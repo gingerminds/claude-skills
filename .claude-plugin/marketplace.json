@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "clara",
-      "description": "Installe la collection Clara complète. Enregistre tous les skills du dossier skills/ sous le namespace clara, invocables comme /clara:<skill> — actuellement /clara:drupal-11 et /clara:docker-devops.",
+      "description": "Installe la collection Clara complète. Enregistre tous les skills du dossier skills/ sous le namespace clara, invocables comme /clara:<skill> — actuellement /clara:drupal-11, /clara:docker-devops, /clara:review et /clara:merge-request.",
       "version": "0.1.0",
       "category": "development",
       "source": "./",
