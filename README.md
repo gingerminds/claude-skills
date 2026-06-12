@@ -8,8 +8,9 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | :--- | :--- | :--- |
 | `drupal-11` | `/clara:drupal-11` | Expertise backend Drupal 10/11 — architecture, services, plugins, events, entités, cache, sécurité. |
 | `docker-devops` | `/clara:docker-devops` | Docker, Compose, Makefile, CI/CD (GitLab) — builds reproductibles, images minimales, sécurité, DX. |
-| `review` | `/clara:review` | Review d'un diff avant merge — correctness, sécurité, cacheability, standards, tests — verdict structuré. |
+| `review` | `/clara:review` | Review d'un diff avant merge — correctness, sécurité, cacheability, standards, tests — verdict structuré. Orienté Drupal/PHP + GitLab. |
 | `merge-request` | `/clara:merge-request` | Prépare une MR GitLab — commit ciblé, push, `glab mr create` en Draft avec description liée au ticket. |
+| `merge-review` | `/clara:merge-review` | Review côté reviewer d'une MR GitLab existante — fond, forme, langue, standards — charge le ticket Mantis lié et rédige une note + recommandation approve / request-changes. |
 
 ## Installation
 
@@ -34,8 +35,18 @@ clara/
 └── skills/
     ├── drupal-11/
     │   └── SKILL.md
-    └── docker-devops/
-        └── SKILL.md
+    ├── docker-devops/
+    │   └── SKILL.md
+    ├── review/
+    │   └── SKILL.md
+    ├── merge-request/
+    │   ├── SKILL.md
+    │   └── scripts/
+    │       └── mantis-issue.sh
+    └── merge-review/
+        ├── SKILL.md
+        └── scripts/
+            └── mantis-issue.sh
 ```
 
 ## Ajouter un skill
