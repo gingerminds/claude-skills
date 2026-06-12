@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "clara",
+  "description": "Clara — collection de skills maison pour Claude Code. Invocables sous le namespace clara (ex. /clara:drupal-11).",
+  "owner": {
+    "name": "tarto-dev",
+    "email": "ccassinat@gingerminds.fr"
+  },
+  "plugins": [
+    {
+      "name": "clara",
+      "description": "Installe la collection Clara complète. Enregistre tous les skills du dossier skills/ sous le namespace clara, invocables comme /clara:<skill> — actuellement /clara:drupal-11 et /clara:docker-devops.",
+      "version": "0.1.0",
+      "category": "development",
+      "source": "./",
+      "homepage": "https://github.com/tarto-dev/clara-claude-skills"
+    }
+  ]
+}
