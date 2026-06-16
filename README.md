@@ -6,6 +6,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 
 | Skill | Invocation | Rôle |
 | :--- | :--- | :--- |
+| `ticket` | `/clara:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation — pour amorcer le contexte avant une session `/clara:drupal-11`. Orienté Drupal/PHP + Mantis + GitLab. |
 | `drupal-11` | `/clara:drupal-11` | Expertise backend Drupal 10/11 — architecture, services, plugins, events, entités, cache, sécurité. |
 | `docker-devops` | `/clara:docker-devops` | Docker, Compose, Makefile, CI/CD (GitLab) — builds reproductibles, images minimales, sécurité, DX. |
 | `review` | `/clara:review` | Review d'un diff avant merge — correctness, sécurité, cacheability, standards, tests — verdict structuré. Orienté Drupal/PHP + GitLab. |
@@ -32,7 +33,11 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 clara/
 ├── .claude-plugin/
 │   └── marketplace.json     # déclare le marketplace + le plugin "clara"
+├── scripts/
+│   └── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
 └── skills/
+    ├── ticket/
+    │   └── SKILL.md
     ├── drupal-11/
     │   └── SKILL.md
     ├── docker-devops/
@@ -40,25 +45,9 @@ clara/
     ├── review/
     │   └── SKILL.md
     ├── merge-request/
-    │   ├── SKILL.md
-    │   └── scripts/
-    │       └── mantis-issue.sh
+    │   └── SKILL.md
     └── merge-review/
-        ├── SKILL.md
-        └── scripts/
-            └── mantis-issue.sh
+        └── SKILL.md
 ```
 
-## Ajouter un skill
-
-1. Créer `skills/<nom>/SKILL.md` avec un front-matter :
-   ```yaml
-   ---
-   name: <nom>
-   description: <quoi + "Use when ..." conditions de déclenchement>
-   ---
-   ```
-2. `git commit` + `git push`.
-3. `/plugin marketplace update clara` puis `/reload-plugins`.
-
-Le `name:` du front-matter détermine l'invocation : `/clara:<name>`.
+Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh` — une seule copie, pas de duplication.

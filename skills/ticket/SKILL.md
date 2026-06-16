@@ -12,7 +12,7 @@ Turn a ticket into a working understanding *before* any code is written. The out
 Accept any of: a Mantis id, a Mantis URL, a branch name (`fix|feat/<id>-slug` → extract the id), or a ticket pasted inline. With an id:
 
 ```bash
-scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, additional info, notes
+bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, additional info, notes
 ```
 
 It needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If they're unset or it exits non-zero (exit 2 = no creds, 3 = API error), **ask the user to paste the ticket** rather than guessing the intent. A pasted ticket is a first-class input — digest it the same way.

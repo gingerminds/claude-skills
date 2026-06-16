@@ -24,7 +24,7 @@ Read the changed lines **and** enough surrounding code to judge them. Never revi
 Judge content against intent. Extract the Mantis id from the MR description or the branch name (`fix/<id>-slug`), then:
 
 ```bash
-scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, notes
+bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, notes
 ```
 
 Needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If unset or it exits non-zero (2 = no creds, 3 = API error), ask the user to paste the ticket rather than reviewing intent blind.
