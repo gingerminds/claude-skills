@@ -31,7 +31,7 @@ Needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If unset or it exits non-zero (2
 
 ## Review axes
 
-Apply the **`clara:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Tests — and the **Blocker/Major/Minor/Nit** severity scale from that skill. Run the project's linters when present (via `lando`/`ddev`/`docker compose exec`). Below are the axes specific to reviewing someone else's MR:
+Apply the **`clara:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Tests — the **Blocker/Major/Minor/Nit** severity scale, and that skill's **Noise control** rule (Nits folded, Minor one-liners, full Why/Action for Blocker/Major only). Run the project's linters when present (via `lando`/`ddev`/`docker compose exec`). Below are the axes specific to reviewing someone else's MR:
 
 - **Contenu** — Does the diff deliver what the ticket asks, end to end? Root cause vs symptom. This is `clara:review` Correctness, judged against the loaded ticket.
 - **Forme** — Commit & MR hygiene:
@@ -60,18 +60,16 @@ Never recommend approve on anything you couldn't verify — say what's unverifie
 
 Two outputs, both **in the MR's language** (French here):
 
-**1. The global note** — one synthesis comment: verdict, per-axis table, verification status, UAT checklist. No per-finding list here (each finding becomes its own thread).
+**1. The global note** — one synthesis comment: verdict, per-axis table, verification status, UAT checklist. No per-finding list here (each finding becomes its own thread). Keep the table to the axes that are ⚠️/❌; fold the clean ones into one line (`✅ Forme, Langue, Tests`).
 
 ```markdown
 ## Revue — <approve | demande de modifs>
 
 | Axe | Verdict |
 |---|---|
-| Contenu | ✅ / ⚠️ / ❌ + une ligne |
-| Forme | … |
-| Langue | … |
-| Standards | … |
-| Tests | … |
+| <uniquement les axes ⚠️/❌> | ⚠️ / ❌ + une ligne |
+
+✅ <axes OK regroupés sur une ligne>
 
 Détail des points en threads ci-dessous (chaque thread = à résoudre avant merge).
 
@@ -89,7 +87,7 @@ Détail des points en threads ci-dessous (chaque thread = à résoudre avant mer
 <pourquoi, et le correctif exact — copiable, jamais « investiguer X »>
 ```
 
-Anchor the thread to a precise diff line whenever the finding maps to one; otherwise post it as a general thread (commit/branch/description-level findings). Keep threads to genuine findings — don't open a thread per micro-nit.
+Anchor the thread to a precise diff line whenever the finding maps to one; otherwise post it as a general thread (commit/branch/description-level findings). Keep threads to genuine findings — **one thread per Blocker/Major/Minor; never a thread per Nit.** Roll the Nits up into a single line at the bottom of the global note (`Nits: <a>; <b>`), so they don't each open a merge-blocking discussion.
 
 Show both the note and the thread list to the user. **Post nothing yet.** State the recommended verdict and what's unverified.
 
