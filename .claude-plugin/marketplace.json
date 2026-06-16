@@ -9,8 +9,8 @@
   "plugins": [
     {
       "name": "clara",
-      "description": "Installe la collection Clara complète. Enregistre tous les skills du dossier skills/ sous le namespace clara, invocables comme /clara:<skill> — actuellement /clara:drupal-11, /clara:docker-devops, /clara:review, /clara:merge-request et /clara:merge-review.",
-      "version": "0.2.0",
+      "description": "Installe la collection Clara complète. Enregistre tous les skills du dossier skills/ sous le namespace clara, invocables comme /clara:<skill> — actuellement /clara:ticket, /clara:drupal-11, /clara:docker-devops, /clara:review, /clara:merge-request et /clara:merge-review.",
+      "version": "0.1.0",
       "category": "development",
       "source": "./",
       "homepage": "https://github.com/tarto-dev/clara-claude-skills"
