@@ -65,27 +65,33 @@ Tag every finding with one level; the verdict follows mechanically:
 
 Verdict: any Blocker/Major → **needs changes**; only Minor/Nit → **ship with nits**; none → **ship**.
 
+**Noise control** — report the signal, not every observation:
+- **Nit** findings are *folded by default*: collapse them into a single trailing line (`Nits: <a>; <b>; <c>`), or omit entirely if the change is clean. Only expand them when the user asks for a full pass.
+- **Minor** is one line each (symptom + fix inline) — no `Why`/`Action` block.
+- Reserve the full `Why` / `Action` block for **Blocker/Major** only.
+- Don't pad: no finding without a concrete consequence. If you can't name what breaks, it's a Nit at most.
+
 ## Output format
 
-Lead with the one-line verdict (ship / ship with nits / needs changes). Then:
+Lead with the one-line verdict (ship / ship with nits / needs changes). Keep it tight — only show what carries information.
+
+**Dimension table** — list only the dimensions that are ⚠️/❌; collapse all the clean ones into a single line below the table (`✅ Security, Cacheability, Tests`). If *everything* passes, skip the table and just give the verdict.
 
 | Dimension | Verdict |
 |---|---|
-| Correctness | ✅ / ⚠️ / ❌ + one line |
-| Security | … |
-| Cacheability | … |
-| Standards | … |
-| Tests | … |
+| <only failing/at-risk dimensions> | ⚠️ / ❌ + one line |
 
-Then findings, most severe first:
+Then the findings, most severe first. Full block for **Blocker/Major**; one line for **Minor**; **Nits** folded into a single trailing line (see Noise control):
 
 ```
-- [Blocker|Major|Minor|Nit] <symptom> (<file>:<line>)
+- [Blocker|Major] <symptom> (<file>:<line>)
   Why: <reason>
   Action: <exact edit or command — copy-pasteable, never "investigate X">
+- [Minor] <symptom> (<file>:<line>) — <fix inline>
+Nits: <a>; <b>; <c>
 ```
 
-Finish with **Out-of-scope** notes (dead code, latent issues you spotted but that belong in a separate ticket) and, when relevant, **manual UAT steps**. When the verdict is ship / ship with nits, point the author to `/clara:merge-request` to open the MR.
+Finish only when there's something to say: **Out-of-scope** notes (latent issues for a separate ticket) and **manual UAT steps** when relevant — omit either section if empty rather than writing "none". When the verdict is ship / ship with nits, point the author to `/clara:merge-request` to open the MR.
 
 ## Non-goals
 
