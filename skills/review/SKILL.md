@@ -31,7 +31,9 @@ Correctness is judged against intent, so get the ticket. Extract the Mantis id f
 bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # prints summary, description, steps-to-reproduce, notes
 ```
 
-It needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If they're unset or it exits non-zero (exit 2 = no creds, 3 = API error), **ask the user to paste the ticket** rather than reviewing intent blind.
+**Read the whole ticket, not just the opening request** — the initial description *and* every note/exchange. The real intent often drifts in the discussion: a note narrows the scope, corrects the expected behaviour, drops a requirement, or settles a question raised mid-thread. Judge the change against the *latest agreed* intent across all notes, not the first description. If notes contradict each other, flag the ambiguity rather than guessing.
+
+The script needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If they're unset or it exits non-zero (exit 2 = no creds, 3 = API error), **ask the user to paste the ticket** rather than reviewing intent blind — and ask for the notes too, not only the description.
 
 ## Review dimensions
 

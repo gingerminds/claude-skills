@@ -27,7 +27,9 @@ Judge content against intent. Extract the Mantis id from the MR description or t
 bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, notes
 ```
 
-Needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If unset or it exits non-zero (2 = no creds, 3 = API error), ask the user to paste the ticket rather than reviewing intent blind.
+**Read the whole ticket, not just the opening request** — the initial description *and* every note/exchange. The real intent often drifts in the discussion: a note narrows the scope, corrects the expected behaviour, drops a requirement, or settles a question raised mid-thread. Judge **Contenu** against the *latest agreed* intent across all notes, not the first description. If notes contradict each other, flag the ambiguity in the review rather than guessing.
+
+Needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If unset or it exits non-zero (2 = no creds, 3 = API error), ask the user to paste the ticket rather than reviewing intent blind — and ask for the notes too, not only the description.
 
 ## Review axes
 
