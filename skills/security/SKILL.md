@@ -33,7 +33,45 @@ State up front which ecosystems you found and will audit; skip the rest explicit
 
 Prefer real signals over guesswork. Run what applies, capture the output, never invent advisory IDs.
 
+**Two things are mandatory and complementary — do BOTH, never just one:**
+
+1. **Read the package/lock files** (`composer.lock`, `package-lock.json`/`pnpm-lock.yaml`/`yarn.lock`) to extract the *exact installed versions* of every package. The lockfile is the ground truth for "what is actually installed". But note: **a lockfile contains NO CVE/advisory data** — only versions and an optional `abandoned` flag. Reading it is necessary but never sufficient.
+2. **Run the real audit** (`composer audit`, `npm audit`, `drush pm:security`) which fetches the **advisory database over the network** and maps installed versions → CVE/GHSA/SA ids. This is where the actual vulnerability signal comes from.
+
+Reading the lockfile alone gets you hygiene findings (abandoned, pre-release versions) but will MISS every real CVE. Always pair the two: extract versions from the lock, then cross-reference them against advisories.
+
+### Where to run — runner first, then host, then offline fallback
+
+Try in this order; don't stop at the first failure, escalate to the next:
+
+1. **Inside the runner** (`lando composer audit`, `lando drush pm:security`, `lando npm audit`) — the bootstrapped, network-capable environment. Best signal. Start Docker/Lando if it isn't up (`lando start`).
+2. **On the host** — if the runner is down (Docker not running, `lando start` fails), run `composer audit --locked` / `npm audit` directly on the host. The host PHP version may differ, but `--locked` audits the committed lockfile so the result is still valid.
+3. **Offline fallback via `WebFetch`** — if the environment has **no network from the shell** (sandboxed `composer audit`/`npm audit` fail with curl errors), DON'T give up and DON'T claim "0 vulnerabilities". Extract installed versions from the lockfile (see below), then pull the advisory feeds with `WebFetch` (a separate network path that often works when the shell is sandboxed) and cross-reference by hand. See the Drupal and offline sections.
+
+The goal is to get **real material** one way or another. A "couldn't run anything" report is a last resort, not a first answer — exhaust runner → host → WebFetch before concluding.
+
 ### PHP / Composer
+
+First, extract the exact installed versions from the lockfile (works with zero network, host or runner):
+
+```bash
+# Drupal core version
+php -r '$l=json_decode(file_get_contents("composer.lock"),true);
+foreach(array_merge($l["packages"]??[],$l["packages-dev"]??[]) as $p)
+  if($p["name"]==="drupal/core") echo $p["version"],"\n";'
+
+# All drupal contrib + versions + abandoned/pre-release flags
+php -r '$l=json_decode(file_get_contents("composer.lock"),true);
+foreach(($l["packages"]??[]) as $p){
+  if(preg_match("#^drupal/(?!core)#",$p["name"])){
+    $ab=!empty($p["abandoned"])?" [ABANDONED]":"";
+    $pre=preg_match("#(alpha|beta|-rc|dev-)#i",$p["version"])?" [pre-release]":"";
+    echo str_pad($p["name"],45)." ".$p["version"].$ab.$pre."\n";
+  }
+}'
+```
+
+Then run the real audit:
 
 ```bash
 composer audit --locked --format=plain     # audits composer.lock against the PHP advisories DB
@@ -57,6 +95,20 @@ drush status --field=drupal-version   # is core itself within a supported / patc
 - Flag any module that is **unsupported / abandoned** (no security coverage) — that's a standing risk, not a one-off CVE.
 - If drush isn't available (no bootstrapped site), say so and rely on `composer audit` + the Drupal version check; don't claim the contrib advisory pass ran.
 
+**Important — Drupal advisories are NOT on packagist.org.** `drupal/*` modules are hosted on `packages.drupal.org`, and their SAs live on Drupal.org, not in packagist's security API. So a packagist-only query (or a generic tool that only knows packagist) will return **empty** for Drupal contrib and give a false "all clear". `composer audit` knows the Drupal endpoint; a manual cross-check must use the **Drupal.org advisory feeds**.
+
+### Offline fallback — cross-reference via the Drupal.org advisory feeds (WebFetch)
+
+When `composer audit` / `drush pm:security` can't run (no shell network, no bootstrap), fetch the **official Drupal advisory feeds** with `WebFetch` and cross-reference each against the versions you extracted from `composer.lock`:
+
+```
+WebFetch https://www.drupal.org/security/rss.xml          → core SAs (SA-CORE-YYYY-NNN) + fixed versions
+WebFetch https://www.drupal.org/security/contrib/rss.xml  → contrib SAs (SA-CONTRIB-YYYY-NNN) + fixed versions
+WebFetch https://www.drupal.org/security/psa/rss.xml      → public service announcements
+```
+
+For each installed module, compare `installed version` vs the advisory's `Fixed in` version: installed `<` fixed ⇒ **vulnerable**. Drupal.org may print legacy tags like `8.x-3.15` — that maps to composer version `3.15`. The RSS feeds only carry the **most recent ~25 advisories per feed**, so older SAs affecting your modules may not appear — say so explicitly and recommend a live `composer audit` to be exhaustive. Don't claim full contrib coverage from RSS alone; do claim the matches you actually found (they're from the authoritative source).
+
 ### JavaScript
 
 Use the runner that matches the lockfile:
@@ -67,7 +119,9 @@ pnpm audit --prod               # or: pnpm audit --json
 yarn npm audit --environment production   # yarn berry
 ```
 
-Separate **prod** from **dev** dependencies — a high-severity CVE in a build-only devDependency is a far lower real risk than the same in shipped runtime code. Note which side each finding is on.
+Separate **prod** from **dev** dependencies — a high-severity CVE in a build-only devDependency is a far lower real risk than the same in shipped runtime code. Note which side each finding is on. For a Drupal theme/asset pipeline (gulp/webpack/postcss/sass compiled to static CSS/JS), the *entire* npm tree is effectively build-time — flag those findings as Low real risk and say why, but still run the audit.
+
+If `npm audit` can't reach the network, read `package.json` + `package-lock.json` for the installed versions and cross-reference notable packages against the **GitHub Advisory Database** (`WebFetch https://github.com/advisories?query=<package>`) rather than skipping the JS side entirely.
 
 ### Docker configuration
 
@@ -139,7 +193,7 @@ Then findings, **most critical first**. Full block for Critical/High, one line f
 Info: <unsupported module X>; <unpinned base image Y>; <EOL core minor Z>
 ```
 
-Close with **what couldn't be verified** (tools absent, no bootstrapped site, no scanner) and, when there are fixes to ship, point the user at `/clara:review` → `/clara:merge-request` to land them.
+Close with **what couldn't be verified** — and be specific about which rung of the runner → host → WebFetch chain you reached and what's still pending (e.g. "RSS cross-check done, but a live `composer audit` for the full contrib history is still owed"). When there are fixes to ship, point the user at `/clara:review` → `/clara:merge-request` to land them.
 
 ## Non-goals
 
