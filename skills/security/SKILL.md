@@ -1,0 +1,150 @@
+---
+name: security
+description: Audits a project's dependency and infrastructure security — runs composer/npm audit, checks CMS (Drupal core + contrib) security advisories, reviews the Docker setup, ranks every finding by exploitable criticality, and either applies safe fixes or gives exact step-by-step remediation. Tuned for Drupal/PHP + Docker. Use when the user asks for a security audit, a CVE/vulnerability check, a dependency-security pass, or invokes /clara:security.
+---
+
+# Clara — Security Audit
+
+Run a dependency- and infrastructure-level security audit and return a prioritised, actionable report. Real exploitability over raw advisory counts. Be direct: state what is vulnerable, how bad it is *in this project*, and the exact remediation.
+
+This is a **defensive** audit — find and fix weaknesses, not exploit them.
+
+## Scope first
+
+Detect the stack before running anything — don't run an audit for a tool the project doesn't use. From the project root:
+
+```bash
+ls composer.json composer.lock package.json package-lock.json pnpm-lock.yaml yarn.lock 2>/dev/null
+ls Dockerfile docker-compose.yml docker-compose.yaml compose.yaml 2>/dev/null
+```
+
+Then identify:
+
+1. **PHP** — `composer.json` / `composer.lock` present.
+2. **CMS** — read `composer.json`: `drupal/core*` → Drupal; `roots/wordpress` or a `wp-content/` tree → WordPress; otherwise treat as plain PHP/JS. Drupal is the primary target here.
+3. **JS** — which lockfile is present picks the runner (`package-lock.json` → npm, `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn). Don't run `npm audit` against a pnpm project.
+4. **Docker** — any Dockerfile / compose file.
+
+Find the project runner the same way the other Clara skills do — `lando`, `ddev`, or `docker compose exec <svc>`. Run composer/drush **inside** the runner if one exists (the host PHP version rarely matches), but `*audit` against the committed lockfile is fine from the host too.
+
+State up front which ecosystems you found and will audit; skip the rest explicitly.
+
+## Run the audits
+
+Prefer real signals over guesswork. Run what applies, capture the output, never invent advisory IDs.
+
+### PHP / Composer
+
+```bash
+composer audit --locked --format=plain     # audits composer.lock against the PHP advisories DB
+composer audit --locked --format=json       # machine-readable, for parsing severity/CVE/affected versions
+```
+
+`--locked` audits what is actually committed (`composer.lock`), not just the resolved tree. Each advisory carries a CVE/GHSA id, affected version range, and a link — keep these for the report.
+
+### Drupal (core + contrib)
+
+`composer audit` covers Drupal core and contrib that publish to the advisory DB, but confirm with Drupal's own tooling when a bootstrapped site is available:
+
+```bash
+drush pm:security                 # core + contrib modules with an open security advisory (SA-*)
+drush pm:security-php             # PHP-library advisories affecting the codebase
+drush status --field=drupal-version   # is core itself within a supported / patched release?
+```
+
+- Check **drupal/core** version against the latest security release — an EOL minor (e.g. a 9.x past EOL) is itself a finding regardless of named CVEs.
+- For contrib, map each advisory to its **SA-CONTRIB-YYYY-NNN** and the fixed version.
+- Flag any module that is **unsupported / abandoned** (no security coverage) — that's a standing risk, not a one-off CVE.
+- If drush isn't available (no bootstrapped site), say so and rely on `composer audit` + the Drupal version check; don't claim the contrib advisory pass ran.
+
+### JavaScript
+
+Use the runner that matches the lockfile:
+
+```bash
+npm audit --omit=dev            # or: npm audit --json
+pnpm audit --prod               # or: pnpm audit --json
+yarn npm audit --environment production   # yarn berry
+```
+
+Separate **prod** from **dev** dependencies — a high-severity CVE in a build-only devDependency is a far lower real risk than the same in shipped runtime code. Note which side each finding is on.
+
+### Docker configuration
+
+If a Dockerfile / compose file exists, audit the *configuration* (this overlaps `/clara:docker-devops` — reuse its hardening checklist rather than re-deriving it). Check for:
+
+- **Base image**: floating tags (`:latest`, unpinned), or a base that is itself EOL / vulnerable.
+- **Privilege**: container running as `root` (no `USER`), `privileged: true`, added capabilities, `--privileged`.
+- **Docker socket**: `/var/run/docker.sock` bind-mounted into a container (container-escape surface).
+- **Secrets**: credentials in `ENV`/`ARG`, hardcoded in compose, or copied into image layers; `.env` committed.
+- **Exposed surface**: ports bound to `0.0.0.0` that should be internal; admin/DB ports published needlessly.
+- **Filesystem**: no `read_only`, writable mounts that needn't be, host paths mounted broadly.
+- **Image scan** (if a scanner is available): `docker scout cves <image>` or `trivy image <image>` / `trivy config .` — report OS/library CVEs in the built image. If no scanner is installed, say so; don't fabricate results.
+
+## Prioritise by criticality
+
+Rank every finding — advisory counts are noise, *exploitable* findings are signal. Tag each with one level, judged **in context**, not by the raw CVSS alone:
+
+- **Critical** — remotely exploitable on shipped/runtime code, RCE, auth bypass, exposed secret, container escape. Fix now.
+- **High** — serious vuln on a reachable runtime path, or a privilege/secret issue gated by some condition.
+- **Medium** — real but constrained: needs auth, hard-to-reach path, or limited to a prod-but-low-exposure surface.
+- **Low** — dev-only dependency, theoretical, or requires already-elevated access.
+- **Info** — hygiene (unsupported module, unpinned base image, EOL minor) with no named CVE yet.
+
+Context that moves a finding up or down: prod vs dev dependency; runtime-reachable vs build-only; internet-facing vs internal; whether a fixed version actually exists yet; whether the vulnerable code path is even used. **Say why** you placed each finding where you did when it differs from the advisory's nominal severity.
+
+## Remediate
+
+For each finding, give one of two things — never a vague "update your dependencies":
+
+**A. Propose the fix** (when it's safe and mechanical):
+
+```bash
+composer update drupal/core-recommended --with-dependencies   # to the patched release
+composer require drupal/<module>:^X.Y                          # bump contrib to the fixed version
+npm audit fix                                                   # non-breaking, when it resolves the advisory
+```
+
+Offer to apply these to the working tree when the user wants. After applying, **re-run the audit** to confirm the finding clears and nothing else broke (build/tests if quick).
+
+**B. Give the marche à suivre** (when the fix is breaking, risky, or has no clean version yet):
+
+- A major version bump with BC breaks → outline the migration steps, what to test, what likely breaks.
+- No patched release exists → the mitigation (config workaround, WAF rule, disable the feature, pin + watch the advisory), plus what to monitor.
+- A Drupal core update that needs `update.php` / config sync → the ordered steps, with the DB-backup-first reminder.
+- An abandoned/unsupported module → replace, fork-and-patch, or remove — with the trade-offs.
+
+Be explicit about **breaking-change risk**: don't propose a blind `composer update` that drags the whole tree forward. Scope every bump to the affected package(s) and their needed deps.
+
+## Output format
+
+Lead with a one-line headline: counts by severity and the single most urgent action. Then:
+
+**Summary table** — one row per ecosystem audited:
+
+| Ecosystem | Audited | Critical | High | Medium | Low | Info |
+|---|---|---|---|---|---|---|
+| Composer (Drupal) | ✅ | … | … | … | … | … |
+| npm (prod) | ✅ | … | … | … | … | … |
+| Docker config | ✅ | … | … | … | … | … |
+
+Then findings, **most critical first**. Full block for Critical/High, one line for Medium/Low, fold Info into a trailing line:
+
+```
+- [Critical] <package/component> — <vuln> (CVE/GHSA/SA-id)
+  Affected: <version range> · Installed: <current> · Fixed in: <version | none yet>
+  Risk here: <why this severity in THIS project — reachable? prod? exposed?>
+  Fix: <exact command, or numbered marche à suivre if breaking>
+- [Medium] <component> — <vuln> (<id>) → <one-line remediation>
+Info: <unsupported module X>; <unpinned base image Y>; <EOL core minor Z>
+```
+
+Close with **what couldn't be verified** (tools absent, no bootstrapped site, no scanner) and, when there are fixes to ship, point the user at `/clara:review` → `/clara:merge-request` to land them.
+
+## Non-goals
+
+- **Not an offensive / pentest tool.** No exploitation, no payloads, no live-target probing — codebase and dependency audit only.
+- Don't report raw advisory dumps — rank, dedupe, and contextualise. A wall of `npm audit` output is the input, not the deliverable.
+- Don't claim a check passed unless it actually ran; mark unavailable tools "(indispo)".
+- Don't blind-bump the whole dependency tree to silence one advisory. Scope every change.
+- Don't flag app-level code bugs here (injection, XSS in custom code) — that's `/clara:review`'s job; note them as out-of-scope if you spot them.

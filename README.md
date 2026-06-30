@@ -12,6 +12,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `review` | `/clara:review` | Review d'un diff avant merge — correctness, sécurité, cacheability, standards, tests — verdict structuré. Orienté Drupal/PHP + GitLab. |
 | `merge-request` | `/clara:merge-request` | Prépare une MR GitLab — commit ciblé, push, `glab mr create` en Draft avec description liée au ticket. |
 | `merge-review` | `/clara:merge-review` | Review côté reviewer d'une MR GitLab existante — fond, forme, langue, standards — charge le ticket Mantis lié et rédige une note + recommandation approve / request-changes. |
+| `security` | `/clara:security` | Audit sécurité des dépendances et de l'infra — `composer audit` / `npm audit`, CVE et advisories du CMS (Drupal core + contrib), config Docker — priorisé par criticité réelle, avec correctifs ou marches à suivre. Orienté Drupal/PHP + Docker. |
 
 ## Installation
 
@@ -46,7 +47,9 @@ clara/
     │   └── SKILL.md
     ├── merge-request/
     │   └── SKILL.md
-    └── merge-review/
+    ├── merge-review/
+    │   └── SKILL.md
+    └── security/
         └── SKILL.md
 ```
 
