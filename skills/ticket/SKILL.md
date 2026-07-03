@@ -3,7 +3,7 @@ name: ticket
 description: Loads and digests a Mantis ticket (or a pasted ticket) into a focused development brief — the goal, what to look at in the codebase, constraints, and acceptance criteria — so the context is in memory before a /gm:drupal-11 session. Tuned for Drupal/PHP + Mantis + GitLab. Use before starting work on a ticketed change, or invoke /gm:ticket.
 ---
 
-# Clara — Ticket
+# Ticket
 
 Turn a ticket into a working understanding *before* any code is written. The output is a compact brief that primes the rest of the session: when `/gm:drupal-11` runs next, it already knows the intent, the scope, and what "done" means — instead of rediscovering it from the diff.
 

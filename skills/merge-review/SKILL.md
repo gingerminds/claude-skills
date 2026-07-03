@@ -3,7 +3,7 @@ name: merge-review
 description: Reviews an existing GitLab merge request end-to-end — content/correctness, form, language, and coding standards — loads the linked Mantis ticket, and drafts a structured review note plus an approve / request-changes recommendation. Drafts only by default; posts the note and approves only on explicit user go-ahead. Tuned for Drupal/PHP + GitLab. Use when the user gives an MR (URL or number) to review as a reviewer, or invokes /gm:merge-review.
 ---
 
-# Clara — Merge Review
+# Merge Review
 
 Reviewer-side review of someone's merge request. Produce a review another human could post as-is: a verdict, a per-axis table, and concrete comments. **Outward-facing** — draft everything by default; post the note and approve **only** on explicit user go-ahead, never on your own initiative.
 
