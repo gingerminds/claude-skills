@@ -11,7 +11,7 @@
     {
       "name": "gm",
       "description": "Installe la collection Gingerminds complète. Enregistre tous les skills du dossier skills/ sous le namespace gm, invocables comme /gm:<skill> — actuellement /gm:ticket, /gm:drupal-11, /gm:vue, /gm:docker-devops, /gm:review, /gm:merge-request, /gm:merge-review et /gm:security.",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "category": "development",
       "source": "./",
       "author": {

@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "gm",
   "description": "Installe la collection Gingerminds complète. Enregistre tous les skills du dossier skills/ sous le namespace gm, invocables comme /gm:<skill>.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "author": {
     "name": "Clara",
     "email": "ccassinat@gingerminds.fr"
