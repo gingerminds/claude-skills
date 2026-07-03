@@ -96,10 +96,12 @@ jq -r '
     (if (($i.notes // []) | length) > 0
        then "## Notes\n" + ([ $i.notes[] | "- [\(.reporter.name // "?")] \(.text)" ] | join("\n"))
        else empty end),
-    (if (($i.attachments // []) | length) > 0
-       then "\n## Attachments\nDownload with: mantis-issue.sh \($i.id) --file <file-id> <dest>\n"
-            + ([ $i.attachments[]
-                 | "- [\(.id)] \(.filename) (\((.content_type // "?") | split(";")[0]), \(.size // 0) bytes)" ]
-               | join("\n"))
-       else empty end)
+    # Attachments live at issue level AND on individual notes; collect both.
+    ( ([ $i.attachments[]? ] + [ $i.notes[]? | .attachments[]? ]) as $atts
+      | if ($atts | length) > 0
+        then "\n## Attachments\nDownload with: mantis-issue.sh \($i.id) --file <file-id> <dest>\n"
+             + ([ $atts[]
+                  | "- [\(.id)] \(.filename) (\((.content_type // "?") | split(";")[0]), \(.size // 0) bytes)" ]
+                | join("\n"))
+        else empty end)
 ' "$body"
