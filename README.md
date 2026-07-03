@@ -10,7 +10,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 
 | Skill | Invocation | Rôle |
 | :--- | :--- | :--- |
-| `ticket` | `/gm:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation — pour amorcer le contexte avant une session `/gm:drupal-11`. Orienté Drupal/PHP + Mantis + GitLab. |
+| `ticket` | `/gm:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation, pièces jointes chargées à la demande — pour amorcer le contexte avant une session `/gm:drupal-11`. Orienté Drupal/PHP + Mantis + GitLab. |
 | `drupal-11` | `/gm:drupal-11` | Expertise backend Drupal 10/11 — architecture, services, plugins, events, entités, cache, sécurité. |
 | `vue` | `/gm:vue` | Expertise frontend Vue 3 / Nuxt 3 — Composition API, composables, Pinia, SSR/SSG, TypeScript, architecture de composants. |
 | `docker-devops` | `/gm:docker-devops` | Docker, Compose, Makefile, CI/CD (GitLab) — builds reproductibles, images minimales, sécurité, DX. |
@@ -73,7 +73,8 @@ Côté reviewer, `/gm:merge-review` prend une MR existante (URL ou numéro), cha
 ```
 claude-skills/
 ├── .claude-plugin/
-│   └── marketplace.json     # déclare le marketplace "gingerminds" + le plugin "gm"
+│   ├── marketplace.json     # déclare le marketplace "gingerminds" + le plugin "gm"
+│   └── plugin.json          # manifeste du plugin "gm" (nom + version) — sert au dev local via --plugin-dir
 ├── scripts/
 │   └── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
 └── skills/
@@ -91,4 +92,13 @@ Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le h
 
 ## Contribuer
 
-Un skill = un dossier `skills/<nom>/` avec un `SKILL.md` (frontmatter `name` + `description`, puis le corps). Ajoute l'entrée correspondante dans la table ci-dessus et dans la `description` du plugin (`.claude-plugin/marketplace.json`), bump la `version`, puis `/plugin marketplace update gingerminds` pour tester en local.
+Un skill = un dossier `skills/<nom>/` avec un `SKILL.md` (frontmatter `name` + `description`, puis le corps). Ajoute l'entrée correspondante dans la table ci-dessus et dans la `description` du plugin (`.claude-plugin/marketplace.json`), et bump la `version` dans **`marketplace.json` _et_ `plugin.json`** (elles doivent rester alignées).
+
+Pour développer en local, lance Claude Code avec le plugin lu **directement depuis ton clone** — pas de réinstallation à chaque modif :
+
+```bash
+claude --plugin-dir ~/claude-skills   # lit les skills en place (le plugin.json fixe le namespace gm)
+/reload-plugins                       # applique tes édits dans la session, sans redémarrer
+```
+
+À l'inverse, `/plugin marketplace update gingerminds` puis `/plugin install gm@gingerminds` recopient depuis la source — plus lourd, à réserver à la vérification d'une version installée.
