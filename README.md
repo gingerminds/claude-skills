@@ -79,6 +79,7 @@ claude-skills/
 └── skills/
     ├── ticket/SKILL.md
     ├── drupal-11/SKILL.md
+    ├── vue/SKILL.md
     ├── docker-devops/SKILL.md
     ├── review/SKILL.md
     ├── merge-request/SKILL.md
