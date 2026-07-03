@@ -12,10 +12,27 @@ Turn a ticket into a working understanding *before* any code is written. The out
 Accept any of: a Mantis id, a Mantis URL, a branch name (`fix|feat/<id>-slug` → extract the id), or a ticket pasted inline. With an id:
 
 ```bash
-bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, additional info, notes
+bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, additional info, notes, attachment list
 ```
 
 It needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If they're unset or it exits non-zero (exit 2 = no creds, 3 = API error), **ask the user to paste the ticket** rather than guessing the intent. A pasted ticket is a first-class input — digest it the same way.
+
+## Attachments
+
+The digest ends with an `## Attachments` section when the ticket has files — screenshots, mockups, logs. **Check for it first**: only when at least one attachment is listed do you raise the question (no attachments → say nothing, move on). When there are some, the digest text alone can't show them, so ask the user before loading them:
+
+> Il y a des pièces jointes, dois-je les charger ?
+
+Then adapt to the answer:
+
+- **Yes** — download each relevant file into the scratchpad and read it into context (images especially — a mockup or a screenshot of the bug often *is* the spec). Use the file ids from the list:
+  ```bash
+  bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id> --file <file-id> "$SCRATCHPAD/<filename>"
+  ```
+  Then `Read` each downloaded file and fold what it shows into the brief (e.g. the expected UI, the error in the screenshot). Prefer the images and anything the discussion refers to; skip large binaries with no bearing on the change.
+- **No** — note in the brief that attachments exist but weren't loaded, and carry on.
+
+For a **pasted** ticket, ask the same question — the user can paste or drop the images directly.
 
 ## Understand it
 
