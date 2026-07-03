@@ -3,7 +3,7 @@ name: merge-request
 description: Prepares a GitLab merge request — a scoped commit, a branch push, and `glab mr create` with a structured description that references the ticket. Defaults to a Draft MR targeting the integration branch. Use when the user asks to prepare/open/create a MR or PR after a fix, or invokes /gm:merge-request.
 ---
 
-# Clara — Prepare Merge Request
+# Prepare Merge Request
 
 Turn a finished change into a clean, reviewable GitLab MR. Outward-facing: create the MR as a **Draft** by default and never mark it Ready or merge without explicit user go-ahead.
 

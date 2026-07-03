@@ -3,7 +3,7 @@ name: security
 description: Audits a project's dependency and infrastructure security — runs composer/npm audit, checks CMS (Drupal core + contrib) security advisories, reviews the Docker setup, ranks every finding by exploitable criticality, and either applies safe fixes or gives exact step-by-step remediation. Tuned for Drupal/PHP + Docker. Use when the user asks for a security audit, a CVE/vulnerability check, a dependency-security pass, or invokes /gm:security.
 ---
 
-# Clara — Security Audit
+# Security Audit
 
 Run a dependency- and infrastructure-level security audit and return a prioritised, actionable report. Real exploitability over raw advisory counts. Be direct: state what is vulnerable, how bad it is *in this project*, and the exact remediation.
 
@@ -25,7 +25,7 @@ Then identify:
 3. **JS** — which lockfile is present picks the runner (`package-lock.json` → npm, `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn). Don't run `npm audit` against a pnpm project.
 4. **Docker** — any Dockerfile / compose file.
 
-Find the project runner the same way the other Clara skills do — `lando`, `ddev`, or `docker compose exec <svc>`. Run composer/drush **inside** the runner if one exists (the host PHP version rarely matches), but `*audit` against the committed lockfile is fine from the host too.
+Find the project runner the same way the other gm skills do — `lando`, `ddev`, or `docker compose exec <svc>`. Run composer/drush **inside** the runner if one exists (the host PHP version rarely matches), but `*audit` against the committed lockfile is fine from the host too.
 
 State up front which ecosystems you found and will audit; skip the rest explicitly.
 

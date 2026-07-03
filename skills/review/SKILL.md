@@ -3,7 +3,7 @@ name: review
 description: Reviews a code change before merge — correctness bugs, security, performance/cacheability, coding standards, and test coverage — and produces a structured, severity-ranked verdict with concrete actions. Tuned for Drupal/PHP + GitLab workflows. Use when the user asks to review a diff, a branch, a fix, or a change before preparing a merge request, or invokes /gm:review.
 ---
 
-# Clara — Code Review
+# Code Review
 
 Review a focused code change and return a verdict the author can act on. Quality and correctness, not style nitpicks. Be direct: state what is wrong, why, and the exact fix.
 
