@@ -1,6 +1,6 @@
 ---
 name: review
-description: Reviews a code change before merge — correctness bugs, security, performance/cacheability, coding standards, and test coverage — and produces a structured, severity-ranked verdict with concrete actions. Tuned for Drupal/PHP + GitLab workflows. Use when the user asks to review a diff, a branch, a fix, or a change before preparing a merge request, or invokes /clara:review.
+description: Reviews a code change before merge — correctness bugs, security, performance/cacheability, coding standards, and test coverage — and produces a structured, severity-ranked verdict with concrete actions. Tuned for Drupal/PHP + GitLab workflows. Use when the user asks to review a diff, a branch, a fix, or a change before preparing a merge request, or invokes /gm:review.
 ---
 
 # Clara — Code Review
@@ -93,7 +93,7 @@ Then the findings, most severe first. Full block for **Blocker/Major**; one line
 Nits: <a>; <b>; <c>
 ```
 
-Finish only when there's something to say: **Out-of-scope** notes (latent issues for a separate ticket) and **manual UAT steps** when relevant — omit either section if empty rather than writing "none". When the verdict is ship / ship with nits, point the author to `/clara:merge-request` to open the MR.
+Finish only when there's something to say: **Out-of-scope** notes (latent issues for a separate ticket) and **manual UAT steps** when relevant — omit either section if empty rather than writing "none". When the verdict is ship / ship with nits, point the author to `/gm:merge-request` to open the MR.
 
 ## Non-goals
 

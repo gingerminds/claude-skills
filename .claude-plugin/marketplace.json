@@ -1,19 +1,24 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "clara",
-  "description": "Clara — collection de skills maison pour Claude Code. Invocables sous le namespace clara (ex. /clara:drupal-11).",
+  "name": "gingerminds",
+  "description": "Gingerminds — collection de skills maison pour Claude Code, maintenue par Clara. Invocables sous le namespace gm (ex. /gm:drupal-11).",
   "owner": {
-    "name": "tarto-dev",
-    "email": "ccassinat@gingerminds.fr"
+    "name": "Gingerminds",
+    "email": "ccassinat@gingerminds.fr",
+    "url": "https://github.com/gingerminds"
   },
   "plugins": [
     {
-      "name": "clara",
-      "description": "Installe la collection Clara complète. Enregistre tous les skills du dossier skills/ sous le namespace clara, invocables comme /clara:<skill> — actuellement /clara:ticket, /clara:drupal-11, /clara:docker-devops, /clara:review, /clara:merge-request, /clara:merge-review et /clara:security.",
-      "version": "0.2.1",
+      "name": "gm",
+      "description": "Installe la collection Gingerminds complète. Enregistre tous les skills du dossier skills/ sous le namespace gm, invocables comme /gm:<skill> — actuellement /gm:ticket, /gm:drupal-11, /gm:docker-devops, /gm:review, /gm:merge-request, /gm:merge-review et /gm:security.",
+      "version": "0.3.0",
       "category": "development",
       "source": "./",
-      "homepage": "https://github.com/tarto-dev/clara-claude-skills"
+      "author": {
+        "name": "Clara",
+        "email": "ccassinat@gingerminds.fr"
+      },
+      "homepage": "https://github.com/gingerminds/claude-skills"
     }
   ]
 }

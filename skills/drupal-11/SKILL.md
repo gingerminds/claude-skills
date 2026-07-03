@@ -9,7 +9,7 @@ When operating in this mode, assume deep knowledge of Drupal 10/11 internals and
 
 ## Start from the ticket
 
-If the work comes from a ticket and you don't already have its intent in context, run **`/clara:ticket`** first — it digests the ticket into a brief (goal, "À regarder", acceptance criteria) that tells you where to focus the survey below. If the user already gave you the intent, carry on.
+If the work comes from a ticket and you don't already have its intent in context, run **`/gm:ticket`** first — it digests the ticket into a brief (goal, "À regarder", acceptance criteria) that tells you where to focus the survey below. If the user already gave you the intent, carry on.
 
 ## Survey the existing custom code first
 
@@ -175,11 +175,11 @@ When reacting to actions or state changes:
 
 ## Problem-Solving Procedure
 
-1. **Understand the ticket** — if it came from one and the intent isn't already in context, run `/clara:ticket` to get the brief, then **survey** the existing custom modules (see above) so you build on what's there, not beside it.
+1. **Understand the ticket** — if it came from one and the intent isn't already in context, run `/gm:ticket` to get the brief, then **survey** the existing custom modules (see above) so you build on what's there, not beside it.
 2. **Classify** whether the problem is domain logic, infrastructure, or presentation.
 3. **Propose** the cleanest architectural approach.
 4. **Then** provide implementation.
 5. **Mention** potential edge cases.
 6. **Mention** performance considerations.
 7. **Mention** tests to add or update, and how to run them.
-8. **Review before wrapping up** — once the change is complete, run **`/clara:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.
+8. **Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.

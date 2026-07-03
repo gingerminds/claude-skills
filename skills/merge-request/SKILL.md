@@ -1,6 +1,6 @@
 ---
 name: merge-request
-description: Prepares a GitLab merge request — a scoped commit, a branch push, and `glab mr create` with a structured description that references the ticket. Defaults to a Draft MR targeting the integration branch. Use when the user asks to prepare/open/create a MR or PR after a fix, or invokes /clara:merge-request.
+description: Prepares a GitLab merge request — a scoped commit, a branch push, and `glab mr create` with a structured description that references the ticket. Defaults to a Draft MR targeting the integration branch. Use when the user asks to prepare/open/create a MR or PR after a fix, or invokes /gm:merge-request.
 ---
 
 # Clara — Prepare Merge Request
@@ -12,7 +12,7 @@ Turn a finished change into a clean, reviewable GitLab MR. Outward-facing: creat
 1. **Branch** — Work on a dedicated branch, never the base. Convention: `fix/<ticket>-<slug>` (or `feat/<ticket>-<slug>`). If currently on the base branch (`develop`/`main`), create the branch first.
 2. **Base branch** — Default target is `develop` (fall back to the repo's default branch). Confirm from existing branches/MRs if unsure.
 3. **Clean staging** — Stage **only** the files belonging to this change. Inspect `git status` and explicitly exclude unrelated working-tree edits (leave them unstaged — never `git add -A` blindly).
-4. **Reuse the review** — If `/clara:review` just ran, lift its verdict, **Vérification ✅** checks, and **Hors-scope** notes straight into the MR description instead of re-deriving them.
+4. **Reuse the review** — If `/gm:review` just ran, lift its verdict, **Vérification ✅** checks, and **Hors-scope** notes straight into the MR description instead of re-deriving them.
 
 ## Commit
 

@@ -1,6 +1,6 @@
 ---
 name: merge-review
-description: Reviews an existing GitLab merge request end-to-end — content/correctness, form, language, and coding standards — loads the linked Mantis ticket, and drafts a structured review note plus an approve / request-changes recommendation. Drafts only by default; posts the note and approves only on explicit user go-ahead. Tuned for Drupal/PHP + GitLab. Use when the user gives an MR (URL or number) to review as a reviewer, or invokes /clara:merge-review.
+description: Reviews an existing GitLab merge request end-to-end — content/correctness, form, language, and coding standards — loads the linked Mantis ticket, and drafts a structured review note plus an approve / request-changes recommendation. Drafts only by default; posts the note and approves only on explicit user go-ahead. Tuned for Drupal/PHP + GitLab. Use when the user gives an MR (URL or number) to review as a reviewer, or invokes /gm:merge-review.
 ---
 
 # Clara — Merge Review
@@ -33,9 +33,9 @@ Needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If unset or it exits non-zero (2
 
 ## Review axes
 
-Apply the **`clara:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Tests — the **Blocker/Major/Minor/Nit** severity scale, and that skill's **Noise control** rule (Nits folded, Minor one-liners, full Why/Action for Blocker/Major only). Run the project's linters when present (via `lando`/`ddev`/`docker compose exec`). Below are the axes specific to reviewing someone else's MR:
+Apply the **`gm:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Tests — the **Blocker/Major/Minor/Nit** severity scale, and that skill's **Noise control** rule (Nits folded, Minor one-liners, full Why/Action for Blocker/Major only). Run the project's linters when present (via `lando`/`ddev`/`docker compose exec`). Below are the axes specific to reviewing someone else's MR:
 
-- **Contenu** — Does the diff deliver what the ticket asks, end to end? Root cause vs symptom. This is `clara:review` Correctness, judged against the loaded ticket.
+- **Contenu** — Does the diff deliver what the ticket asks, end to end? Root cause vs symptom. This is `gm:review` Correctness, judged against the loaded ticket.
 - **Forme** — Commit & MR hygiene:
   - **Atomic commits** — one logical change per commit; flag mixed-concern commits.
   - **Conventional commits** — `type(scope: #ticket): summary`.
@@ -45,7 +45,7 @@ Apply the **`clara:review` dimensions** — Correctness, Security, Performance &
   - **French** — the MR title/description and your review note (team language).
   - **English** — all code: identifiers, code comments, docblocks, and (Drupal) user-facing strings through `t()`. Non-English code or comments → raise a comment tagged **« à revoir »** at **Minor** — *non-blocking for the verdict*; the "threads must be closed before merge" rule guarantees it gets fixed.
   - Typos / grammar in either register → comment.
-- **Standards** — `clara:review` Standards (match the file's local idiom and the `Drupal,DrupalPractice` standard; run `phpcs` / `php -l` rather than eyeballing), **plus the house rule: every function is typed (params + return) and carries a docblock (HEREDOC)** — flag any function missing either.
+- **Standards** — `gm:review` Standards (match the file's local idiom and the `Drupal,DrupalPractice` standard; run `phpcs` / `php -l` rather than eyeballing), **plus the house rule: every function is typed (params + return) and carries a docblock (HEREDOC)** — flag any function missing either.
 
 ## Verdict
 

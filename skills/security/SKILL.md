@@ -1,6 +1,6 @@
 ---
 name: security
-description: Audits a project's dependency and infrastructure security — runs composer/npm audit, checks CMS (Drupal core + contrib) security advisories, reviews the Docker setup, ranks every finding by exploitable criticality, and either applies safe fixes or gives exact step-by-step remediation. Tuned for Drupal/PHP + Docker. Use when the user asks for a security audit, a CVE/vulnerability check, a dependency-security pass, or invokes /clara:security.
+description: Audits a project's dependency and infrastructure security — runs composer/npm audit, checks CMS (Drupal core + contrib) security advisories, reviews the Docker setup, ranks every finding by exploitable criticality, and either applies safe fixes or gives exact step-by-step remediation. Tuned for Drupal/PHP + Docker. Use when the user asks for a security audit, a CVE/vulnerability check, a dependency-security pass, or invokes /gm:security.
 ---
 
 # Clara — Security Audit
@@ -125,7 +125,7 @@ If `npm audit` can't reach the network, read `package.json` + `package-lock.json
 
 ### Docker configuration
 
-If a Dockerfile / compose file exists, audit the *configuration* (this overlaps `/clara:docker-devops` — reuse its hardening checklist rather than re-deriving it). Check for:
+If a Dockerfile / compose file exists, audit the *configuration* (this overlaps `/gm:docker-devops` — reuse its hardening checklist rather than re-deriving it). Check for:
 
 - **Base image**: floating tags (`:latest`, unpinned), or a base that is itself EOL / vulnerable.
 - **Privilege**: container running as `root` (no `USER`), `privileged: true`, added capabilities, `--privileged`.
@@ -193,7 +193,7 @@ Then findings, **most critical first**. Full block for Critical/High, one line f
 Info: <unsupported module X>; <unpinned base image Y>; <EOL core minor Z>
 ```
 
-Close with **what couldn't be verified** — and be specific about which rung of the runner → host → WebFetch chain you reached and what's still pending (e.g. "RSS cross-check done, but a live `composer audit` for the full contrib history is still owed"). When there are fixes to ship, point the user at `/clara:review` → `/clara:merge-request` to land them.
+Close with **what couldn't be verified** — and be specific about which rung of the runner → host → WebFetch chain you reached and what's still pending (e.g. "RSS cross-check done, but a live `composer audit` for the full contrib history is still owed"). When there are fixes to ship, point the user at `/gm:review` → `/gm:merge-request` to land them.
 
 ## Non-goals
 
@@ -201,4 +201,4 @@ Close with **what couldn't be verified** — and be specific about which rung of
 - Don't report raw advisory dumps — rank, dedupe, and contextualise. A wall of `npm audit` output is the input, not the deliverable.
 - Don't claim a check passed unless it actually ran; mark unavailable tools "(indispo)".
 - Don't blind-bump the whole dependency tree to silence one advisory. Scope every change.
-- Don't flag app-level code bugs here (injection, XSS in custom code) — that's `/clara:review`'s job; note them as out-of-scope if you spot them.
+- Don't flag app-level code bugs here (injection, XSS in custom code) — that's `/gm:review`'s job; note them as out-of-scope if you spot them.
