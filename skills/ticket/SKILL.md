@@ -19,20 +19,25 @@ It needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If they're unset or it exits 
 
 ## Attachments
 
-The digest ends with an `## Attachments` section when the ticket has files — screenshots, mockups, logs. **Check for it first**: only when at least one attachment is listed do you raise the question (no attachments → say nothing, move on). When there are some, the digest text alone can't show them, so ask the user before loading them:
+The digest ends with an `## Attachments` section when the ticket has files — screenshots, mockups, logs. **Check for it first**: only when at least one attachment is listed do you raise the question (no attachments → say nothing, move on). The digest text can't show the files, so ask before loading — via **`AskUserQuestion`**, not a free-text prompt, so the user answers in one click:
 
-> Il y a des pièces jointes, dois-je les charger ?
+- **Question:** `Charger les pièces jointes ?`
+- **Options:**
+  - `Oui, charger` — put it first and tag it `(recommandé)` when an attachment looks tied to the spec (the discussion says « voir image en PJ », or the file is a mockup/screenshot of the expected UI or the bug).
+  - `Non, ignorer`
+  - `En parler` — the user wants to weigh which files matter before loading.
 
-Then adapt to the answer:
+Act on the choice:
 
-- **Yes** — download each relevant file into the scratchpad and read it into context (images especially — a mockup or a screenshot of the bug often *is* the spec). Use the file ids from the list:
+- **Oui** — download each relevant file into the scratchpad and read it into context (images especially — a mockup or a screenshot of the bug often *is* the spec). Use the file ids from the list:
   ```bash
   bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id> --file <file-id> "$SCRATCHPAD/<filename>"
   ```
   Then `Read` each downloaded file and fold what it shows into the brief (e.g. the expected UI, the error in the screenshot). Prefer the images and anything the discussion refers to; skip large binaries with no bearing on the change.
-- **No** — note in the brief that attachments exist but weren't loaded, and carry on.
+- **Non** — note in the brief that attachments exist but weren't loaded, and carry on.
+- **En parler** — list what's attached (names, types) and help the user pick, then download the chosen ones.
 
-For a **pasted** ticket, ask the same question — the user can paste or drop the images directly.
+For a **pasted** ticket, ask the same way — the user can paste or drop the images directly.
 
 ## Understand it
 
