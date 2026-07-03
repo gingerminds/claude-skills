@@ -35,6 +35,12 @@ bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # prints summary,
 
 The script needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If they're unset or it exits non-zero (exit 2 = no creds, 3 = API error), **ask the user to paste the ticket** rather than reviewing intent blind — and ask for the notes too, not only the description.
 
+If the digest lists an `## Attachments` section, **ask the user before loading them** ("Il y a des pièces jointes, dois-je les charger ?"). A mockup or a before/after screenshot is often the real acceptance criterion — download the relevant ones and read them in:
+
+```bash
+bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id> --file <file-id> "$SCRATCHPAD/<filename>"
+```
+
 ## Review dimensions
 
 Assess each, and only report what applies:

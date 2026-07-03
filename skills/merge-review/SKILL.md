@@ -31,6 +31,12 @@ bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # summary, descri
 
 Needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If unset or it exits non-zero (2 = no creds, 3 = API error), ask the user to paste the ticket rather than reviewing intent blind — and ask for the notes too, not only the description.
 
+If the digest lists an `## Attachments` section, **ask the user before loading them** ("Il y a des pièces jointes, dois-je les charger ?"). A mockup or a before/after screenshot is often the real acceptance criterion — download the relevant ones and read them in:
+
+```bash
+bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id> --file <file-id> "$SCRATCHPAD/<filename>"
+```
+
 ## Review axes
 
 Apply the **`gm:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Tests — the **Blocker/Major/Minor/Nit** severity scale, and that skill's **Noise control** rule (Nits folded, Minor one-liners, full Why/Action for Blocker/Major only). Run the project's linters when present (via `lando`/`ddev`/`docker compose exec`). Below are the axes specific to reviewing someone else's MR:
