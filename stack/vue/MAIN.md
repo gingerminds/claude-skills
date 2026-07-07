@@ -10,7 +10,7 @@ Nature → section:
 | `/gm:review`, `/gm:merge-review` | core + review |
 | `/gm:security` | core + security |
 
-Cross-stack resources: `../../shared/runner.md`, `../../shared/stack-detect.md`.
+Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md` (anchored on the calling skill's base dir).
 
 ---
 
@@ -22,8 +22,8 @@ Shared baseline (all natures):
 - Follow the [Vue Style Guide](https://vuejs.org/style-guide/) priority A and B rules.
 - Component names are **two words minimum** (`UserCard`, not `Card`).
 - SFC block order (team convention): `<script setup>`, `<template>`, `<style scoped>`.
-- Lint via the project runner (see `shared/runner.md`): eslint + prettier, `vue-tsc` for type checks.
-- Detection: `vue` / `nuxt` in `package.json` (see `shared/stack-detect.md`).
+- Lint via the project runner (see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`): eslint + prettier, `vue-tsc` for type checks.
+- Detection: `vue` / `nuxt` in `package.json` (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
 
 ---
 

@@ -4,7 +4,7 @@ Baseline shared by every Drupal consumer (dev, review, security). Load this firs
 
 ## Coding standard
 
-- **`phpcs --standard=Drupal,DrupalPractice`** is the reference standard. Run it via the project runner (see `shared/runner.md`) rather than eyeballing.
+- **`phpcs --standard=Drupal,DrupalPractice`** is the reference standard. Run it via the project runner (see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`) rather than eyeballing.
 - **Strict types** (`declare(strict_types=1);`) and typed signatures (params + return) where the file's idiom allows.
 - **Meaningful PHPDoc** on functions/methods.
 - **English** for all code: identifiers, comments, docblocks. **User-facing strings go through `t()`** (or `$this->t()`), never hardcoded.
@@ -20,4 +20,4 @@ Shared cacheability vocabulary used both when building and when reviewing:
 
 ## Detection
 
-Drupal is identified by `drupal/core*` in `composer.json` (see `shared/stack-detect.md`). Contrib/custom modules typically live under `web/modules/custom/*` (sometimes `modules/custom/*` or `docroot/...`).
+Drupal is identified by `drupal/core*` in `composer.json` (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`). Contrib/custom modules typically live under `web/modules/custom/*` (sometimes `modules/custom/*` or `docroot/...`).

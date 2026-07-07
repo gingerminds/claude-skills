@@ -44,7 +44,7 @@ Reading the lockfile alone gets you hygiene findings (abandoned, pre-release ver
 
 Try in this order; don't stop at the first failure, escalate to the next:
 
-1. **Inside the runner** (`<runner> composer audit`, `<runner> npm audit`, and any stack tool such as `<runner> drush pm:security`) — the bootstrapped, network-capable environment. Best signal. Start it if it isn't up. Resolve `<runner>` via `shared/runner.md`.
+1. **Inside the runner** (`<runner> composer audit`, `<runner> npm audit`, and any stack tool such as `<runner> drush pm:security`) — the bootstrapped, network-capable environment. Best signal. Start it if it isn't up. Resolve `<runner>` via `${CLAUDE_SKILL_DIR}/../../shared/runner.md`.
 2. **On the host** — if the runner is down (Docker not running, runner fails to start), run `composer audit --locked` / `npm audit` directly on the host. The host PHP version may differ, but `--locked` audits the committed lockfile so the result is still valid.
 3. **Offline fallback via `WebFetch`** — if the environment has **no network from the shell** (sandboxed `composer audit`/`npm audit` fail with curl errors), DON'T give up and DON'T claim "0 vulnerabilities". Extract installed versions from the lockfile (see below), then pull the advisory feeds with `WebFetch` (a separate network path that often works when the shell is sandboxed) and cross-reference by hand — the loaded stack resource gives the stack-specific feeds (e.g. Drupal.org SA RSS).
 
