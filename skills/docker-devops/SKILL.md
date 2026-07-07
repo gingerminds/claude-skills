@@ -20,6 +20,134 @@ Operate with strong knowledge of Dockerfile best practices, Docker Compose, Make
 
 ---
 
+## Kickoff — scope the stack first
+
+Before generating any Docker asset, **scope the project shape**. Not every
+project is a front + back split — many are a single monolith (Drupal, Laravel,
+Symfony, a lone Nuxt app…), and generating the wrong blocks wastes everyone's
+time.
+
+**Skip this when it's a reprise** — i.e. a `docker/compose/` (or existing
+`docker-compose.yml`) is already present: read it, follow its established shape,
+and only add/adjust what's asked.
+
+**Otherwise, ask up front with `AskUserQuestion`** (one click beats a free-text
+guess) before choosing which files/blocks to emit:
+
+- **Shape** — monolith · front + back (split repos/services) · other. Drives
+  whether you emit one exposed service or several.
+- **Runtime(s)** — PHP/Apache/FPM · Node/Nuxt · Python · … Drives the
+  `docker/<service>/Dockerfile` set.
+- **Backing services** — DB (which?), Redis, Elasticsearch, Mailpit, admin UIs…
+  Drives the `app-internal`-only services and their healthchecks.
+- **Exposure** — which services must be reachable via Traefik (get the label
+  block) vs. internal only.
+
+Then emit exactly the layout and Traefik blocks matching the answers — no
+speculative services, no front tier for a monolith.
+
+---
+
+## Project Layout (non-negotiable)
+
+Docker assets live under a top-level `docker/` directory. **Never** drop the
+`docker-compose.yml` (or the `Makefile`'s compose file) at the project root.
+
+```
+docker/
+  compose/
+    docker-compose.yml        # the compose file lives HERE, not at the repo root
+  <service>/                  # one dir per service that needs a build/config
+    Dockerfile
+    <config files…>           # php.ini, entrypoint.sh, elasticsearch.yml, …
+Makefile                      # stays at the repo root
+.env                          # stays at the repo root
+```
+
+Because the compose file sits two levels down, **build contexts are relative to
+the repo root**, i.e. `context: ../..`, and dockerfiles are addressed from there:
+
+```yaml
+build:
+  context: ../..
+  dockerfile: docker/app/Dockerfile
+```
+
+The `Makefile` (at the root) always targets the compose file explicitly, and
+pins the project directory so the root `.env` is resolved regardless of the
+current working directory:
+
+```make
+COMPOSE ?= docker compose --project-directory . -f docker/compose/docker-compose.yml
+```
+
+Without `--project-directory .` (or `--env-file .env`), running the command from
+another directory can leave `${COMPOSE_PROJECT_NAME}` unset — silently breaking
+container, volume, and network names.
+
+---
+
+## Traefik Architecture (non-negotiable for exposed services)
+
+Local/dev stacks are fronted by a shared, externally-managed **Traefik** reverse
+proxy. Generated compose files MUST follow this pattern.
+
+**Two networks:**
+
+- `app-internal` — a `bridge` network, named `${COMPOSE_PROJECT_NAME}-internal`,
+  for service-to-service traffic (DB, cache, app ⇄ web server).
+- `traefik-public` — declared `external: true` (Traefik owns it); joined **only**
+  by services that must be reachable through the proxy.
+
+```yaml
+networks:
+  app-internal:
+    name: ${COMPOSE_PROJECT_NAME}-internal
+    driver: bridge
+  traefik-public:
+    external: true
+```
+
+**Which services get exposed:** only user-facing ones (web server, admin UIs like
+Adminer/Mailpit/Elasticvue). Pure backend services (`db`, `redis`, `node`,
+workers) stay on `app-internal` only — **no Traefik labels, not on
+`traefik-public`**.
+
+**Standard label block** for every exposed service — one HTTP router (`web`) and
+one HTTPS router suffixed `-secure` (`websecure`, `tls=true`):
+
+```yaml
+labels:
+  - "traefik.enable=true"
+  # HTTP Router
+  - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.rule=Host(`${COMPOSE_PROJECT_NAME}.dev.localhost`)"
+  - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.entrypoints=web"
+  - "traefik.http.routers.${COMPOSE_PROJECT_NAME}.service=${COMPOSE_PROJECT_NAME}"
+  # HTTPS Router
+  - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-secure.rule=Host(`${COMPOSE_PROJECT_NAME}.dev.localhost`)"
+  - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-secure.entrypoints=websecure"
+  - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-secure.tls=true"
+  - "traefik.http.routers.${COMPOSE_PROJECT_NAME}-secure.service=${COMPOSE_PROJECT_NAME}"
+  # Service (container's internal port)
+  - "traefik.http.services.${COMPOSE_PROJECT_NAME}.loadbalancer.server.port=80"
+  # Network
+  - "traefik.docker.network=traefik-public"
+```
+
+**Conventions:**
+
+- Prefix everything with `${COMPOSE_PROJECT_NAME}` — container names, volume
+  names, network name, router/service names. For a secondary UI, suffix it
+  (`${COMPOSE_PROJECT_NAME}-adminer`, `-mailpit`, …).
+- Host pattern: `${COMPOSE_PROJECT_NAME}[-<tool>].dev.localhost`, or a dedicated
+  `${APP_HOST}` variable when the project defines one.
+- Set `traefik.docker.network=traefik-public` so Traefik resolves the right
+  network in a multi-network service.
+- Don't publish ports for services reached through Traefik; use `ports:` only for
+  direct host access (e.g. exposing the DB to a local client).
+
+---
+
 ## Dockerfile Best Practices
 
 **Build strategy:**
@@ -55,6 +183,10 @@ Operate with strong knowledge of Dockerfile best practices, Docker Compose, Make
 
 **Runtime orchestration:**
 
+- Place the compose file at `docker/compose/docker-compose.yml` with `../..`
+  build contexts (see *Project Layout*).
+- Front exposed services with Traefik using the two-network pattern and the
+  standard label block (see *Traefik Architecture*).
 - Define clear services, networks, and volumes.
 - Use named volumes for stateful components (DB, queues, storage).
 - Add healthchecks for critical services.
@@ -78,7 +210,9 @@ Operate with strong knowledge of Dockerfile best practices, Docker Compose, Make
 - Targets must be safe and idempotent.
 - Prefer clear variable defaults, allow overrides:
   - `ENV ?= dev`
-  - `COMPOSE ?= docker compose`
+  - `COMPOSE ?= docker compose --project-directory . -f docker/compose/docker-compose.yml`
+    (point at the compose file under `docker/compose/`; `--project-directory .`
+    keeps the root `.env` resolvable from any CWD)
 - Provide common workflows:
   - up / down / restart / logs / shell
   - build / pull
