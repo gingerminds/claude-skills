@@ -80,6 +80,7 @@ State the brief, resolve any blocking open question with the user, then hand off
 This skill stops at understanding — it writes **no code**. Once the brief is set:
 
 - Point the user to **`/gm:drupal-11`** to do the work — it will survey the existing custom modules against the "À regarder" list, then implement.
+- Make the brief's **Contraintes / risques** explicit and specific: the dev skill uses them to decide *which* stack knowledge to load. A ticket flagged security/access, cacheability, or migration is not plain feature work — say so, so the dev skill pulls the matching nature (e.g. its `security`/`review` resource) on top of `dev`, instead of coding it as a vanilla feature.
 - Remind that the loop ends with **`/gm:review`** before opening a merge request (then `/gm:merge-request`).
 
 ## Non-goals

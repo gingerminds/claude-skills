@@ -11,6 +11,13 @@ Entry point for Drupal backend development. This skill carries the **workflow**;
 
 Load `${CLAUDE_SKILL_DIR}/../../stack/drupal/MAIN.md` for the **dev** nature — it pulls `core.md` (coding standard, `t()`, Cache API vocabulary) + `dev.md` (architecture, entities, cacheability, config, security, testing, service decoration, plugins, event subscribers). Apply that discipline throughout the work below.
 
+**`dev` is the baseline, not always enough.** `MAIN.md` is the dispatcher — it lists every nature the stack exposes (`core` / `dev` / `review` / `security`). When the ticket reaches beyond plain feature work, also load the nature(s) it implicates so you build with the right lens from the start, not after the fact:
+
+- Ticket with **security / access / data-exposure** implications (auth, permissions, private data, file handling, an SA to patch) → also load `${CLAUDE_SKILL_DIR}/../../stack/drupal/security.md`.
+- Working against **existing code you must not regress**, or a change where cacheability/standards are the crux → also load `${CLAUDE_SKILL_DIR}/../../stack/drupal/review.md` to keep its checklist in mind while coding (the formal pass still runs later via `/gm:review`).
+
+Let the ticket brief's **Contraintes / risques** drive this: each concern there maps to a nature. Load what's relevant, skip the rest — don't pull all four by reflex.
+
 ## Start from the ticket
 
 If the work comes from a ticket and you don't already have its intent in context, run **`/gm:ticket`** first — it digests the ticket into a brief (goal, "À regarder", acceptance criteria) that tells you where to focus the survey below. If the user already gave you the intent, carry on.
@@ -34,5 +41,5 @@ State briefly what you found (or confirm there's nothing relevant) before propos
 4. **Then** provide implementation.
 5. **Mention** potential edge cases.
 6. **Mention** performance considerations (cacheability metadata, N+1, batch/queue).
-7. **Mention** tests to add or update, and how to run them (via the runner — see `shared/runner.md`).
+7. **Mention** tests to add or update, and how to run them (via the runner — see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`).
 8. **Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.
