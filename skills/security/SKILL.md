@@ -1,6 +1,6 @@
 ---
 name: security
-description: Audits a project's dependency and infrastructure security — runs composer/npm audit, checks CMS (Drupal core + contrib) security advisories, reviews the Docker setup, ranks every finding by exploitable criticality, and either applies safe fixes or gives exact step-by-step remediation. Tuned for Drupal/PHP + Docker. Use when the user asks for a security audit, a CVE/vulnerability check, a dependency-security pass, or invokes /gm:security.
+description: Audits a project's dependency and infrastructure security — runs composer/npm audit, checks CMS/framework security advisories, reviews the Docker setup, ranks every finding by exploitable criticality, and either applies safe fixes or gives exact step-by-step remediation. Stack-agnostic: pulls stack-specific advisory checks (e.g. Drupal SAs) from the loaded stack/ resource. Use when the user asks for a security audit, a CVE/vulnerability check, a dependency-security pass, or invokes /gm:security.
 ---
 
 # Security Audit
@@ -21,11 +21,11 @@ ls Dockerfile docker-compose.yml docker-compose.yaml compose.yaml 2>/dev/null
 Then identify:
 
 1. **PHP** — `composer.json` / `composer.lock` present.
-2. **CMS** — read `composer.json`: `drupal/core*` → Drupal; `roots/wordpress` or a `wp-content/` tree → WordPress; otherwise treat as plain PHP/JS. Drupal is the primary target here.
+2. **Stack / CMS** — detect via `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`, then load `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` for the **security** nature. This pulls the stack's advisory specifics (e.g. Drupal: `drush pm:security`, Drupal.org SA feeds, core-version check) on top of the generic audit below. No known stack → stay generic.
 3. **JS** — which lockfile is present picks the runner (`package-lock.json` → npm, `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn). Don't run `npm audit` against a pnpm project.
 4. **Docker** — any Dockerfile / compose file.
 
-Find the project runner the same way the other gm skills do — `lando`, `ddev`, or `docker compose exec <svc>`. Run composer/drush **inside** the runner if one exists (the host PHP version rarely matches), but `*audit` against the committed lockfile is fine from the host too.
+Find the project runner via `${CLAUDE_SKILL_DIR}/../../shared/runner.md` (priority `make` → `docker compose` → `lando`). Run composer/package-manager audits **inside** the runner if one exists (the host PHP version rarely matches), but `*audit` against the committed lockfile is fine from the host too.
 
 State up front which ecosystems you found and will audit; skip the rest explicitly.
 
@@ -36,7 +36,7 @@ Prefer real signals over guesswork. Run what applies, capture the output, never 
 **Two things are mandatory and complementary — do BOTH, never just one:**
 
 1. **Read the package/lock files** (`composer.lock`, `package-lock.json`/`pnpm-lock.yaml`/`yarn.lock`) to extract the *exact installed versions* of every package. The lockfile is the ground truth for "what is actually installed". But note: **a lockfile contains NO CVE/advisory data** — only versions and an optional `abandoned` flag. Reading it is necessary but never sufficient.
-2. **Run the real audit** (`composer audit`, `npm audit`, `drush pm:security`) which fetches the **advisory database over the network** and maps installed versions → CVE/GHSA/SA ids. This is where the actual vulnerability signal comes from.
+2. **Run the real audit** (`composer audit`, `npm audit`, plus any stack tool such as `drush pm:security` on Drupal) which fetches the **advisory database over the network** and maps installed versions → CVE/GHSA/SA ids. This is where the actual vulnerability signal comes from.
 
 Reading the lockfile alone gets you hygiene findings (abandoned, pre-release versions) but will MISS every real CVE. Always pair the two: extract versions from the lock, then cross-reference them against advisories.
 
@@ -44,9 +44,9 @@ Reading the lockfile alone gets you hygiene findings (abandoned, pre-release ver
 
 Try in this order; don't stop at the first failure, escalate to the next:
 
-1. **Inside the runner** (`lando composer audit`, `lando drush pm:security`, `lando npm audit`) — the bootstrapped, network-capable environment. Best signal. Start Docker/Lando if it isn't up (`lando start`).
-2. **On the host** — if the runner is down (Docker not running, `lando start` fails), run `composer audit --locked` / `npm audit` directly on the host. The host PHP version may differ, but `--locked` audits the committed lockfile so the result is still valid.
-3. **Offline fallback via `WebFetch`** — if the environment has **no network from the shell** (sandboxed `composer audit`/`npm audit` fail with curl errors), DON'T give up and DON'T claim "0 vulnerabilities". Extract installed versions from the lockfile (see below), then pull the advisory feeds with `WebFetch` (a separate network path that often works when the shell is sandboxed) and cross-reference by hand. See the Drupal and offline sections.
+1. **Inside the runner** (`<runner> composer audit`, `<runner> npm audit`, and any stack tool such as `<runner> drush pm:security`) — the bootstrapped, network-capable environment. Best signal. Start it if it isn't up. Resolve `<runner>` via `${CLAUDE_SKILL_DIR}/../../shared/runner.md`.
+2. **On the host** — if the runner is down (Docker not running, runner fails to start), run `composer audit --locked` / `npm audit` directly on the host. The host PHP version may differ, but `--locked` audits the committed lockfile so the result is still valid.
+3. **Offline fallback via `WebFetch`** — if the environment has **no network from the shell** (sandboxed `composer audit`/`npm audit` fail with curl errors), DON'T give up and DON'T claim "0 vulnerabilities". Extract installed versions from the lockfile (see below), then pull the advisory feeds with `WebFetch` (a separate network path that often works when the shell is sandboxed) and cross-reference by hand — the loaded stack resource gives the stack-specific feeds (e.g. Drupal.org SA RSS).
 
 The goal is to get **real material** one way or another. A "couldn't run anything" report is a last resort, not a first answer — exhaust runner → host → WebFetch before concluding.
 
@@ -55,23 +55,16 @@ The goal is to get **real material** one way or another. A "couldn't run anythin
 First, extract the exact installed versions from the lockfile (works with zero network, host or runner):
 
 ```bash
-# Drupal core version
-php -r '$l=json_decode(file_get_contents("composer.lock"),true);
-foreach(array_merge($l["packages"]??[],$l["packages-dev"]??[]) as $p)
-  if($p["name"]==="drupal/core") echo $p["version"],"\n";'
-
-# All drupal contrib + versions + abandoned/pre-release flags
+# All packages + versions + abandoned/pre-release flags
 php -r '$l=json_decode(file_get_contents("composer.lock"),true);
 foreach(($l["packages"]??[]) as $p){
-  if(preg_match("#^drupal/(?!core)#",$p["name"])){
-    $ab=!empty($p["abandoned"])?" [ABANDONED]":"";
-    $pre=preg_match("#(alpha|beta|-rc|dev-)#i",$p["version"])?" [pre-release]":"";
-    echo str_pad($p["name"],45)." ".$p["version"].$ab.$pre."\n";
-  }
+  $ab=!empty($p["abandoned"])?" [ABANDONED]":"";
+  $pre=preg_match("#(alpha|beta|-rc|dev-)#i",$p["version"])?" [pre-release]":"";
+  echo str_pad($p["name"],45)." ".$p["version"].$ab.$pre."\n";
 }'
 ```
 
-Then run the real audit:
+The loaded stack resource may add stack-specific extraction (e.g. Drupal core + contrib filtering). Then run the real audit:
 
 ```bash
 composer audit --locked --format=plain     # audits composer.lock against the PHP advisories DB
@@ -80,34 +73,9 @@ composer audit --locked --format=json       # machine-readable, for parsing seve
 
 `--locked` audits what is actually committed (`composer.lock`), not just the resolved tree. Each advisory carries a CVE/GHSA id, affected version range, and a link — keep these for the report.
 
-### Drupal (core + contrib)
+### CMS / framework advisories (stack-specific)
 
-`composer audit` covers Drupal core and contrib that publish to the advisory DB, but confirm with Drupal's own tooling when a bootstrapped site is available:
-
-```bash
-drush pm:security                 # core + contrib modules with an open security advisory (SA-*)
-drush pm:security-php             # PHP-library advisories affecting the codebase
-drush status --field=drupal-version   # is core itself within a supported / patched release?
-```
-
-- Check **drupal/core** version against the latest security release — an EOL minor (e.g. a 9.x past EOL) is itself a finding regardless of named CVEs.
-- For contrib, map each advisory to its **SA-CONTRIB-YYYY-NNN** and the fixed version.
-- Flag any module that is **unsupported / abandoned** (no security coverage) — that's a standing risk, not a one-off CVE.
-- If drush isn't available (no bootstrapped site), say so and rely on `composer audit` + the Drupal version check; don't claim the contrib advisory pass ran.
-
-**Important — Drupal advisories are NOT on packagist.org.** `drupal/*` modules are hosted on `packages.drupal.org`, and their SAs live on Drupal.org, not in packagist's security API. So a packagist-only query (or a generic tool that only knows packagist) will return **empty** for Drupal contrib and give a false "all clear". `composer audit` knows the Drupal endpoint; a manual cross-check must use the **Drupal.org advisory feeds**.
-
-### Offline fallback — cross-reference via the Drupal.org advisory feeds (WebFetch)
-
-When `composer audit` / `drush pm:security` can't run (no shell network, no bootstrap), fetch the **official Drupal advisory feeds** with `WebFetch` and cross-reference each against the versions you extracted from `composer.lock`:
-
-```
-WebFetch https://www.drupal.org/security/rss.xml          → core SAs (SA-CORE-YYYY-NNN) + fixed versions
-WebFetch https://www.drupal.org/security/contrib/rss.xml  → contrib SAs (SA-CONTRIB-YYYY-NNN) + fixed versions
-WebFetch https://www.drupal.org/security/psa/rss.xml      → public service announcements
-```
-
-For each installed module, compare `installed version` vs the advisory's `Fixed in` version: installed `<` fixed ⇒ **vulnerable**. Drupal.org may print legacy tags like `8.x-3.15` — that maps to composer version `3.15`. The RSS feeds only carry the **most recent ~25 advisories per feed**, so older SAs affecting your modules may not appear — say so explicitly and recommend a live `composer audit` to be exhaustive. Don't claim full contrib coverage from RSS alone; do claim the matches you actually found (they're from the authoritative source).
+Some ecosystems don't publish all advisories to packagist/npm and need their own tooling and feeds — **apply the loaded stack resource here**. For example, Drupal contrib SAs are **not** on packagist.org (they live on Drupal.org), so a packagist-only audit gives a false "all clear"; `stack/drupal/security.md` covers `drush pm:security`, the core-version EOL check, and the Drupal.org SA RSS feeds for the offline cross-reference. If no stack resource was loaded, note that only the generic `composer audit` / `npm audit` coverage applies.
 
 ### JavaScript
 
@@ -119,7 +87,7 @@ pnpm audit --prod               # or: pnpm audit --json
 yarn npm audit --environment production   # yarn berry
 ```
 
-Separate **prod** from **dev** dependencies — a high-severity CVE in a build-only devDependency is a far lower real risk than the same in shipped runtime code. Note which side each finding is on. For a Drupal theme/asset pipeline (gulp/webpack/postcss/sass compiled to static CSS/JS), the *entire* npm tree is effectively build-time — flag those findings as Low real risk and say why, but still run the audit.
+Separate **prod** from **dev** dependencies — a high-severity CVE in a build-only devDependency is a far lower real risk than the same in shipped runtime code. Note which side each finding is on. For a compiled asset/theme pipeline (gulp/webpack/postcss/sass compiled to static CSS/JS), the *entire* npm tree is effectively build-time — flag those findings as Low real risk and say why, but still run the audit.
 
 If `npm audit` can't reach the network, read `package.json` + `package-lock.json` for the installed versions and cross-reference notable packages against the **GitHub Advisory Database** (`WebFetch https://github.com/advisories?query=<package>`) rather than skipping the JS side entirely.
 
@@ -154,19 +122,18 @@ For each finding, give one of two things — never a vague "update your dependen
 **A. Propose the fix** (when it's safe and mechanical):
 
 ```bash
-composer update drupal/core-recommended --with-dependencies   # to the patched release
-composer require drupal/<module>:^X.Y                          # bump contrib to the fixed version
-npm audit fix                                                   # non-breaking, when it resolves the advisory
+composer require <vendor>/<package>:^X.Y      # bump to the fixed version (scope to the affected package)
+npm audit fix                                  # non-breaking, when it resolves the advisory
 ```
 
-Offer to apply these to the working tree when the user wants. After applying, **re-run the audit** to confirm the finding clears and nothing else broke (build/tests if quick).
+The loaded stack resource gives stack-specific remediation (e.g. Drupal's `composer update drupal/core-recommended --with-dependencies`, the `update.php`/config-sync steps). Offer to apply these to the working tree when the user wants. After applying, **re-run the audit** to confirm the finding clears and nothing else broke (build/tests if quick).
 
 **B. Give the marche à suivre** (when the fix is breaking, risky, or has no clean version yet):
 
 - A major version bump with BC breaks → outline the migration steps, what to test, what likely breaks.
 - No patched release exists → the mitigation (config workaround, WAF rule, disable the feature, pin + watch the advisory), plus what to monitor.
-- A Drupal core update that needs `update.php` / config sync → the ordered steps, with the DB-backup-first reminder.
-- An abandoned/unsupported module → replace, fork-and-patch, or remove — with the trade-offs.
+- A framework/CMS update needing a migration step (e.g. Drupal `update.php` / config sync) → the ordered steps, with the DB-backup-first reminder.
+- An abandoned/unsupported package → replace, fork-and-patch, or remove — with the trade-offs.
 
 Be explicit about **breaking-change risk**: don't propose a blind `composer update` that drags the whole tree forward. Scope every bump to the affected package(s) and their needed deps.
 
@@ -178,7 +145,7 @@ Lead with a one-line headline: counts by severity and the single most urgent act
 
 | Ecosystem | Audited | Critical | High | Medium | Low | Info |
 |---|---|---|---|---|---|---|
-| Composer (Drupal) | ✅ | … | … | … | … | … |
+| Composer (PHP/CMS) | ✅ | … | … | … | … | … |
 | npm (prod) | ✅ | … | … | … | … | … |
 | Docker config | ✅ | … | … | … | … | … |
 

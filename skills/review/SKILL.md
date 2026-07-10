@@ -1,6 +1,6 @@
 ---
 name: review
-description: Reviews a code change before merge — correctness bugs, security, performance/cacheability, coding standards, and test coverage — and produces a structured, severity-ranked verdict with concrete actions. Tuned for Drupal/PHP + GitLab workflows. Use when the user asks to review a diff, a branch, a fix, or a change before preparing a merge request, or invokes /gm:review.
+description: Reviews a code change before merge — correctness bugs, security, performance/cacheability, coding standards, and test coverage — and produces a structured, severity-ranked verdict with concrete actions. Stack-agnostic: adapts to the project's stack (Drupal, Vue…) by loading its stack/ resource; GitLab-oriented workflow. Use when the user asks to review a diff, a branch, a fix, or a change before preparing a merge request, or invokes /gm:review.
 ---
 
 # Code Review
@@ -22,6 +22,14 @@ Determine what to review, in this order:
 4. Otherwise the working-tree diff (`git diff` / `git diff --cached`).
 
 Read the changed lines **and** enough surrounding code to judge them (the function, its callers, the form/route/service it touches). Never review a hunk in isolation when the bug could live in the context.
+
+## Detect the stack
+
+This skill stays stack-agnostic; the technology-specific review checklist comes from a loaded resource.
+
+1. Apply `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md` to identify the project's stack(s).
+2. Load `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` for the **review** nature (it pulls `core` + `review`). E.g. Drupal → cacheability/N+1/`Drupal,DrupalPractice`/`t()` checks; Vue → reactivity/hydration checks.
+3. Apply those specifics on top of the generic dimensions below. No known stack → skip, stay generic.
 
 ## Load the ticket
 
@@ -47,20 +55,20 @@ Assess each, and only report what applies:
 
 - **Correctness** — Does it do what the ticket/intent says? Walk the actual control flow. For regressions, confirm the change addresses the root cause, not a symptom. When feasible, **verify empirically** (build the form, call the service, run the path) rather than asserting.
 - **Security** — Input validation, access checks, SQL/XSS/CSRF, secrets, privilege boundaries. Flag anything that widens attack surface.
-- **Performance & cacheability** (Drupal) — Cache contexts/tags/max-age, render cache, N+1 entity loads, entity queries vs full loads, batch/queue for large sets.
-- **Standards** — Match the **local idiom** of the file (don't impose DI on a fully procedural `.module`, etc.) and the `Drupal,DrupalPractice` standard. Run the linters (see below) rather than eyeballing.
+- **Performance & cacheability** — Apply the loaded stack's checklist (e.g. Drupal cache contexts/tags/max-age, N+1 entity loads; Vue reactivity/hydration). Generic: unnecessary work on hot paths, missing caching, N+1 patterns.
+- **Standards** — Match the **local idiom** of the file (don't impose DI on a fully procedural module, etc.) and the loaded stack's coding standard. Run the linters (see below) rather than eyeballing.
 - **Tests** — Is new logic covered? If the project has no test infra, say so and recommend (don't fabricate a lone untestable test); document manual UAT steps instead.
 
 ## Run what you can
 
-Prefer real signals over opinion. Prefix with the project's runner (`lando`, `ddev`, or `docker compose exec <svc>`) to run linters and quick probes:
+Prefer real signals over opinion. Prefix linters and quick probes with the project's runner — see `${CLAUDE_SKILL_DIR}/../../shared/runner.md` for the priority order (`make` → `docker compose` → `lando`). The exact linter command comes from the loaded stack (e.g. Drupal `phpcs --standard=Drupal,DrupalPractice`, `php -l`; Vue `vue-tsc`, eslint), run through that runner:
 
 ```bash
-lando php -l <file>
-lando phpcs --standard=Drupal,DrupalPractice <path>
+make lint                                   # if the project exposes it
+docker compose exec <svc> <linter> <path>   # otherwise
 ```
 
-Report a check as passed only after it actually ran. If a tool is absent, say "(indispo)" — don't claim it passed.
+Report a check as passed only after it actually ran. If a tool is absent, say "(unavailable)" — don't claim it passed.
 
 ## Severity
 
