@@ -9,6 +9,7 @@ Nature → section:
 | `/gm:vue` | core + dev |
 | `/gm:review`, `/gm:merge-review` | core + review |
 | `/gm:security` | core + security |
+| `/gm:archi-c4` | core + archi |
 
 Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md` (anchored on the calling skill's base dir).
 
@@ -108,3 +109,30 @@ Consumed by `/gm:security`.
 - **SSR state exposure** — secrets or private data leaking into the serialized SSR payload / `useState`.
 - **Dependencies** — `npm audit` (or the lockfile-matching runner) on the JS tree; separate prod from dev/build-time deps.
 - **Runtime config** — no secrets in `public` runtime config (it ships to the client); server-only secrets stay in the private config.
+
+---
+
+## archi
+
+Consumed by `/gm:archi-c4`. Layered on `core`. Instructions in English; generated documentation in French.
+
+### Where custom code lives (what we detail)
+
+- The whole app repo is custom. Nuxt: `components/`, `composables/`, `stores/` (Pinia), `pages/`, `layouts/`, `middleware/`, `plugins/`, `server/` (Nitro API/routes), `utils/`. Plain Vue: `src/**`.
+- Build/orchestration (`nuxt.config.ts`, `vite.config.*`, `Makefile`, CI) → **containers** (C2).
+
+**Never detailed (black box, `type: external`)**: `node_modules/**` — Vue/Nuxt runtime, UI libraries, any dependency. Show only what custom code imports/calls (an external API, the Nitro runtime, a headless CMS, a DB) as `external` nodes.
+
+### Wiring source of truth
+
+1. **Pinia stores** (`defineStore`) — each store = a `component` node; store→store and composable→store calls = `uses` edges.
+2. **Composables** (`useX`) — `component` nodes; a component/composable importing another = `uses` edge.
+3. **Nitro server routes/handlers** (`server/api/**`, `server/routes/**`) — entry points; external calls (DB, upstream API) = `external` nodes.
+4. **Router / pages** (`pages/**`, route config) — entry points; navigation guards/middleware as `component` nodes.
+5. **Component import graph** — parent→child and component→composable `uses` edges; stop at `node_modules`.
+
+Typical containers (C2): the Nuxt/Vite app, the Nitro server, and any external API/CMS/DB the app talks to.
+
+### C4 splitting (code level, on request)
+
+Group by feature/domain into `CODE.views` (e.g. `stores`, `composables`, one feature module). Vue has no classes/interfaces: represent composables/stores as `class`-kind nodes and shared TS contracts (interfaces/types) as `interface`-kind nodes, linked by `assoc`/`use`.
