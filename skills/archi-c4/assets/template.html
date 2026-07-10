@@ -1,0 +1,842 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Modèle C4</title>
+<style>
+  :root {
+    --bg:        #eef1f6;
+    --grid:      rgba(30, 64, 128, 0.055);
+    --panel:     #ffffff;
+    --panel-2:   #f5f7fb;
+    --ink:       #16202f;
+    --ink-soft:  #52627a;
+    --ink-faint: #8493a8;
+    --hair:      #d3dbe7;
+    --hair-strong:#b9c4d6;
+    --accent:    #c9781a;
+    --accent-2:  #e8a33d;
+    --wire:      #93a3bb;
+    --wire-active:#d98a2b;
+
+    --c-person:    #2f3a8c;
+    --c-system:    #1d4ed8;
+    --c-external:  #566072;
+    --c-container: #0e7490;
+    --c-store:     #7c3aed;
+    --c-component: #3f63c9;
+
+    --shadow: 0 1px 2px rgba(20,32,47,.06), 0 8px 24px rgba(20,32,47,.06);
+    --shadow-lift: 0 6px 16px rgba(20,32,47,.10), 0 20px 48px rgba(20,32,47,.14);
+
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --r: 10px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0d1320;
+      --grid:      rgba(120, 165, 240, 0.06);
+      --panel:     #141c2c;
+      --panel-2:   #1a2436;
+      --ink:       #e7edf6;
+      --ink-soft:  #a3b1c6;
+      --ink-faint: #6c7c94;
+      --hair:      #263247;
+      --hair-strong:#33425c;
+      --accent:    #f0b64f;
+      --accent-2:  #f6c96f;
+      --wire:      #46566f;
+      --wire-active:#f0b64f;
+
+      --c-person:    #8790e6;
+      --c-system:    #5b8dff;
+      --c-external:  #8595ac;
+      --c-container: #2bb6c9;
+      --c-store:     #a986f5;
+      --c-component: #6f8fe6;
+
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.4);
+      --shadow-lift: 0 8px 20px rgba(0,0,0,.5), 0 24px 60px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #0d1320;
+    --grid:      rgba(120, 165, 240, 0.06);
+    --panel:     #141c2c;
+    --panel-2:   #1a2436;
+    --ink:       #e7edf6;
+    --ink-soft:  #a3b1c6;
+    --ink-faint: #6c7c94;
+    --hair:      #263247;
+    --hair-strong:#33425c;
+    --accent:    #f0b64f;
+    --accent-2:  #f6c96f;
+    --wire:      #46566f;
+    --wire-active:#f0b64f;
+    --c-person:    #8790e6;
+    --c-system:    #5b8dff;
+    --c-external:  #8595ac;
+    --c-container: #2bb6c9;
+    --c-store:     #a986f5;
+    --c-component: #6f8fe6;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.4);
+    --shadow-lift: 0 8px 20px rgba(0,0,0,.5), 0 24px 60px rgba(0,0,0,.6);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background:
+      linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 26px 26px,
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 26px 26px,
+      var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.45;
+  }
+
+  .wrap { max-width: 1360px; margin: 0 auto; padding: 26px clamp(14px, 3vw, 34px) 60px; }
+
+  /* ---------- Header ---------- */
+  header.masthead { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px 26px; justify-content: space-between; }
+  .title-block { min-width: 260px; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin: 0 0 8px;
+  }
+  h1 { font-size: clamp(24px, 3.4vw, 34px); line-height: 1.08; margin: 0; letter-spacing: -.02em; text-wrap: balance; font-weight: 680; }
+  .subtitle { margin: 9px 0 0; color: var(--ink-soft); max-width: 60ch; font-size: 14.5px; }
+
+  /* ---------- Segmented level switcher ---------- */
+  .levels { display: inline-flex; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--hair); border-radius: 12px; padding: 4px; gap: 3px; box-shadow: var(--shadow); }
+  .levels button {
+    appearance: none; border: 0; background: transparent; cursor: pointer; color: var(--ink-soft);
+    font-family: var(--font-sans); font-size: 13px; font-weight: 600; padding: 8px 13px; border-radius: 9px;
+    display: flex; align-items: baseline; gap: 8px; transition: background .18s, color .18s;
+  }
+  .levels button .lv { font-family: var(--font-mono); font-size: 10.5px; opacity: .6; }
+  .levels button:hover { color: var(--ink); background: var(--panel-2); }
+  .levels button[aria-selected="true"] { background: var(--c-system); color: #fff; box-shadow: 0 1px 8px rgba(29,78,216,.35); }
+  .levels button[aria-selected="true"] .lv { opacity: .8; }
+  .levels button[hidden] { display: none; }
+
+  /* ---------- Intro + legend + subnav ---------- */
+  .stage-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px 24px; margin: 26px 0 12px; }
+  .stage-head .lead { font-size: 14.5px; color: var(--ink); max-width: 78ch; }
+  .stage-head .lead b { font-weight: 650; }
+  .stage-head .count { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-faint); white-space: nowrap; }
+
+  .subnav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 14px; }
+  .subnav .slabel { font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); margin-right: 2px; }
+  .subnav button {
+    appearance: none; cursor: pointer; border: 1px solid var(--hair); background: var(--panel); color: var(--ink-soft);
+    font-family: var(--font-sans); font-size: 12.5px; font-weight: 600; padding: 7px 12px; border-radius: 8px; transition: all .16s;
+  }
+  .subnav button:hover { color: var(--ink); border-color: var(--hair-strong); }
+  .subnav button[aria-pressed="true"] { background: var(--c-store); border-color: var(--c-store); color: #fff; }
+  .subnav[hidden] { display: none; }
+
+  .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 14px; margin: 0 0 14px; padding: 10px 14px; background: var(--panel); border: 1px solid var(--hair); border-radius: var(--r); }
+  .legend .li { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-soft); }
+  .legend .sw { width: 13px; height: 13px; border-radius: 4px; flex: none; }
+  .legend .rk { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink-soft); }
+  .legend .rk svg { flex: none; }
+  .legend .sep { width: 1px; align-self: stretch; background: var(--hair); margin: 0 2px; }
+  .legend .hint { margin-left: auto; font-size: 11.5px; color: var(--ink-faint); font-style: italic; display: inline-flex; align-items: center; gap: 6px; }
+  .legend .hint svg { width: 14px; height: 14px; opacity: .8; }
+
+  /* ---------- Canvas ---------- */
+  .canvas { position: relative; border: 1px solid var(--hair); border-radius: 14px; background: var(--panel-2); box-shadow: var(--shadow); overflow: auto; }
+  .stage { position: relative; padding: 30px clamp(18px, 2.5vw, 34px) 34px; min-width: 720px; }
+  .stage[hidden] { display: none; }
+  svg.wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; overflow: visible; }
+  svg.wires .wire { fill: none; stroke: var(--wire); stroke-width: 1.6; transition: opacity .2s, stroke .2s, stroke-width .2s; }
+  svg.wires .wire.dash { stroke-dasharray: 5 4; }
+  svg.wires .wire.active { stroke: var(--wire-active); stroke-width: 2.4; }
+  svg.wires .wlabel { font-family: var(--font-mono); font-size: 10.5px; fill: var(--ink-soft); paint-order: stroke; stroke: var(--panel-2); stroke-width: 3.5px; stroke-linejoin: round; transition: opacity .2s; }
+  svg.wires .wlabel.active { fill: var(--accent); font-weight: 600; }
+  .stage.faded svg.wires .wire:not(.active) { opacity: .12; }
+  .stage.faded svg.wires .wlabel:not(.active) { opacity: .18; }
+  .stage.trace svg.wires .wire:not(.active) { opacity: 0; }
+  .stage.trace svg.wires .wlabel { opacity: 0; }
+
+  .content { position: relative; z-index: 2; }
+
+  /* grid layouts (context / container / code) */
+  .gridflow { display: grid; gap: clamp(20px, 4vh, 42px) clamp(28px, 6vw, 90px); align-items: center; justify-items: stretch; }
+  .codegrid { gap: 30px 22px; align-items: start; grid-template-columns: repeat(12, minmax(0, 1fr)); min-width: 780px; }
+
+  /* ---------- Nodes (context/container/component) ---------- */
+  .node {
+    position: relative; text-align: left; cursor: pointer; border: 1px solid var(--hair-strong);
+    background: var(--panel); border-radius: var(--r); box-shadow: var(--shadow); overflow: hidden;
+    transition: transform .16s, box-shadow .16s, border-color .16s, opacity .2s; width: 100%;
+    display: flex; flex-direction: column; min-width: 0;
+  }
+  .gnode { font: inherit; }
+  .gnode:hover { transform: translateY(-2px); box-shadow: var(--shadow-lift); border-color: var(--tc, var(--hair-strong)); }
+  .gnode:focus-visible { outline: 2.5px solid var(--accent); outline-offset: 2px; }
+  .node .hd { padding: 7px 12px; background: var(--tc); color: #fff; display: flex; flex-direction: column; gap: 1px; }
+  .node .stereo { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; opacity: .82; }
+  .node .name { font-weight: 640; font-size: 14.5px; line-height: 1.15; }
+  .node .bd { padding: 9px 12px 11px; display: flex; flex-direction: column; gap: 5px; }
+  .node .idline { font-family: var(--font-mono); font-size: 11px; color: var(--accent); word-break: break-word; }
+  .node .desc { font-size: 12px; color: var(--ink-soft); line-height: 1.35; }
+
+  .stage.faded .gnode:not(.active):not(.hot) { opacity: .32; }
+  .gnode.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), var(--shadow-lift); }
+  .gnode.hot { border-color: var(--tc); box-shadow: 0 0 0 1.5px var(--tc), var(--shadow); }
+  .node.hero { box-shadow: 0 0 0 1.5px var(--tc), var(--shadow-lift); }
+  .node.hero .hd { padding-top: 9px; padding-bottom: 9px; }
+
+  /* component compact cards */
+  .node.mini .hd { padding: 6px 10px; flex-direction: row; align-items: center; gap: 8px; background: var(--panel); color: var(--ink); border-bottom: 1px solid var(--hair); }
+  .node.mini .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--tc); flex: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--tc) 22%, transparent); }
+  .node.mini .name { font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
+  .node.mini .bd { padding: 6px 10px 8px; }
+  .node.mini .desc { font-size: 11px; }
+  .node.mini .stereo { color: var(--ink-faint); }
+
+  /* ---------- UML class boxes (code) ---------- */
+  .uml {
+    position: relative; text-align: left; cursor: pointer; border: 1px solid var(--hair-strong);
+    border-top: 3px solid var(--kc); background: var(--panel); border-radius: 8px; box-shadow: var(--shadow);
+    overflow: hidden; display: flex; flex-direction: column; width: 100%; min-width: 0;
+    transition: transform .16s, box-shadow .16s, border-color .16s, opacity .2s;
+  }
+  .uml .uhd { padding: 8px 10px; text-align: center; display: flex; flex-direction: column; gap: 1px; }
+  .uml .ustereo { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: .06em; color: var(--kc); }
+  .uml .uname { font-weight: 650; font-size: 13.5px; letter-spacing: -.01em; word-break: break-word; }
+  .uml.italic .uname { font-style: italic; }
+  .uml .ucompart { padding: 6px 11px; border-top: 1px solid var(--hair); font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-soft); display: flex; flex-direction: column; gap: 2px; line-height: 1.32; }
+  .uml .ucompart div { word-break: break-word; }
+  .uml .ucompart .abs { font-style: italic; color: var(--ink-faint); }
+  .uml .ucompart .more { color: var(--ink-faint); font-style: italic; }
+
+  /* ---------- Component boundaries ---------- */
+  .comp { display: grid; grid-template-columns: minmax(0,1fr) 224px; gap: 16px; }
+  .comp .main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .band { display: grid; gap: 14px; }
+  .band.b-parsers { grid-template-columns: 1.5fr 1fr 1.2fr; }
+  .band.b-domain { grid-template-columns: 1fr 1fr; }
+  .band.b-domain2 { grid-template-columns: 1fr 1fr; }
+  .boundary { border: 1.4px dashed var(--hair-strong); border-radius: 12px; padding: 12px 12px 14px; background: color-mix(in srgb, var(--panel) 40%, transparent); }
+  .boundary > .btitle { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 11px; display: flex; align-items: center; gap: 8px; }
+  .boundary > .btitle b { color: var(--ink-soft); font-weight: 600; }
+  .grp { display: grid; gap: 9px; }
+  .grp.c2 { grid-template-columns: 1fr 1fr; }
+  .grp.c4 { grid-template-columns: repeat(4, 1fr); }
+  .rail .grp { gap: 9px; }
+  .boundary.ext { border-style: solid; border-color: var(--hair); background: var(--panel-2); height: 100%; }
+
+  @media (max-width: 860px) {
+    .comp { grid-template-columns: 1fr; }
+    .band.b-parsers, .grp.c4 { grid-template-columns: 1fr 1fr; }
+    .band.b-domain, .band.b-domain2 { grid-template-columns: 1fr; }
+  }
+
+  /* ---------- Detail drawer ---------- */
+  .scrim { position: fixed; inset: 0; background: rgba(10,16,26,.42); opacity: 0; pointer-events: none; transition: opacity .22s; z-index: 40; }
+  .scrim.on { opacity: 1; pointer-events: auto; }
+  .drawer {
+    position: fixed; top: 0; right: 0; height: 100%; width: min(420px, 92vw); background: var(--panel);
+    border-left: 1px solid var(--hair); box-shadow: var(--shadow-lift); z-index: 50; transform: translateX(102%);
+    transition: transform .28s cubic-bezier(.4,.02,.2,1); display: flex; flex-direction: column;
+  }
+  .drawer.on { transform: none; }
+  .drawer .dhd { padding: 20px 22px 16px; border-bottom: 1px solid var(--hair); position: relative; }
+  .drawer .dclose { position: absolute; top: 14px; right: 14px; appearance: none; border: 1px solid var(--hair); background: var(--panel-2); color: var(--ink-soft); width: 32px; height: 32px; border-radius: 8px; cursor: pointer; font-size: 17px; line-height: 1; display: grid; place-items: center; }
+  .drawer .dclose:hover { color: var(--ink); border-color: var(--hair-strong); }
+  .drawer .dtype { display: inline-flex; align-items: center; gap: 7px; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: #fff; background: var(--tc); padding: 4px 9px; border-radius: 20px; font-weight: 600; }
+  .drawer h2 { font-size: 20px; margin: 13px 0 3px; letter-spacing: -.01em; line-height: 1.15; word-break: break-word; }
+  .drawer .did { font-family: var(--font-mono); font-size: 12px; color: var(--accent); word-break: break-word; }
+  .drawer .dbody { padding: 18px 22px 28px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
+  .drawer .drole { font-size: 14px; color: var(--ink); line-height: 1.5; }
+  .drawer .dfile { font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); background: var(--panel-2); border: 1px solid var(--hair); border-radius: 7px; padding: 7px 9px; word-break: break-all; }
+  .drawer .dopen { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; text-decoration: none; font-weight: 600; font-size: 13px; color: #fff; background: var(--tc); padding: 8px 13px; border-radius: 8px; }
+  .drawer .dopen[hidden] { display: none; }
+  .drawer .dopen:hover { filter: brightness(1.06); }
+  .drel h3 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 8px; font-family: var(--font-mono); }
+  .drel .chips { display: flex; flex-direction: column; gap: 6px; }
+  .chip { appearance: none; text-align: left; border: 1px solid var(--hair); background: var(--panel-2); border-radius: 8px; padding: 7px 10px; cursor: pointer; display: flex; align-items: center; gap: 9px; font-family: var(--font-mono); font-size: 12px; color: var(--ink); transition: border-color .15s, background .15s; }
+  .chip:hover { border-color: var(--tc2); background: var(--panel); }
+  .chip .cdot { width: 8px; height: 8px; border-radius: 50%; background: var(--tc2); flex: none; }
+  .chip .cedge { margin-left: auto; font-family: var(--font-sans); font-size: 10px; color: var(--ink-faint); text-transform: lowercase; }
+  .drel.empty { display: none; }
+
+  footer { margin-top: 22px; font-size: 12px; color: var(--ink-faint); line-height: 1.6; }
+  footer code { font-family: var(--font-mono); color: var(--ink-soft); font-size: 11.5px; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="masthead">
+    <div class="title-block">
+      <p class="eyebrow" id="eyebrow"></p>
+      <h1 id="title"></h1>
+      <p class="subtitle" id="subtitle"></p>
+    </div>
+    <div class="levels" role="tablist" aria-label="Niveau de zoom C4">
+      <button role="tab" data-level="context" aria-selected="true"><span class="lv">C1</span> Contexte</button>
+      <button role="tab" data-level="container" aria-selected="false"><span class="lv">C2</span> Conteneurs</button>
+      <button role="tab" data-level="component" aria-selected="false"><span class="lv">C3</span> Composants</button>
+      <button role="tab" data-level="code" aria-selected="false"><span class="lv">C4</span> Code</button>
+    </div>
+  </header>
+
+  <div class="stage-head">
+    <p class="lead" id="lead"></p>
+    <span class="count" id="count"></span>
+  </div>
+
+  <div class="subnav" id="subnav" hidden></div>
+
+  <div class="legend" id="legend"></div>
+
+  <div class="canvas">
+    <section class="stage" data-level="context"></section>
+    <section class="stage" data-level="container" hidden></section>
+    <section class="stage" data-level="component" hidden></section>
+    <section class="stage" data-level="code" hidden></section>
+  </div>
+
+  <footer id="footer"></footer>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true" aria-label="Détail de l'élément">
+  <div class="dhd">
+    <button class="dclose" id="dclose" aria-label="Fermer">✕</button>
+    <span class="dtype" id="d-type"></span>
+    <h2 id="d-name"></h2>
+    <div class="did" id="d-id"></div>
+  </div>
+  <div class="dbody">
+    <p class="drole" id="d-role"></p>
+    <a class="dopen" id="d-open" hidden>Ouvrir le détail →</a>
+    <div class="dfile" id="d-file" hidden></div>
+    <div class="drel" id="d-ext"><h3></h3><div class="chips"></div></div>
+    <div class="drel" id="d-extby"><h3></h3><div class="chips"></div></div>
+    <div class="drel" id="d-deps"><h3></h3><div class="chips"></div></div>
+    <div class="drel" id="d-used"><h3></h3><div class="chips"></div></div>
+  </div>
+</aside>
+
+<script>
+(function () {
+  "use strict";
+
+  var TYPES = {
+    person:    { c: "--c-person",    label: "Personne" },
+    system:    { c: "--c-system",    label: "Système (périmètre)" },
+    external:  { c: "--c-external",  label: "Système externe" },
+    container: { c: "--c-container", label: "Conteneur" },
+    store:     { c: "--c-store",     label: "Stockage / données" },
+    component: { c: "--c-component", label: "Composant" }
+  };
+  var KINDS = {
+    interface: { c: "--c-container", label: "interface", italic: true },
+    abstract:  { c: "--c-store",     label: "abstract",  italic: true },
+    "class":   { c: "--c-component", label: "class",     italic: false },
+    trait:     { c: "--accent",      label: "trait",     italic: false }
+  };
+
+  /* Pré-déclaration stable — PAS le point d'injection. Si le bloc de données omet un niveau,
+     il reste `undefined` (son onglet se masque) au lieu de lever une ReferenceError. */
+  var META, CONTEXT, CONTAINER, COMPONENT, CODE;
+  /* @@ARCHI-C4:MODEL@@ — gm:archi-c4 remplace UNIQUEMENT LA LIGNE CI-DESSOUS par le bloc de
+     données (voir assets/model.example.js). Ne rien modifier au-dessus de ce commentaire. */
+  META = null; CONTEXT = null; CONTAINER = null; COMPONENT = null; CODE = null;
+
+  var MODELS = { context: CONTEXT, container: CONTAINER, component: COMPONENT, code: CODE };
+  var EDGE_WORD = { uses: "utilise", extends: "hérite", flow: "flux", extend: "étend", realize: "implémente", use: "trait", assoc: "référence" };
+
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  function el(tag, cls, html) { var e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
+  var SVGNS = "http://www.w3.org/2000/svg";
+  function svg(tag, attrs) { var e = document.createElementNS(SVGNS, tag); if (attrs) for (var k in attrs) e.setAttribute(k, attrs[k]); return e; }
+  function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+  function tc(type) { return "var(" + (TYPES[type] ? TYPES[type].c : "--c-external") + ")"; }
+  function kc(kind) { return "var(" + (KINDS[kind] ? KINDS[kind].c : "--c-component") + ")"; }
+  function colorOf(n) { return n.kind ? kc(n.kind) : tc(n.type); }
+  function typeLabel(n) { return n.kind ? (KINDS[n.kind] ? KINDS[n.kind].label : n.kind) : (TYPES[n.type] ? TYPES[n.type].label : n.type); }
+
+  function nodeMap(model) {
+    if (Array.isArray(model.nodes)) { var m = {}; model.nodes.forEach(function (n) { m[n.id] = n; }); return m; }
+    return model.nodes;
+  }
+
+  function makeCard(id, n, mini) {
+    var node = el("button", "node gnode" + (mini ? " mini" : "") + (n.hero ? " hero" : ""));
+    node.type = "button";
+    node.dataset.id = id;
+    node.style.setProperty("--tc", tc(n.type));
+    var stereo = TYPES[n.type] ? TYPES[n.type].label : "";
+    if (mini) {
+      var hd = el("div", "hd");
+      hd.appendChild(el("span", "dot"));
+      hd.appendChild(el("span", "name", esc(n.name)));
+      node.appendChild(hd);
+      var bd = el("div", "bd");
+      bd.appendChild(el("div", "stereo", esc(n.id2 || stereo)));
+      node.appendChild(bd);
+    } else {
+      var hd2 = el("div", "hd");
+      hd2.appendChild(el("div", "stereo", "« " + esc(stereo) + " »"));
+      hd2.appendChild(el("div", "name", esc(n.name)));
+      node.appendChild(hd2);
+      var bd2 = el("div", "bd");
+      if (n.id2) bd2.appendChild(el("div", "idline", esc(n.id2)));
+      bd2.appendChild(el("div", "desc", esc(n.desc)));
+      node.appendChild(bd2);
+    }
+    return node;
+  }
+
+  function makeUml(id, n) {
+    var italic = KINDS[n.kind] && KINDS[n.kind].italic;
+    var box = el("button", "uml gnode" + (italic ? " italic" : ""));
+    box.type = "button";
+    box.dataset.id = id;
+    box.style.setProperty("--kc", kc(n.kind));
+    box.style.setProperty("--tc", kc(n.kind));
+    var hd = el("div", "uhd");
+    hd.appendChild(el("div", "ustereo", "« " + esc(KINDS[n.kind] ? KINDS[n.kind].label : n.kind) + " »"));
+    hd.appendChild(el("div", "uname", esc(n.name)));
+    box.appendChild(hd);
+    if (n.attrs && n.attrs.length) {
+      var a = el("div", "ucompart");
+      n.attrs.forEach(function (x) { a.appendChild(el("div", null, esc(x))); });
+      box.appendChild(a);
+    }
+    if (n.methods && n.methods.length) {
+      var m = el("div", "ucompart");
+      n.methods.forEach(function (x) {
+        var isMore = x.indexOf("…") === 0 || x.indexOf("(") > 0 && x.indexOf("méthodes") > -1;
+        var isAbs = x.indexOf("{abstract}") > -1;
+        m.appendChild(el("div", isMore ? "more" : (isAbs ? "abs" : null), esc(x)));
+      });
+      box.appendChild(m);
+    }
+    return box;
+  }
+
+  function buildGrid(stage, model) {
+    var wires = svg("svg", { class: "wires" });
+    stage.appendChild(wires);
+    var content = el("div", "content gridflow");
+    content.style.gridTemplateColumns = "repeat(" + model.layout.cols + ", minmax(120px, 1fr))";
+    model.nodes.forEach(function (n) {
+      var card = makeCard(n.id, n, false);
+      card.style.gridColumn = n.col + (n.span ? " / span " + n.span : "");
+      card.style.gridRow = String(n.row);
+      card.style.maxWidth = n.span ? "none" : "260px";
+      content.appendChild(card);
+    });
+    stage.appendChild(content);
+    stage._wires = wires; stage._content = content; stage._model = model;
+  }
+
+  function buildCode(stage, view) {
+    var wires = svg("svg", { class: "wires" });
+    stage.appendChild(wires);
+    var content = el("div", "content gridflow codegrid");
+    Object.keys(view.nodes).forEach(function (id) {
+      var n = view.nodes[id];
+      var box = makeUml(id, n);
+      box.style.gridColumn = n.col + " / span " + (n.span || 4);
+      box.style.gridRow = String(n.row);
+      content.appendChild(box);
+    });
+    stage.appendChild(content);
+    stage._wires = wires; stage._content = content; stage._model = view;
+  }
+
+  function buildComp(stage, model) {
+    var wires = svg("svg", { class: "wires" });
+    stage.appendChild(wires);
+    var comp = el("div", "content comp");
+    var main = el("div", "main");
+    comp.appendChild(main);
+    var bands = {};
+    function band(key, cls) {
+      if (!bands[key]) { var b = el("div", "band " + (cls || "")); main.appendChild(b); bands[key] = b; }
+      return bands[key];
+    }
+    band("single", "b-single"); band("parsers", "b-parsers"); band("domain", "b-domain"); band("domain2", "b-domain2");
+    model.groups.forEach(function (g) {
+      var cls = g.band === "parsers" ? "b-parsers" : (g.band === "domain" ? "b-domain" : (g.band === "domain2" ? "b-domain2" : ""));
+      var b = band(g.band, cls);
+      var box = el("div", "boundary");
+      box.appendChild(el("div", "btitle", g.title));
+      var grp = el("div", "grp " + (g.grp === "c4" ? "c4" : g.grp === "c2" ? "c2" : ""));
+      g.ids.forEach(function (id) { grp.appendChild(makeCard(id, model.nodes[id], true)); });
+      box.appendChild(grp);
+      b.appendChild(box);
+    });
+    var rail = el("div", "rail");
+    var rbox = el("div", "boundary ext");
+    rbox.appendChild(el("div", "btitle", model.rail.title));
+    var rgrp = el("div", "grp");
+    model.rail.ids.forEach(function (id) { rgrp.appendChild(makeCard(id, model.nodes[id], true)); });
+    rbox.appendChild(rgrp); rail.appendChild(rbox); comp.appendChild(rail);
+    stage.appendChild(comp);
+    stage._wires = wires; stage._content = comp; stage._model = model;
+  }
+
+  function rectOf(node, stage) {
+    var sr = stage.getBoundingClientRect(), nr = node.getBoundingClientRect();
+    return { x: nr.left - sr.left, y: nr.top - sr.top, w: nr.width, h: nr.height };
+  }
+  function pathBetween(a, b) {
+    var ax = a.x + a.w / 2, ay = a.y + a.h / 2, bx = b.x + b.w / 2, by = b.y + b.h / 2;
+    var dx = bx - ax, dy = by - ay, p1, p2, d, mid;
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      if (dx >= 0) { p1 = { x: a.x + a.w, y: ay }; p2 = { x: b.x, y: by }; }
+      else { p1 = { x: a.x, y: ay }; p2 = { x: b.x + b.w, y: by }; }
+      var mx = (p1.x + p2.x) / 2;
+      d = "M" + p1.x + "," + p1.y + " C " + mx + "," + p1.y + " " + mx + "," + p2.y + " " + p2.x + "," + p2.y;
+      mid = { x: mx, y: (p1.y + p2.y) / 2 };
+    } else {
+      if (dy >= 0) { p1 = { x: ax, y: a.y + a.h }; p2 = { x: bx, y: b.y }; }
+      else { p1 = { x: ax, y: a.y }; p2 = { x: bx, y: b.y + b.h }; }
+      var my = (p1.y + p2.y) / 2;
+      d = "M" + p1.x + "," + p1.y + " C " + p1.x + "," + my + " " + p2.x + "," + my + " " + p2.x + "," + p2.y;
+      mid = { x: (p1.x + p2.x) / 2, y: my };
+    }
+    return { d: d, mid: mid };
+  }
+  function wrapText(s, max) {
+    var words = s.split(" "), lines = [], cur = "";
+    words.forEach(function (w) {
+      if ((cur + " " + w).trim().length > max) { if (cur) lines.push(cur); cur = w; }
+      else cur = (cur + " " + w).trim();
+    });
+    if (cur) lines.push(cur);
+    return lines;
+  }
+
+  function edgeStyle(kind) {
+    switch (kind) {
+      case "extends": return { dash: true,  marker: "tri" };
+      case "extend":  return { dash: false, marker: "tri" };
+      case "realize": return { dash: true,  marker: "tri" };
+      case "use":     return { dash: true,  marker: "open" };
+      case "assoc":   return { dash: false, marker: "open" };
+      case "uses":    return { dash: false, marker: "fill" };
+      default:        return { dash: false, marker: "fill" };
+    }
+  }
+  function addMarker(defs, id, shape, active) {
+    var color = active ? "var(--wire-active)" : "var(--wire)";
+    var mk = svg("marker", { id: id, orient: "auto", markerUnits: "userSpaceOnUse" });
+    var path;
+    if (shape === "fill") {
+      mk.setAttribute("markerWidth", 9); mk.setAttribute("markerHeight", 9); mk.setAttribute("refX", 7.5); mk.setAttribute("refY", 3);
+      path = svg("path", { d: "M0,0 L8,3 L0,6 Z" }); path.style.fill = color; path.style.stroke = "none";
+    } else if (shape === "tri") {
+      mk.setAttribute("markerWidth", 13); mk.setAttribute("markerHeight", 13); mk.setAttribute("refX", 10.5); mk.setAttribute("refY", 5);
+      path = svg("path", { d: "M0.5,0.5 L10.5,5 L0.5,9.5 Z" }); path.style.fill = "var(--panel-2)"; path.style.stroke = color; path.style.strokeWidth = "1.4";
+    } else {
+      mk.setAttribute("markerWidth", 13); mk.setAttribute("markerHeight", 13); mk.setAttribute("refX", 9); mk.setAttribute("refY", 5);
+      path = svg("path", { d: "M0.5,0.5 L10,5 L0.5,9.5" }); path.style.fill = "none"; path.style.stroke = color; path.style.strokeWidth = "1.7";
+    }
+    mk.appendChild(path); defs.appendChild(mk);
+  }
+
+  function drawWires(stage) {
+    var model = stage._model, wires = stage._wires, level = stage.dataset.level;
+    while (wires.firstChild) wires.removeChild(wires.firstChild);
+    var defs = svg("defs");
+    ["fill", "tri", "open"].forEach(function (shape) {
+      addMarker(defs, shape + "-" + level, shape, false);
+      addMarker(defs, shape + "-a-" + level, shape, true);
+    });
+    wires.appendChild(defs);
+
+    var byId = {};
+    stage._content.querySelectorAll(".gnode").forEach(function (nd) { byId[nd.dataset.id] = nd; });
+
+    stage._edges = [];
+    (model.edges || []).forEach(function (e) {
+      var na = byId[e.from], nb = byId[e.to];
+      if (!na || !nb) return;
+      var geo = pathBetween(rectOf(na, stage), rectOf(nb, stage));
+      var st = edgeStyle(e.kind);
+      var p = svg("path", { class: "wire" + (st.dash ? " dash" : ""), d: geo.d });
+      p.dataset.from = e.from; p.dataset.to = e.to;
+      p.setAttribute("marker-end", "url(#" + st.marker + "-" + level + ")");
+      wires.appendChild(p);
+      var rec = { path: p, from: e.from, to: e.to, marker: st.marker + "-" + level, markerA: st.marker + "-a-" + level, label: null };
+      if (e.label) {
+        var lines = wrapText(e.label, 22);
+        var t = svg("text", { class: "wlabel", x: geo.mid.x, y: geo.mid.y - (lines.length - 1) * 6, "text-anchor": "middle" });
+        lines.forEach(function (ln, li) {
+          var ts = svg("tspan", { x: geo.mid.x, dy: li === 0 ? 0 : 12 }); ts.textContent = ln; t.appendChild(ts);
+        });
+        t.dataset.from = e.from; t.dataset.to = e.to;
+        wires.appendChild(t);
+        rec.label = t;
+      }
+      stage._edges.push(rec);
+    });
+  }
+
+  var state = { level: "component", selected: null, codeView: "content" };
+  var stages = {};
+  document.querySelectorAll(".stage").forEach(function (s) { stages[s.dataset.level] = s; });
+
+  function wireInteractions(stage) {
+    var lvl = stage.dataset.level;
+    stage._content.querySelectorAll(".gnode").forEach(function (nd) {
+      nd.addEventListener("mouseenter", function () { if (!state.selected) highlight(lvl, nd.dataset.id); });
+      nd.addEventListener("mouseleave", function () { if (!state.selected) clearHighlight(lvl); });
+      nd.addEventListener("click", function (ev) { ev.stopPropagation(); selectNode(lvl, nd.dataset.id); });
+    });
+    stage.addEventListener("click", function () { if (state.selected) { state.selected = null; clearHighlight(lvl); closeDrawer(); } });
+  }
+
+  function build(level) {
+    var stage = stages[level], model = MODELS[level];
+    if (stage._built) return;
+    if (model.layout.type === "comp") buildComp(stage, model);
+    else buildGrid(stage, model);
+    wireInteractions(stage);
+    stage._built = true;
+  }
+  function buildCodeView(view) {
+    var stage = stages.code;
+    if (stage._built && stage._view === view) return;
+    while (stage.firstChild) stage.removeChild(stage.firstChild);
+    buildCode(stage, CODE.views[view]);
+    wireInteractions(stage);
+    stage._built = true; stage._view = view;
+  }
+
+  function neighbors(model, id) {
+    var set = {}; set[id] = true;
+    (model.edges || []).forEach(function (e) {
+      if (e.from === id) set[e.to] = true;
+      if (e.to === id) set[e.from] = true;
+    });
+    return set;
+  }
+  function highlight(level, id) {
+    var stage = stages[level], model = stage._model;
+    var trace = model.layout.type === "comp";
+    stage.classList.add(trace ? "trace" : "faded");
+    var nb = neighbors(model, id);
+    stage._content.querySelectorAll(".gnode").forEach(function (nd) {
+      var t = nd.dataset.id;
+      nd.classList.toggle("active", t === id);
+      nd.classList.toggle("hot", t !== id && !!nb[t]);
+    });
+    (stage._edges || []).forEach(function (rec) {
+      var on = rec.from === id || rec.to === id;
+      rec.path.classList.toggle("active", on);
+      rec.path.setAttribute("marker-end", "url(#" + (on ? rec.markerA : rec.marker) + ")");
+      if (rec.label) rec.label.classList.toggle("active", on);
+    });
+  }
+  function clearHighlight(level) {
+    var stage = stages[level];
+    var trace = stage._model && stage._model.layout.type === "comp";
+    stage.classList.remove("faded");
+    if (!trace) stage.classList.remove("trace");
+    stage._content.querySelectorAll(".gnode").forEach(function (nd) { nd.classList.remove("active", "hot"); });
+    (stage._edges || []).forEach(function (rec) {
+      rec.path.classList.remove("active");
+      rec.path.setAttribute("marker-end", "url(#" + rec.marker + ")");
+      if (rec.label) rec.label.classList.remove("active");
+    });
+  }
+
+  var drawer = $("#drawer"), scrim = $("#scrim");
+  function selectNode(level, id) { state.selected = id; highlight(level, id); openDrawer(level, id); }
+  function relChip(level, id, word) {
+    var n = stages[level]._model ? nodeMap(stages[level]._model)[id] : null;
+    if (!n) return null;
+    var b = el("button", "chip");
+    b.style.setProperty("--tc2", colorOf(n));
+    b.appendChild(el("span", "cdot"));
+    b.appendChild(el("span", null, esc(n.name)));
+    if (word) b.appendChild(el("span", "cedge", word));
+    b.addEventListener("click", function (ev) { ev.stopPropagation(); selectNode(level, id); });
+    return b;
+  }
+  function fillRel(wrapId, title, level, items) {
+    var wrap = $("#" + wrapId), box = $(".chips", wrap);
+    $("h3", wrap).textContent = title;
+    box.innerHTML = "";
+    if (!items.length) { wrap.classList.add("empty"); return; }
+    wrap.classList.remove("empty");
+    items.forEach(function (it) { var c = relChip(level, it.id, it.word); if (c) box.appendChild(c); });
+  }
+  function isGen(kind) { return kind === "extends" || kind === "extend" || kind === "realize"; }
+  function openDrawer(level, id) {
+    var model = stages[level]._model, n = nodeMap(model)[id];
+    if (!n) return;
+    drawer.style.setProperty("--tc", colorOf(n));
+    $("#d-type").textContent = typeLabel(n);
+    $("#d-name").textContent = n.name;
+    var did = $("#d-id"); did.textContent = n.id2 || ""; did.style.display = n.id2 ? "" : "none";
+    $("#d-role").textContent = n.desc || "";
+    var openBtn = $("#d-open");
+    if (n.doc) { openBtn.setAttribute("href", n.doc); openBtn.hidden = false; }
+    else { openBtn.removeAttribute("href"); openBtn.hidden = true; }
+    var fileBox = $("#d-file");
+    if (n.file) { fileBox.textContent = n.file; fileBox.hidden = false; } else { fileBox.hidden = true; }
+
+    var gen = [], genby = [], deps = [], used = [];
+    (model.edges || []).forEach(function (e) {
+      var g = isGen(e.kind);
+      if (e.from === id) (g ? gen : deps).push({ id: e.to, word: EDGE_WORD[e.kind] });
+      if (e.to === id) (g ? genby : used).push({ id: e.from, word: EDGE_WORD[e.kind] });
+    });
+    fillRel("d-ext", "Hérite / implémente →", level, gen);
+    fillRel("d-extby", "← Hérité / implémenté par", level, genby);
+    fillRel("d-deps", "Dépend de →", level, deps);
+    fillRel("d-used", "← Utilisé par", level, used);
+
+    drawer.classList.add("on"); drawer.setAttribute("aria-hidden", "false"); scrim.classList.add("on");
+  }
+  function closeDrawer() { drawer.classList.remove("on"); drawer.setAttribute("aria-hidden", "true"); scrim.classList.remove("on"); }
+  function dismiss() { closeDrawer(); if (state.selected) { clearHighlight(state.level); state.selected = null; } }
+  $("#dclose").addEventListener("click", dismiss);
+  scrim.addEventListener("click", dismiss);
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") dismiss(); });
+
+  function relSwatch(dash, shape) {
+    var s = svg("svg", { width: 34, height: 12, viewBox: "0 0 34 12" });
+    var ln = svg("line", { x1: 1, y1: 6, x2: 24, y2: 6, stroke: "var(--wire)", "stroke-width": 1.8 });
+    if (dash) ln.setAttribute("stroke-dasharray", "4 3");
+    s.appendChild(ln);
+    var head;
+    if (shape === "tri") { head = svg("path", { d: "M23,1 L33,6 L23,11 Z", fill: "var(--panel-2)", stroke: "var(--wire)", "stroke-width": 1.4 }); }
+    else if (shape === "open") { head = svg("path", { d: "M24,1 L33,6 L24,11", fill: "none", stroke: "var(--wire)", "stroke-width": 1.7 }); }
+    else { head = svg("path", { d: "M24,2 L33,6 L24,10 Z", fill: "var(--wire)" }); }
+    s.appendChild(head);
+    return s;
+  }
+  function renderLegend(level) {
+    var model = stages[level]._model, isCode = model.layout.type === "code";
+    var lg = $("#legend"); lg.innerHTML = "";
+    if (isCode) {
+      var kUsed = {}; Object.keys(model.nodes).forEach(function (k) { kUsed[model.nodes[k].kind] = true; });
+      ["interface", "abstract", "class", "trait"].forEach(function (k) {
+        if (!kUsed[k]) return;
+        var li = el("span", "li"); var sw = el("span", "sw"); sw.style.background = kc(k);
+        li.appendChild(sw); li.appendChild(document.createTextNode("« " + KINDS[k].label + " »")); lg.appendChild(li);
+      });
+      lg.appendChild(el("span", "sep"));
+      [["généralisation", false, "tri"], ["réalisation", true, "tri"], ["trait (use)", true, "open"], ["référence", false, "open"]].forEach(function (r) {
+        var rk = el("span", "rk"); rk.appendChild(relSwatch(r[1], r[2])); rk.appendChild(document.createTextNode(r[0])); lg.appendChild(rk);
+      });
+    } else {
+      var used = {};
+      var list = Array.isArray(model.nodes) ? model.nodes : Object.keys(model.nodes).map(function (k) { return model.nodes[k]; });
+      list.forEach(function (n) { used[n.type] = true; });
+      Object.keys(TYPES).forEach(function (k) {
+        if (!used[k]) return;
+        var li = el("span", "li"); var sw = el("span", "sw"); sw.style.background = tc(k);
+        li.appendChild(sw); li.appendChild(document.createTextNode(TYPES[k].label)); lg.appendChild(li);
+      });
+    }
+    var hint = el("span", "hint");
+    hint.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11.5 12 8l3 3.5M12 8v9"/><circle cx="12" cy="12" r="9"/></svg>' +
+      (level === "component" ? "Survolez pour tracer · cliquez pour le détail" : "Cliquez un élément pour le détail");
+    lg.appendChild(hint);
+  }
+
+  var subnav = $("#subnav");
+  function currentModel(level) { return level === "code" ? CODE.views[state.codeView] : MODELS[level]; }
+
+  function show(level) {
+    state.level = level; state.selected = null; closeDrawer();
+    subnav.hidden = (level !== "code");
+    if (level === "code") buildCodeView(state.codeView); else build(level);
+
+    Object.keys(stages).forEach(function (k) {
+      stages[k].hidden = (k !== level);
+      stages[k].classList.remove("faded", "trace");
+    });
+    if (MODELS[level].layout.type === "comp") stages[level].classList.add("trace");
+
+    document.querySelectorAll(".levels button").forEach(function (b) {
+      b.setAttribute("aria-selected", b.dataset.level === level ? "true" : "false");
+    });
+
+    var model = currentModel(level);
+    $("#lead").innerHTML = model.lead;
+    var nCount = Array.isArray(model.nodes) ? model.nodes.length : Object.keys(model.nodes).length;
+    var eCount = (model.edges || []).length;
+    $("#count").textContent = nCount + (level === "code" ? " classes · " : " éléments · ") + eCount + " liaisons";
+    renderLegend(level);
+    requestAnimationFrame(function () { requestAnimationFrame(function () { drawWires(stages[level]); }); });
+  }
+
+  document.querySelectorAll(".levels button").forEach(function (b) {
+    b.addEventListener("click", function () { show(b.dataset.level); });
+  });
+  function buildSubnav() {
+    subnav.innerHTML = "";
+    if (!(CODE && CODE.views)) return;
+    var keys = Object.keys(CODE.views);
+    if (!keys.length) return;
+    subnav.appendChild(el("span", "slabel", "Vue :"));
+    keys.forEach(function (k, i) {
+      var b = el("button", null, esc(CODE.views[k].label || k));
+      b.dataset.view = k;
+      b.setAttribute("aria-pressed", i === 0 ? "true" : "false");
+      b.addEventListener("click", function () {
+        state.codeView = k;
+        subnav.querySelectorAll("button").forEach(function (x) { x.setAttribute("aria-pressed", x === b ? "true" : "false"); });
+        show("code");
+      });
+      subnav.appendChild(b);
+    });
+    state.codeView = keys[0];
+  }
+
+  var rt;
+  window.addEventListener("resize", function () {
+    clearTimeout(rt);
+    rt = setTimeout(function () {
+      var lvl = state.level;
+      drawWires(stages[lvl]);
+      if (state.selected) highlight(lvl, state.selected);
+    }, 140);
+  });
+
+  var LEVEL_ORDER = ["context", "container", "component", "code"];
+  function levelPresent(l) {
+    return l === "code" ? !!(CODE && CODE.views && Object.keys(CODE.views).length) : !!MODELS[l];
+  }
+  document.querySelectorAll(".levels button").forEach(function (b) {
+    b.hidden = !levelPresent(b.dataset.level);
+  });
+
+  if (META) {
+    if (META.title) document.title = String(META.title).replace(/<[^>]+>/g, "").trim();
+    $("#eyebrow").innerHTML = META.eyebrow || "";
+    $("#title").innerHTML = META.title || "";
+    $("#subtitle").innerHTML = META.subtitle || "";
+    $("#footer").innerHTML = META.footer || "";
+  }
+  buildSubnav();
+
+  var firstLevel = LEVEL_ORDER.filter(levelPresent)[0];
+  if (firstLevel) show(firstLevel);
+})();
+</script>
+
+</body>
+</html>

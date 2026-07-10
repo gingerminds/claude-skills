@@ -11,6 +11,7 @@ Entry point for Drupal specifics (Form 2: split folder). `MAIN.md` routes; it ho
 | `/gm:drupal-11` | `${CLAUDE_SKILL_DIR}/../../stack/drupal/dev.md` |
 | `/gm:review`, `/gm:merge-review` | `${CLAUDE_SKILL_DIR}/../../stack/drupal/review.md` |
 | `/gm:security` | `${CLAUDE_SKILL_DIR}/../../stack/drupal/security.md` |
+| `/gm:archi-c4` | `${CLAUDE_SKILL_DIR}/../../stack/drupal/archi.md` |
 
 Load only the relevant nature(s), not all four — that's what keeps each run focused.
 

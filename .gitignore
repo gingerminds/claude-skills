@@ -1,2 +1,6 @@
 .DS_Store
 *.log
+
+# Artefacts de conception / scratch — locaux, hors dépôt
+docs/superpowers/
+.superpowers/
