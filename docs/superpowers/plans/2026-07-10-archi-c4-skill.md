@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **Langue de sortie : français.** Tout le contenu généré (docs, drawer, légendes, leads) et les instructions écrites dans le projet cible sont en français.
+- **Langue : skill rédigé en anglais, sortie en français.** `SKILL.md` (frontmatter + corps) et les ressources `stack/**` sont en **anglais** (convention du dépôt). Tout le contenu **généré** (docs `.archi/**`, drawer, légendes, leads, messages `AskUser`, bloc CLAUDE.md injecté dans le projet cible) est en **français**. Les exemples de rendu (`reference-c4-example.html`, `model.example.js`) sont en français car ils illustrent la sortie.
 - **HTML 100% autonome.** Aucun `fetch`/XHR/CDN/police distante/`import` : tout est inline, ouvrable en `file://`. Un JSON externe est interdit (bloqué en `file://`).
 - **Aucune étape de build ni dépendance Node** côté projet cible. `node --check` n'est utilisé QUE comme vérif de syntaxe des assets du dépôt `gm`, pas requis à l'exécution du skill.
 - **Chemins ancrés sur `${CLAUDE_SKILL_DIR}`** dans toute ressource référencée (comme les skills existants), ex. `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`.
@@ -26,8 +26,9 @@
 - `skills/archi-c4/assets/model.example.js` — **créer.** Le contrat de données commenté (`META` + 4 niveaux). Sert de gabarit à l'agent et de fixture de test du template.
 - `skills/archi-c4/assets/template.html` — **créer.** Le chrome figé : identique au fichier de référence mais bloc de données remplacé par un marqueur d'injection, chrome (titre/sous-titre/pied) piloté par `META`, sous-nav C4 construite depuis les données, onglets de niveau auto-masqués, lien `doc` vers les unités.
 - `skills/archi-c4/SKILL.md` — **créer.** Les trois flux + méthode d'extraction + repli générique.
-- `stack/drupal/archi.md` — **créer.** Nature « archi » pour Drupal : où vit le custom, source de vérité, quoi mettre en boîte noire.
+- `stack/drupal/archi.md` — **créer.** Nature « archi » pour Drupal (anglais) : où vit le custom, source de vérité, quoi mettre en boîte noire.
 - `stack/drupal/MAIN.md` — **modifier.** +1 ligne dans la table de routage (`/gm:archi-c4` → `archi.md`).
+- `stack/vue/MAIN.md` — **modifier.** +1 ligne (table nature→section) + nouvelle section `## archi` (anglais).
 - `README.md` — **modifier.** +1 ligne dans le tableau des skills + mise à jour de l'arbre « Structure ».
 - `.claude-plugin/plugin.json` — **modifier.** Bump version `0.5.0` → `0.6.0`.
 
@@ -371,47 +372,50 @@ git commit -m "feat(archi-c4): lien 'Ouvrir le détail' du drawer (index → uni
 
 ---
 
-### Task 5 : Ressource stack `stack/drupal/archi.md` + routage
+### Task 5 : Stack archi resources (Drupal + Vue)
+
+> Ressources rédigées **en anglais** (convention du dépôt) ; elles décrivent une sortie **en français**.
 
 **Files:**
 - Create: `stack/drupal/archi.md`
-- Modify: `stack/drupal/MAIN.md` (table de routage)
+- Modify: `stack/drupal/MAIN.md` (dispatcher table)
+- Modify: `stack/vue/MAIN.md` (nature→section table + nouvelle section `## archi`)
 
 **Interfaces:**
-- Consumes : chargé par `SKILL.md` (Task 6) via `${CLAUDE_SKILL_DIR}/../../stack/drupal/MAIN.md` quand Drupal est détecté.
-- Produces : la connaissance Drupal du périmètre custom et de la source de vérité.
+- Consumes : chargé par `SKILL.md` (Task 6) via `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` selon la stack détectée.
+- Produces : la connaissance Drupal et Vue du périmètre custom et de la source de vérité.
 
-- [ ] **Step 1 : Écrire `stack/drupal/archi.md`**
+- [ ] **Step 1 : Écrire `stack/drupal/archi.md`** (en anglais)
 
 ```markdown
 # Stack: Drupal — archi (C4)
 
-Spécifique Drupal pour `/gm:archi-c4`. Chargé en plus de `core.md` (vocabulaire standard/Cache API) via le dispatcher `MAIN.md`.
+Drupal specifics for `/gm:archi-c4`. Loaded on top of `core.md` (standard vocabulary / Cache API) via the `MAIN.md` dispatcher. Instructions are in English; the generated documentation is in French.
 
-## Où vit le code custom (ce qu'on détaille)
+## Where custom code lives (what we detail)
 
-- `web/modules/custom/**` (ou `modules/custom/**` selon l'arbo) — modules maison.
-- `web/themes/custom/**` (ou `themes/custom/**`) — thèmes maison.
-- Un module custom peut embarquer des scripts d'orchestration (`bin/`, `Makefile`, `*.sh`, `*.py`) : ce sont des **conteneurs** (C2).
+- `web/modules/custom/**` (or `modules/custom/**` depending on layout) — in-house modules.
+- `web/themes/custom/**` (or `themes/custom/**`) — in-house themes.
+- A custom module may ship orchestration scripts (`bin/`, `Makefile`, `*.sh`, `*.py`): these are **containers** (C2).
 
-**Jamais détaillé (boîte noire, `type: external`)** : `web/core/**`, `web/modules/contrib/**`, `web/themes/contrib/**`, `vendor/**`. On montre uniquement les services core/contrib **consommés** par le custom, comme nœuds externes du rail C3 (ex. `entity_type.manager`, `menu.link_tree`, `search_api_index`).
+**Never detailed (black box, `type: external`)**: `web/core/**`, `web/modules/contrib/**`, `web/themes/contrib/**`, `vendor/**`. Show only the core/contrib services **consumed** by custom code, as external nodes in the C3 rail (e.g. `entity_type.manager`, `menu.link_tree`, `search_api_index`).
 
-## Source de vérité du câblage
+## Wiring source of truth
 
-Construire le modèle à partir de, par ordre :
+Build the model from, in order:
 
-1. **`*.services.yml`** — chaque service = un nœud `component` ; chaque `arguments: ['@autre.service']` = un edge `uses` (from = ce service, to = l'argument). Les `@service` core/contrib deviennent des nœuds `external` du rail.
-2. **`*.info.yml`** — nom lisible, `dependencies` (modules requis → nœuds externes au niveau container/context).
-3. **Classes de `src/`** — `extends` (edge `extends` en C3 ; `extend` en C4), `implements` (edge `realize`), `use <Trait>` (edge `use`). Les commandes Drush (`src/Drush/Commands/`, `src/Commands/`) et contrôleurs/plugins sont les **points d'entrée** (C3).
-4. **`*.module` / `*.install`** — hooks (`hook_cron`, `hook_*_alter`…) : un nœud `component` « Hooks du module ».
-5. **`*.routing.yml`, plugins (`src/Plugin/**`)** — points d'entrée additionnels.
-6. **`bin/`, `Makefile`, `composer.json` scripts** — conteneurs d'orchestration (C2).
+1. **`*.services.yml`** — each service = a `component` node; each `arguments: ['@other.service']` = a `uses` edge (from = this service, to = the argument). Core/contrib `@service` become `external` rail nodes.
+2. **`*.info.yml`** — human-readable name, `dependencies` (required modules → external nodes at container/context level).
+3. **`src/` classes** — `extends` (`extends` edge in C3, `extend` in C4), `implements` (`realize` edge), `use <Trait>` (`use` edge). Drush commands (`src/Drush/Commands/`, `src/Commands/`), controllers and plugins are the **entry points** (C3).
+4. **`*.module` / `*.install`** — hooks (`hook_cron`, `hook_*_alter`…): a single `component` node named « Hooks du module » (French label in the output).
+5. **`*.routing.yml`, plugins (`src/Plugin/**`)** — additional entry points.
+6. **`bin/`, `Makefile`, `composer.json` scripts** — orchestration containers (C2).
 
-Omettre `logger.factory`/`logger.channel.*` des liaisons C3 pour la lisibilité (le noter dans le pied `META.footer`, comme la référence).
+Omit `logger.factory`/`logger.channel.*` from C3 edges for readability (note it in the `META.footer`, like the reference).
 
-## Découpage C4 (niveau code, sur demande)
+## C4 splitting (code level, on request)
 
-Regrouper les classes par domaine en **vues** (`CODE.views`) : une vue par famille cohérente (ex. `content`, `media`, `parser`), pas une vue géante. Chaque vue = interfaces + abstraites + classes concrètes reliées par `realize`/`extend`/`use`/`assoc`.
+Group classes by domain into **views** (`CODE.views`): one view per coherent family (e.g. `content`, `media`, `parser`), not one giant view. Each view = interfaces + abstracts + concrete classes linked by `realize`/`extend`/`use`/`assoc`.
 ```
 
 - [ ] **Step 2 : Ajouter la ligne de routage dans `stack/drupal/MAIN.md`**
@@ -422,16 +426,59 @@ Dans la table « Caller → Nature to load », ajouter la ligne (après la ligne
 | `/gm:archi-c4` | `${CLAUDE_SKILL_DIR}/../../stack/drupal/archi.md` |
 ```
 
-- [ ] **Step 3 : Vérifs**
+- [ ] **Step 3 : Ajouter la ligne de la table de `stack/vue/MAIN.md`**
+
+Dans la table « Nature → section » (en tête du fichier), ajouter la ligne (après la ligne `/gm:security`) :
+
+```markdown
+| `/gm:archi-c4` | core + archi |
+```
+
+- [ ] **Step 4 : Ajouter la section `## archi` en fin de `stack/vue/MAIN.md`** (en anglais)
+
+Ajouter à la fin du fichier :
+
+```markdown
+---
+
+## archi
+
+Consumed by `/gm:archi-c4`. Layered on `core`. Instructions in English; generated documentation in French.
+
+### Where custom code lives (what we detail)
+
+- The whole app repo is custom. Nuxt: `components/`, `composables/`, `stores/` (Pinia), `pages/`, `layouts/`, `middleware/`, `plugins/`, `server/` (Nitro API/routes), `utils/`. Plain Vue: `src/**`.
+- Build/orchestration (`nuxt.config.ts`, `vite.config.*`, `Makefile`, CI) → **containers** (C2).
+
+**Never detailed (black box, `type: external`)**: `node_modules/**` — Vue/Nuxt runtime, UI libraries, any dependency. Show only what custom code imports/calls (an external API, the Nitro runtime, a headless CMS, a DB) as `external` nodes.
+
+### Wiring source of truth
+
+1. **Pinia stores** (`defineStore`) — each store = a `component` node; store→store and composable→store calls = `uses` edges.
+2. **Composables** (`useX`) — `component` nodes; a component/composable importing another = `uses` edge.
+3. **Nitro server routes/handlers** (`server/api/**`, `server/routes/**`) — entry points; external calls (DB, upstream API) = `external` nodes.
+4. **Router / pages** (`pages/**`, route config) — entry points; navigation guards/middleware as `component` nodes.
+5. **Component import graph** — parent→child and component→composable `uses` edges; stop at `node_modules`.
+
+Typical containers (C2): the Nuxt/Vite app, the Nitro server, and any external API/CMS/DB the app talks to.
+
+### C4 splitting (code level, on request)
+
+Group by feature/domain into `CODE.views` (e.g. `stores`, `composables`, one feature module). Vue has no classes/interfaces: represent composables/stores as `class`-kind nodes and shared TS contracts (interfaces/types) as `interface`-kind nodes, linked by `assoc`/`use`.
+```
+
+- [ ] **Step 5 : Vérifs**
 
 Run: `test -f stack/drupal/archi.md && echo OK`
 Run: `grep -c "archi-c4" stack/drupal/MAIN.md` → attendre `1`.
+Run: `grep -c "archi-c4" stack/vue/MAIN.md` → attendre `1`.
+Run: `grep -c "^## archi" stack/vue/MAIN.md` → attendre `1`.
 
-- [ ] **Step 4 : Commit**
+- [ ] **Step 6 : Commit**
 
 ```bash
-git add stack/drupal/archi.md stack/drupal/MAIN.md
-git commit -m "feat(archi-c4): nature 'archi' Drupal (périmètre custom + source de vérité) + routage"
+git add stack/drupal/archi.md stack/drupal/MAIN.md stack/vue/MAIN.md
+git commit -m "feat(archi-c4): nature 'archi' pour Drupal et Vue (périmètre custom + source de vérité)"
 ```
 
 ---
@@ -450,45 +497,47 @@ git commit -m "feat(archi-c4): nature 'archi' Drupal (périmètre custom + sourc
 ````markdown
 ---
 name: archi-c4
-description: Prépare, génère et maintient une documentation d'architecture C4 interactive (HTML autonome) dans .archi/. Trace uniquement le code custom (contrib/core/vendor en boîte noire), vue projet C1/C2 dans index.html + une page par unité pour C3 (et C4 UML à la demande). Stack-agnostique via shared/stack-detect.md ; charge stack/drupal/archi.md sur Drupal. Sortie en français. Use when the user asks to set up / generate / update an architecture diagram or C4 model, "documenter l'archi", "à quoi ressemble le projet", or invokes /gm:archi-c4.
+description: Prepare, generate and maintain interactive C4 architecture documentation (self-contained HTML) under .archi/. Traces only custom code (contrib/core/vendor shown as black boxes); project-level C1/C2 in index.html plus one page per custom unit for C3 (C4 UML on request). Stack-agnostic via shared/stack-detect.md; loads a stack archi resource for Drupal and Vue. All generated output is written in French. Use when the user asks to set up / generate / update an architecture diagram or C4 model, "documenter l'archi", "à quoi ressemble le projet", or invokes /gm:archi-c4.
 ---
 
-# Architecture C4 interactive (`.archi/`)
+# Interactive C4 architecture (`.archi/`)
 
-Produire une doc d'archi **vivante** et **interactive** dans `.archi/` du projet cible, à partir d'un template figé alimenté uniquement par des données. Double usage : onboarding (`.archi/index.html`) et doc à jour.
+Produce living, interactive architecture docs under the target project's `.archi/`, from a frozen template fed only with data. **All generated output is in French** (leads, drawer text, legends, and the CLAUDE.md block written into the project). Dual use: onboarding (`.archi/index.html`) and up-to-date documentation.
 
-## Modèle mental
+## Mental model
 
-- Le **chrome** (CSS+JS interactif) est figé dans `${CLAUDE_SKILL_DIR}/assets/template.html`. On ne le modifie jamais à la génération.
-- On ne rédige que le **bloc de données** : `META` + les niveaux présents (`CONTEXT`, `CONTAINER`, `COMPONENT`, `CODE`). Contrat + exemple complet : `${CLAUDE_SKILL_DIR}/assets/model.example.js` — **le lire avant de générer**.
-- **Générer un fichier** = copier `template.html` puis remplacer la ligne marqueur
+- The **chrome** (interactive CSS+JS) is frozen in `${CLAUDE_SKILL_DIR}/assets/template.html`. Never edit it when generating.
+- You only write the **data block**: `META` + the present levels (`CONTEXT`, `CONTAINER`, `COMPONENT`, `CODE`). Contract + full example: `${CLAUDE_SKILL_DIR}/assets/model.example.js` — **read it before generating**. Its French strings show the expected output language.
+- **Generate a file** = copy `template.html`, then replace the marker line
   `var META = null, CONTEXT = null, CONTAINER = null, COMPONENT = null, CODE = null;`
-  par le bloc de données rédigé (un niveau absent reste `null` → son onglet se masque).
-- **Périmètre : uniquement le code custom.** Tout tiers (contrib/core/vendor, `node_modules`, paquets) = nœud `external` (boîte noire), jamais décomposé.
+  with the data block you wrote (an absent level stays `null` → its tab auto-hides).
+- **Scope: custom code only.** Any third party (contrib/core/vendor, `node_modules`, packages) is an `external` node (black box), never decomposed.
 
-## Détecter la stack
+## Detect the stack
 
-1. Appliquer `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`.
-2. Stack connue avec ressource archi (Drupal) → charger `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` pour la nature **archi** (où vit le custom, source de vérité, boîte noire).
-3. Stack sans ressource archi → **méthode générique** : demander à l'utilisateur où vit le code custom et quelle est la source de vérité du câblage (points d'entrée + imports/instanciations custom→custom, arrêt à la frontière du tiers). Ne jamais `Read` une ressource stack inexistante.
+1. Apply `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`.
+2. Stack with an archi resource → load `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` for the **archi** nature (where custom lives, source of truth, black box):
+   - Drupal → `stack/drupal/archi.md`.
+   - Vue / Nuxt → the `core` + `archi` sections of `stack/vue/MAIN.md`.
+3. Stack without an archi resource → **generic method**: ask the user where custom code lives and what the wiring source of truth is (entry points + custom→custom imports/instantiations, stop at the third-party boundary). Never `Read` a non-existent stack resource.
 
-## Choisir le flux
+## Choose the flow
 
-- `.archi/` **absent** → **Préparer** puis proposer d'enchaîner sur **Faire**.
-- `.archi/` **présent** et l'utilisateur veut (re)documenter → **Faire**.
-- `.archi/` **présent** et on soupçonne une dérive → **Maintenir**.
+- `.archi/` **missing** → **Prepare**, then offer to continue with **Build**.
+- `.archi/` **present** and the user wants to (re)document → **Build**.
+- `.archi/` **present** and drift is suspected → **Maintain**.
 
-## Flux 1 — Préparer
+## Flow 1 — Prepare
 
-1. Créer `.archi/` et `.archi/units/`.
-2. `.gitignore` : s'assurer que `.archi/` **reste commité** (retirer/neutraliser toute règle qui l'exclurait). `.archi/` **doit** être versionné.
-3. **Exclusion du déploiement** : détecter l'outil et proposer l'édit exacte, **appliquer seulement après confirmation** :
-   - Deployer (`deploy.php`/`deploy.yaml`) → ajouter `.archi` aux chemins exclus / `--exclude`.
-   - `.dockerignore` → ligne `.archi/`.
-   - GitLab CI rsync (`.gitlab-ci.yml`) → `--exclude='.archi'` dans la commande de sync.
-   - Capistrano (`Capfile`/`config/deploy.rb`) → exclure du release.
-   - Aucun outil détecté → le dire, demander lequel, ou documenter et passer.
-4. **CLAUDE.md** projet (racine, créé si absent) : insérer **idempotemment** ce bloc (ne pas dupliquer s'il existe déjà — repérer les balises) :
+1. Create `.archi/` and `.archi/units/`.
+2. `.gitignore`: ensure `.archi/` **stays committed** (remove/neutralise any rule that would exclude it). `.archi/` **must** be versioned.
+3. **Deployment exclusion**: detect the tool and propose the exact edit, **apply only after confirmation**:
+   - Deployer (`deploy.php`/`deploy.yaml`) → add `.archi` to excluded paths / `--exclude`.
+   - `.dockerignore` → a `.archi/` line.
+   - GitLab CI rsync (`.gitlab-ci.yml`) → `--exclude='.archi'` in the sync command.
+   - Capistrano (`Capfile`/`config/deploy.rb`) → exclude from the release.
+   - No tool detected → say so, ask which one, or document and move on.
+4. **Project CLAUDE.md** (root, create if absent): insert this block **idempotently** (do not duplicate if the tags already exist). The block content is in French — it targets the project team:
 
    ```markdown
    <!-- gm:archi-c4 -->
@@ -498,29 +547,29 @@ Produire une doc d'archi **vivante** et **interactive** dans `.archi/` du projet
    <!-- /gm:archi-c4 -->
    ```
 
-## Flux 2 — Faire
+## Flow 2 — Build
 
-1. **Lister d'abord les unités custom à tracer** (selon la ressource stack ou la méthode générique). **Présenter la liste et la faire valider** avant toute rédaction.
-2. **Vue projet — `.archi/index.html`** : générer avec `META` + `CONTEXT` (C1 : le système, ses acteurs `person`, ses systèmes externes) + `CONTAINER` (C2 : chaque unité custom en `container`/`component` + l'infra partagée en `store`/`external` — DB, moteur de recherche, cron, stockage). Sur chaque container custom, poser `doc: "units/<slug>.html"`.
-3. **Par unité — `.archi/units/<slug>.html`** : générer avec `META` + `COMPONENT` (C3, issu de la source de vérité). `<slug>` = nom d'unité en kebab-case.
-4. **C4 (UML code)** : ne PAS le produire par défaut. Proposer via `AskUser` en prévenant : « Le niveau C4 (UML par classe) est le plus détaillé mais devient obsolète à chaque refactor et coûte cher à (re)générer. L'ajouter pour cette unité ? ». Si oui, ajouter `CODE.views` à l'unité (voir découpage en vues dans la ressource stack).
-5. **Modèle juste, pas décoratif** : chaque edge doit correspondre à une dépendance réelle (argument DI, `extends`, `use`, appel). Sur un gros projet, l'exploration par unité peut être déléguée à des **sous-agents** (une unité = un agent) puis synthétisée.
-6. **Stamp** : renseigner dans `META.footer` la source de vérité utilisée ET la mention de génération : `généré le <AAAA-MM-JJ> · commit <hash-court>` (récupérer via `git rev-parse --short HEAD`).
+1. **List the custom units to trace first** (from the stack resource or the generic method). **Present the list and get it validated** before writing anything.
+2. **Project view — `.archi/index.html`**: generate `META` + `CONTEXT` (C1: the system, its `person` actors, its external systems) + `CONTAINER` (C2: each custom unit as `container`/`component` + shared infra as `store`/`external` — DB, search engine, cron, storage). On each custom container, set `doc: "units/<slug>.html"`.
+3. **Per unit — `.archi/units/<slug>.html`**: generate `META` + `COMPONENT` (C3, from the source of truth). `<slug>` = kebab-case unit name.
+4. **C4 (UML code)**: do NOT produce by default. Offer it via `AskUser`, warning the user (message in French): « Le niveau C4 (UML par classe) est le plus détaillé mais devient obsolète à chaque refactor et coûte cher à (re)générer. L'ajouter pour cette unité ? ». If yes, add `CODE.views` to the unit (see per-view splitting in the stack resource).
+5. **Accurate model, not decorative**: every edge maps to a real dependency (DI argument, `extends`, `use`, call). On a large project, per-unit exploration may be delegated to **subagents** (one unit = one agent) then synthesised.
+6. **Stamp**: in `META.footer`, record the source of truth used AND the generation stamp: `généré le <YYYY-MM-DD> · commit <short-hash>` (`git rev-parse --short HEAD`).
 
-## Flux 3 — Maintenir
+## Flow 3 — Maintain
 
-1. Lire le stamp de chaque doc `.archi/**` (`généré le … · commit …`).
-2. Comparer aux fichiers custom modifiés depuis ce commit :
-   `git diff --name-only <commit>..HEAD -- <chemins custom>`.
-3. Si des unités custom ont changé **ou** si la génération est ancienne → **`AskUser` « Faut-il vérifier / mettre à jour le C4 ? »** listant les unités impactées.
-4. Mise à jour = régénérer les blocs de données des docs concernés (le template ne bouge jamais). Re-stamp.
+1. Read each doc's stamp under `.archi/**` (`généré le … · commit …`).
+2. Compare with custom files changed since that commit:
+   `git diff --name-only <commit>..HEAD -- <custom paths>`.
+3. If custom units changed **or** the generation is old → **`AskUser` « Faut-il vérifier / mettre à jour le C4 ? »** listing the impacted units.
+4. Update = regenerate the data blocks of the affected docs (the template never changes). Re-stamp.
 
 ## Non-goals
 
-- Ne pas modifier `template.html` à la génération.
-- Ne pas décomposer le code tiers (boîte noire seulement).
-- Ne pas produire de C4 sans accord explicite.
-- Pas de mono-HTML multi-unités, pas de JSON externe, pas d'étape de build.
+- Never edit `template.html` when generating.
+- Never decompose third-party code (black box only).
+- Never produce C4 without explicit consent.
+- No multi-unit mono-HTML, no external JSON, no build step.
 ````
 
 - [ ] **Step 2 : Vérifier le frontmatter et les références de chemins**
@@ -553,7 +602,7 @@ git commit -m "feat(archi-c4): SKILL.md — flux Préparer/Faire/Maintenir + rep
 Dans `README.md`, ajouter à la fin du tableau « ## Skills » :
 
 ```markdown
-| `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressource dédiée Drupal. |
+| `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressources dédiées Drupal et Vue. |
 ```
 
 - [ ] **Step 2 : Mentionner le dossier assets dans l'arbre « Structure »**
