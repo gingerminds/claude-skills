@@ -257,6 +257,9 @@
   .drawer .dbody { padding: 18px 22px 28px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
   .drawer .drole { font-size: 14px; color: var(--ink); line-height: 1.5; }
   .drawer .dfile { font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); background: var(--panel-2); border: 1px solid var(--hair); border-radius: 7px; padding: 7px 9px; word-break: break-all; }
+  .drawer .dopen { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; text-decoration: none; font-weight: 600; font-size: 13px; color: #fff; background: var(--tc); padding: 8px 13px; border-radius: 8px; }
+  .drawer .dopen[hidden] { display: none; }
+  .drawer .dopen:hover { filter: brightness(1.06); }
   .drel h3 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 8px; font-family: var(--font-mono); }
   .drel .chips { display: flex; flex-direction: column; gap: 6px; }
   .chip { appearance: none; text-align: left; border: 1px solid var(--hair); background: var(--panel-2); border-radius: 8px; padding: 7px 10px; cursor: pointer; display: flex; align-items: center; gap: 9px; font-family: var(--font-mono); font-size: 12px; color: var(--ink); transition: border-color .15s, background .15s; }
@@ -317,6 +320,7 @@
   </div>
   <div class="dbody">
     <p class="drole" id="d-role"></p>
+    <a class="dopen" id="d-open" hidden>Ouvrir le détail →</a>
     <div class="dfile" id="d-file" hidden></div>
     <div class="drel" id="d-ext"><h3></h3><div class="chips"></div></div>
     <div class="drel" id="d-extby"><h3></h3><div class="chips"></div></div>
@@ -683,6 +687,9 @@
     $("#d-name").textContent = n.name;
     var did = $("#d-id"); did.textContent = n.id2 || ""; did.style.display = n.id2 ? "" : "none";
     $("#d-role").textContent = n.desc || "";
+    var openBtn = $("#d-open");
+    if (n.doc) { openBtn.setAttribute("href", n.doc); openBtn.hidden = false; }
+    else { openBtn.removeAttribute("href"); openBtn.hidden = true; }
     var fileBox = $("#d-file");
     if (n.file) { fileBox.textContent = n.file; fileBox.hidden = false; } else { fileBox.hidden = true; }
 
