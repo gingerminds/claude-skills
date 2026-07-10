@@ -2,21 +2,27 @@
  * model.example.js — CONTRAT DE DONNÉES du skill gm:archi-c4.
  *
  * Le template (assets/template.html) est FIGÉ. Seul ce bloc de données change.
- * L'agent régénère META + les niveaux présents, puis les injecte dans une copie
- * du template à la place du marqueur "@@ARCHI-C4:MODEL@@".
+ * Générer = copier le template puis remplacer LA LIGNE, juste sous le marqueur
+ * "@@ARCHI-C4:MODEL@@" :
+ *   META = null; CONTEXT = null; CONTAINER = null; COMPONENT = null; CODE = null;
+ * par le bloc ci-dessous. Les cinq variables sont pré-déclarées dans le template :
+ * un niveau absent peut rester null (ou être omis) => son onglet se masque, sans erreur.
  *
- * Règles : sortie en français ; seuls META + les niveaux présents sont fournis
- * (un niveau absent => sa variable vaut null => son onglet est masqué).
+ * Règles : sortie en français.
  * Types de noeud : person | system | external | container | store | component
  * Kinds UML     : interface | abstract | class | trait
- * Kinds d'edge  : flow (C1/C2) | uses (DI, C3) | extends | realize | use | assoc
+ * Kinds d'edge  : flow (C1/C2) | uses (DI, C3) | extends (C3) | extend (C4) | realize | use | assoc
+ * COMPONENT.groups : band in single | parsers | domain | domain2 ; grp in one | c2 | c4
+ *   (toute autre valeur retombe sur une bande simple colonne).
+ * META.footer DOIT porter le stamp de génération "généré le AAAA-MM-JJ · commit <hash-court>"
+ *   pour que le flux Maintenir détecte la dérive (voir l'exemple ci-dessous).
  */
 
 var META = {
   eyebrow: "Architecture · Modèle C4",
   title: 'Module <span style="font-family:var(--font-mono);font-weight:640">product_import</span>',
   subtitle: "Exemple de référence : pipeline d'import du catalogue produit depuis le PIM produit.",
-  footer: 'Source de vérité : <code>product_import.services.yml</code>, <code>src/Service</code>, <code>product_import.module</code>. Diagramme interactif — survolez ou sélectionnez un élément pour tracer ses relations.'
+  footer: 'Source de vérité : <code>product_import.services.yml</code>, <code>src/Service</code>, <code>product_import.module</code>. Diagramme interactif — survolez ou sélectionnez un élément pour tracer ses relations.<br><small>Généré le 2026-07-10 · commit <code>a1b2c3d</code></small>'
 };
 
 var CONTEXT = {

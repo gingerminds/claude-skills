@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Product Import — Modèle C4</title>
+<title>Modèle C4</title>
 <style>
   :root {
     --bg:        #eef1f6;
@@ -348,10 +348,12 @@
     trait:     { c: "--accent",      label: "trait",     italic: false }
   };
 
-  /* @@ARCHI-C4:MODEL@@
-     Ce marqueur est remplacé par gm:archi-c4 : le bloc "var META = {…}; var CONTEXT = …"
-     (voir assets/model.example.js). Un niveau absent doit valoir null. */
-  var META = null, CONTEXT = null, CONTAINER = null, COMPONENT = null, CODE = null;
+  /* Pré-déclaration stable — PAS le point d'injection. Si le bloc de données omet un niveau,
+     il reste `undefined` (son onglet se masque) au lieu de lever une ReferenceError. */
+  var META, CONTEXT, CONTAINER, COMPONENT, CODE;
+  /* @@ARCHI-C4:MODEL@@ — gm:archi-c4 remplace UNIQUEMENT LA LIGNE CI-DESSOUS par le bloc de
+     données (voir assets/model.example.js). Ne rien modifier au-dessus de ce commentaire. */
+  META = null; CONTEXT = null; CONTAINER = null; COMPONENT = null; CODE = null;
 
   var MODELS = { context: CONTEXT, container: CONTAINER, component: COMPONENT, code: CODE };
   var EDGE_WORD = { uses: "utilise", extends: "hérite", flow: "flux", extend: "étend", realize: "implémente", use: "trait", assoc: "référence" };

@@ -11,9 +11,9 @@ Produce living, interactive architecture docs under the target project's `.archi
 
 - The **chrome** (interactive CSS+JS) is frozen in `${CLAUDE_SKILL_DIR}/assets/template.html`. Never edit it when generating.
 - You only write the **data block**: `META` + the present levels (`CONTEXT`, `CONTAINER`, `COMPONENT`, `CODE`). Contract + full example: `${CLAUDE_SKILL_DIR}/assets/model.example.js` — **read it before generating**. Its French strings show the expected output language.
-- **Generate a file** = copy `template.html`, then replace the marker line
-  `var META = null, CONTEXT = null, CONTAINER = null, COMPONENT = null, CODE = null;`
-  with the data block you wrote (an absent level stays `null` → its tab auto-hides).
+- **Generate a file** = copy `template.html`, then replace the single line just below the `@@ARCHI-C4:MODEL@@` marker —
+  `META = null; CONTEXT = null; CONTAINER = null; COMPONENT = null; CODE = null;`
+  — with the data block you wrote. The five globals are pre-declared above the marker, so an absent level may be left `null` (or omitted) → its tab auto-hides, no error. Never touch anything above the marker comment.
 - **Scope: custom code only.** Any third party (contrib/core/vendor, `node_modules`, packages) is an `external` node (black box), never decomposed.
 
 ## Detect the stack
