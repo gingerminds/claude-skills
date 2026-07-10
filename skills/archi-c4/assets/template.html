@@ -122,6 +122,7 @@
   .levels button:hover { color: var(--ink); background: var(--panel-2); }
   .levels button[aria-selected="true"] { background: var(--c-system); color: #fff; box-shadow: 0 1px 8px rgba(29,78,216,.35); }
   .levels button[aria-selected="true"] .lv { opacity: .8; }
+  .levels button[hidden] { display: none; }
 
   /* ---------- Intro + legend + subnav ---------- */
   .stage-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px 24px; margin: 26px 0 12px; }
@@ -806,6 +807,14 @@
     }, 140);
   });
 
+  var LEVEL_ORDER = ["context", "container", "component", "code"];
+  function levelPresent(l) {
+    return l === "code" ? !!(CODE && CODE.views && Object.keys(CODE.views).length) : !!MODELS[l];
+  }
+  document.querySelectorAll(".levels button").forEach(function (b) {
+    b.hidden = !levelPresent(b.dataset.level);
+  });
+
   if (META) {
     if (META.title) document.title = String(META.title).replace(/<[^>]+>/g, "").trim();
     $("#eyebrow").innerHTML = META.eyebrow || "";
@@ -815,7 +824,8 @@
   }
   buildSubnav();
 
-  show("component");
+  var firstLevel = LEVEL_ORDER.filter(levelPresent)[0];
+  if (firstLevel) show(firstLevel);
 })();
 </script>
 
