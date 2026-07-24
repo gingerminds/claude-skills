@@ -1,11 +1,11 @@
 ---
 name: ticket
-description: Loads and digests a Mantis ticket (or a pasted ticket) into a focused development brief — the goal, what to look at in the codebase, constraints, and acceptance criteria — so the context is in memory before a /gm:drupal-11 session. Tuned for Drupal/PHP + Mantis + GitLab. Use before starting work on a ticketed change, or invoke /gm:ticket.
+description: Loads and digests a Mantis ticket (or a pasted ticket) into a focused development brief — the goal, what to look at in the codebase, constraints, and acceptance criteria — so the context is in memory before a /gm:drupal session. Tuned for Drupal/PHP + Mantis + GitLab. Use before starting work on a ticketed change, or invoke /gm:ticket.
 ---
 
 # Ticket
 
-Turn a ticket into a working understanding *before* any code is written. The output is a compact brief that primes the rest of the session: when `/gm:drupal-11` runs next, it already knows the intent, the scope, and what "done" means — instead of rediscovering it from the diff.
+Turn a ticket into a working understanding *before* any code is written. The output is a compact brief that primes the rest of the session: when `/gm:drupal` runs next, it already knows the intent, the scope, and what "done" means — instead of rediscovering it from the diff.
 
 ## Load the ticket
 
@@ -45,7 +45,7 @@ Read the whole ticket, including the notes (they often carry the real decision o
 
 - **Goal** — what the ticket actually asks for, in one or two sentences. For a bug, the wrong behavior; for a feature, the outcome the user wants.
 - **Root cause (if a regression)** — what's suspected, and whether the ticket points at a symptom or the cause. Note it as a hypothesis, not a conclusion.
-- **Scope** — which functional area / custom module(s) this likely touches. Stay lightweight here — the deep read of the existing code is `/gm:drupal-11`'s "Survey the existing custom code first" step; your job is to point it at the right place.
+- **Scope** — which functional area / custom module(s) this likely touches. Stay lightweight here — the deep read of the existing code is `/gm:drupal`'s "Survey the existing custom code first" step; your job is to point it at the right place.
 - **Reproduction / context** — the steps to reproduce, the environment, the data conditions.
 - **Acceptance criteria** — how anyone will know it's fixed. If the ticket doesn't state them, derive the obvious ones and mark them as inferred.
 - **Constraints & risks** — multilingual, cacheability, access/security, data migration, anything that narrows the solution space.
@@ -79,12 +79,12 @@ State the brief, resolve any blocking open question with the user, then hand off
 
 This skill stops at understanding — it writes **no code**. Once the brief is set:
 
-- Point the user to **`/gm:drupal-11`** to do the work — it will survey the existing custom modules against the "À regarder" list, then implement.
+- Point the user to **`/gm:drupal`** to do the work — it will survey the existing custom modules against the "À regarder" list, then implement.
 - Make the brief's **Contraintes / risques** explicit and specific: the dev skill uses them to decide *which* stack knowledge to load. A ticket flagged security/access, cacheability, or migration is not plain feature work — say so, so the dev skill pulls the matching nature (e.g. its `security`/`review` resource) on top of `dev`, instead of coding it as a vanilla feature.
 - Remind that the loop ends with **`/gm:review`** before opening a merge request (then `/gm:merge-request`).
 
 ## Non-goals
 
-- Don't design the solution or write code here — that's `/gm:drupal-11`. Keep to intent and scope.
+- Don't design the solution or write code here — that's `/gm:drupal`. Keep to intent and scope.
 - Don't deep-dive the codebase — surface the pistes; the survey is the dev skill's job.
 - Don't review intent blind: if the ticket is unreachable and not pasted, stop and ask.

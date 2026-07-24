@@ -1,6 +1,6 @@
 # Drupal — dev
 
-Backend development knowledge for Drupal 10/11. Assumes `core.md` is already loaded (standard, `t()`, Cache API vocabulary). Consumed by `/gm:drupal-11`.
+Backend development knowledge for Drupal 10/11. Assumes `core.md` is already loaded (standard, `t()`, Cache API vocabulary). Consumed by `/gm:drupal`.
 
 ## Core knowledge areas
 
