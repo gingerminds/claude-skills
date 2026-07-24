@@ -9,7 +9,7 @@ Turn a finished change into a clean, reviewable GitLab MR. Outward-facing: creat
 
 ## Preflight
 
-1. **Branch** — Work on a dedicated branch, never the base. Convention: `fix/<ticket>-<slug>` (or `feat/<ticket>-<slug>`). If currently on the base branch (`develop`/`main`), create the branch first.
+1. **Branch** — Work on a dedicated branch, never the base. Convention: `feature/<ticket>-<slug>` (or `fix/<ticket>-<slug>` for a bugfix) — e.g. `feature/51234-branche-de-test`. `<ticket>` is the bare Mantis id **without leading zeros** (`0051234` → `51234`). If currently on the base branch (`develop`/`main`), create the branch first.
 2. **Base branch** — Default target is `develop` (fall back to the repo's default branch). Confirm from existing branches/MRs if unsure.
 3. **Clean staging** — Stage **only** the files belonging to this change. Inspect `git status` and explicitly exclude unrelated working-tree edits (leave them unstaged — never `git add -A` blindly).
 4. **Reuse the review** — If `/gm:review` just ran, lift its verdict, **Vérification ✅** checks, and **Hors-scope** notes straight into the MR description instead of re-deriving them.
@@ -24,7 +24,7 @@ type(scope: #<ticket>): <imperative summary>
 <body: what was wrong, the root cause, and what the fix does — wrapped ~72 cols>
 ```
 
-`type` ∈ fix / feat / refactor / chore. Verify the staged set before committing:
+`type` ∈ fix / feat / refactor / chore — this is the **commit type**, `feat` stays `feat` here (only the *branch* prefix is `feature/`). `#<ticket>` is the bare Mantis id without leading zeros (`#51234`, not `#0051234`). Verify the staged set before committing:
 
 ```bash
 git diff --cached --name-only   # must contain only the intended files
@@ -50,7 +50,7 @@ GITLAB_HOST=<host> glab mr create \
   --draft --yes
 ```
 
-Set `GITLAB_HOST` when the remote is self-hosted (e.g. `gitlab.gingerminds.fr`). Build `$DESC` with the heredoc above so the multi-line markdown survives the shell. `--draft` is the canonical Draft flag (don't fake it with a `Draft:` title prefix); `--yes` skips the interactive prompt. If `glab mr list` shows an open MR for the branch, update it instead of creating a second one.
+**MR title and description are written in French** (team language) — both `--title` and `$DESC` are in French; only the code stays in English. Set `GITLAB_HOST` when the remote is self-hosted (e.g. `gitlab.gingerminds.fr`). Build `$DESC` with the heredoc above so the multi-line markdown survives the shell. `--draft` is the canonical Draft flag (don't fake it with a `Draft:` title prefix); `--yes` skips the interactive prompt. If `glab mr list` shows an open MR for the branch, update it instead of creating a second one.
 
 ## MR description template
 

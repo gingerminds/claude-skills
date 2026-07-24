@@ -33,7 +33,7 @@ This skill stays stack-agnostic; the technology-specific review checklist comes 
 
 ## Load the ticket
 
-Correctness is judged against intent, so get the ticket. Extract the Mantis id from the MR description or the branch name (`fix/<id>-slug`), then:
+Correctness is judged against intent, so get the ticket. Extract the Mantis id from the MR description or the branch name (`feature|fix/<id>-slug`, also legacy `feat/`), then:
 
 ```bash
 bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # prints summary, description, steps-to-reproduce, notes

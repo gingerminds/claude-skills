@@ -21,7 +21,7 @@ Read the changed lines **and** enough surrounding code to judge them. Never revi
 
 ## Load the ticket
 
-Judge content against intent. Extract the Mantis id from the MR description or the branch name (`fix/<id>-slug`), then:
+Judge content against intent. Extract the Mantis id from the MR description or the branch name (`feature|fix/<id>-slug`, also legacy `feat/`), then:
 
 ```bash
 bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, notes
@@ -46,7 +46,7 @@ Apply the **`gm:review` dimensions** — Correctness, Security, Performance & ca
   - **Atomic commits** — one logical change per commit; flag mixed-concern commits.
   - **Conventional commits** — `type(scope: #ticket): summary`.
   - **Ticket number required in every commit.** If missing, the author can add the Mantis ref as an MR comment; with no Mantis attached at all it's tolerated but should be rare — flag it either way.
-  - MR title convention, real ticket link, description complete (Contexte / Cause racine / Correctif / Vérification), branch `fix|feat/<id>-slug`, staging scoped (no stray files).
+  - MR title convention, real ticket link, description complete (Contexte / Cause racine / Correctif / Vérification), branch `feature|fix/<id>-slug` (flag a `feat/` prefix — the branch convention is `feature/`), ticket id without leading zeros (`#51234`, not `#0051234`), staging scoped (no stray files).
 - **Langue** — Two registers, never mixed:
   - **French** — the MR title/description and your review note (team language).
   - **English** — all code: identifiers, code comments, docblocks, and (per the loaded stack, e.g. Drupal) user-facing strings through the translation API (`t()`). Non-English code or comments → raise a comment tagged **« à revoir »** at **Minor** — *non-blocking for the verdict*; the "threads must be closed before merge" rule guarantees it gets fixed.
