@@ -39,7 +39,7 @@ bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id> --file <file-id> "$S
 
 ## Review axes
 
-Apply the **`gm:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Tests — the **Blocker/Major/Minor/Nit** severity scale, and that skill's **Noise control** rule (Nits folded, Minor one-liners, full Why/Action for Blocker/Major only). `gm:review` handles **stack detection** and loads the stack's review specifics (e.g. Drupal cacheability/`t()`/`Drupal,DrupalPractice`, Vue reactivity/hydration) — reuse them here. Run the project's linters when present, via the runner in `${CLAUDE_SKILL_DIR}/../../shared/runner.md` (`make` → `docker compose` → `lando`). Below are the axes specific to reviewing someone else's MR:
+Apply the **`gm:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Tests — the **Blocker/Major/Minor/Nit** severity scale, and that skill's **Noise control** rule (Nits folded, Minor one-liners, full Why/Action for Blocker/Major only). `gm:review` handles **stack detection** and loads the stack's review specifics (e.g. Drupal cacheability/`t()`/`Drupal,DrupalPractice`, Vue reactivity/hydration) — reuse them here. If `gm:review` reports no stack resource for the detected stack, carry that note into the review and rely on the generic dimensions. Run the project's linters when present, via the runner in `${CLAUDE_SKILL_DIR}/../../shared/runner.md` (`make` → `docker compose` → `lando`). Below are the axes specific to reviewing someone else's MR:
 
 - **Contenu** — Does the diff deliver what the ticket asks, end to end? Root cause vs symptom. This is `gm:review` Correctness, judged against the loaded ticket.
 - **Forme** — Commit & MR hygiene:
