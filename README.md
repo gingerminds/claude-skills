@@ -1,6 +1,6 @@
 # Gingerminds — skills Claude Code
 
-Collection de skills maison pour [Claude Code](https://claude.com/claude-code), distribuée comme plugin via un marketplace. Tous les skills sont invocables sous le namespace **`gm`** (ex. `/gm:drupal-11`).
+Collection de skills maison pour [Claude Code](https://claude.com/claude-code), distribuée comme plugin via un marketplace. Tous les skills sont invocables sous le namespace **`gm`** (ex. `/gm:drupal`).
 
 - **Namespace** : `gm`
 - **Mainteneur** : Clara
@@ -10,9 +10,13 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 
 | Skill | Invocation | Rôle |
 | :--- | :--- | :--- |
-| `ticket` | `/gm:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation, pièces jointes chargées à la demande — pour amorcer le contexte avant une session `/gm:drupal-11`. Orienté Drupal/PHP + Mantis + GitLab. |
-| `drupal-11` | `/gm:drupal-11` | Expertise backend Drupal 10/11 — architecture, services, plugins, events, entités, cache, sécurité. |
+| `ticket` | `/gm:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation, pièces jointes chargées à la demande — pour amorcer le contexte avant une session dev spécifique à la stack. Détecte la stack du projet pour router vers le bon skill dev. Orienté Mantis + GitLab. |
+| `drupal` | `/gm:drupal` | Expertise backend Drupal 10/11 — architecture, services, plugins, events, entités, cache, sécurité. |
 | `vue` | `/gm:vue` | Expertise frontend Vue 3 / Nuxt 3 — Composition API, composables, Pinia, SSR/SSG, TypeScript, architecture de composants. |
+| `laravel` | `/gm:laravel` | Expertise backend Laravel — Eloquent, migrations, form requests, services, queues, events, tests. |
+| `django` | `/gm:django` | Expertise backend Django — apps, modèles, ORM, migrations, DRF, forms/serializers, tests. |
+| `python` | `/gm:python` | Expertise Python générique (hors framework web) — packaging, typing, structure, erreurs, tests. |
+| `wordpress` | `/gm:wordpress` | Expertise WordPress — hooks, plugin/thème custom, APIs data WP, CPT, i18n, sécurité (nonces, capabilities, escaping). |
 | `docker-devops` | `/gm:docker-devops` | Docker, Compose, Makefile, CI/CD (GitLab) — builds reproductibles, images minimales, sécurité, DX. |
 | `review` | `/gm:review` | Review d'un diff avant merge — correctness, sécurité, cacheability, standards, tests — verdict structuré. Stack-agnostique : charge les spécificités techno depuis `stack/`. Orienté GitLab. |
 | `merge-request` | `/gm:merge-request` | Prépare une MR GitLab — commit ciblé, push, `glab mr create` en Draft avec description liée au ticket. |
@@ -62,7 +66,7 @@ Tape `/gm:<skill>` dans Claude Code. Les skills se chaînent — un flux Drupal 
 
 ```
 /gm:ticket        # digère le ticket Mantis en brief
-/gm:drupal-11     # implémente en s'appuyant sur le brief + le code existant
+/gm:drupal        # implémente en s'appuyant sur le brief + le code existant
 /gm:review        # verdict severity-ranked sur le diff
 /gm:merge-request # ouvre la MR GitLab (Draft) liée au ticket
 ```
@@ -92,8 +96,12 @@ claude-skills/
 │       └── MAIN.md          # Forme 1 : fichier unique sectionné (## core / dev / review / security)
 └── skills/
     ├── ticket/SKILL.md
-    ├── drupal-11/SKILL.md   # point d'entrée : charge stack/drupal/MAIN.md (dev)
+    ├── drupal/SKILL.md      # point d'entrée : charge stack/drupal/MAIN.md (dev)
     ├── vue/SKILL.md         # point d'entrée : charge stack/vue/MAIN.md (dev)
+    ├── laravel/SKILL.md     # point d'entrée : charge stack/laravel/MAIN.md (dev)
+    ├── django/SKILL.md      # point d'entrée : charge stack/django/MAIN.md (dev)
+    ├── python/SKILL.md      # point d'entrée : charge stack/python/MAIN.md (dev)
+    ├── wordpress/SKILL.md   # point d'entrée : charge stack/wordpress/MAIN.md (dev)
     ├── docker-devops/SKILL.md
     ├── review/SKILL.md      # générique : détecte la stack → charge stack/<x>/MAIN.md (review)
     ├── merge-request/SKILL.md
