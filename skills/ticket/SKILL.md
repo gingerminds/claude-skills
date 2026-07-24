@@ -9,7 +9,7 @@ Turn a ticket into a working understanding *before* any code is written. The out
 
 ## Load the ticket
 
-Accept any of: a Mantis id, a Mantis URL, a branch name (`fix|feat/<id>-slug` → extract the id), or a ticket pasted inline. With an id:
+Accept any of: a Mantis id, a Mantis URL, a branch name (`feature|fix/<id>-slug`, also legacy `feat/` → extract the id), or a ticket pasted inline. With an id:
 
 ```bash
 bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, additional info, notes, attachment list
