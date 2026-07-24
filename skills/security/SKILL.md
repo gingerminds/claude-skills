@@ -21,7 +21,7 @@ ls Dockerfile docker-compose.yml docker-compose.yaml compose.yaml 2>/dev/null
 Then identify:
 
 1. **PHP** — `composer.json` / `composer.lock` present.
-2. **Stack / CMS** — detect via `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`, then load `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` for the **security** nature. This pulls the stack's advisory specifics (e.g. Drupal: `drush pm:security`, Drupal.org SA feeds, core-version check) on top of the generic audit below. No known stack → stay generic.
+2. **Stack / CMS** — detect via `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`, then load `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` for the **security** nature. This pulls the stack's advisory specifics (e.g. Drupal: `drush pm:security`, Drupal.org SA feeds, core-version check) on top of the generic audit below. No known stack, or a stack whose `MAIN.md` has no `security` section → stay generic and **say so** (only the generic `composer audit` / `npm audit` coverage applies). Never `Read` a non-existent resource.
 3. **JS** — which lockfile is present picks the runner (`package-lock.json` → npm, `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn). Don't run `npm audit` against a pnpm project.
 4. **Docker** — any Dockerfile / compose file.
 
