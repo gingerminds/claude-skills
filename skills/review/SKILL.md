@@ -30,7 +30,7 @@ This skill stays stack-agnostic; the technology-specific review checklist comes 
 1. Apply `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md` to identify the project's stack(s).
 2. Load `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` for the **review** nature (it pulls `core` + `review`). E.g. Drupal → cacheability/N+1/`Drupal,DrupalPractice`/`t()` checks; Vue → reactivity/hydration checks.
 3. **Graceful degradation** — if the detected stack has no `stack/` resource, or its `MAIN.md` doesn't expose a `review`/`core` section, apply the generic dimensions below and **say so** in the verdict ("pas de resource review pour la stack `<x>` — dimensions génériques uniquement"). Never `Read` a non-existent resource and never fail silently.
-4. Apply those specifics on top of the generic dimensions below. No known stack → skip, stay generic.
+4. Apply those specifics on top of the generic dimensions below.
 
 ## Load the ticket
 
