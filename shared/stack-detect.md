@@ -8,12 +8,14 @@ The generic skills (`review`, `security`, `merge-review`…) stay **stack-agnost
 |---|---|
 | `composer.json` contains `drupal/core*` | **drupal** |
 | `composer.json` contains `roots/wordpress`, or a `wp-content/` tree | **wordpress** |
+| `composer.json` contains `laravel/framework` | **laravel** |
+| `composer.json` with no CMS/framework | php (generic) — no `stack/` resource |
 | `package.json` depends on `vue` / `nuxt` | **vue** |
-| `manage.py`, or `django` in `requirements*.txt` / `pyproject.toml` | **django** |
-| `composer.json` with no CMS | php (generic) — no `stack/` resource |
 | `package.json` with no known front framework | js (generic) — no `stack/` resource |
+| `manage.py`, or `django` in `requirements*.txt` / `pyproject.toml` | **django** |
+| `pyproject.toml` / `requirements*.txt` with no django | **python** |
 
-Actually read the files (`composer.json`, `package.json`) — don't guess from the repo name.
+Resolution order matters: test **laravel** before the generic `php`, and **django** before **python** (django is a Python web subset). Actually read the files (`composer.json`, `package.json`, `pyproject.toml`) — don't guess from the repo name.
 
 ## Loading rule
 
@@ -23,3 +25,21 @@ Actually read the files (`composer.json`, `package.json`) — don't guess from t
 - **No known stack** → stay generic, load no `stack/` resource, and say so.
 
 The **runner** is cross-cutting (stack-independent): see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`.
+
+## Dev skill routing
+
+Naming principle: **stack name == dev skill name == `stack/<stack>/` folder**. The main consumer of this mapping is `/gm:ticket`, which detects the stack and hands off to the matching dev skill.
+
+| Stack | Dev skill |
+|---|---|
+| drupal | `/gm:drupal` |
+| wordpress | `/gm:wordpress` |
+| vue | `/gm:vue` |
+| laravel | `/gm:laravel` |
+| django | `/gm:django` |
+| python | `/gm:python` |
+| php (generic) | — none: generic dev discipline |
+| js (generic) | — none: generic dev discipline |
+
+- **Stack with a dev skill** → hand off to `/gm:<stack>`.
+- **Generic `php` / `js`, or a detected stack with no dedicated skill yet** → there is no `/gm:<stack>` to route to; say so and fall back to generic dev discipline (plus the `stack/` resource if one exists).

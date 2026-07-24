@@ -1,5 +1,5 @@
 ---
-name: drupal-11
+name: drupal
 description: Guides Drupal 10/11 backend development with architecture, services, plugins, events, entities, cache, and security. Use when implementing or reviewing Drupal backend code, services, event subscribers, plugins, entity/configuration logic, or when the user asks for Drupal backend expertise.
 ---
 
