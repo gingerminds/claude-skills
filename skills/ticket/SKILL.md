@@ -1,6 +1,6 @@
 ---
 name: ticket
-description: Loads and digests a Mantis ticket (or a pasted ticket) into a focused development brief — the goal, what to look at in the codebase, constraints, and acceptance criteria — so the context is in memory before a stack-specific dev session (Drupal, Vue, Laravel, Python/Django, WordPress…). Detects the project stack to route to the right dev skill. Tuned for a Mantis + GitLab workflow. Use before starting work on a ticketed change, or invoke /gm:ticket.
+description: Loads and digests a Mantis ticket (or a pasted ticket) into a focused development brief — the goal, what to look at in the codebase, constraints, and acceptance criteria — so the context is in memory before a stack-specific dev session (Drupal, Vue, Laravel, Python/Django, WordPress…). Detects the project stack to route to the right dev skill, and classifies the ticket as bug or feature/refactor to apply the matching pre-code discipline (root-cause hypothesis, or scope/approach sketch). Tuned for a Mantis + GitLab workflow. Use before starting work on a ticketed change, or invoke /gm:ticket.
 ---
 
 # Ticket
@@ -45,6 +45,14 @@ Before framing the brief, identify the project's stack so the hand-off points at
 
 Resolve the dev skill from that file's **Dev skill routing** table (drupal→`/gm:drupal`, vue→`/gm:vue`, laravel→`/gm:laravel`, django→`/gm:django`, python→`/gm:python`, wordpress→`/gm:wordpress`). Note the detected stack and the resolved skill — the brief and the hand-off use them. If detection is ambiguous (monorepo, multiple stacks), note the candidates and let the "À regarder" reflect each; if the stack is generic `php`/`js` or has no dedicated skill yet, say so and plan a generic dev hand-off.
 
+## Classify the ticket
+
+Determine whether the ticket is a **bug** or a **feature/refactor** — this decides which pre-code discipline to apply before writing the brief. A ticket with a reproducible error, or an explicit expected-vs-observed behavior, is a bug; otherwise treat it as feature/refactor. When genuinely ambiguous, ask rather than guess.
+
+- **Bug** → apply `${CLAUDE_SKILL_DIR}/../../shared/root-cause.md`: read it, then run its targeted investigation against this ticket to reach a single, stated hypothesis (never a fix).
+- **Feature / refactor** → apply `${CLAUDE_SKILL_DIR}/../../shared/scope-classification.md`: classify bounded vs architectural, and sketch approaches only if the ticket doesn't already point to one.
+- **Mixed** (a bug ticket that also asks for an improvement) → apply both, reusing the reading you've already done rather than re-reading the ticket twice.
+
 ## Understand it
 
 Read the whole ticket, including the notes (they often carry the real decision or a scope change). Extract:
@@ -61,13 +69,26 @@ Don't pad. If a field doesn't apply, drop it.
 
 ## Output — the development brief
 
-Produce one compact brief and keep it in context for the rest of the session:
+Produce one compact brief and keep it in context for the rest of the session. Add **Investigation** for a bug ticket, or **Ampleur** (and **Approches envisageables** when non-obvious) for a feature/refactor ticket, right after `Type`/`Status` — per the classification above. Omit whichever doesn't apply; don't pad the brief with an empty section.
 
 ```markdown
 ## Ticket #<id> — <summary>
 
 **Goal:** <one or two lines>
 **Type:** bug | feature | refactor    **Status:** <mantis status>
+
+**Investigation** (bug only)
+- Hypothèse de cause racine: <"je pense que X cause Y parce que Z" ou "aucune — reproduction pas claire, à faire par le dev">
+- Comparaison/pattern: <exemple similaire qui fonctionne, si trouvé — sinon omettre la ligne>
+- Reste à faire: test qui reproduit avant fix, un changement à la fois, règle des 3 essais
+
+**Ampleur** (feature/refactor only)
+- <bounded | architectural> — <raison en une ligne>
+
+**Approches envisageables** (feature/refactor only, si non triviale)
+- <approche A> — <compromis>
+- <approche B> — <compromis>
+→ recommandé: <A ou B>
 
 **À regarder** (pistes, à confirmer par la lecture du code)
 - <module/zone> — <pourquoi>
@@ -87,6 +108,7 @@ This skill stops at understanding — it writes **no code**. Once the brief is s
 
 - Point the user to the resolved **`/gm:<stack>`** dev skill (from the "Detect the stack" step) to do the work — it will survey the existing custom code against the "À regarder" list, then implement. If the stack has no dedicated dev skill yet (generic `php`/`js`, or a stack we don't cover), say so and hand off to generic dev discipline instead.
 - Make the brief's **Contraintes / risques** explicit and specific: the dev skill uses them to decide *which* stack knowledge to load. A ticket flagged security/access, cacheability, or migration is not plain feature work — say so, so the dev skill pulls the matching nature (e.g. its `security`/`review` resource) on top of `dev`, instead of coding it as a vanilla feature.
+- For a bug ticket, remind the dev skill to resume from the **Investigation**'s hypothesis (pattern comparison, test-before-fix, one change at a time, rule of three) rather than re-investigating from scratch.
 - Remind that the loop ends with **`/gm:review`** before opening a merge request (then `/gm:merge-request`).
 
 ## Non-goals
@@ -94,3 +116,5 @@ This skill stops at understanding — it writes **no code**. Once the brief is s
 - Don't design the solution or write code here — that's the stack's dev skill. Keep to intent and scope.
 - Don't deep-dive the codebase — surface the pistes; the survey is the dev skill's job.
 - Don't review intent blind: if the ticket is unreachable and not pasted, stop and ask.
+- Don't turn the Investigation into a fix: it stays a stated hypothesis, even when the cause seems obvious.
+- Don't turn Ampleur into a blocking gate: bounded/architectural is informative for the dev skill, not a checkpoint to clear here.
