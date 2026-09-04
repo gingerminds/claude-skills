@@ -50,12 +50,12 @@ Consumed by `/gm:review`, `/gm:merge-review`. Layered on the generic dimensions.
 
 ## security
 
-Consumed by `/gm:security`.
+Consumed by `/gm:security`,`/gm:review`, `/gm:merge-review`.
 
-- **Mass-assignment & authorization** — `$fillable`/`$guarded` set; access enforced via Policies/Gates, not just route middleware.
+- **Mass-assignment & authorization** — `$fillable`/`$guarded` set; access enforced via Policies/Gates, not just route middleware (depending of the project legacy codebase and policies managment).
 - **SQL** — parameter binding via Eloquent/query builder; flag raw `DB::raw`/string-interpolated SQL.
 - **Secrets & config** — no secrets in code or committed `.env`; config read via `config()`/`env()` only in config files.
-- **Dependencies** — `composer audit` on the tree; keep `laravel/framework` patched.
+- **Dependencies** — Indicate weak dependiciees through`composer audit`
 - **CSRF / XSS** — CSRF middleware on state-changing routes; Blade `{{ }}` auto-escapes — flag `{!! !!}` on untrusted data.
 
 ---
@@ -64,6 +64,6 @@ Consumed by `/gm:security`.
 
 Consumed by `/gm:archi-c4`. Layered on `core`. Instructions in English; generated documentation in French.
 
-- **Custom code** = the app repo: `app/` (Models, Http/Controllers, Services/Actions, Jobs, Providers), `routes/`, `database/migrations`. Build/orchestration (`composer.json`, `artisan`, CI) → containers (C2).
+- **Custom code** = the app repo: `app/` (Models, Http/Controllers, Services/Actions, Jobs, Providers) + `packages/` if existing with splitted app structure by sections,   `routes/`, `database/migrations`. Build/orchestration (`composer.json`, `artisan`, CI) → containers (C2).
 - **Never detailed (black box, `type: external`)**: `vendor/**` — the Laravel framework and all packages. Show only what custom code calls (DB, external API, queue/cache backend) as `external` nodes.
 - **Wiring source of truth**: routes → controllers → services/actions (entry points + `uses` edges); Eloquent models as `component` nodes; service-provider bindings reveal DI edges; jobs/events as async entry points. Stop at `vendor/`.

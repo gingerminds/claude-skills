@@ -52,7 +52,7 @@ Determine whether the ticket is a **bug** or a **feature/refactor** — this dec
 - **Bug** → apply `${CLAUDE_SKILL_DIR}/../../shared/root-cause.md`: read it, then run its targeted investigation against this ticket to reach a single, stated hypothesis (never a fix).
 - **Feature / refactor** → apply `${CLAUDE_SKILL_DIR}/../../shared/scope-classification.md`: classify bounded vs architectural, and sketch approaches only if the ticket doesn't already point to one.
 - **Mixed** (a bug ticket that also asks for an improvement) → apply both, reusing the reading you've already done rather than re-reading the ticket twice.
-
+- 
 ## Understand it
 
 Read the whole ticket, including the notes (they often carry the real decision or a scope change). Extract:
