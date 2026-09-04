@@ -5,7 +5,7 @@ Entry point for Laravel specifics (Form 1: single sectioned file). The caller re
 Nature → section:
 
 | Caller | Sections |
-| --- | --- |
+|---|---|
 | `/gm:laravel` | core + dev |
 | `/gm:review`, `/gm:merge-review` | core + review |
 | `/gm:security` | core + security |
@@ -17,8 +17,9 @@ Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_S
 
 ## core
 
-- PHP 8.x (detect PHP version in local docker configuration or .gitlab-ci.yml main image pull), **PSR-12** coding style; enforce with Laravel Pint (`./vendor/bin/pint`).
-- User-facing strings go through the localization helpers (`__()`, `trans(), @lang()`), NEVER hardcoded.
+- PHP 8.2+, **PSR-12** coding style; enforce with Laravel Pint (`./vendor/bin/pint`).
+- Follow the framework's directory conventions (`app/`, `routes/`, `database/`, `config/`); use artisan generators rather than hand-rolling boilerplate.
+- User-facing strings go through the localization helpers (`__()`, `trans()`), never hardcoded.
 - Detection: `laravel/framework` in `composer.json` (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
 
 ---
@@ -27,9 +28,9 @@ Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_S
 
 Consumed by `/gm:laravel`.
 
-- **Eloquent**: models thin; Detect if project has guard mass-assignment with `$fillable`/`$guarded`if so use the same pattern for new code, otherwise if PHP attributes are used in the project use them instead; avoid N+1 with `with()` eager loading; use migrations for schema and use seeders/factories for test data or initial data injection (users roles, permissions, products tags, etc.) if needed.
-- **HTTP layer**: validate input through Form Request classes, not inline in controllers; keep controllers thin — push domain logic into services/actions. If you modify existing controller and validator you must inform explicitly the user of the change.
-- **Service providers** for wiring/bootstrapping; bind interfaces in the container rather than `new`ing dependencies. Use the Services pattern when relevant in new or existing code (you can challenge the legacy codebase to propose a code splitting with services usage).
+- **Eloquent**: models thin; guard mass-assignment with `$fillable`/`$guarded`; avoid N+1 with `with()` eager loading; use migrations + factories/seeders for schema and test data.
+- **HTTP layer**: validate input through Form Request classes, not inline in controllers; keep controllers thin — push domain logic into services/actions.
+- **Service providers** for wiring/bootstrapping; bind interfaces in the container rather than `new`-ing dependencies.
 - **Queues & events** for slow or side-effect work (mail, external calls); jobs are idempotent.
 - **Testing**: Pest or PHPUnit via the runner (`${CLAUDE_SKILL_DIR}/../../shared/runner.md`); prefer feature tests hitting routes + `RefreshDatabase`, unit tests for services.
 
@@ -37,12 +38,11 @@ Consumed by `/gm:laravel`.
 
 ## review
 
-Consumed by `/gm:review`, `/gm:merge-review`. Layered on the generic dimensions. The review should also call the `/gm:security` to audit security breaches.
+Consumed by `/gm:review`, `/gm:merge-review`. Layered on the generic dimensions.
 
 - **Mass-assignment** — request data passed to `create()`/`update()` without `$fillable`/validated data.
 - **N+1** — missing eager loads on relations rendered in loops/collections.
 - **Fat controllers** — business logic that belongs in a service/action; queries in controllers instead of the model/repository.
-- **Code complexity** —  Identify complex code & propose a simplier alternative.
 - **Validation** — routes accepting input without a Form Request or `$request->validate()`.
 - **Standards** — Pint clean; typed signatures; no logic in Blade beyond presentation.
 

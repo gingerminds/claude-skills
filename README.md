@@ -10,7 +10,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 
 | Skill | Invocation | Rôle |
 | :--- | :--- | :--- |
-| `ticket` | `/gm:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation, pièces jointes chargées à la demande — pour amorcer le contexte avant une session dev spécifique à la stack. Détecte la stack du projet pour router vers le bon skill dev. Orienté Mantis + GitLab. |
+| `ticket` | `/gm:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation, pièces jointes chargées à la demande — pour amorcer le contexte avant une session dev spécifique à la stack. Détecte la stack du projet pour router vers le bon skill dev, et classe le ticket en bug ou feature/refactor pour appliquer la discipline adaptée (hypothèse de cause racine, ou esquisse d'ampleur/approches). Orienté Mantis + GitLab. |
 | `drupal` | `/gm:drupal` | Expertise backend Drupal 10/11 — architecture, services, plugins, events, entités, cache, sécurité. |
 | `vue` | `/gm:vue` | Expertise frontend Vue 3 / Nuxt 3 — Composition API, composables, Pinia, SSR/SSG, TypeScript, architecture de composants. |
 | `laravel` | `/gm:laravel` | Expertise backend Laravel — Eloquent, migrations, form requests, services, queues, events, tests. |
@@ -86,7 +86,9 @@ claude-skills/
 │   └── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
 ├── shared/                  # ressources transverses (indépendantes de la techno)
 │   ├── runner.md            # ordre de priorité du runner : make → docker → lando
-│   └── stack-detect.md      # cheatsheet de détection de stack + règle de chargement
+│   ├── stack-detect.md      # cheatsheet de détection de stack + règle de chargement
+│   ├── root-cause.md        # investigation de cause racine (tickets bug) — consommé par ticket
+│   └── scope-classification.md  # classification bounded/architectural (tickets feature) — consommé par ticket
 ├── stack/                   # spécificités par techno, chargées à la demande
 │   ├── drupal/              # Forme 2 : dispatcher + natures découpées
 │   │   ├── MAIN.md          #   route vers core + la nature (dev | review | security)
