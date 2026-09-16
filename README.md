@@ -25,6 +25,8 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `merge-review` | `/gm:merge-review` | Review côté reviewer d'une MR GitLab existante — fond, forme, langue, standards — charge le ticket Mantis lié et rédige une note + recommandation approve / request-changes. Stack-agnostique (via `gm:review`). |
 | `security` | `/gm:security` | Audit sécurité des dépendances et de l'infra — `composer audit` / `npm audit`, advisories CMS/framework, config Docker — priorisé par criticité réelle, avec correctifs ou marches à suivre. Stack-agnostique : les checks spécifiques (ex. SA Drupal) viennent de `stack/`. |
 | `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressources dédiées par techno quand elles existent. |
+| `nuxt4-migration` | `/gm:nuxt4-migration` | Audite un projet Nuxt 3 et pilote sa migration vers Nuxt 4 — lance `nuxt upgrade` + les codemods officiels, met à jour l'écosystème de modules (Node, modules Nuxt, TypeScript/Vite), passe en revue chaque zone de breaking change (structure de dossiers, réactivité `useAsyncData`/`useFetch`, Vite Environment API, routing sensible à la casse, `window.__NUXT__`), déclenche `/gm:swiper-migration` si Swiper est détecté, et produit un plan de migration priorisé. |
+| `swiper-migration` | `/gm:swiper-migration` | Audite les sliders Swiper d'un projet Vue/Nuxt utilisant un ancien wrapper/API (`vue-awesome-swiper`, prop `options` unique, directive `v-swiper`) et les migre vers les composants Vue modernes de Swiper.js (`swiper/vue`). Invocable seul, ou déclenché automatiquement par `/gm:nuxt4-migration` si Swiper est présent. |
 
 ## Installation
 
@@ -117,9 +119,11 @@ claude-skills/
     ├── merge-request/SKILL.md
     ├── merge-review/SKILL.md
     ├── security/SKILL.md    # générique : détecte la stack → charge stack/<x>/MAIN.md (security)
-    └── archi-c4/
-        ├── SKILL.md
-        └── assets/          # template.html figé + model.example.js (contrat)
+    ├── archi-c4/
+    │   ├── SKILL.md
+    │   └── assets/          # template.html figé + model.example.js (contrat)
+    ├── nuxt4-migration/SKILL.md   # autonome : audit + plan de migration Nuxt 3 → 4 (déclenche swiper-migration si détecté)
+    └── swiper-migration/SKILL.md  # autonome : audit + migration des sliders vers swiper/vue
 ```
 
 Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh` — une seule copie, pas de duplication.
