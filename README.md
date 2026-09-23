@@ -99,7 +99,7 @@ claude-skills/
 │   │   ├── core.md  dev.md  review.md  security.md
 │   │   └── …
 │   ├── vue/
-│   │   └── MAIN.md          # Forme 1 : fichier unique sectionné (## core / dev / review / security)
+│   │   └── MAIN.md          # Forme 1 : fichier unique sectionné (## core / dev / review / security / nuxt4-migration / swiper-migration)
 │   ├── react/
 │   │   └── MAIN.md
 │   └── angular/
@@ -122,8 +122,8 @@ claude-skills/
     ├── archi-c4/
     │   ├── SKILL.md
     │   └── assets/          # template.html figé + model.example.js (contrat)
-    ├── nuxt4-migration/SKILL.md   # autonome : audit + plan de migration Nuxt 3 → 4 (déclenche swiper-migration si détecté)
-    └── swiper-migration/SKILL.md  # autonome : audit + migration des sliders vers swiper/vue
+    ├── nuxt4-migration/SKILL.md   # point d'entrée : charge stack/vue/MAIN.md (nuxt4-migration, déclenche swiper-migration si Swiper détecté)
+    └── swiper-migration/SKILL.md  # point d'entrée : charge stack/vue/MAIN.md (swiper-migration)
 ```
 
 Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh` — une seule copie, pas de duplication.
