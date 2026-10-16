@@ -19,6 +19,66 @@ Source of truth: Notion « Checklist Qualité GM [Modèle à dupliquer] » (data
 
 Stack names from `shared/stack-detect.md`: `laravel` → `L`, `drupal` → `D`, `vue` (Vue/Nuxt) → `N`, `wordpress` → `W`. For a stack absent from the checklist (`django`, `python`, generic `php`/`js`), apply only the `*` rules.
 
+## Besoins projet
+
+Not every rule fits every project: an extranet has no SEO, a site without upload doesn't need SEC-01. The project's needs are recorded once in its **profil qualité** (`.gm/quality-profile.md`, see `/gm:quality profile`) and the table below turns them into rules. A rule is **applicable** when its techno and section match **and** its condition below holds. A rule listed nowhere here has no condition: it always applies.
+
+Conditions: `a | b` = a or b, `a & b` = a and b.
+
+### Besoins (clés du profil)
+
+| Clé | Signification |
+|---|---|
+| `seo` | Le site doit être indexé par les moteurs de recherche |
+| `public` | Le front est accessible sans authentification (vitrine, éditorial, e-commerce) — `non` pour un extranet / intranet / API seule |
+| `multilingue` | Plusieurs langues de contenu |
+| `multisite` | Plusieurs sites sur une même base de code / instance |
+| `accessibilite` | Le front doit respecter les guidelines d'accessibilité |
+| `formulaires` | Formulaires de saisie côté front (contact, candidature, inscription…) |
+| `comptes` | Comptes utilisateurs / authentification côté front |
+| `uploads` | Upload de fichiers par les utilisateurs ou le BO |
+| `api` | L'application expose une API |
+| `backoffice` | Back-office d'administration |
+| `ecommerce` | Tunnel d'achat / paiement |
+| `tracking` | Outils de tracking / cookies tiers (analytics, GTM, pixels…) |
+| `listings` | Pages de listing avec recherche et/ou pagination |
+| `medias` | Médias audio / vidéo |
+| `starter` | Projet initialisé depuis un starter GM |
+
+Derived needs (never asked, computed): `formulaires_publics` = `formulaires & public` ; `donnees_perso` = `formulaires | comptes | ecommerce`.
+
+### Conditions par règle
+
+| Condition | Règles |
+|---|---|
+| `seo` | SEO-06 to SEO-10, SEO-12, SEO-13, SEO-15, SEO-17, SEO-19 to SEO-24 |
+| `seo \| accessibilite` | SEO-01, SEO-05, SEO-14, SEO-16 |
+| `multilingue` | SEO-02 |
+| `seo & multilingue` | SEO-03, SEO-04 |
+| `seo & listings` | SEO-06, SEO-07, SEO-12 (in addition to `seo`) |
+| `public` | SEO-25, QUAL-01 |
+| `accessibilite` | A11Y-01 to A11Y-32 |
+| `accessibilite & medias` | A11Y-01, A11Y-10, A11Y-17 (in addition to `accessibilite`) |
+| `accessibilite & formulaires` | A11Y-08, A11Y-22, A11Y-24, A11Y-29 (in addition to `accessibilite`) |
+| `multisite` | QUAL-04 |
+| `ecommerce` | QUAL-07 |
+| `api` | QUAL-03, QUAL-06, SEC-21 |
+| `api & comptes` | SEC-18 |
+| `comptes` | SEC-07, SEC-08, QUAL-28 |
+| `comptes \| formulaires_publics` | SEC-09 |
+| `formulaires_publics` | SEC-15 |
+| `formulaires` | QUAL-14, QUAL-29 |
+| `donnees_perso` | RGPD-01, RGPD-02, RGPD-04, RGPD-06 |
+| `formulaires & donnees_perso` | RGPD-05 |
+| `tracking` | RGPD-03 |
+| `uploads` | SEC-01, SEC-24, ECO-07 |
+| `uploads & backoffice` | QUAL-12 |
+| `backoffice` | SEC-22 |
+| `listings` | ECO-15 |
+| `starter` | SEC-17 |
+
+When a rule appears on several lines, **all** its conditions must hold (e.g. SEO-06 needs `seo` and `listings`). SEO-11 (préprod non indexable) has no condition on purpose: a preprod must never be indexed, whatever the project. For a non-indexed project (`seo: non`), the **prod** must be non-indexable too — flag it if it isn't.
+
 ## SÉCURITÉ
 
 | ID | Règle | Sect. | Technos | MEL | Vérif |
