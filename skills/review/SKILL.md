@@ -58,6 +58,7 @@ Assess each, and only report what applies:
 - **Security** — Input validation, access checks, SQL/XSS/CSRF, secrets, privilege boundaries. Flag anything that widens attack surface.
 - **Performance & cacheability** — Apply the loaded stack's checklist (e.g. Drupal cache contexts/tags/max-age, N+1 entity loads; Vue reactivity/hydration). Generic: unnecessary work on hot paths, missing caching, N+1 patterns.
 - **Standards** — Match the **local idiom** of the file (don't impose DI on a fully procedural module, etc.) and the loaded stack's coding standard. Run the linters (see below) rather than eyeballing.
+- **Checklist Qualité GM** — Run `/gm:quality` in `check` mode (read `${CLAUDE_SKILL_DIR}/../quality/SKILL.md`, « Mode `check` »; the checklist it refers to is `${CLAUDE_SKILL_DIR}/../../shared/quality-checklist.md` — pass that resolved path to the subagent): it spawns the `quality-checker` subagent on the same diff. Map its findings into this review: a 🔴 (bloquant MEL) rule non conforme → **Major** (**Blocker** when it's also a security hole); a non-blocking one → **Minor**; « incertain » → Minor with what's missing. Cite the rule ID in the finding (`[Major] SEC-11 …`). Its « À vérifier en recette » list goes into the **manual UAT steps**.
 - **Tests** — Is new logic covered? If the project has no test infra, say so and recommend (don't fabricate a lone untestable test); document manual UAT steps instead.
 
 ## Run what you can

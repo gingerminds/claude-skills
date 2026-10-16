@@ -53,6 +53,10 @@ Determine whether the ticket is a **bug** or a **feature/refactor** — this dec
 - **Feature / refactor** → apply `${CLAUDE_SKILL_DIR}/../../shared/scope-classification.md`: classify bounded vs architectural, and sketch approaches only if the ticket doesn't already point to one.
 - **Mixed** (a bug ticket that also asks for an improvement) → apply both, reusing the reading you've already done rather than re-reading the ticket twice.
 
+## Quality rules
+
+Once the stack and the scope are known, apply **`/gm:quality`** in `context` mode (read `${CLAUDE_SKILL_DIR}/../quality/SKILL.md` and follow its « Mode `context` »; the checklist it refers to is `${CLAUDE_SKILL_DIR}/../../shared/quality-checklist.md`): it filters the Checklist Qualité GM down to the rules this ticket can affect. Reuse the stack you already detected — don't detect twice. Its output becomes the brief's **Checklist qualité GM** section.
+
 ## Understand it
 
 Read the whole ticket, including the notes (they often carry the real decision or a scope change). Extract:
@@ -96,6 +100,10 @@ Produce one compact brief and keep it in context for the rest of the session. Ad
 **Critères d'acceptation**
 - [ ] <critère> <(inféré) si dérivé>
 
+**Checklist qualité GM** (règles applicables — via /gm:quality context)
+- 🔴 <ID> — <règle, rattachée à l'endroit concerné dans ce ticket>
+- À vérifier en recette : <IDs + test concret>
+
 **Contraintes / risques:** <multilingue, cache, accès, migration… ou "aucune notable">
 **Questions ouvertes:** <bloquantes posées maintenant — sinon "aucune">
 ```
@@ -109,7 +117,8 @@ This skill stops at understanding — it writes **no code**. Once the brief is s
 - Point the user to the resolved **`/gm:<stack>`** dev skill (from the "Detect the stack" step) to do the work — it will survey the existing custom code against the "À regarder" list, then implement. If the stack has no dedicated dev skill yet (generic `php`/`js`, or a stack we don't cover), say so and hand off to generic dev discipline instead.
 - Make the brief's **Contraintes / risques** explicit and specific: the dev skill uses them to decide *which* stack knowledge to load. A ticket flagged security/access, cacheability, or migration is not plain feature work — say so, so the dev skill pulls the matching nature (e.g. its `security`/`review` resource) on top of `dev`, instead of coding it as a vanilla feature.
 - For a bug ticket, remind the dev skill to resume from the **Investigation**'s hypothesis (pattern comparison, test-before-fix, one change at a time, rule of three) rather than re-investigating from scratch.
-- Remind that the loop ends with **`/gm:review`** before opening a merge request (then `/gm:merge-request`).
+- Pass the **Checklist qualité GM** rules on as constraints the dev skill builds against — not as an afterthought for review.
+- Remind that the loop ends with **`/gm:review`** (which runs the quality check on the diff) before opening a merge request (then `/gm:merge-request`).
 
 ## Non-goals
 
