@@ -15,6 +15,8 @@ Load `${CLAUDE_SKILL_DIR}/../../stack/laravel/MAIN.md` for the **dev** nature �
 
 If the work comes from a ticket and you don't already have its intent in context, run **`/gm:ticket`** first — it digests the ticket into a brief (goal, "À regarder", acceptance criteria) that tells you where to focus the survey below. If the user already gave you the intent, carry on.
 
+Without a ticket brief, still apply **`/gm:quality`** (`context` mode) once the intent is clear, so the Checklist Qualité GM rules that apply to this change are known before you code.
+
 ## Survey the existing custom code first
 
 Before writing any code, **read the project's existing app code** to build a picture of what already exists — don't reinvent or duplicate. When a ticket brief exists, let its "À regarder" list steer where you look first. Unless you've already done this in the current session:
