@@ -14,6 +14,9 @@ Pour toute tâche de dev (feature, bug, refactor) :
 - avant de committer : /gm:review, qui inclut le contrôle /gm:quality check sur le diff.
 Questions, lectures de code ou tâches hors dev : ignore ce rappel.
 MSG
+    if [ ! -f "$dir/.gm/quality-profile.md" ]; then
+      echo "Profil qualité absent (.gm/quality-profile.md) : il sera créé au premier /gm:quality (besoins du projet : SEO, multilingue, API…), ou via /gm:quality profile."
+    fi
     exit 0
   fi
 done

@@ -22,7 +22,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `merge-request` | `/gm:merge-request` | Prépare une MR GitLab — commit ciblé, push, `glab mr create` en Draft avec description liée au ticket. |
 | `merge-review` | `/gm:merge-review` | Review côté reviewer d'une MR GitLab existante — fond, forme, langue, standards — charge le ticket Mantis lié et rédige une note + recommandation approve / request-changes. Stack-agnostique (via `gm:review`). |
 | `security` | `/gm:security` | Audit sécurité des dépendances et de l'infra — `composer audit` / `npm audit`, advisories CMS/framework, config Docker — priorisé par criticité réelle, avec correctifs ou marches à suivre. Stack-agnostique : les checks spécifiques (ex. SA Drupal) viennent de `stack/`. |
-| `quality` | `/gm:quality` | Applique la **Checklist Qualité GM** (sécurité, SEO, RGPD, accessibilité, éco-conception, qualité, process) à chaque tâche de dev : mode `context` (règles applicables avant de coder, filtrées par stack et front/back), mode `check` (audit du diff via le subagent `quality-checker`, appelé par `/gm:review`), mode `sync` (resynchro du snapshot depuis Notion). |
+| `quality` | `/gm:quality` | Applique la **Checklist Qualité GM** (sécurité, SEO, RGPD, accessibilité, éco-conception, qualité, process) à chaque tâche de dev : mode `profile` (profil projet versionné `.gm/quality-profile.md` : SEO, multilingue, API… pour écarter les règles sans objet), mode `context` (règles applicables avant de coder, filtrées par profil, stack et front/back), mode `check` (audit du diff via le subagent `quality-checker`, appelé par `/gm:review`), mode `sync` (resynchro du snapshot depuis Notion). |
 | `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressources dédiées par techno quand elles existent. |
 
 ## Installation
@@ -76,7 +76,11 @@ Côté reviewer, `/gm:merge-review` prend une MR existante (URL ou numéro), cha
 
 ### Checklist Qualité GM
 
-La checklist Notion « Checklist Qualité GM » est versionnée dans `shared/quality-checklist.md` (une règle = un ID stable, ex. `SEC-11`, filtrable par techno, front/back, bloquant MEL, et type de vérification `code` / `config` / `recette`). Elle s'applique automatiquement à chaque tâche de dev :
+La checklist Notion « Checklist Qualité GM » est versionnée dans `shared/quality-checklist.md` (une règle = un ID stable, ex. `SEC-11`, filtrable par techno, front/back, bloquant MEL, et type de vérification `code` / `config` / `recette`).
+
+Chaque projet client a un **profil qualité** versionné dans son repo, `.gm/quality-profile.md` : type de projet et besoins (`seo`, `multilingue`, `api`, `comptes`, `uploads`…). Il écarte les règles sans objet (un extranet sans SEO ne se voit pas proposer les règles SEO), avec des exclusions / inclusions manuelles par ID. Il est créé au premier `/gm:quality` par auto-détection dans le code puis confirmation en quelques questions, et se révise avec `/gm:quality profile`.
+
+La checklist s'applique automatiquement à chaque tâche de dev :
 
 - **Hook SessionStart** (`hooks/`) : à l'ouverture d'une session dans un projet (manifest détecté), Claude reçoit un rappel de la checklist.
 - **Début de tâche** : `/gm:ticket` et les skills dev (`/gm:drupal`, `/gm:laravel`…) chargent `/gm:quality` en mode `context`.
@@ -96,7 +100,7 @@ claude-skills/
 ├── agents/
 │   └── quality-checker.md   # subagent read-only : audit d'un diff vs Checklist Qualité GM
 ├── hooks/
-│   ├── hooks.json           # SessionStart → rappel de la Checklist Qualité GM
+│   ├── hooks.json           # SessionStart → rappel de la Checklist Qualité GM (+ profil absent)
 │   └── quality-reminder.sh
 ├── scripts/
 │   └── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
@@ -126,7 +130,7 @@ claude-skills/
     ├── merge-request/SKILL.md
     ├── merge-review/SKILL.md
     ├── security/SKILL.md    # générique : détecte la stack → charge stack/<x>/MAIN.md (security)
-    ├── quality/SKILL.md     # Checklist Qualité GM : context | check | sync
+    ├── quality/SKILL.md     # Checklist Qualité GM : context | check | profile | sync
     └── archi-c4/
         ├── SKILL.md
         └── assets/          # template.html figé + model.example.js (contrat)
