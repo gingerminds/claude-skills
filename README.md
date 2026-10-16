@@ -22,6 +22,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `merge-request` | `/gm:merge-request` | Prépare une MR GitLab — commit ciblé, push, `glab mr create` en Draft avec description liée au ticket. |
 | `merge-review` | `/gm:merge-review` | Review côté reviewer d'une MR GitLab existante — fond, forme, langue, standards — charge le ticket Mantis lié et rédige une note + recommandation approve / request-changes. Stack-agnostique (via `gm:review`). |
 | `security` | `/gm:security` | Audit sécurité des dépendances et de l'infra — `composer audit` / `npm audit`, advisories CMS/framework, config Docker — priorisé par criticité réelle, avec correctifs ou marches à suivre. Stack-agnostique : les checks spécifiques (ex. SA Drupal) viennent de `stack/`. |
+| `quality` | `/gm:quality` | Applique la **Checklist Qualité GM** (sécurité, SEO, RGPD, accessibilité, éco-conception, qualité, process) à chaque tâche de dev : mode `context` (règles applicables avant de coder, filtrées par stack et front/back), mode `check` (audit du diff via le subagent `quality-checker`, appelé par `/gm:review`), mode `sync` (resynchro du snapshot depuis Notion). |
 | `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressources dédiées par techno quand elles existent. |
 
 ## Installation
@@ -65,13 +66,23 @@ Sur un clone local, fais d'abord un `git pull` dans le dépôt, puis `/plugin ma
 Tape `/gm:<skill>` dans Claude Code. Les skills se chaînent — un flux Drupal typique :
 
 ```
-/gm:ticket        # digère le ticket Mantis en brief
+/gm:ticket        # digère le ticket Mantis en brief (+ règles Checklist Qualité GM applicables)
 /gm:drupal        # implémente en s'appuyant sur le brief + le code existant
-/gm:review        # verdict severity-ranked sur le diff
+/gm:review        # verdict severity-ranked sur le diff (+ contrôle Checklist Qualité GM)
 /gm:merge-request # ouvre la MR GitLab (Draft) liée au ticket
 ```
 
 Côté reviewer, `/gm:merge-review` prend une MR existante (URL ou numéro), charge le ticket lié et rédige la note de review. `/gm:security` fait un audit dépendances + infra à part entière, `/gm:docker-devops` couvre tout le volet conteneurs / CI.
+
+### Checklist Qualité GM
+
+La checklist Notion « Checklist Qualité GM » est versionnée dans `shared/quality-checklist.md` (une règle = un ID stable, ex. `SEC-11`, filtrable par techno, front/back, bloquant MEL, et type de vérification `code` / `config` / `recette`). Elle s'applique automatiquement à chaque tâche de dev :
+
+- **Hook SessionStart** (`hooks/`) : à l'ouverture d'une session dans un projet (manifest détecté), Claude reçoit un rappel de la checklist.
+- **Début de tâche** : `/gm:ticket` et les skills dev (`/gm:drupal`, `/gm:laravel`…) chargent `/gm:quality` en mode `context`.
+- **Avant commit** : `/gm:review` lance `/gm:quality check`, exécuté par le subagent `quality-checker` (`agents/`) en contexte isolé ; les règles bloquantes non respectées remontent en **Major**.
+
+Quand la checklist Notion évolue, un mainteneur lance `/gm:quality sync` (MCP Notion requis), relit les règles ajoutées, puis publie une nouvelle version du plugin.
 
 Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépare, génère et maintient un modèle **C4 interactif** (HTML autonome) dans `.archi/` — vue projet (C1/C2) dans `.archi/index.html` et une page par unité custom (C3, C4 à la demande), à ouvrir dans le navigateur.
 
@@ -82,11 +93,17 @@ claude-skills/
 ├── .claude-plugin/
 │   ├── marketplace.json     # déclare le marketplace "gingerminds" + le plugin "gm"
 │   └── plugin.json          # manifeste du plugin "gm" (nom + version) — sert au dev local via --plugin-dir
+├── agents/
+│   └── quality-checker.md   # subagent read-only : audit d'un diff vs Checklist Qualité GM
+├── hooks/
+│   ├── hooks.json           # SessionStart → rappel de la Checklist Qualité GM
+│   └── quality-reminder.sh
 ├── scripts/
 │   └── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
 ├── shared/                  # ressources transverses (indépendantes de la techno)
 │   ├── runner.md            # ordre de priorité du runner : make → docker → lando
 │   ├── stack-detect.md      # cheatsheet de détection de stack + règle de chargement
+│   ├── quality-checklist.md # snapshot versionné de la Checklist Qualité GM (Notion) — consommé par quality
 │   ├── root-cause.md        # investigation de cause racine (tickets bug) — consommé par ticket
 │   └── scope-classification.md  # classification bounded/architectural (tickets feature) — consommé par ticket
 ├── stack/                   # spécificités par techno, chargées à la demande
@@ -109,6 +126,7 @@ claude-skills/
     ├── merge-request/SKILL.md
     ├── merge-review/SKILL.md
     ├── security/SKILL.md    # générique : détecte la stack → charge stack/<x>/MAIN.md (security)
+    ├── quality/SKILL.md     # Checklist Qualité GM : context | check | sync
     └── archi-c4/
         ├── SKILL.md
         └── assets/          # template.html figé + model.example.js (contrat)
