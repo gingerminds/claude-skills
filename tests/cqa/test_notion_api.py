@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import socket
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -132,15 +133,15 @@ class RequestTest(unittest.TestCase):
     def test_network_failure_becomes_a_notion_error(self):
         for cause in (OSError("Name or service not known"), http.client.IncompleteRead(b"")):
             with self.subTest(cause=type(cause).__name__):
-                client, transport, clock = make_client([cause])
+                client, transport, clock = make_client([cause] * 5)
                 with self.assertRaises(NotionError) as caught:
                     client.request("GET", "/users/me")
                 error = caught.exception
                 self.assertEqual((error.status, error.code), (0, "network_error"))
                 self.assertIn(str(cause), error.message)
                 self.assertIs(error.__cause__, cause)
-                self.assertEqual(len(transport.calls), 1)
-                self.assertEqual(clock.sleeps, [])
+                self.assertEqual(len(transport.calls), 5)
+                self.assertEqual(clock.sleeps, [1, 2, 4, 8])
 
     def test_success_body_must_be_a_json_object(self):
         for raw in (b"", b"<html></html>", b"[1, 2]"):
@@ -235,9 +236,110 @@ class RetryTest(unittest.TestCase):
 
     def test_a_retry_resends_the_same_request(self):
         client, transport, _ = make_client([failure(503), OK])
-        client.request("POST", "/comments", body={"a": 1})
+        client.request("PATCH", "/pages/p1", body={"a": 1})
         first, second = transport.calls
         self.assertEqual(first, second)
+
+    def test_network_failure_is_retried(self):
+        for frozen in (False, True):
+            with self.subTest(frozen=frozen):
+                client, transport, clock = make_client([OSError("down"), OK], frozen=frozen)
+                self.assertEqual(client.request("GET", "/users/me"), {"object": "user"})
+                self.assertEqual(clock.sleeps, [1])
+                self.assertEqual(len(transport.calls), 2)
+
+    def test_failure_kinds_share_the_five_attempts(self):
+        responses = [
+            OSError("down"),
+            failure(503),
+            failure(429, headers={"Retry-After": "1"}),
+            OSError("down"),
+            failure(503),
+        ]
+        client, transport, clock = make_client(responses)
+        with self.assertRaises(NotionError) as caught:
+            client.request("GET", "/users/me")
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(len(transport.calls), 5)
+        self.assertEqual(clock.sleeps, [1, 2, 1, 8])
+
+    def test_idempotent_flag_controls_the_replay_of_server_and_network_errors(self):
+        for idempotent, expected_calls in ((True, 2), (False, 1)):
+            for label, first in (("server error", failure(503)), ("network", OSError("down"))):
+                with self.subTest(idempotent=idempotent, first=label):
+                    client, transport, clock = make_client([first, OK])
+                    if idempotent:
+                        self.assertEqual(
+                            client.request("POST", "/x", body={}, idempotent=True),
+                            {"object": "user"},
+                        )
+                    else:
+                        with self.assertRaises(NotionError):
+                            client.request("POST", "/x", body={}, idempotent=False)
+                    self.assertEqual(len(transport.calls), expected_calls)
+                    self.assertEqual(clock.sleeps, [1] if idempotent else [])
+
+
+class WriteRetryTest(unittest.TestCase):
+    RICH_TEXT = [{"type": "text", "text": {"content": "Contrôle validé"}}]
+    CREATED = (200, {}, {"object": "comment", "id": "c1"})
+
+    def test_create_comment_is_not_replayed_on_a_server_error(self):
+        for status in (500, 502, 503, 504):
+            with self.subTest(status=status):
+                client, transport, clock = make_client([failure(status, "server_error", "Boom")])
+                with self.assertRaises(NotionError) as caught:
+                    client.create_comment("p1", self.RICH_TEXT)
+                error = caught.exception
+                self.assertEqual((error.status, error.code), (status, "server_error"))
+                self.assertEqual(len(transport.calls), 1)
+                self.assertEqual(clock.sleeps, [])
+
+    def test_create_comment_is_not_replayed_after_a_network_failure(self):
+        for cause in (OSError("down"), http.client.IncompleteRead(b"")):
+            with self.subTest(cause=type(cause).__name__):
+                client, transport, clock = make_client([cause])
+                with self.assertRaises(NotionError) as caught:
+                    client.create_comment("p1", self.RICH_TEXT)
+                error = caught.exception
+                self.assertEqual((error.status, error.code), (0, "network_error"))
+                self.assertEqual(len(transport.calls), 1)
+                self.assertEqual(clock.sleeps, [])
+
+    def test_create_comment_is_retried_when_rate_limited(self):
+        for frozen in (False, True):
+            with self.subTest(frozen=frozen):
+                rate_limited = failure(429, "rate_limited", headers={"Retry-After": "2"})
+                client, transport, clock = make_client([rate_limited, self.CREATED], frozen=frozen)
+                created = client.create_comment("p1", self.RICH_TEXT)
+                self.assertEqual(created, {"object": "comment", "id": "c1"})
+                self.assertEqual(clock.sleeps, [2])
+                first, second = transport.calls
+                self.assertEqual(first, second)
+
+    def test_create_comment_stops_at_a_server_error_after_a_rate_limit(self):
+        rate_limited = failure(429, "rate_limited", headers={"Retry-After": "1"})
+        client, transport, clock = make_client([rate_limited, failure(503)])
+        with self.assertRaises(NotionError) as caught:
+            client.create_comment("p1", self.RICH_TEXT)
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual(clock.sleeps, [1])
+
+    def test_other_calls_still_retry_server_errors_and_network_failures(self):
+        calls = [
+            ("update_page", ("p1", {"Statut": {"status": {"name": "Mis en place"}}}), OK),
+            ("query_data_source", ("ds1",), listing(items("r1"))),
+            ("page_markdown", ("p1",), markdown_response()),
+        ]
+        first_failures = {"server error": failure(503), "network failure": OSError("down")}
+        for name, args, success in calls:
+            for label, first in first_failures.items():
+                with self.subTest(call=name, first=label):
+                    client, transport, clock = make_client([first, success])
+                    getattr(client, name)(*args)
+                    self.assertEqual(len(transport.calls), 2)
+                    self.assertEqual(clock.sleeps, [1])
 
 
 class ThrottleTest(unittest.TestCase):
@@ -541,3 +643,10 @@ class UrllibTransportTest(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(response_headers["X-Example"], "yes")
         self.assertEqual(json.loads(raw)["method"], "GET")
+
+    def test_refused_connection_raises_an_os_error(self):
+        with socket.socket() as probe:
+            probe.bind(("localhost", 0))
+            port = probe.getsockname()[1]
+        with self.assertRaises(OSError):
+            urllib_transport("GET", f"http://localhost:{port}/", {}, None)

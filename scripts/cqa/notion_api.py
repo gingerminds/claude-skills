@@ -65,7 +65,7 @@ def urllib_transport(
 
 
 class NotionClient:
-    """Notion REST client. Requests are spaced by 1 / rate seconds, 429 and 5xx are retried."""
+    """Notion REST client. Requests are spaced by 1 / rate seconds and failed ones are retried."""
 
     def __init__(
         self,
@@ -86,9 +86,21 @@ class NotionClient:
         self._last_sent: Optional[float] = None
 
     def request(
-        self, method: str, path: str, *, body: Optional[dict] = None, query: Optional[dict] = None
+        self,
+        method: str,
+        path: str,
+        *,
+        body: Optional[dict] = None,
+        query: Optional[dict] = None,
+        idempotent: bool = True,
     ) -> dict:
-        """Send one call and return its JSON object. 429 and 5xx are retried, others raise."""
+        """Send one call and return its JSON object.
+
+        Up to 5 attempts, spaced by 1, 2, 4 then 8 s (or by Retry-After on a 429). A 429 is
+        always retried. A 5xx or a network failure is retried only when idempotent: otherwise
+        Notion may already have processed the request and a replay could do it twice.
+        Any other error raises at once.
+        """
         url = f"{API_BASE}/{path.lstrip('/')}"
         if query:
             url += "?" + urllib.parse.urlencode(query)
@@ -100,11 +112,17 @@ class NotionClient:
         delay = 0
         while True:
             self._wait_turn(delay)
-            status, response_headers, raw = self._send(method.upper(), url, headers, data)
+            try:
+                status, response_headers, raw = self._transport(method.upper(), url, headers, data)
+            except (OSError, http.client.HTTPException) as error:
+                delay = next(delays, None)
+                if delay is None or not idempotent:
+                    raise _network_error(error) from error
+                continue
             if 200 <= status < 300:
                 return _success_body(status, raw)
             delay = next(delays, None)
-            if delay is None or not (status == 429 or status >= 500):
+            if delay is None or not (status == 429 or (idempotent and status >= 500)):
                 raise _api_error(status, raw)
             if status == 429:
                 delay = _retry_after(response_headers, delay)
@@ -162,8 +180,9 @@ class NotionClient:
         return self.request("PATCH", f"/pages/{page_id}", body={"properties": properties})
 
     def create_comment(self, page_id: str, rich_text: list[dict]) -> dict:
+        """Post a comment. Not replayed after a 5xx or a network failure: it may be stored."""
         body = {"parent": {"page_id": page_id}, "rich_text": rich_text}
-        return self.request("POST", "/comments", body=body)
+        return self.request("POST", "/comments", body=body, idempotent=False)
 
     def _wait_turn(self, delay: float) -> None:
         """Sleep until delay has passed and the interval since the previous send has too."""
@@ -174,15 +193,10 @@ class NotionClient:
             self._sleep(wait)
         self._last_sent = self._clock()
 
-    def _send(
-        self, method: str, url: str, headers: dict, data: Optional[bytes]
-    ) -> tuple[int, dict, bytes]:
-        try:
-            return self._transport(method, url, headers, data)
-        except (OSError, http.client.HTTPException) as error:
-            reason = str(error) or type(error).__name__
-            message = f"Connexion à Notion impossible : {reason}"
-            raise NotionError(0, "network_error", message) from error
+
+def _network_error(error: Exception) -> NotionError:
+    reason = str(error) or type(error).__name__
+    return NotionError(0, "network_error", f"Connexion à Notion impossible : {reason}")
 
 
 def _json_object(raw: bytes) -> Optional[dict]:
