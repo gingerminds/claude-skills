@@ -98,11 +98,15 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     """Return a copy of the finding with the verdict lowered where the rules require it.
 
     The copy carries "guardrail": the French reasons (joined with "; ") of the rules that
-    changed the verdict, or None. Rules, in this order:
+    changed the verdict, or None. Rules, in this order, each on the verdict left by the
+    previous ones:
     1. ok without evidence, or with a confidence other than high, becomes ok_human;
     2. ok on a row that asks for "Intervention humaine" becomes ok_human;
     3. a filled divergence turns ok and ok_human into partial;
-    4. needs_probes still filled after the follow-up turn any verdict into unknown.
+    4. needs_probes still filled after the follow-up cap the verdict at unknown: ko and partial
+       are kept, ok_human, ok and na become unknown;
+    5. an ok whose todo or human_check is filled becomes ok_human (contradictory finding);
+    6. an na whose confidence is not high becomes unknown.
     A guardrail the sub-agent wrote itself is always overwritten.
     """
     result = copy.deepcopy(finding)
@@ -120,9 +124,15 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     if verdict in ("ok", "ok_human") and _filled(result.get("divergence")):
         reasons.append(f"écart code / préprod : {verdict} abaissé à partial")
         verdict = "partial"
-    if followup_done and result.get("needs_probes") and verdict != "unknown":
+    if followup_done and result.get("needs_probes") and worst([verdict, "unknown"]) != verdict:
         reasons.append(f"sondes en attente après la relance : {verdict} abaissé à unknown")
         verdict = "unknown"
+    if verdict == "ok" and (_filled(result.get("todo")) or _filled(result.get("human_check"))):
+        verdict = "ok_human"
+        reasons.append("à faire ou à valider renseigné : ok abaissé à ok_human")
+    if verdict == "na" and result.get("confidence") != "high":
+        verdict = "unknown"
+        reasons.append("confiance non haute : na abaissé à unknown")
     result["verdict"] = verdict
     result["guardrail"] = "; ".join(reasons) if reasons else None
     return result

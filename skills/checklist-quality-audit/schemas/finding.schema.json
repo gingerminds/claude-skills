@@ -37,7 +37,7 @@
         },
         "verdict": {
           "enum": ["ko", "partial", "unknown", "ok_human", "ok", "na"],
-          "description": "ko: not compliant. partial: partly compliant. unknown: cannot be evaluated (say why in summary). ok_human: compliant as far as the audit can tell, a human must validate (say what in human_check). ok: compliant, verified without human judgement; needs at least one piece of evidence and high confidence, otherwise it is lowered to ok_human. na: not applicable. When several repos give different results, keep the worst in this order: ko, partial, unknown, ok_human, ok, na."
+          "description": "ko: not compliant. partial: partly compliant. unknown: cannot be evaluated (say why in summary). ok_human: compliant as far as the audit can tell, a human must validate (say what in human_check). ok: compliant, verified without human judgement; needs at least one piece of evidence and high confidence, and todo and human_check must be null, otherwise it is lowered to ok_human. na: not applicable; na needs high confidence, otherwise it becomes unknown. When several repos give different results, keep the worst in this order: ko, partial, unknown, ok_human, ok, na."
         },
         "confidence": {
           "enum": ["high", "medium", "low"],
@@ -65,12 +65,12 @@
         "todo": {
           "type": ["string", "null"],
           "maxLength": 400,
-          "description": "What to do to fix the row, in French, at most 400 characters. null when there is nothing to do."
+          "description": "What to do to fix the row, in French, at most 400 characters. null when there is nothing to do: an ok with a filled todo is lowered to ok_human."
         },
         "human_check": {
           "type": ["string", "null"],
           "maxLength": 400,
-          "description": "What a human must validate, in French, at most 400 characters. null when nothing."
+          "description": "What a human must validate, in French, at most 400 characters. null when nothing: an ok with a filled human_check is lowered to ok_human."
         },
         "divergence": {
           "type": ["string", "null"],
@@ -80,7 +80,7 @@
         "needs_probes": {
           "type": "array",
           "items": {"$ref": "#/$defs/probe"},
-          "description": "HTTP responses missing from the tool collection. Ask for them here instead of concluding; they are run once, then the lot is re-run. [] when none is needed. A finding that still waits for probes after the follow-up becomes unknown."
+          "description": "HTTP responses missing from the tool collection. Ask for them here instead of concluding; they are run once, then the lot is re-run. [] when none is needed. A finding that still waits for probes after the follow-up is capped at unknown: ko and partial are kept, ok_human, ok and na become unknown."
         }
       },
       "examples": [

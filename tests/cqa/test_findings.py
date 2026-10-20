@@ -1,4 +1,5 @@
 import copy
+import itertools
 import json
 import unittest
 from pathlib import Path
@@ -50,6 +51,11 @@ def make_finding(**overrides):
     }
     finding.update(overrides)
     return finding
+
+
+def make_ok(**overrides):
+    overrides.setdefault("todo", None)
+    return make_finding(verdict="ok", **overrides)
 
 
 def make_document(*findings, lot="front-1"):
@@ -468,24 +474,24 @@ class ValidateDocumentTest(unittest.TestCase):
 
 class GuardrailsTest(unittest.TestCase):
     def test_solid_ok_is_kept(self):
-        result = guard(make_finding(verdict="ok"))
+        result = guard(make_ok())
         self.assertEqual(result["verdict"], "ok")
         self.assertIsNone(result["guardrail"])
 
     def test_ok_without_evidence_becomes_ok_human(self):
-        result = guard(make_finding(verdict="ok", evidence=[]))
+        result = guard(make_ok(evidence=[]))
         self.assertEqual(result["verdict"], "ok_human")
         self.assertIn("preuve", result["guardrail"])
 
     def test_ok_without_high_confidence_becomes_ok_human(self):
         for confidence in ("medium", "low"):
             with self.subTest(confidence=confidence):
-                result = guard(make_finding(verdict="ok", confidence=confidence))
+                result = guard(make_ok(confidence=confidence))
                 self.assertEqual(result["verdict"], "ok_human")
                 self.assertIn("confiance", result["guardrail"])
 
     def test_other_verdicts_are_not_touched_by_the_evidence_rule(self):
-        for verdict in ("ko", "partial", "unknown", "ok_human", "na"):
+        for verdict in ("ko", "partial", "unknown", "ok_human"):
             with self.subTest(verdict=verdict):
                 result = guard(make_finding(verdict=verdict, evidence=[], confidence="low"))
                 self.assertEqual(result["verdict"], verdict)
@@ -493,7 +499,7 @@ class GuardrailsTest(unittest.TestCase):
 
     def test_guardrail_human_tool(self):
         row = make_row(tools=("Code", HUMAN))
-        result = guard(make_finding(verdict="ok"), row)
+        result = guard(make_ok(), row)
         self.assertEqual(result["verdict"], "ok_human")
         self.assertIn("humaine", result["guardrail"])
 
@@ -506,7 +512,7 @@ class GuardrailsTest(unittest.TestCase):
                 self.assertIsNone(result["guardrail"])
 
     def test_row_without_tools_key(self):
-        result = apply_guardrails(make_finding(verdict="ok"), {"ref": 79}, followup_done=False)
+        result = apply_guardrails(make_ok(), {"ref": 79}, followup_done=False)
         self.assertEqual(result["verdict"], "ok")
 
     def test_guardrail_divergence(self):
@@ -526,13 +532,13 @@ class GuardrailsTest(unittest.TestCase):
     def test_empty_divergence_is_not_a_divergence(self):
         for value in (None, "", "  \n"):
             with self.subTest(value=value):
-                result = guard(make_finding(verdict="ok", divergence=value))
+                result = guard(make_ok(divergence=value))
                 self.assertEqual(result["verdict"], "ok")
                 self.assertIsNone(result["guardrail"])
 
     def test_guardrail_pending_probes(self):
         probes = [{"url": "https://preprod.example.org/", "method": "GET"}]
-        result = guard(make_finding(verdict="ok", needs_probes=probes), followup_done=True)
+        result = guard(make_ok(needs_probes=probes), followup_done=True)
         self.assertEqual(result["verdict"], "unknown")
         self.assertIn("sondes", result["guardrail"])
 
@@ -542,13 +548,22 @@ class GuardrailsTest(unittest.TestCase):
         self.assertEqual(result["verdict"], "ko")
         self.assertIsNone(result["guardrail"])
 
-    def test_pending_probes_turn_every_verdict_into_unknown_after_the_follow_up(self):
+    def test_pending_probes_keep_a_failing_verdict_after_the_follow_up(self):
         probes = [{"url": "https://preprod.example.org/", "method": "HEAD"}]
-        for verdict in ("ko", "partial", "ok_human", "ok", "na"):
+        for verdict in ("ko", "partial"):
+            with self.subTest(verdict=verdict):
+                result = guard(make_finding(verdict=verdict, needs_probes=probes), followup_done=True)
+                self.assertEqual(result["verdict"], verdict)
+                self.assertIsNone(result["guardrail"])
+
+    def test_pending_probes_cap_a_passing_verdict_at_unknown_after_the_follow_up(self):
+        probes = [{"url": "https://preprod.example.org/", "method": "HEAD"}]
+        for verdict in ("ok_human", "ok", "na"):
             with self.subTest(verdict=verdict):
                 result = guard(make_finding(verdict=verdict, needs_probes=probes), followup_done=True)
                 self.assertEqual(result["verdict"], "unknown")
-                self.assertTrue(result["guardrail"])
+                self.assertIn("sondes", result["guardrail"])
+                self.assertIn(f"{verdict} abaissé à unknown", result["guardrail"])
 
     def test_unknown_with_pending_probes_is_unchanged(self):
         probes = [{"url": "https://preprod.example.org/", "method": "GET"}]
@@ -557,26 +572,89 @@ class GuardrailsTest(unittest.TestCase):
         self.assertIsNone(result["guardrail"])
 
     def test_no_pending_probes_after_the_follow_up(self):
-        result = guard(make_finding(verdict="ok", needs_probes=[]), followup_done=True)
+        result = guard(make_ok(needs_probes=[]), followup_done=True)
         self.assertEqual(result["verdict"], "ok")
 
     def test_rules_chain_in_order(self):
-        weak_ok = make_finding(verdict="ok", evidence=[], divergence="Écart.")
+        weak_ok = make_ok(evidence=[], divergence="Écart.")
         result = guard(weak_ok)
         self.assertEqual(result["verdict"], "partial")
         self.assertIn("preuve", result["guardrail"])
         self.assertIn("écart", result["guardrail"])
 
-    def test_probes_rule_comes_last(self):
+    def test_probes_cap_comes_after_the_first_three_rules(self):
         probes = [{"url": "https://preprod.example.org/", "method": "GET"}]
-        finding = make_finding(verdict="ok", divergence="Écart.", needs_probes=probes)
-        result = guard(finding, make_row(tools=(HUMAN,)), followup_done=True)
+        human = make_row(tools=(HUMAN,))
+        result = guard(make_ok(needs_probes=probes), human, followup_done=True)
         self.assertEqual(result["verdict"], "unknown")
-        for word in ("humaine", "écart", "sondes"):
-            self.assertIn(word, result["guardrail"])
+        self.assertIn("humaine", result["guardrail"])
+        self.assertIn("ok_human abaissé à unknown", result["guardrail"])
+        result = guard(make_ok(divergence="Écart.", needs_probes=probes), human, followup_done=True)
+        self.assertEqual(result["verdict"], "partial")
+        self.assertIn("écart", result["guardrail"])
+        self.assertNotIn("sondes", result["guardrail"])
+
+    def test_ok_with_a_todo_or_a_human_check_becomes_ok_human(self):
+        for key, word in (("todo", "à faire"), ("human_check", "à valider")):
+            with self.subTest(key=key):
+                result = guard(make_ok(**{key: "Vérifier le menu mobile."}))
+                self.assertEqual(result["verdict"], "ok_human")
+                self.assertIn(word, result["guardrail"])
+                self.assertIn("ok abaissé à ok_human", result["guardrail"])
+
+    def test_blank_todo_and_human_check_do_not_count(self):
+        for value in (None, "", "  \n"):
+            with self.subTest(value=value):
+                result = guard(make_ok(todo=value, human_check=value))
+                self.assertEqual(result["verdict"], "ok")
+                self.assertIsNone(result["guardrail"])
+
+    def test_todo_and_human_check_do_not_touch_other_verdicts(self):
+        for verdict in ("ko", "partial", "unknown", "ok_human", "na"):
+            with self.subTest(verdict=verdict):
+                finding = make_finding(verdict=verdict, todo="À faire.", human_check="À valider.")
+                result = guard(finding)
+                self.assertEqual(result["verdict"], verdict)
+                self.assertIsNone(result["guardrail"])
+
+    def test_na_without_high_confidence_becomes_unknown(self):
+        for confidence in ("medium", "low"):
+            with self.subTest(confidence=confidence):
+                result = guard(make_finding(verdict="na", confidence=confidence))
+                self.assertEqual(result["verdict"], "unknown")
+                self.assertIn("confiance", result["guardrail"])
+                self.assertIn("na abaissé à unknown", result["guardrail"])
+
+    def test_na_with_high_confidence_is_kept(self):
+        result = guard(make_finding(verdict="na", confidence="high", evidence=[]))
+        self.assertEqual(result["verdict"], "na")
+        self.assertIsNone(result["guardrail"])
+
+    def test_contradiction_rules_come_after_the_first_four(self):
+        result = guard(make_ok(todo="À faire.", divergence="Écart."))
+        self.assertEqual(result["verdict"], "partial")
+        self.assertIn("écart", result["guardrail"])
+        self.assertNotIn("à faire", result["guardrail"])
+        result = guard(make_ok(todo="À faire.", evidence=[]))
+        self.assertEqual(result["verdict"], "ok_human")
+        self.assertIn("preuve", result["guardrail"])
+        self.assertNotIn("à faire", result["guardrail"])
+
+    def test_pending_probes_come_before_the_contradiction_rules(self):
+        probes = [{"url": "https://preprod.example.org/", "method": "GET"}]
+        result = guard(make_ok(todo="À faire.", needs_probes=probes), followup_done=True)
+        self.assertEqual(result["verdict"], "unknown")
+        self.assertIn("sondes", result["guardrail"])
+        self.assertNotIn("à faire", result["guardrail"])
+        result = guard(
+            make_finding(verdict="na", confidence="low", needs_probes=probes), followup_done=True
+        )
+        self.assertEqual(result["verdict"], "unknown")
+        self.assertIn("sondes", result["guardrail"])
+        self.assertNotIn("confiance", result["guardrail"])
 
     def test_returns_a_copy(self):
-        finding = make_finding(verdict="ok", evidence=[])
+        finding = make_ok(evidence=[])
         before = copy.deepcopy(finding)
         result = guard(finding)
         self.assertEqual(finding, before)
@@ -586,26 +664,51 @@ class GuardrailsTest(unittest.TestCase):
         self.assertEqual(finding, before)
 
     def test_other_fields_are_kept(self):
-        finding = make_finding(verdict="ok", confidence="low", human_check="À relire.")
+        finding = make_ok(confidence="low", human_check="À relire.")
         result = guard(finding)
         for key, value in finding.items():
             if key != "verdict":
                 self.assertEqual(result[key], value)
 
     def test_guardrail_written_by_a_model_is_overwritten(self):
-        result = guard(make_finding(verdict="ok", guardrail="trust me"))
+        result = guard(make_ok(guardrail="trust me"))
         self.assertIsNone(result["guardrail"])
 
     def test_guardrails_never_raise_a_verdict(self):
         rank = {verdict: index for index, verdict in enumerate(VERDICTS)}
-        for verdict in ("ko", "partial", "ok_human", "ok"):
-            for divergence in (None, "Écart."):
-                for evidence in ([], make_finding()["evidence"]):
-                    for tools in (("Code",), (HUMAN,)):
-                        finding = make_finding(verdict=verdict, divergence=divergence, evidence=evidence)
-                        result = guard(finding, make_row(tools=tools))
-                        with self.subTest(verdict=verdict, divergence=divergence, tools=tools):
-                            self.assertLessEqual(rank[result["verdict"]], rank[verdict])
+        probes = [{"url": "https://preprod.example.org/", "method": "GET"}]
+        evidence = make_finding()["evidence"]
+        cases = itertools.product(
+            VERDICTS,
+            ("high", "low"),
+            ([], evidence),
+            (None, "Écart."),
+            (None, "À faire."),
+            ([], probes),
+            (False, True),
+            (("Code",), (HUMAN,)),
+        )
+        for verdict, confidence, ev, divergence, todo, needs, followup, tools in cases:
+            finding = make_finding(
+                verdict=verdict,
+                confidence=confidence,
+                evidence=ev,
+                divergence=divergence,
+                todo=todo,
+                needs_probes=needs,
+            )
+            result = guard(finding, make_row(tools=tools), followup_done=followup)
+            with self.subTest(
+                verdict=verdict,
+                confidence=confidence,
+                evidence=bool(ev),
+                divergence=divergence,
+                todo=todo,
+                probes=bool(needs),
+                followup=followup,
+                tools=tools,
+            ):
+                self.assertLessEqual(rank[result["verdict"]], rank[verdict])
 
 
 class SchemaTest(unittest.TestCase):
@@ -630,6 +733,17 @@ class SchemaTest(unittest.TestCase):
         for name, definition in self.finding["properties"].items():
             with self.subTest(name=name):
                 self.assertTrue(definition.get("description"))
+
+    def test_descriptions_state_the_guardrails(self):
+        properties = self.finding["properties"]
+        verdict = properties["verdict"]["description"]
+        self.assertIn("todo and human_check must be null", verdict)
+        self.assertIn("na needs high confidence", verdict)
+        for key in ("todo", "human_check"):
+            self.assertIn("an ok with a filled", properties[key]["description"])
+        probes = properties["needs_probes"]["description"]
+        self.assertIn("unknown", probes)
+        self.assertIn("ko and partial are kept", probes)
 
     def test_confidence_enum(self):
         self.assertEqual(self.finding["properties"]["confidence"]["enum"], list(CONFIDENCES))
