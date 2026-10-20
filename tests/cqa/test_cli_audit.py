@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 from cqa import probes, report
 from cqa.notion_write import apply_plan, validate_plan
@@ -36,6 +37,29 @@ SENSITIVE_PATHS = [
     "/phpinfo.php",
 ]
 BASE = "https://preprod.example.org"
+EXPOSURE_PATHS = [
+    "/telescope",
+    "/horizon",
+    "/_ignition/health-check",
+    "/wp-json/wp/v2/users",
+    "/xmlrpc.php",
+    "/CHANGELOG.txt",
+    "/core/CHANGELOG.txt",
+    "/user/login",
+    "/wp-login.php",
+]
+ESCAPING_URLS = [
+    f"{BASE}//evil.example.net/x",
+    f"{BASE}///evil.example.net/x",
+    f"{BASE}/\\evil.example.net/x",
+    f"{BASE}/\\\\evil.example.net/x",
+    f"{BASE}//evil.example.net",
+]
+
+
+def origin_of(url):
+    parts = urlsplit(url)
+    return parts.scheme, parts.hostname, parts.port or {"http": 80, "https": 443}[parts.scheme]
 
 
 class AuditCase(prepare.CliCase):
@@ -290,11 +314,102 @@ class BuildProbesTest(unittest.TestCase):
             "Content-Encoding",
             "/../secret",
             "/page#ancre",
+            "https://preprod.example.org//evil.example.net/x",
+            "https://preprod.example.org/\\evil.example.net/x",
+            "/\\evil.example.net/x",
         ]
         text = " ".join(f"`{item}`" for item in ignored) + " `/valide` `/home`"
         document = self.build(technos=(), rows=[row], fiches={"CQ-101.md": text})
         paths = [probe["path"] for probe in document["probes"] if probe["id"].startswith("fiche")]
         self.assertEqual(paths, ["/valide", "/home"])
+
+    def test_urls_that_resolve_to_another_host_are_ignored(self):
+        row = {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}
+        cited = ESCAPING_URLS + ["/\\evil.example.net/x", "/\\\\evil.example.net"]
+        text = " ".join(f"`{item}`" for item in cited) + " `/valide`"
+        pages = [{"template": "T", "url": url} for url in ESCAPING_URLS]
+        document = self.build(
+            technos=("Laravel",), rows=[row], fiches={"CQ-101.md": text}, key_pages=pages
+        )
+        ids = [probe["id"] for probe in document["probes"]]
+        self.assertFalse([name for name in ids if name.startswith("page-")])
+        self.assertEqual([name for name in ids if name.startswith("fiche-")], ["fiche-101-1"])
+
+    def test_no_probe_leaves_the_origin_of_the_target(self):
+        row = {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}
+        text = " ".join(f"`{item}`" for item in ESCAPING_URLS) + f" `{BASE}/ok` `/ok2`"
+        pages = [{"template": "T", "url": url} for url in ESCAPING_URLS]
+        pages.append({"template": "Ok", "url": f"{BASE}/page"})
+        document = self.build(
+            technos=("Laravel", "Drupal", "Wordpress"),
+            rows=[row],
+            fiches={"CQ-101.md": text},
+            key_pages=pages,
+        )
+        absolute = [probe["path"] for probe in document["probes"] if "://" in probe["path"]]
+        self.assertEqual(absolute, ["http://preprod.example.org/"])
+        for probe in document["probes"]:
+            if probe["path"] in absolute:
+                continue
+            joined = urljoin(BASE + "/", probe["path"])
+            self.assertEqual(origin_of(joined), origin_of(BASE), probe["path"])
+            self.assertFalse(probe["path"].startswith("//"), probe["path"])
+            self.assertNotIn("\\", probe["path"])
+        self.assertGreater(len(document["probes"]), 20)
+
+    def test_stays_on_origin(self):
+        origin = origin_of(BASE)
+        allowed = ["/", "/a", "/a/b?c=d", "/%5Cevil.example.net", "/a//b", "/a:b"]
+        refused = [
+            "",
+            "a",
+            "//evil.example.net/x",
+            "///x",
+            "/\\evil.example.net/x",
+            "/a\\b",
+            "/\t/evil.example.net",
+            "/\n/evil.example.net",
+            "/a b",
+            "/a\x7f",
+            "http://evil.example.net/",
+            "https://preprod.example.org/",
+        ]
+        for path in allowed:
+            self.assertTrue(probes._stays_on_origin(path, origin), repr(path))
+        for path in refused:
+            self.assertFalse(probes._stays_on_origin(path, origin), repr(path))
+        self.assertTrue(probes._stays_on_origin("/a", ("https", "::1", 8443)))
+
+    def test_the_collection_refuses_a_path_that_leaves_the_origin(self):
+        collected = probes._Collected(origin_of(BASE))
+        self.assertFalse(collected.add("a", "//evil.example.net/x", body="keep"))
+        self.assertFalse(collected.add("b", "/\\evil.example.net/x", body="keep"))
+        self.assertFalse(collected.add("c", "https://evil.example.net/", body="keep"))
+        insecure = "http://preprod.example.org/"
+        self.assertTrue(collected.add("d", insecure, body="keep", absolute=True))
+        self.assertTrue(collected.add("e", "/fine", body="keep"))
+        self.assertEqual([probe["id"] for probe in collected.probes], ["d", "e"])
+
+    def test_exposure_paths_never_keep_the_body_whatever_the_source(self):
+        row = {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}
+        cited = EXPOSURE_PATHS + ["/wp-json/wp/v2/users?per_page=1", "/changelog.txt"]
+        text = " ".join(f"`{item}`" for item in cited) + " `/accueil`"
+        pages = [{"template": "Login", "url": f"{BASE}/user/login"}]
+        found = self.by_path(
+            self.build(technos=(), rows=[row], fiches={"CQ-101.md": text}, key_pages=pages)
+        )
+        for path in cited:
+            self.assertEqual((found[path]["body"], found[path]["sensitive"]), ("none", True), path)
+        plain = found["/accueil"]
+        self.assertEqual((plain["body"], plain["sensitive"]), ("keep", False))
+
+    def test_every_sensitive_base_path_stays_sensitive_from_any_source(self):
+        row = {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}
+        cited = [f"{path}?x=1" for path in SENSITIVE_PATHS]
+        text = " ".join(f"`{path}`" for path in cited)
+        found = self.by_path(self.build(technos=(), rows=[row], fiches={"CQ-101.md": text}))
+        for path in cited:
+            self.assertEqual((found[path]["body"], found[path]["sensitive"]), ("none", True), path)
 
     def test_sensitive_fiche_paths_never_keep_the_body(self):
         row = {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}
@@ -409,8 +524,10 @@ class FollowupProbesTest(AuditCase):
         for probe in document["probes"]:
             self.assertEqual(set(probe), PROBE_KEYS)
             self.assertEqual(probe["headers"], {})
-            self.assertFalse(probe["sensitive"])
-        self.assertEqual([probe["body"] for probe in document["probes"]], ["keep", "none"])
+        self.assertEqual(
+            [(probe["body"], probe["sensitive"]) for probe in document["probes"]],
+            [("none", True), ("none", False)],
+        )
         ids = [probe["id"] for probe in document["probes"]]
         self.assertEqual(len(ids), len(set(ids)))
         self.assertEqual(document["lots"], ["code-performance", "code-securite"])
@@ -451,6 +568,19 @@ class FollowupProbesTest(AuditCase):
         self.assertEqual([item["url"] for item in document["discarded"]], shown)
         self.assertNotIn("pw", json.dumps(document["discarded"]))
         self.assertTrue(all(item["reason"] for item in document["discarded"]))
+
+    def test_followup_refuses_urls_that_resolve_to_another_host(self):
+        run_dir = self.make_run()
+        needs = [{"url": url, "method": "GET"} for url in ESCAPING_URLS]
+        needs.append({"url": f"{BASE}/fine", "method": "GET"})
+        self.edit_finding(run_dir, "code-performance", 101, needs_probes=needs)
+        self.edit_finding(run_dir, "code-securite", 103, needs_probes=[])
+        document = probes.followup_probes(run_dir)
+        self.assertEqual([probe["path"] for probe in document["probes"]], ["/fine"])
+        self.assertEqual([item["url"] for item in document["discarded"]], ESCAPING_URLS)
+        self.assertTrue(all(item["reason"] for item in document["discarded"]))
+        for probe in document["probes"]:
+            self.assertEqual(origin_of(urljoin(BASE + "/", probe["path"])), origin_of(BASE))
 
     def test_followup_keeps_query_and_same_origin_variants(self):
         run_dir = self.make_run()
@@ -868,6 +998,39 @@ class PlanTest(AuditCase):
         self.assertIn(103, summary["unknown"])
         self.assertNotIn((103, "status"), self.ops(run_dir))
 
+    def discard_everything_but_one_ok_probe(self, run_dir):
+        """102 is ok and asks for a probe outside the origin: no probe can answer it."""
+        pending = [{"url": "https://other.example.net/probe", "method": "GET"}]
+        self.edit_finding(run_dir, "code-performance", 102, needs_probes=pending)
+        self.edit_finding(run_dir, "code-performance", 101, needs_probes=[])
+        self.edit_finding(run_dir, "code-securite", 103, needs_probes=[])
+
+    def test_unprobeable_pending_probes_cap_the_verdict_once_followup_was_requested(self):
+        run_dir = self.make_run()
+        self.discard_everything_but_one_ok_probe(run_dir)
+        result = self.run_json(["probes", run_dir, "--followup"])
+        self.assertEqual((result["count"], result["lots"]), (0, ["code-performance"]))
+        self.assertFalse((run_dir / "findings" / "code-performance-followup.json").exists())
+        summary = self.plan(run_dir)
+        self.assertIn(102, summary["unknown"])
+        self.assertNotIn((102, "status"), self.ops(run_dir))
+        self.assertEqual(self.ops(run_dir)[(102, "comment")]["verdict"], "unknown")
+
+    def test_the_cap_only_covers_the_lots_with_pending_probes(self):
+        run_dir = self.make_run()
+        self.discard_everything_but_one_ok_probe(run_dir)
+        self.edit_finding(run_dir, "code-securite", 103, verdict="ok", todo=None)
+        self.run_json(["probes", run_dir, "--followup"])
+        summary = self.plan(run_dir)
+        self.assertNotIn(103, summary["unknown"])
+        self.assertEqual(self.ops(run_dir)[(103, "status")]["after"], "Ok / Recetté")
+
+    def test_no_cap_before_the_followup_was_requested(self):
+        run_dir = self.make_run()
+        self.discard_everything_but_one_ok_probe(run_dir)
+        self.assertNotIn(102, self.plan(run_dir)["unknown"])
+        self.assertEqual(self.ops(run_dir)[(102, "status")]["after"], "Ok / Recetté")
+
     def test_without_followup_a_pending_probe_does_not_lower_the_verdict(self):
         run_dir = self.make_run()
         pending = [{"url": "https://other.example.net/probe", "method": "GET"}]
@@ -965,6 +1128,15 @@ class ManifestTest(AuditCase):
         for item in tools[2:]:
             self.assertEqual(item["status"], "failed")
             self.assertIn("result.json", item["reason"])
+
+    def test_a_result_without_tool_or_status_takes_the_folder_name(self):
+        run_dir = self.make_run()
+        self.write(run_dir, "tools/assets/result.json", {"reason": "x"})
+        tools = {item["tool"]: item for item in report.manifest(run_dir)["tools"]}
+        self.assertEqual(sorted(tools), ["assets", "http", "lighthouse"])
+        self.assertEqual(tools["assets"]["reason"], "x")
+        self.write(run_dir, "tools/nu/result.json", {"tool": 5, "status": "ok"})
+        self.assertIn("nu", [item["tool"] for item in report.manifest(run_dir)["tools"]])
 
     def test_manifest_without_tools(self):
         run_dir = self.make_run()
@@ -1070,6 +1242,16 @@ class SynthesisTest(AuditCase):
         text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
         self.assertIn("- Évaluables : 10 (dont 3 avec validation humaine)", text)
         self.assertNotIn("13", text.split("## Couverture")[1].split("##")[0])
+
+    def test_synthesis_survives_a_tool_result_without_tool_or_status(self):
+        run_dir = self.make_planned_run()
+        self.write(run_dir, "tools/assets/result.json", {"reason": "x"})
+        self.write(run_dir, "tools/nu/result.json", {"tool": "nu", "status": ["ok"]})
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+        outils = text.split("## Outils")[1]
+        self.assertIn("- assets : statut inconnu (x)", outils)
+        self.assertIn("- nu : statut inconnu", outils)
+        self.assertIn("- http : ok", outils)
 
     def test_alignment_gaps(self):
         run_dir = self.make_run()
@@ -1388,6 +1570,15 @@ class AssignTest(AuditCase):
         self.assertNotIn(102, self.proposed(self.assign(run_dir, "--include-unknown")))
         followup = self.read(run_dir, "findings/code-performance.json")
         self.write(run_dir, "findings/code-performance-followup.json", followup)
+        self.assertIn(102, self.proposed(self.assign(run_dir, "--include-unknown")))
+
+    def test_unprobeable_pending_probes_make_a_row_unknown(self):
+        run_dir = self.make_run()
+        self.edit_row(run_dir, 102, status="Mis en place")
+        pending = [{"url": "https://other.example.net/probe", "method": "GET"}]
+        self.edit_finding(run_dir, "code-performance", 102, needs_probes=pending)
+        self.edit_finding(run_dir, "code-performance", 101, needs_probes=[])
+        self.run_json(["probes", run_dir, "--followup"])
         self.assertIn(102, self.proposed(self.assign(run_dir, "--include-unknown")))
 
     def test_include_unknown_needs_lots_json(self):

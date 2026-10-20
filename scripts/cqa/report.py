@@ -30,6 +30,7 @@ _STATUS_ORDER = (
 _TOOL_STATUS = {"ok": "ok", "failed": "en échec", "skipped": "ignoré"}
 _NO_CATEGORY = "Sans catégorie"
 _NO_RESULT = "result.json absent ou illisible"
+_UNKNOWN_STATUS = "statut inconnu"
 _UNKNOWN_WITHOUT_TEXT = "voir le commentaire déjà présent dans Notion"
 _CONSTAT = "Constat : "
 _HUMAN_SECTION = "Statuts posés par un humain et contredits par l'audit"
@@ -239,7 +240,9 @@ def _gap_lines(context: dict) -> list:
 def _tool_lines(tools: dict) -> list:
     lines = []
     for item in tools["tools"]:
-        label = _TOOL_STATUS.get(item.get("status"), str(item.get("status")))
+        status = item.get("status")
+        label = _TOOL_STATUS.get(status, status) if isinstance(status, str) and status else None
+        label = label or _UNKNOWN_STATUS
         reason = _line(item.get("reason"))
         lines.append(f"- {item['tool']} : {label}" + (f" ({reason})" if reason else ""))
     return lines
@@ -267,6 +270,8 @@ def _tool_result(folder: Path) -> dict:
     except (OSError, ValueError):
         result = None
     if isinstance(result, dict):
+        if not (isinstance(result.get("tool"), str) and result["tool"]):
+            result = {**result, "tool": folder.name}
         return result
     return {"tool": folder.name, "status": "failed", "reason": _NO_RESULT}
 

@@ -4,7 +4,7 @@ import re
 import uuid
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from cqa.findings import validate_document
 from cqa.target import validate_url
@@ -43,6 +43,11 @@ _TECHNO_PROBES = {
     ),
 }
 
+_EXPOSURE_PATHS = frozenset(
+    path.casefold()
+    for group in (_SENSITIVE_PROBES, *_TECHNO_PROBES.values())
+    for _, path in group
+)
 _BACKTICKS = re.compile(r"`([^`\n]+)`")
 _TARGET_PATH = re.compile(r"/[A-Za-z0-9._~%/+=:@&-]*(?:\?[A-Za-z0-9._~%/+=:@&?-]*)?")
 _SYSTEM_ROOTS = frozenset(
@@ -97,18 +102,19 @@ def build_probes(
 
     Order: content probes (body kept), sensitive probes (never any body), probes of each project
     techno, key pages (headers only), then the paths and target URLs that the fiches of the rows
-    asking for HTTP quote between backticks. Every path is relative to the origin of base_url,
-    and a probe that repeats an earlier one is left out. All probes are GET.
+    asking for HTTP quote between backticks. Every path is relative to the origin of base_url
+    and resolves to it (the one absolute form is the http:// version of the same host), and a
+    probe that repeats an earlier one is left out. All probes are GET.
     """
     base = _checked_base(base_url, "base_url")
     origin = _origin(urlsplit(base))
-    collected = _Collected()
+    collected = _Collected(origin)
     for name, path in _CONTENT_PROBES:
         collected.add(name, path, body="keep")
     collected.add("not-found", f"/cqa-404-{uuid.uuid4().hex[:8]}", body="keep")
     insecure = _http_version(urlsplit(base))
     if insecure:
-        collected.add("http-version", insecure, body="keep")
+        collected.add("http-version", insecure, body="keep", absolute=True)
     for name, path in _SENSITIVE_PROBES:
         collected.add(name, path, body="none", sensitive=True)
     for techno in dict.fromkeys(str(item).casefold() for item in technos):
@@ -117,7 +123,9 @@ def build_probes(
     pages = 0
     for page in key_pages:
         path = _target_path(page.get("url") if isinstance(page, dict) else None, origin)
-        if path and collected.add(f"page-{pages + 1}", path, body="none"):
+        if path and collected.add(
+            f"page-{pages + 1}", path, body="none", sensitive=_is_sensitive(path)
+        ):
             pages += 1
     for row in sorted((row for row in rows if _asks_http(row)), key=lambda row: row["ref"]):
         cited = 0
@@ -143,49 +151,64 @@ def followup_probes(run_dir: Path) -> dict:
     base = target_url(context)
     origin = _origin(urlsplit(base))
     lots = _lot_entries(_read_json(run_dir / "lots.json", "cqa_plan.py lots"))
-    collected = _Collected()
-    pending_lots, discarded = [], []
-    for lot in lots:
-        document = _first_round(run_dir, lot["id"])
-        valid, _ = validate_document(document, set(lot["refs"])) if document else ([], [])
-        found = False
-        for item in valid:
-            for probe in item["needs_probes"]:
-                found = True
-                path, reason = _followup_path(probe["url"], origin)
-                if path is None:
-                    shown = _public_url(probe["url"])
-                    discarded.append(
-                        {"lot": lot["id"], "ref": item["ref"], "url": shown, "reason": reason}
-                    )
-                    continue
-                collected.add(
-                    f"followup-{len(collected.probes) + 1}",
-                    path,
-                    method=probe["method"],
-                    **_content_rule(path, probe["method"]),
-                )
-        if found:
-            pending_lots.append(lot["id"])
+    collected = _Collected(origin)
+    discarded = []
+    pending = list(_pending(run_dir, lots))
+    for lot_id, ref, probe in pending:
+        path, reason = _followup_path(probe["url"], origin)
+        if path is None:
+            shown = _public_url(probe["url"])
+            discarded.append({"lot": lot_id, "ref": ref, "url": shown, "reason": reason})
+            continue
+        collected.add(
+            f"followup-{len(collected.probes) + 1}",
+            path,
+            method=probe["method"],
+            **_content_rule(path, probe["method"]),
+        )
     return {
         "base_url": base,
         "probes": collected.probes,
-        "lots": pending_lots,
+        "lots": list(dict.fromkeys(lot_id for lot_id, _, _ in pending)),
         "discarded": discarded,
     }
 
 
-class _Collected:
-    """The probes built so far, without a repeated (method, path)."""
+def pending_lots(run_dir: Path, lots: list) -> list:
+    """Return the ids of the lots whose valid first-round findings still ask for probes.
 
-    def __init__(self):
+    The target is not needed: a lot is pending whatever becomes of its URLs.
+    """
+    pending = _pending(Path(run_dir), _lot_entries({"lots": lots}))
+    return list(dict.fromkeys(lot_id for lot_id, _, _ in pending))
+
+
+def _pending(run_dir: Path, lots: list):
+    """Yield (lot id, ref, probe) for each needs_probes entry of the valid first-round findings."""
+    for lot in lots:
+        document = _first_round(run_dir, lot["id"])
+        valid, _ = validate_document(document, set(lot["refs"])) if document else ([], [])
+        for item in valid:
+            for probe in item["needs_probes"]:
+                yield lot["id"], item["ref"], probe
+
+
+class _Collected:
+    """The probes built so far, without a repeated (method, path).
+
+    Whatever its source, a path that does not resolve to the target origin is refused here.
+    Only a probe flagged absolute (the http:// version of the base) skips that check.
+    """
+
+    def __init__(self, origin: tuple):
         self.probes = []
+        self._origin = origin
         self._seen = set()
 
-    def add(self, name, path, *, body, sensitive=False, method="GET") -> bool:
-        """Add a probe and return True, unless it repeats an earlier one."""
+    def add(self, name, path, *, body, sensitive=False, method="GET", absolute=False) -> bool:
+        """Add a probe and return True, unless it repeats an earlier one or leaves the origin."""
         key = (method, path)
-        if key in self._seen:
+        if key in self._seen or not (absolute or _stays_on_origin(path, self._origin)):
             return False
         self._seen.add(key)
         self.probes.append(
@@ -238,7 +261,26 @@ def _target_path(url, origin) -> Optional[str]:
         return None
     if not same:
         return None
-    return (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    return path if _stays_on_origin(path, origin) else None
+
+
+def _stays_on_origin(path: str, origin: tuple) -> bool:
+    """Whether a path resolved against the target gives a URL on the target origin.
+
+    "//host/x" and "/\\host/x" (a backslash counts as a slash for browsers and Node) point to
+    another host, as does a path holding a control character that URL parsers drop.
+    """
+    if not path.startswith("/") or path.startswith("//"):
+        return False
+    if any(char == "\\" or ord(char) <= 32 or ord(char) == 127 for char in path):
+        return False
+    scheme, host, port = origin
+    base = f"{scheme}://{f'[{host}]' if ':' in host else host}:{port}/"
+    try:
+        return _origin(urlsplit(urljoin(base, path))) == origin
+    except ValueError:
+        return False
 
 
 def _followup_path(url: str, origin) -> tuple:
@@ -265,7 +307,10 @@ def _public_url(url: str) -> str:
 
 
 def _is_sensitive(path: str) -> bool:
-    return bool(_SENSITIVE_PATH.search(path))
+    """Whether a path exposes something that must never be stored: sensitive base paths, the
+    techno exposure paths (whatever the project technos), and what the patterns recognize."""
+    bare = path.partition("?")[0].casefold().rstrip("/") or "/"
+    return bare in _EXPOSURE_PATHS or bool(_SENSITIVE_PATH.search(path))
 
 
 def _content_rule(path: str, method: str = "GET") -> dict:

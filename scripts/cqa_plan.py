@@ -1097,19 +1097,25 @@ def _read_findings(run_dir: Path, context: dict, lot: dict, *, followup: bool) -
 
 
 def _collect_findings(run_dir: Path, context: dict, lots: list) -> tuple:
-    """Return ({ref: finding}, refs of the lots relaunched after the probes).
+    """Return ({ref: finding}, refs of the lots that went through the follow-up of the probes).
 
     A finding of the follow-up file replaces the one of the first round; a ref the follow-up
-    file does not give (or gives invalid) keeps its first-round finding.
+    file does not give (or gives invalid) keeps its first-round finding. A lot went through the
+    follow-up when it has a follow-up file, or when probes-followup.json exists and the lot
+    still asked for probes: if every URL was discarded no relaunch has any use, but what the lot
+    waited for will not come either.
     """
     findings, followup_done = {}, set()
+    requested = set()
+    if (run_dir / "probes-followup.json").is_file():
+        requested = set(probes.pending_lots(run_dir, lots))
     for lot in lots:
         first = _read_findings(run_dir, context, lot, followup=False)
         second = _read_findings(run_dir, context, lot, followup=True)
         for found in (first, second):
             for item in found[0] if found else []:
                 findings[item["ref"]] = item
-        if second is not None:
+        if second is not None or lot["id"] in requested:
             followup_done.update(lot["refs"])
     return findings, followup_done
 
