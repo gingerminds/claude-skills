@@ -225,7 +225,8 @@ A row can concern several repos (Laravel back-office and Nuxt front, for example
 - Only ask for URLs on the origin (scheme, host and port) of the audit target: `target.preprod_url`, or `target.prod_url` on a J0 or J+7 run. Any other URL is dropped.
 - Never put credentials or a token in a probe URL. Ask only what decides the verdict, 5 URLs per finding at most.
 - The orchestrator runs every probe once through the toolbox, with the preprod credentials when needed. The answers land in `tools/http-followup/`. Then it relaunches the lot once with `Follow-up: yes`.
-- First round: give the verdict your evidence supports without the probe (often `unknown`), and list the probes.
+- A finding that lists probes is never `ok`, `ok_human` or `na`: give `unknown`, or `ko` or `partial` when your evidence already establishes it.
+- First round: list the probes with that verdict.
 - Follow-up round: remove every probe that got an answer, and judge again with it. Keep only the probes that got none. A finding that still lists probes after the follow-up is capped at `unknown` (`ko` and `partial` stay).
 
 ```json

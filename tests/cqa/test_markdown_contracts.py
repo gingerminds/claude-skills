@@ -18,6 +18,7 @@ CHROME_TOOLS = {
     for name in (
         "tabs_context_mcp",
         "tabs_create_mcp",
+        "tabs_close_mcp",
         "navigate",
         "read_page",
         "find",
@@ -32,6 +33,10 @@ EM_DASH = chr(0x2014)
 
 _PLUGIN_PATH = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/([^\s`\"'<>)]+)")
 _JSON_BLOCK = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
+_TOOL_QUERY = re.compile(r"`select:([^`]+)`")
+_CURL = re.compile(r"\bcurl [^`\n]*")
+_SQL_QUERY = re.compile(r"--sql \S+ [^\n\"]*\"([^\"\n]+)\"")
+_PROBES_CAP = "A finding that lists probes is never `ok`, `ok_human` or `na`"
 
 
 def _text(path: Path) -> str:
@@ -88,10 +93,47 @@ class AgentsTest(unittest.TestCase):
         self.assertIn("scripts/cqa_ssh_ro.py", text)
         self.assertIn("exit code 4", text)
 
+    def test_auditor_never_starts_the_runner(self):
+        text = _text(AUDITOR)
+        self.assertIn("Never start the project runner", text)
+        self.assertIn("read the target in the Makefile", text)
+
+    def test_auditor_curl_ignores_curlrc(self):
+        commands = _CURL.findall(_text(AUDITOR))
+        self.assertTrue(commands)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertTrue(command.startswith("curl -q "))
+
+    def test_auditor_sql_examples_have_a_limit(self):
+        queries = _SQL_QUERY.findall(_text(AUDITOR))
+        self.assertTrue(queries)
+        for query in queries:
+            with self.subTest(query=query):
+                self.assertRegex(query, r"\bLIMIT \d+$")
+
+    def test_first_round_probes_cap_the_verdict(self):
+        for path in (AUDITOR, BROWSER, VERDICTS_MD):
+            with self.subTest(file=path.name):
+                self.assertIn(_PROBES_CAP, _text(path))
+
     def test_browser_forbids_forms(self):
         text = _text(BROWSER)
         self.assertIn("Never submit a form", text)
         self.assertIn("Never type a password", text)
+
+    def test_browser_never_changes_state(self):
+        text = _text(BROWSER)
+        self.assertIn("Never click an element or open a URL that changes state", text)
+        self.assertIn("Never interact with a cookie or consent banner", text)
+        self.assertIn("Close only the tabs you created", text)
+
+    def test_browser_loads_every_chrome_tool(self):
+        queries = _TOOL_QUERY.findall(_text(BROWSER))
+        self.assertEqual(len(queries), 1)
+        loaded = set(queries[0].split(","))
+        self.assertEqual(loaded, {tool for tool in _tools(BROWSER) if tool in CHROME_TOOLS})
+        self.assertEqual(loaded, CHROME_TOOLS)
 
     def test_cited_plugin_paths_exist(self):
         for path in (AUDITOR, BROWSER, VERDICTS_MD):

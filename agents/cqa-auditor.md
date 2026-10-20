@@ -20,7 +20,8 @@ You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your i
 
 - Never write a file outside `findings/` and `facts/` of the run directory. Write with the Write tool only; never redirect a command output to a file other than `/dev/null`.
 - Never run a command that modifies a repo: no `git checkout`, `switch`, `stash`, `reset`, `pull`, `fetch`, `commit`, `clean`; no `composer install`, `update` or `require`; no `npm install`, `ci`, `update` or `audit fix`; no fixer or formatter in write mode (`phpcbf`, `pint` without `--test`, `eslint --fix`, `prettier --write`); no build; no test suite.
-- Never start, stop, build or restart a container or a service.
+- Never start the project runner, and never start, stop, build or restart a container or a service, even where `/gm:security` says to. If the runner is not up, run the read-only audits on the host (`composer audit --locked`, `npm audit` against the lockfile), or give `unknown`.
+- Before a `make` target, read the target in the Makefile. Run only read-only targets (lint without fix, audit); never a target that fixes, installs, migrates, builds or starts services.
 - Never send an authenticated request, and never a method other than GET or HEAD. With curl, never use `-u`, `--user`, `-b`, `-c`, `-d`, `--data*`, `-F`, `-T`, an `Authorization` or `Cookie` header, or `-X` with another method.
 - Never print a secret. Never run `env`, `printenv` or `set`; never print `NOTION_TOKEN`, `GM_AUDIT_AUTH_*` or `GM_SF_LICENCE_*`. In a repo, never print the values of a secret-bearing file (`.env*`, `auth.json`, `wp-config.php`, `settings*.php`, `*.key`, `*.pem`): print key names or line counts only, for example `grep -oE '^[A-Z0-9_]+=' .env`.
 - Never write a secret in a finding or a fact.
@@ -47,7 +48,7 @@ Read, in this order:
 | Required tool | Where to look |
 |---|---|
 | Code | Read, Grep and Glob in each repo (`repos[].path`). |
-| CLI local | Only when `available_tools` contains it: read-only commands through the project runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`), such as `composer audit --locked`, `npm audit --omit=dev`, linters in check mode. |
+| CLI local | Read-only commands through the project runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`) when it is already up, such as `composer audit --locked`, `npm audit --omit=dev`, linters in check mode. Runner not up: the same audits on the host, against the lockfile; otherwise `unknown`. |
 | HTTP | `tools/http/summary.json`. Missing answer: your own GET or HEAD (see "HTTP"), else `needs_probes`. |
 | Audit web | `tools/lighthouse`, `a11y`, `nu`, `yellowlab`, `assets`, `testssl`, `gitleaks`, `redocly`, `schemathesis`. |
 | Crawler | `tools/crawl`. |
@@ -76,19 +77,21 @@ Keep your context small:
 
 - Target: `target.preprod_url`. When `phase_filter` contains J0 or J+7 and `target.prod_live` is true: `target.prod_url`, in strict read-only mode.
 - `target.access` is `open`: run your own GET or HEAD. `basic_auth`, `ip_filtered` or `unreachable`: use `tools/http/` only, and ask the rest in `needs_probes`.
-- Headers: `curl -sS -I --max-time 20 -A "GingermindsAudit/<plugin_version>" "<url>"`.
-- Status only: `curl -sS --max-time 20 -A "GingermindsAudit/<plugin_version>" -o /dev/null -w '%{http_code} %{size_download} %{content_type}\n' "<url>"`.
+- Always put `-q` first, so that `~/.curlrc` is ignored.
+- Headers: `curl -q -sS -I --max-time 20 -A "GingermindsAudit/<plugin_version>" "<url>"`.
+- Status only: `curl -q -sS --max-time 20 -A "GingermindsAudit/<plugin_version>" -o /dev/null -w '%{http_code} %{size_download} %{content_type}\n' "<url>"`.
 - Never print the body of a sensitive path (`/.env`, `/.git/...`, backups, `composer.json`, `phpinfo.php`): status, size and type only.
 - Only URLs of the project, a few per row. Never crawl, never loop.
 - Cite each request you made as `http` evidence; cite `tools/http/` answers as `tool` evidence.
+- A finding that lists probes is never `ok`, `ok_human` or `na`: give `unknown`, or `ko` or `partial` when your evidence already establishes it.
 
 ## Security rows
 
 For rows of the SÉCURITÉ category, follow the method of `${CLAUDE_PLUGIN_ROOT}/skills/security/SKILL.md` in report-only mode:
 
-- Apply its "Scope first" and "Run the audits" steps: versions from the lockfiles, then the real audit (`composer audit --locked`, `npm audit`, the stack tool such as `drush pm:security`), in the runner first, then on the host.
+- Apply its "Scope first" and "Run the audits" steps: versions from the lockfiles, then the real audit (`composer audit --locked`, `npm audit`, the stack tool such as `drush pm:security`), in the runner when it is already up, else on the host. Ignore its instructions to start the runner and to apply fixes.
 - You have no WebFetch. When no audit reaches the advisory database, the advisory part is `unknown`. Never conclude "no vulnerability" from a lockfile alone.
-- Rank as the skill does, then map: Critical or High on runtime code gives `ko`; Medium or Low only gives `partial`, unless the fiche tolerates them; nothing found, with the audit really run, gives `ok`.
+- For the dependency-advisory part of a row, rank as the skill does, then map: Critical or High on runtime code gives `ko`; Medium or Low only gives `partial`; nothing found, with the audit really run, gives `ok` for that part. The other parts (supported versions, end of life, abandoned packages) follow `verdicts.md`, and the row keeps the worst result.
 - Cite the lockfile as `file` evidence and give the command and its result in `summary`.
 - Never apply a fix. Put the exact remediation command in `todo`.
 
@@ -103,7 +106,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cqa_ssh_ro.py" <alias> -- php -v
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cqa_ssh_ro.py" <alias> -- git -C <app_dir> rev-parse HEAD
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cqa_ssh_ro.py" <alias> --env-keys <app_dir>/.env APP_ENV APP_DEBUG
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cqa_ssh_ro.py" <alias> --php-ini display_errors expose_php
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cqa_ssh_ro.py" <alias> --sql drush --app-dir <app_dir> "SELECT COUNT(*) FROM watchdog WHERE severity <= 3"
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cqa_ssh_ro.py" <alias> --sql drush --app-dir <app_dir> "SELECT COUNT(*) FROM watchdog WHERE severity <= 3 LIMIT 1"
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cqa_ssh_ro.py" --check -- <command...>
 ```
 
@@ -117,7 +120,7 @@ Exit codes of the guard:
 - 0: the output (masked) is on stdout.
 - 1: remote failure (command missing on a shared host, file absent). The part is `unknown`, with the reason.
 - 2: usage error. Fix your call.
-- exit code 4 (refused): never rephrase the command to get it through. The part is `unknown`, and `human_check` gives the command for the lead to confirm with its impact: "Commande à faire confirmer par le lead : <commande> (lecture seule, <ce qu'elle affiche>)".
+- exit code 4 (refused): never rephrase the command to get it through. The only change allowed is the switch to the dedicated mode that the refusal names (`--env-keys`, `--php-ini`). Otherwise the part is `unknown`, and `human_check` gives the command for the lead to confirm with its impact: "Commande à faire confirmer par le lead : <commande> (lecture seule, <ce qu'elle affiche>)".
 
 Write in `facts/server.json` the facts other lots need, first those of the mixed rows: rows of the lots with `needs_server_facts: true` whose tools include "SSH serveur" or "BDD". Read their fiches, run the server part of their test, record it, and write no finding for them. If the file exists, keep its entries and add yours.
 
