@@ -222,7 +222,7 @@ A row can concern several repos (Laravel back-office and Nuxt front, for example
 
 - When the verdict depends on an HTTP answer that `tools/http/` does not hold and that you cannot get yourself, ask for it in `needs_probes` instead of guessing.
 - Each entry is `{"url": "<absolute URL>", "method": "GET"}` or `"HEAD"`. Never another method.
-- Only ask for URLs on the origin (scheme, host and port) of the audit target: `target.preprod_url`, or `target.prod_url` on a J0 or J+7 run. Any other URL is dropped.
+- Only ask for URLs on the origin (scheme, host and port) of the audit target: `target.preprod_url`, or `target.prod_url` on a prod run only, that is a `phase_filter` with J0 or J+7 while `target.prod_live` is true (the rule of `probes.is_prod_run`). Any other URL is dropped.
 - Never put credentials or a token in a probe URL. Ask only what decides the verdict, 5 URLs per finding at most.
 - The orchestrator runs every probe once through the toolbox, with the preprod credentials when needed. The answers land in `tools/http-followup/`. Then it relaunches the lot once with `Follow-up: yes`.
 - A finding that lists probes is never `ok`, `ok_human` or `na`: give `unknown`, or `ko` or `partial` when your evidence already establishes it.
@@ -261,3 +261,75 @@ Only the orchestrator writes in Notion, after the lead confirms. Sub-agents neve
 | row "En standby" | never changed | never changed | none |
 
 A status set by a human changes only with the lead's agreement.
+
+## For the orchestrator: plan, confirmation, writing
+
+Sub-agents can skip this section. Every Bash call starts with the `S=` line of SKILL.md (here unexpanded) and `RUN="<run_dir>"`.
+
+### Plan
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" plan "$RUN"
+```
+
+- It merges the findings (after the guardrails above), the rows and the exclusions into `notion/plan.json`, and prints its `summary`: `{"by_status_after", "blocking_non_conform", "unknown", "human_overrides": [{"ref", "before", "after"}], "deferred", "missing_in_copy"}`.
+- A comment is planned only when the status changes, or when neither the visible comments of the integration (`comments.json`) nor the earlier runs of this copy already carry the verdict: a run again does not repeat comments.
+- Exit 6: `context.json` incomplete for the comments (`lead.option`, `audited_sha`, `run_id`): fix it. Exit 2: a file of the run is missing (the message names the command).
+
+Titles of the refs to show, from `rows.json`:
+
+```bash
+RUN="<run_dir>"
+python3 - "$RUN/rows.json" 12 40 <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))["rows"]
+titles = {row["ref"]: row["title"] for row in rows if row.get("ref") is not None}
+for ref in map(int, sys.argv[2:]):
+    print(f"CQ-{ref} : {titles.get(ref, '?')}")
+PY
+```
+
+What the lead sees, in French:
+
+1. « Statuts après écriture : À traiter <n>, Mise en place partielle <n>, Mis en place <n>, Ok / Recetté <n>, Non applicable <n>, En standby <n>. »
+2. « Lignes bloquantes non conformes : » then one line per ref, `CQ-<ref> : <titre>`.
+3. « Lignes non évaluées : <n> » (the reasons are in the synthesis).
+4. « Statuts posés par un humain que l'audit changerait : » then `CQ-<ref> : <titre> (« <before> » vers « <after> »)`, or « aucun ».
+5. « Reportées à J0 / J+7 : <n>. Lignes du modèle absentes de la copie : <n>. »
+
+### Confirmation
+
+One question, « Écrire le plan dans la copie Notion ? »:
+
+- « Tout écrire »: statuses, assignments of the lead and comments, the human statuses listed included.
+- « Sans toucher aux statuts posés par un humain »: offered only when `human_overrides` is not empty. Those pages are left as they are, comments included. Keep the list shown above: the rebuilt plan no longer holds it, and SKILL.md section 8 adds it to `synthese.md`. Rebuild the plan first, so that the synthesis describes what is written, then apply with the same option:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
+```
+
+- « Ne rien écrire »: the plan stays in `notion/plan.json`; synthesis and scan are made locally, nothing goes to Notion.
+
+### Exit codes of `cqa_notion.py apply`
+
+`apply` prints `{"done", "skipped", "blocked": [{"key", "labels"}], "errors": [{"key", "message"}]}`. `done` and `skipped` are numbers: operations written now, and operations already written (listed in `notion/applied.json`, or a comment already on the page). It prints one French line per operation on stderr. The `key` of an operation is in `notion/plan.json`, with its `ref` and `kind`.
+
+| Exit | Meaning | What to tell the lead |
+|---|---|---|
+| exit 0 | every operation written or already there | « <done> opérations écrites, <skipped> déjà présentes. » |
+| exit 7 | at least one operation blocked, without any request; the others are written | for each entry of `blocked`, from its labels (`blocked[].labels`): « CQ-<ref> (<kind>) non écrit : <raison> », reasons below |
+| exit 3 | stopped on a network or Notion API error, or an operation refused by Notion; wins over 7 | « Écriture interrompue (<message>). Relancer : la reprise saute ce qui est déjà écrit. » Run the same command again once the cause is fixed: `notion/applied.json` makes it resume where it stopped. An operation refused by Notion skips the later operations of the same page. |
+| exit 8 | the plan targets the reference template | « Écriture refusée : la data source est celle du modèle de référence. » Nothing is written; check the copy URL of `context.json`. |
+| exit 2 | plan or `context.json` unreadable or invalid, environment variable missing | show the message, fix, run again |
+
+Labels of `blocked[].labels`:
+
+- `page_outside_copy`: « page hors de la copie » (not a row of `rows.json`, or not the page of the copy).
+- `unknown_option`: « option de « Assignée à » absente de la copie » (removed since the plan; Notion would create it, so the skill does not write it).
+- A secret label (`known_value`, `private_key`, `aws_key`, `gitlab_token`, `github_token`, `notion_token`, `jwt`, `credential_assignment`, `authorization_header`): « le texte contient ce qui ressemble à un secret (<label>) ». Never show the text. The lead writes that comment by hand if needed, without the secret.
+
+A blocked operation stays blocked when run again. `cqa_notion.py comment-page` follows the same codes and the same journal.
