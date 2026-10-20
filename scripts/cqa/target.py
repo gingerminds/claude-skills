@@ -1,6 +1,7 @@
 """Reachability of the audit target: what the preprod answers to a HEAD request."""
 import base64
 import http.client
+import ipaddress
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -55,34 +56,65 @@ def probe_target(
 ) -> dict:
     """Return {"status", "access"} for the answer of url to a HEAD request.
 
-    A GET follows when the server answers 405 to the HEAD. Redirects stay on the origin of
-    the URL (scheme, host and port): a redirect elsewhere is not followed and its status is
-    the answer, so credentials never leave the target. auth is a (user, password) pair sent
-    as Basic authentication. status is None when nothing answered. opener is an object with
-    open(request, timeout=...) returning a response usable in a with block; it defaults to a
-    urllib opener. Raises ValueError for a URL validate_url refuses.
+    A GET follows when the server answers 405 to the HEAD. A redirect is followed when it
+    stays on the origin of the URL (scheme, host and port) or only upgrades http to https on
+    the same host (port 80 to 443, or the same explicit port). Any other redirect, a downgrade
+    to http included, is not followed: its 3xx status is the answer and its Location header is
+    added as "location", so credentials never leave the target. status is None when nothing
+    answered.
+
+    auth is a (user, password) pair sent as Basic authentication; it is refused for an http
+    URL, except on a loopback address, because it would travel in clear. opener is an object
+    with open(request, timeout=...) returning a response usable in a with block; it defaults
+    to build_opener(). Raises ValueError for a URL validate_url refuses.
     """
     validate_url(url)
+    if auth is not None:
+        _require_encryption(url)
     if opener is None:
-        opener = urllib.request.build_opener(_SameOriginRedirect())
+        opener = build_opener(authenticated=auth is not None)
     headers = {"User-Agent": f"GingermindsAudit/{plugin_version()}"}
     if auth is not None:
         token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode("utf-8")).decode("ascii")
         headers["Authorization"] = f"Basic {token}"
-    status = _status(opener, url, "HEAD", headers, timeout)
+    status, location = _answer(opener, url, "HEAD", headers, timeout)
     if status == 405:
-        status = _status(opener, url, "GET", headers, timeout)
-    return {"status": status, "access": classify_access(status)}
+        status, location = _answer(opener, url, "GET", headers, timeout)
+    result = {"status": status, "access": classify_access(status)}
+    if location:
+        result["location"] = location
+    return result
+
+
+def build_opener(*handlers, authenticated: bool = False):
+    """Return the urllib opener of probe_target.
+
+    Redirects follow the rule of probe_target. With authenticated, the proxies of the
+    environment are ignored so that none of them receives the credentials. Extra handlers
+    are consulted first (for tests).
+    """
+    chain = list(handlers)
+    if authenticated:
+        chain.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*chain, _SameOriginRedirect())
 
 
 class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        try:
-            if _origin(newurl) != _origin(req.full_url):
-                return None
-        except ValueError:
+        if not _may_follow(req.full_url, newurl):
             return None
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _may_follow(current: str, new: str) -> bool:
+    try:
+        parts = urlsplit(new)
+        if parts.username is not None or parts.password is not None:
+            return False
+        before, after = _origin(current), _origin(new)
+    except ValueError:
+        return False
+    return after == before or _is_upgrade(before, after)
 
 
 def _origin(url: str) -> tuple:
@@ -91,13 +123,50 @@ def _origin(url: str) -> tuple:
     return scheme, (parts.hostname or "").lower(), parts.port or _DEFAULT_PORTS.get(scheme)
 
 
-def _status(opener, url: str, method: str, headers: dict, timeout: float) -> Optional[int]:
+def _is_upgrade(before: tuple, after: tuple) -> bool:
+    if (before[0], after[0]) != ("http", "https") or before[1] != after[1]:
+        return False
+    expected = _DEFAULT_PORTS["https"] if before[2] == _DEFAULT_PORTS["http"] else before[2]
+    return after[2] == expected
+
+
+def _require_encryption(url: str) -> None:
+    parts = urlsplit(url)
+    if parts.scheme != "https" and not _is_loopback(parts.hostname):
+        raise ValueError(
+            "Les identifiants ne sont envoyés qu'en https : sur une URL en http, "
+            "ils circuleraient en clair."
+        )
+
+
+def _is_loopback(host: Optional[str]) -> bool:
+    if host is None:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _answer(opener, url: str, method: str, headers: dict, timeout: float) -> tuple:
+    """Return (status, location) of one request; (None, None) when nothing answered."""
     request = urllib.request.Request(url, headers=headers, method=method)
     try:
         with opener.open(request, timeout=timeout) as response:
-            return response.getcode()
+            status = response.getcode()
+            return status, _location(status, getattr(response, "headers", None))
     except urllib.error.HTTPError as error:
+        location = _location(error.code, error.headers)
         error.close()
-        return error.code
+        return error.code, location
     except (urllib.error.URLError, http.client.HTTPException, OSError, UnicodeError):
+        return None, None
+
+
+def _location(status: int, headers) -> Optional[str]:
+    if headers is None or not 300 <= status < 400:
         return None
+    value = headers.get("Location")
+    return value if isinstance(value, str) and value else None

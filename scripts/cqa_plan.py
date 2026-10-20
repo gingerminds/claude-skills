@@ -447,9 +447,15 @@ def _target_url(target: dict, key: str) -> str:
     if not isinstance(url, str) or not url:
         raise ContextError(f"context.json : « target.{key} » est absent ou vide.")
     try:
-        return validate_url(url)
+        validate_url(url)
     except ValueError as error:
         raise ContextError(f"context.json : « target.{key} » : {error}")
+    if "?" in url or "#" in url:
+        raise UsageError(
+            f"context.json : « target.{key} » ne doit contenir ni « ? » ni « # » : "
+            "une requête pourrait porter un jeton."
+        )
+    return url
 
 
 def _load_context(run_dir: Path) -> dict:

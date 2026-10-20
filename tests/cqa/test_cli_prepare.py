@@ -1,6 +1,7 @@
 import base64
 import contextlib
 import copy
+import http.client
 import io
 import json
 import os
@@ -10,6 +11,8 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.request
+import urllib.response
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -99,6 +102,37 @@ def basic_gate(method, path, headers):
     return 401, {"WWW-Authenticate": 'Basic realm="preprod"'}
 
 
+class FakeNetwork(urllib.request.BaseHandler):
+    """Handler that answers http and https requests from routes {url: (status, headers)}.
+
+    The answers go through the real redirect and error processing of urllib, so a redirect
+    is followed or refused by the code under test. A URL that is not routed fails the test.
+    """
+
+    handler_order = 100
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.requests = []
+
+    def _answer(self, request):
+        self.requests.append((request.get_method(), request.full_url, dict(request.header_items())))
+        status, headers = self.routes[request.full_url]
+        message = http.client.HTTPMessage()
+        for key, value in headers.items():
+            message[key] = value
+        response = urllib.response.addinfourl(io.BytesIO(b""), message, request.full_url, status)
+        response.msg = "Answer"
+        return response
+
+    http_open = _answer
+    https_open = _answer
+
+    @property
+    def urls(self):
+        return [request[1] for request in self.requests]
+
+
 class ClassifyAccessTest(unittest.TestCase):
     def test_classification(self):
         expected = {
@@ -179,12 +213,178 @@ class ProbeTargetTest(CliCase):
         other, other_url = start_server(self, answer(200))
         _, url = start_server(self, answer(302, Location=other_url + "/landing"))
         result = target.probe_target(url, auth=(USER, PASSWORD))
-        self.assertEqual(result, {"status": 302, "access": "open"})
+        self.assertEqual(
+            result, {"status": 302, "access": "open", "location": other_url + "/landing"}
+        )
         self.assertEqual(other.requests, [])
 
-    def test_redirect_to_https_is_not_followed(self):
+    def test_upgrade_to_another_port_is_not_followed(self):
         _, url = start_server(self, answer(301, Location="https://127.0.0.1:1/"))
-        self.assertEqual(target.probe_target(url)["status"], 301)
+        self.assertEqual(
+            target.probe_target(url),
+            {"status": 301, "access": "open", "location": "https://127.0.0.1:1/"},
+        )
+
+    def test_credentials_are_never_sent_without_the_flag(self):
+        server, url = start_server(self, basic_gate)
+        env = {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(target.probe_target(url), {"status": 401, "access": "basic_auth"})
+        self.assertEqual(
+            [key.lower() for key in server.requests[0][2] if key.lower() == "authorization"], []
+        )
+
+    def test_http_to_https_upgrade_is_followed_and_classified_on_the_final_answer(self):
+        cases = {
+            "http://preprod.example.org/": "https://preprod.example.org/",
+            "http://preprod.example.org:8080/": "https://preprod.example.org:8080/",
+            "http://preprod.example.org:80/": "https://preprod.example.org:443/",
+            "http://Preprod.Example.org/": "https://preprod.example.org/",
+        }
+        for start, upgraded in cases.items():
+            for final, access in ((401, "basic_auth"), (403, "ip_filtered"), (200, "open")):
+                with self.subTest(start=start, final=final):
+                    network = FakeNetwork(
+                        {start: (301, {"Location": upgraded}), upgraded: (final, {})}
+                    )
+                    result = target.probe_target(start, opener=target.build_opener(network))
+                    self.assertEqual(result, {"status": final, "access": access})
+                    self.assertEqual(network.urls, [start, upgraded])
+
+    def test_upgrade_keeps_following_on_the_https_origin(self):
+        network = FakeNetwork(
+            {
+                "http://preprod.example.org/": (301, {"Location": "https://preprod.example.org/"}),
+                "https://preprod.example.org/": (302, {"Location": "/fr/"}),
+                "https://preprod.example.org/fr/": (401, {}),
+            }
+        )
+        result = target.probe_target(
+            "http://preprod.example.org/", opener=target.build_opener(network)
+        )
+        self.assertEqual(result, {"status": 401, "access": "basic_auth"})
+        self.assertEqual(len(network.requests), 3)
+
+    def test_credentials_follow_an_upgrade_on_the_same_host(self):
+        network = FakeNetwork(
+            {
+                "http://127.0.0.1/": (301, {"Location": "https://127.0.0.1/"}),
+                "https://127.0.0.1/": (200, {}),
+            }
+        )
+        opener = target.build_opener(network, authenticated=True)
+        result = target.probe_target("http://127.0.0.1/", auth=(USER, PASSWORD), opener=opener)
+        self.assertEqual(result, {"status": 200, "access": "open"})
+        self.assertEqual([request[2]["Authorization"] for request in network.requests], [BASIC] * 2)
+
+    def test_https_to_http_downgrade_is_not_followed(self):
+        network = FakeNetwork(
+            {"https://preprod.example.org/": (301, {"Location": "http://preprod.example.org/"})}
+        )
+        result = target.probe_target(
+            "https://preprod.example.org/", opener=target.build_opener(network)
+        )
+        self.assertEqual(
+            result,
+            {"status": 301, "access": "open", "location": "http://preprod.example.org/"},
+        )
+        self.assertEqual(len(network.requests), 1)
+
+    def test_redirects_to_another_host_or_port_are_not_followed(self):
+        cases = [
+            ("https://preprod.example.org/", "https://www.example.org/"),
+            ("https://preprod.example.org/", "https://preprod.example.org:8443/"),
+            ("https://preprod.example.org:8443/", "http://preprod.example.org:8443/"),
+            ("http://preprod.example.org/", "https://www.example.org/"),
+            ("http://preprod.example.org/", "https://preprod.example.org:8443/"),
+            ("http://preprod.example.org:8080/", "https://preprod.example.org/"),
+            ("http://preprod.example.org/", "http://www.example.org/"),
+            ("http://preprod.example.org/", "https://preprod.example.org.evil.example.net/"),
+            ("http://preprod.example.org/", "https://user:pw@preprod.example.org/"),
+        ]
+        for start, location in cases:
+            with self.subTest(start=start, location=location):
+                network = FakeNetwork({start: (302, {"Location": location})})
+                result = target.probe_target(start, opener=target.build_opener(network))
+                self.assertEqual(
+                    result, {"status": 302, "access": "open", "location": location}
+                )
+                self.assertEqual(network.urls, [start])
+
+    def test_redirect_without_location_reports_none(self):
+        network = FakeNetwork({"https://preprod.example.org/": (304, {})})
+        result = target.probe_target(
+            "https://preprod.example.org/", opener=target.build_opener(network)
+        )
+        self.assertEqual(result, {"status": 304, "access": "open"})
+
+    def test_location_is_not_reported_for_other_statuses(self):
+        network = FakeNetwork(
+            {"https://preprod.example.org/": (403, {"Location": "https://www.example.org/"})}
+        )
+        result = target.probe_target(
+            "https://preprod.example.org/", opener=target.build_opener(network)
+        )
+        self.assertEqual(result, {"status": 403, "access": "ip_filtered"})
+
+    def test_credentials_are_refused_over_plain_http(self):
+        class Opener:
+            def open(self, request, timeout=None):
+                raise AssertionError("no request expected")
+
+        urls = ("http://preprod.example.org/", "http://preprod.example.net:8080/")
+        for url in (*urls, "http://localhost.example.org"):
+            with self.subTest(url=url):
+                with self.assertRaises(ValueError) as caught:
+                    target.probe_target(url, auth=(USER, PASSWORD), opener=Opener())
+                self.assertNotIn(PASSWORD, str(caught.exception))
+                self.assertIn("https", str(caught.exception))
+
+    def test_credentials_may_travel_to_a_loopback_address_over_http(self):
+        for host in ("127.0.0.1", "localhost", "[::1]", "127.0.0.2"):
+            with self.subTest(host=host):
+                url = f"http://{host}/"
+                network = FakeNetwork({url: (200, {})})
+                result = target.probe_target(
+                    url, auth=(USER, PASSWORD), opener=target.build_opener(network)
+                )
+                self.assertEqual(result["status"], 200)
+
+    def test_credentials_are_sent_to_an_https_target(self):
+        network = FakeNetwork({"https://preprod.example.org/": (200, {})})
+        opener = target.build_opener(network, authenticated=True)
+        result = target.probe_target(
+            "https://preprod.example.org/", auth=(USER, PASSWORD), opener=opener
+        )
+        self.assertEqual(result, {"status": 200, "access": "open"})
+        self.assertEqual(network.requests[0][2]["Authorization"], BASIC)
+
+    def test_authenticated_opener_ignores_the_proxy_environment(self):
+        with mock.patch.dict(os.environ, {"http_proxy": "http://proxy.example.org:3128"}):
+            plain = target.build_opener()
+            authenticated = target.build_opener(authenticated=True)
+
+        def proxies(opener):
+            return [
+                handler.proxies
+                for handler in opener.handlers
+                if isinstance(handler, urllib.request.ProxyHandler)
+            ]
+
+        self.assertEqual(proxies(plain), [{"http": "http://proxy.example.org:3128"}])
+        self.assertEqual([found for found in proxies(authenticated) if found], [])
+
+    def test_credentials_do_not_reach_a_proxy_of_the_environment(self):
+        proxy, proxy_url = start_server(self, answer(200))
+        server, url = start_server(self, basic_gate)
+        with mock.patch.dict(os.environ, {"http_proxy": proxy_url}):
+            result = target.probe_target(url, auth=(USER, PASSWORD))
+            unauthenticated = target.probe_target(url)
+        self.assertEqual(result, {"status": 200, "access": "open"})
+        self.assertEqual(server.requests[0][2]["Authorization"], BASIC)
+        self.assertEqual(len(proxy.requests), 1)
+        self.assertNotIn("Authorization", proxy.requests[0][2])
+        self.assertEqual(unauthenticated, {"status": 200, "access": "open"})
 
     def test_unreachable_host(self):
         with socket.socket() as sock:
@@ -274,6 +474,53 @@ class ProbeTargetCommandTest(CliCase):
                 self.assertEqual(out, "")
                 self.assertIn("GM_AUDIT_AUTH_USER", err)
                 self.assertNotIn(PASSWORD, err)
+
+    def test_credentials_in_the_environment_are_not_sent_without_the_flag(self):
+        server, url = start_server(self, basic_gate)
+        env = {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        code, out, err = self.run_main(["probe-target", url], env=env)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {"status": 401, "access": "basic_auth"})
+        self.assertEqual(len(server.requests), 1)
+        self.assertNotIn("authorization", [key.lower() for key in server.requests[0][2]])
+
+    def test_auth_env_refuses_a_clear_text_target(self):
+        class Opener:
+            def open(self, request, timeout=None):
+                raise AssertionError("no request expected")
+
+        env = {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        code, out, err = self.run_main(
+            ["probe-target", "http://preprod.example.org/", "--auth-env"], env=env, opener=Opener()
+        )
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("https", err)
+        self.assertIn("clair", err)
+        self.assertNotIn(PASSWORD, err)
+
+    def test_auth_env_accepts_an_https_target(self):
+        network = FakeNetwork({"https://preprod.example.org/": (200, {})})
+        env = {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        code, out, err = self.run_main(
+            ["probe-target", "https://preprod.example.org/", "--auth-env"],
+            env=env,
+            opener=target.build_opener(network, authenticated=True),
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {"status": 200, "access": "open"})
+        self.assertEqual(network.requests[0][2]["Authorization"], BASIC)
+
+    def test_unfollowed_redirect_reports_its_location(self):
+        network = FakeNetwork(
+            {"https://preprod.example.org/": (302, {"Location": "https://sso.example.net/login"})}
+        )
+        self.assertEqual(
+            self.run_json(
+                ["probe-target", "https://preprod.example.org/"],
+                opener=target.build_opener(network),
+            ),
+            {"status": 302, "access": "open", "location": "https://sso.example.net/login"},
+        )
 
     def test_refused_url_is_a_usage_error(self):
         code, out, err = self.run_main(["probe-target", f"https://{USER}:{PASSWORD}@x.example.org"])
@@ -1229,6 +1476,29 @@ class ToolboxEnvTest(RunDirCase):
                 self.assertEqual((code, out), (6, ""))
                 self.assertNotEqual(err, "")
                 self.assertNotIn(PASSWORD, err)
+
+    def test_target_with_a_query_or_a_fragment_is_refused(self):
+        cases = {
+            "query": {"target__preprod_url": "https://preprod.example.org/?token=abc123"},
+            "empty query": {"target__preprod_url": "https://preprod.example.org/?"},
+            "fragment": {"target__preprod_url": "https://preprod.example.org/#abc123"},
+            "prod query": {
+                "phase_filter": "MEL J0",
+                "target__prod_live": True,
+                "target__prod_url": "https://www.example.org/?token=abc123",
+            },
+        }
+        for label, changes in cases.items():
+            with self.subTest(label):
+                self.write_context(**changes)
+                code, out, err = self.run_main(["toolbox-env", self.run_dir])
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("?", err)
+                self.assertNotIn("abc123", err)
+
+    def test_query_of_an_unused_url_is_not_a_problem(self):
+        lines = self.env_lines(target__prod_url="https://www.example.org/?token=abc123")
+        self.assertEqual(lines[:2], PREPROD_LINES)
 
     def test_missing_context(self):
         code, out, err = self.run_main(["toolbox-env", self.run_dir])
