@@ -1,0 +1,148 @@
+{
+  "object": "data_source",
+  "id": "0123456789abcdef0123456789abcdef",
+  "title": [
+    {"type": "text", "text": {"content": "Checklist de test", "link": null}, "plain_text": "Checklist de test", "href": null}
+  ],
+  "properties": {
+    "Tâche": {"id": "title", "name": "Tâche", "type": "title", "title": {}},
+    "Réf": {"id": "p01", "name": "Réf", "type": "unique_id", "unique_id": {"prefix": "CQ"}},
+    "Réf modèle": {"id": "p02", "name": "Réf modèle", "type": "rich_text", "rich_text": {}},
+    "Statut": {
+      "id": "p03",
+      "name": "Statut",
+      "type": "status",
+      "status": {
+        "options": [
+          {"id": "s1", "name": "À traiter", "color": "red"},
+          {"id": "s2", "name": "En standby", "color": "gray"},
+          {"id": "s3", "name": "Mise en place partielle", "color": "yellow"},
+          {"id": "s4", "name": "Mis en place", "color": "blue"},
+          {"id": "s5", "name": "Ok / Recetté", "color": "green"},
+          {"id": "s6", "name": "Non applicable", "color": "default"}
+        ],
+        "groups": [
+          {"id": "g1", "name": "To-do", "color": "gray", "option_ids": ["s1", "s2"]},
+          {"id": "g2", "name": "In progress", "color": "blue", "option_ids": ["s3", "s4"]},
+          {"id": "g3", "name": "Complete", "color": "green", "option_ids": ["s5", "s6"]}
+        ]
+      }
+    },
+    "Assignée à": {
+      "id": "p04",
+      "name": "Assignée à",
+      "type": "multi_select",
+      "multi_select": {
+        "options": [
+          {"id": "a1", "name": "Alice", "color": "blue"},
+          {"id": "a2", "name": "Bruno", "color": "green"},
+          {"id": "a3", "name": "Chloé", "color": "pink"}
+        ]
+      }
+    },
+    "Catégorie": {
+      "id": "p05",
+      "name": "Catégorie",
+      "type": "select",
+      "select": {
+        "options": [
+          {"id": "c1", "name": "QUALITÉ", "color": "blue"},
+          {"id": "c2", "name": "ACCESSIBILITÉ", "color": "purple"}
+        ]
+      }
+    },
+    "Sous-catégorie": {
+      "id": "p06",
+      "name": "Sous-catégorie",
+      "type": "select",
+      "select": {
+        "options": [
+          {"id": "d1", "name": "Performance", "color": "orange"},
+          {"id": "d2", "name": "Tests", "color": "gray"}
+        ]
+      }
+    },
+    "Mise en ligne": {
+      "id": "p07",
+      "name": "Mise en ligne",
+      "type": "select",
+      "select": {
+        "options": [
+          {"id": "m1", "name": "Bloquant", "color": "red"},
+          {"id": "m2", "name": "Non bloquant", "color": "default"}
+        ]
+      }
+    },
+    "Section": {
+      "id": "p08",
+      "name": "Section",
+      "type": "multi_select",
+      "multi_select": {
+        "options": [
+          {"id": "e1", "name": "Front", "color": "blue"},
+          {"id": "e2", "name": "Back", "color": "green"}
+        ]
+      }
+    },
+    "Technos concernées": {
+      "id": "p09",
+      "name": "Technos concernées",
+      "type": "multi_select",
+      "multi_select": {
+        "options": [
+          {"id": "t1", "name": "Laravel", "color": "red"},
+          {"id": "t2", "name": "Drupal", "color": "blue"},
+          {"id": "t3", "name": "Nuxt", "color": "green"},
+          {"id": "t4", "name": "Wordpress", "color": "purple"}
+        ]
+      }
+    },
+    "Phase": {
+      "id": "p10",
+      "name": "Phase",
+      "type": "multi_select",
+      "multi_select": {
+        "options": [
+          {"id": "h1", "name": "Cadrage", "color": "gray"},
+          {"id": "h2", "name": "Build", "color": "blue"},
+          {"id": "h3", "name": "Recette J-30", "color": "yellow"},
+          {"id": "h4", "name": "MEL J0", "color": "orange"},
+          {"id": "h5", "name": "Post-MEL J+7", "color": "green"}
+        ]
+      }
+    },
+    "Outils requis": {
+      "id": "p11",
+      "name": "Outils requis",
+      "type": "multi_select",
+      "multi_select": {
+        "options": [
+          {"id": "o01", "name": "Code", "color": "blue"},
+          {"id": "o02", "name": "CLI local", "color": "gray"},
+          {"id": "o03", "name": "HTTP", "color": "green"},
+          {"id": "o04", "name": "Navigateur", "color": "purple"},
+          {"id": "o05", "name": "Audit web", "color": "orange"},
+          {"id": "o06", "name": "Crawler", "color": "yellow"},
+          {"id": "o07", "name": "SSH serveur", "color": "red"},
+          {"id": "o08", "name": "BDD", "color": "pink"},
+          {"id": "o09", "name": "Comptes de test", "color": "brown"},
+          {"id": "o10", "name": "Service externe", "color": "default"},
+          {"id": "o11", "name": "Intervention humaine", "color": "gray"}
+        ]
+      }
+    },
+    "Automatisation skill": {
+      "id": "p12",
+      "name": "Automatisation skill",
+      "type": "select",
+      "select": {
+        "options": [
+          {"id": "u1", "name": "Totale", "color": "green"},
+          {"id": "u2", "name": "Partielle", "color": "yellow"},
+          {"id": "u3", "name": "Aucune", "color": "gray"}
+        ]
+      }
+    },
+    "Outillage skill": {"id": "p13", "name": "Outillage skill", "type": "rich_text", "rich_text": {}}
+  }
+}
