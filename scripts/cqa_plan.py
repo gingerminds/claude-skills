@@ -4,7 +4,7 @@
 Results go to stdout (JSON, except repos-tsv and toolbox-env which print lines for bash),
 errors to stderr.
 
-Exit codes: 0 success, 2 environment or usage, 6 invalid context.
+Exit codes: 0 success, 2 environment or usage, 6 invalid context or findings, 7 secret found.
 """
 import argparse
 import functools
@@ -14,10 +14,15 @@ import re
 import subprocess
 import sys
 import unicodedata
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import urlsplit
 
+from cqa import probes, report
+from cqa.checklist import ref_label
+from cqa.findings import apply_guardrails, validate_document
 from cqa.git_tools import (
     alignment,
     deployed_from_gitlab,
@@ -25,15 +30,19 @@ from cqa.git_tools import (
     repo_state,
     same_gitlab_group,
 )
-from cqa.lots import TOOLS
-from cqa.names import match_option, normalize
+from cqa.lots import TOOLS, build_lots, coverage, select_rows
+from cqa.names import match_option, normalize, propose_assignment
+from cqa.notion_read import write_json, write_text
+from cqa.plan import build_plan, filter_plan, load_history, operation_key
 from cqa.project import parse_project_md, project_slug, sibling_repos
+from cqa.secrets import known_values_from_env, scan_tree
 from cqa.target import probe_target, validate_url
 from cqa.version import plugin_version
 
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_CONTEXT = 6
+EXIT_SECRET = 7
 
 MAX_KEY_PAGES = 10
 TOOLBOX_RATE = "2"
@@ -45,7 +54,14 @@ _RUN_ID = re.compile(r"\d{4}-\d{2}-\d{2}-\d{4}")
 _REPO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _UNPROTECTED = frozenset({"", "non", "aucun", "aucune", "n/a"})
 _ACCESS_VALUES = ("open", "basic_auth", "ip_filtered", "unreachable")
-_PROD_PHASES = ("J0", "J+7")
+_TOOL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
+_EVIDENCE_TOOL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_REF_KEY = re.compile(r"[0-9]+")
+_SPEC_NAME = re.compile(r"(?:openapi|swagger).*\.(?:ya?ml|json)")
+_SPEC_SKIPPED_DIRS = frozenset({"vendor", "node_modules", ".git"})
+_EXCLUDED_KEYS = ("ref", "page_id", "reason", "verdict", "detail")
+_MAX_COMMENT = 1500
+_EM_DASH = chr(0x2014)
 _RUN_FILES = {
     "context": "context.json",
     "lots": "lots.json",
@@ -98,6 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="commande")
     _register_preparation(commands)
+    _register_audit(commands)
     return parser
 
 
@@ -138,6 +155,46 @@ def _register_preparation(commands) -> None:
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub = _command(commands, "toolbox-env", "variables non secrètes (outillage)", _cmd_toolbox_env)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
+
+
+def _run_command(commands, name: str, help_text: str, handler) -> argparse.ArgumentParser:
+    sub = _command(commands, name, help_text, handler)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    return sub
+
+
+def _register_audit(commands) -> None:
+    _run_command(commands, "coverage", "couverture des lignes selon les outils", _cmd_coverage)
+    _run_command(commands, "lots", "répartit les lignes en lots (lots.json)", _cmd_lots)
+    sub = _run_command(commands, "probes", "sondes HTTP de la boîte à outils", _cmd_probes)
+    sub.add_argument(
+        "--followup",
+        action="store_true",
+        help="regroupe les sondes demandées par les constats (probes-followup.json)",
+    )
+    sub = _run_command(commands, "validate", "valide les constats d'un lot", _cmd_validate)
+    sub.add_argument("lot_id", help="identifiant du lot (lots.json)")
+    sub.add_argument(
+        "--followup", action="store_true", help="valide findings/<lot>-followup.json"
+    )
+    sub = _run_command(commands, "plan", "plan d'écriture Notion (notion/plan.json)", _cmd_plan)
+    sub.add_argument(
+        "--skip-human-overrides",
+        action="store_true",
+        help="retire les pages dont le statut a été posé par un humain",
+    )
+    _run_command(commands, "manifest", "résultats des outils (tools/manifest.json)", _cmd_manifest)
+    _run_command(commands, "synthesis", "synthese.md et commentaire de la page", _cmd_synthesis)
+    _run_command(commands, "scan", "contrôle anti-secret du dossier du run", _cmd_scan)
+    _run_command(commands, "openapi-specs", "specs OpenAPI des repos", _cmd_openapi_specs)
+    sub = _run_command(commands, "skip", "marque un outil comme ignoré", _cmd_skip)
+    sub.add_argument("tool", help="nom de l'outil")
+    sub.add_argument("reason", help="raison, affichée dans la synthèse")
+    sub = _run_command(commands, "assign", "propose une répartition des lignes", _cmd_assign)
+    sub.add_argument(
+        "--include-unknown", action="store_true", help="ajoute les lignes non évaluées"
+    )
+    _run_command(commands, "assign-plan", "plan d'assignation (assign-plan.json)", _cmd_assign_plan)
 
 
 def _cmd_project(args, services) -> int:
@@ -244,10 +301,16 @@ def _cmd_runs(args, services) -> int:
 
 
 def _cmd_repos_tsv(args, services) -> int:
-    repos = _load_context(args.run_dir).get("repos")
+    _emit_lines([f"{name}\t{path}" for name, path in _context_repos(args.run_dir)])
+    return EXIT_OK
+
+
+def _context_repos(run_dir: Path) -> list:
+    """Return the (name, path) of each repo of context.json, checked for a tab-separated line."""
+    repos = _load_context(run_dir).get("repos")
     if not isinstance(repos, list) or not repos:
         raise ContextError("context.json : « repos » est absent ou vide.")
-    lines = []
+    found = []
     for index, repo in enumerate(repos):
         label = f"repos[{index}]"
         if not isinstance(repo, dict):
@@ -256,9 +319,8 @@ def _cmd_repos_tsv(args, services) -> int:
             problem = check(repo.get(key))
             if problem:
                 raise ContextError(f"context.json : « {label}.{key} » {problem}.")
-        lines.append(f"{repo['name']}\t{repo['path']}")
-    _emit_lines(lines)
-    return EXIT_OK
+        found.append((repo["name"], repo["path"]))
+    return found
 
 
 def _cmd_toolbox_env(args, services) -> int:
@@ -266,7 +328,7 @@ def _cmd_toolbox_env(args, services) -> int:
     target = context.get("target")
     if not isinstance(target, dict):
         raise ContextError("context.json : « target » est absent.")
-    if _is_prod_phase(context.get("phase_filter")) and target.get("prod_live") is True:
+    if probes.is_prod_run(context):
         url, robots = _target_url(target, "prod_url"), "respect"
     else:
         url, robots = _target_url(target, "preprod_url"), "ignore"
@@ -277,6 +339,244 @@ def _cmd_toolbox_env(args, services) -> int:
             f"GM_AUDIT_RATE={TOOLBOX_RATE}",
             f"GM_AUDIT_USER_AGENT=GingermindsAudit/{plugin_version()}",
         ]
+    )
+    return EXIT_OK
+
+
+def _cmd_coverage(args, services) -> int:
+    context, kept, excluded = _selection(args.run_dir)
+    _emit(coverage(kept, excluded, context["available_tools"]))
+    return EXIT_OK
+
+
+def _cmd_lots(args, services) -> int:
+    context, kept, excluded = _selection(args.run_dir)
+    lots = build_lots(kept)
+    counts = coverage(kept, excluded, context["available_tools"])
+    write_json(args.run_dir / "lots.json", {"lots": lots, "excluded": excluded, "coverage": counts})
+    _emit(
+        {
+            "lots": [
+                {**{key: lot[key] for key in lot if key != "refs"}, "rows": len(lot["refs"])}
+                for lot in lots
+            ],
+            "excluded": dict(Counter(entry["reason"] for entry in excluded)),
+            "coverage": counts,
+        }
+    )
+    return EXIT_OK
+
+
+def _cmd_probes(args, services) -> int:
+    run_dir = args.run_dir
+    if args.followup:
+        _checked_context(run_dir)
+        result = probes.followup_probes(run_dir)
+        document = {"base_url": result["base_url"], "probes": result["probes"]}
+        write_json(run_dir / "probes-followup.json", document)
+        _emit(
+            {
+                "file": "probes-followup.json",
+                "base_url": document["base_url"],
+                "count": len(document["probes"]),
+                "lots": result["lots"],
+                "discarded": result["discarded"],
+            }
+        )
+        return EXIT_OK
+    context, kept, _ = _selection(run_dir)
+    document = probes.build_probes(
+        base_url=probes.target_url(context),
+        technos=context["technos"],
+        rows=kept,
+        fiches_dir=run_dir / "fiches",
+        key_pages=context["key_pages"],
+    )
+    write_json(run_dir / "probes.json", document)
+    from_fiches = sum(1 for probe in document["probes"] if probe["id"].startswith("fiche-"))
+    _emit(
+        {
+            "file": "probes.json",
+            "base_url": document["base_url"],
+            "count": len(document["probes"]),
+            "from_fiches": from_fiches,
+        }
+    )
+    return EXIT_OK
+
+
+def _cmd_validate(args, services) -> int:
+    context = _checked_context(args.run_dir)
+    lots = _read_lots(args.run_dir)["lots"]
+    lot = next((item for item in lots if item["id"] == args.lot_id), None)
+    if lot is None:
+        known = ", ".join(item["id"] for item in lots) or "aucun"
+        raise UsageError(f"Le lot « {args.lot_id} » est absent de lots.json (lots : {known}).")
+    found = _read_findings(args.run_dir, context, lot, followup=args.followup)
+    if found is None:
+        name = _findings_name(lot["id"], args.followup)
+        errors = [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
+    else:
+        errors = found[1]
+    _emit({"ok": not errors, "errors": errors})
+    return EXIT_CONTEXT if errors else EXIT_OK
+
+
+def _cmd_plan(args, services) -> int:
+    run_dir = args.run_dir.resolve()
+    context = _plan_context(run_dir)
+    rows, missing = _read_rows(run_dir)
+    lots = _read_lots(run_dir)
+    visible = _read_visible_verdicts(run_dir)
+    findings, followup_done = _collect_findings(run_dir, context, lots["lots"])
+    copy_ds_id = context["notion"]["copy_data_source_id"]
+    history = load_history(run_dir.parent.parent, run_dir.parent.name, copy_ds_id, run_dir.name)
+    plan = build_plan(
+        rows=rows,
+        findings=findings,
+        excluded=lots["excluded"],
+        context=context,
+        visible_verdicts=visible,
+        history=history,
+        run_date=_run_start(context).date(),
+        plugin_version=context["plugin_version"],
+        followup_done=followup_done,
+        missing_in_copy=missing,
+    )
+    plan = filter_plan(plan, skip_human_overrides=args.skip_human_overrides)
+    (run_dir / "notion").mkdir(exist_ok=True)
+    write_json(run_dir / "notion" / "plan.json", plan)
+    _emit(plan["summary"])
+    return EXIT_OK
+
+
+def _cmd_manifest(args, services) -> int:
+    document = report.manifest(args.run_dir)
+    (args.run_dir / "tools").mkdir(exist_ok=True)
+    write_json(args.run_dir / "tools" / "manifest.json", document)
+    _emit(document)
+    return EXIT_OK
+
+
+def _cmd_synthesis(args, services) -> int:
+    run_dir = args.run_dir
+    synthese, comment = report.synthesis(run_dir)
+    (run_dir / "notion").mkdir(exist_ok=True)
+    write_text(run_dir / "synthese.md", synthese)
+    write_text(run_dir / "notion" / "page-comment.txt", comment)
+    _emit(
+        {
+            "synthese": "synthese.md",
+            "page_comment": "notion/page-comment.txt",
+            "page_comment_length": len(comment),
+        }
+    )
+    return EXIT_OK
+
+
+def _cmd_scan(args, services) -> int:
+    found = [
+        {"path": path, "label": label}
+        for path, label in scan_tree(args.run_dir, known_values_from_env())
+    ]
+    _emit({"ok": not found, "found": found})
+    return EXIT_SECRET if found else EXIT_OK
+
+
+def _cmd_openapi_specs(args, services) -> int:
+    lines = []
+    for name, path in _context_repos(args.run_dir):
+        root = Path(path)
+        if not root.is_dir():
+            print(f"Le repo « {name} » est introuvable : {path}", file=sys.stderr)
+            continue
+        lines.extend(f"{name}\t{relative}" for relative in _openapi_files(root))
+    _emit_lines(lines)
+    return EXIT_OK
+
+
+def _cmd_skip(args, services) -> int:
+    if not _TOOL_NAME.fullmatch(args.tool):
+        raise UsageError(
+            f"« {args.tool} » n'est pas un nom d'outil "
+            "(minuscules, chiffres et tirets, 40 caractères au plus)."
+        )
+    reason = " ".join(args.reason.split())
+    if not reason:
+        raise UsageError("La raison est vide : elle sert à expliquer le saut dans la synthèse.")
+    if not args.run_dir.is_dir():
+        raise UsageError(f"Le dossier du run {args.run_dir} est introuvable.")
+    result = {
+        "tool": args.tool,
+        "toolbox_version": None,
+        "tool_version": None,
+        "status": "skipped",
+        "reason": reason,
+        "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "duration_s": 0,
+        "targets": [],
+        "files": [],
+        "counts": {},
+    }
+    folder = args.run_dir / "tools" / args.tool
+    folder.mkdir(parents=True, exist_ok=True)
+    write_json(folder / "result.json", result)
+    _emit(result)
+    return EXIT_OK
+
+
+def _cmd_assign(args, services) -> int:
+    run_dir = args.run_dir
+    context = _checked_context(run_dir)
+    lead = _lead_option(context)
+    rows, _ = _read_rows(run_dir)
+    verdicts = _verdicts(run_dir, context, rows) if args.include_unknown else {}
+    annotated = [{**row, "verdict": verdicts.get(row.get("ref"))} for row in rows]
+    team = [member for member in context["team"] if member.get("option")]
+    without_option = [member["name"] for member in context["team"] if not member.get("option")]
+    document = {
+        "lead": lead,
+        "include_unknown": args.include_unknown,
+        "proposal": propose_assignment(annotated, team, lead, include_unknown=args.include_unknown),
+        "sans_option": list(dict.fromkeys(without_option)),
+    }
+    (run_dir / "notion").mkdir(exist_ok=True)
+    write_json(run_dir / "notion" / "assign-proposal.json", document)
+    _emit(document)
+    return EXIT_OK
+
+
+def _cmd_assign_plan(args, services) -> int:
+    run_dir = args.run_dir
+    context = _checked_context(run_dir)
+    notion = context["notion"]
+    document = _read_run_json(run_dir, "notion/assign-proposal.json", "cqa_plan.py assign")
+    entries = document.get("proposal") if isinstance(document, dict) else None
+    if not isinstance(entries, list):
+        raise UsageError("notion/assign-proposal.json : la liste « proposal » est absente.")
+    rows, _ = _read_rows(run_dir)
+    ops, unchanged = _assign_operations(entries, rows, notion["assignee_options"])
+    comment = None
+    page_id = notion["copy_page_id"]
+    if ops and isinstance(page_id, str) and page_id.strip():
+        comment = _assignment_comment(ops, context, _lead_option(context))
+        ops.append(_page_comment_operation(page_id, comment))
+    plan = {
+        "run_id": context["run_id"],
+        "copy_data_source_id": notion["copy_data_source_id"],
+        "copy_page_id": notion["copy_page_id"],
+        "assignee_options": list(notion["assignee_options"]),
+        "ops": ops,
+    }
+    (run_dir / "notion").mkdir(exist_ok=True)
+    write_json(run_dir / "notion" / "assign-plan.json", plan)
+    _emit(
+        {
+            "file": "notion/assign-plan.json",
+            "assigned": sum(1 for op in ops if op["kind"] == "assign"),
+            "unchanged": unchanged,
+            "page_comment": comment is not None,
+        }
     )
     return EXIT_OK
 
@@ -436,10 +736,6 @@ def _run_state(run_dir: Path) -> dict:
     findings = run_dir / "findings"
     state["findings"] = findings.is_dir() and any(findings.glob("*.json"))
     return state
-
-
-def _is_prod_phase(phase_filter) -> bool:
-    return isinstance(phase_filter, str) and any(tag in phase_filter for tag in _PROD_PHASES)
 
 
 def _target_url(target: dict, key: str) -> str:
@@ -645,6 +941,348 @@ _REPO_FIELDS = {
     "aligned": _boolean_or_null,
 }
 _PAGE_FIELDS = {"template": _text, "url": _text}
+
+
+def _read_run_json(run_dir: Path, relative: str, hint: str):
+    try:
+        return json.loads((run_dir / relative).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise UsageError(f"{relative} est introuvable dans {run_dir} : lancer d'abord {hint}.")
+    except (OSError, ValueError) as error:
+        raise UsageError(f"{relative} est illisible : {error}")
+
+
+def _checked_context(run_dir: Path) -> dict:
+    context = _load_context(run_dir)
+    errors = validate_context(context)
+    if errors:
+        raise ContextError("\n".join(errors))
+    return context
+
+
+def _lead_option(context: dict) -> str:
+    option = context["lead"]["option"]
+    if not isinstance(option, str) or not option.strip():
+        raise ContextError(
+            "context.json : « lead.option » est vide : "
+            "le lead n'a pas d'option dans « Assignée à »."
+        )
+    return option
+
+
+def _plan_context(run_dir: Path) -> dict:
+    """Return the checked context, with what the comments of the plan quote."""
+    context = _checked_context(run_dir)
+    _lead_option(context)
+    _run_start(context)
+    for repo in context["repos"]:
+        sha = repo["audited_sha"]
+        if not isinstance(sha, str) or not sha.strip():
+            raise ContextError(
+                f"context.json : « audited_sha » du repo « {repo['name']} » est vide : "
+                "les commentaires citent le commit audité."
+            )
+    return context
+
+
+def _run_start(context: dict) -> datetime:
+    try:
+        return report.run_start(context["run_id"])
+    except ValueError as error:
+        raise ContextError(str(error)) from None
+
+
+def _is_ref(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _row_label(row: dict) -> str:
+    return ref_label(row["ref"]) if _is_ref(row.get("ref")) else row["page_id"]
+
+
+def _read_rows(run_dir: Path) -> tuple:
+    """Return (rows, missing_in_copy) of rows.json."""
+    document = _read_run_json(run_dir, "rows.json", "cqa_notion.py rows")
+    rows = document.get("rows") if isinstance(document, dict) else None
+    sound = isinstance(rows, list) and all(
+        isinstance(row, dict) and isinstance(row.get("page_id"), str) for row in rows
+    )
+    if not sound:
+        raise UsageError("rows.json : la liste « rows » est absente ou invalide.")
+    missing = document.get("missing_in_copy", [])
+    if not isinstance(missing, list):
+        raise UsageError("rows.json : « missing_in_copy » doit être une liste.")
+    return rows, missing
+
+
+def _read_lots(run_dir: Path) -> dict:
+    document = _read_run_json(run_dir, "lots.json", "cqa_plan.py lots")
+    lots = document.get("lots") if isinstance(document, dict) else None
+    excluded = document.get("excluded") if isinstance(document, dict) else None
+    sound = (
+        isinstance(lots, list)
+        and all(
+            isinstance(lot, dict)
+            and isinstance(lot.get("id"), str)
+            and isinstance(lot.get("refs"), list)
+            for lot in lots
+        )
+        and isinstance(excluded, list)
+        and all(
+            isinstance(entry, dict) and all(key in entry for key in _EXCLUDED_KEYS)
+            for entry in excluded
+        )
+    )
+    if not sound:
+        raise UsageError("lots.json : « lots » ou « excluded » est absent ou invalide.")
+    return document
+
+
+def _selection(run_dir: Path) -> tuple:
+    """Return (context, kept rows, excluded entries) for the rows of the run."""
+    context = _checked_context(run_dir)
+    rows, _ = _read_rows(run_dir)
+    kept, excluded = select_rows(
+        rows, context["technos"], context["available_tools"], context["phase_filter"]
+    )
+    for row in kept:
+        if not _is_ref(row.get("ref")):
+            raise UsageError(
+                f"rows.json : la ligne « {row.get('title')} » n'a pas de ref, "
+                "relancer cqa_notion.py rows."
+            )
+    return context, kept, excluded
+
+
+def _read_visible_verdicts(run_dir: Path) -> dict:
+    """Return comments.json as {ref: [verdict]}, its keys being text in the file."""
+    document = _read_run_json(run_dir, "comments.json", "cqa_notion.py comments")
+    if not isinstance(document, dict):
+        raise UsageError("comments.json : un objet {Réf: [verdicts]} est attendu.")
+    verdicts = {}
+    for key, found in document.items():
+        if not _REF_KEY.fullmatch(key) or not isinstance(found, list):
+            raise UsageError(
+                "comments.json : chaque clé doit être une Réf numérique et valoir une liste."
+            )
+        verdicts[int(key)] = [item for item in found if isinstance(item, str)]
+    return verdicts
+
+
+def _findings_name(lot_id: str, followup: bool) -> str:
+    return f"{lot_id}-followup.json" if followup else f"{lot_id}.json"
+
+
+def _read_findings(run_dir: Path, context: dict, lot: dict, *, followup: bool) -> Optional[tuple]:
+    """Return (valid findings, errors) of a lot file, None when the file does not exist.
+
+    The valid findings are those of validate_document whose evidence also holds against the run.
+    """
+    name = _findings_name(lot["id"], followup)
+    try:
+        document = json.loads((run_dir / "findings" / name).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        return [], [f"findings/{name} est illisible : {error}"]
+    valid, errors = validate_document(document, set(lot["refs"]))
+    roots = {repo["name"]: Path(repo["path"]) for repo in context["repos"]}
+    grounded = []
+    for item in valid:
+        problems = _evidence_problems(item["evidence"], roots, run_dir)
+        errors.extend(f"constat {ref_label(item['ref'])} : {problem}" for problem in problems)
+        if not problems:
+            grounded.append(item)
+    return grounded, errors
+
+
+def _collect_findings(run_dir: Path, context: dict, lots: list) -> tuple:
+    """Return ({ref: finding}, refs of the lots relaunched after the probes).
+
+    A finding of the follow-up file replaces the one of the first round; a ref the follow-up
+    file does not give (or gives invalid) keeps its first-round finding.
+    """
+    findings, followup_done = {}, set()
+    for lot in lots:
+        first = _read_findings(run_dir, context, lot, followup=False)
+        second = _read_findings(run_dir, context, lot, followup=True)
+        for found in (first, second):
+            for item in found[0] if found else []:
+                findings[item["ref"]] = item
+        if second is not None:
+            followup_done.update(lot["refs"])
+    return findings, followup_done
+
+
+def _verdicts(run_dir: Path, context: dict, rows: list) -> dict:
+    """Return {ref: verdict} of the audit: the exclusions, then the findings after guardrails."""
+    if not (run_dir / "lots.json").is_file():
+        raise UsageError(
+            "lots.json est introuvable : les lignes non évaluées se déduisent des verdicts "
+            "de l'audit, lancer d'abord cqa_plan.py lots."
+        )
+    lots = _read_lots(run_dir)
+    findings, followup_done = _collect_findings(run_dir, context, lots["lots"])
+    by_ref = {row["ref"]: row for row in rows if _is_ref(row.get("ref"))}
+    verdicts = {
+        entry["ref"]: entry["verdict"] for entry in lots["excluded"] if _is_ref(entry["ref"])
+    }
+    for lot in lots["lots"]:
+        for ref in lot["refs"]:
+            finding = findings.get(ref)
+            if finding is None:
+                verdicts[ref] = "unknown"
+            else:
+                row = by_ref.get(ref, {})
+                verdicts[ref] = apply_guardrails(finding, row, followup_done=ref in followup_done)[
+                    "verdict"
+                ]
+    return verdicts
+
+
+def _evidence_problems(evidence: list, roots: dict, run_dir: Path) -> list:
+    """Return what the evidence of a valid finding claims that the run does not hold."""
+    problems = []
+    for number, item in enumerate(evidence, start=1):
+        kind = item["type"]
+        if kind == "file":
+            problem = _file_problem(item, roots)
+        elif kind == "tool":
+            problem = _tool_problem(item, run_dir)
+        else:
+            problem = None
+        if problem:
+            problems.append(f"preuve n° {number} ({kind}) : {problem}")
+    return problems
+
+
+def _file_problem(item: dict, roots: dict) -> Optional[str]:
+    repo, path = item["repo"], item["path"]
+    if repo not in roots:
+        return f"repo {_quoted(repo)} absent de context.json (repos : {', '.join(roots)})"
+    relative = Path(path)
+    if relative.is_absolute() or ".." in relative.parts:
+        return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
+    candidate = roots[repo] / relative
+    if not candidate.exists():
+        return f"chemin {_quoted(path)} introuvable dans le repo {_quoted(repo)}"
+    if not candidate.resolve().is_relative_to(roots[repo].resolve()):
+        return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
+    return None
+
+
+def _tool_problem(item: dict, run_dir: Path) -> Optional[str]:
+    tool = item["tool"]
+    if not _EVIDENCE_TOOL.fullmatch(tool):
+        return f"nom d'outil {_quoted(tool)} invalide"
+    if not (run_dir / "tools" / tool / "summary.json").is_file():
+        return f"outil {_quoted(tool)} sans résumé (tools/{tool}/summary.json est introuvable)"
+    return None
+
+
+def _quoted(value) -> str:
+    text = str(value)
+    return f"« {text if len(text) <= 60 else text[:59] + '…'} »"
+
+
+def _openapi_files(root: Path) -> list:
+    """Return the relative paths of the OpenAPI and Swagger specs of a repo, sorted."""
+    found = []
+    for directory, subdirs, names in os.walk(root):
+        subdirs[:] = [name for name in subdirs if name not in _SPEC_SKIPPED_DIRS]
+        for name in names:
+            path = Path(directory, name)
+            if not _SPEC_NAME.fullmatch(name.lower()) or path.is_symlink():
+                continue
+            relative = path.relative_to(root).as_posix()
+            if not any(char in relative for char in "\t\r\n"):
+                found.append(relative)
+    return sorted(found)
+
+
+def _assign_operations(entries: list, rows: list, options: list) -> tuple:
+    """Return (assign operations, number of rows already holding their assignee).
+
+    An entry without assignee is left out. An entry that names a page outside rows.json, a row
+    twice, or an assignee that is not an existing option is a UsageError: nothing is written.
+    """
+    by_page = {row["page_id"]: row for row in rows}
+    ops, seen, unchanged = [], set(), 0
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("page_id"), str):
+            raise UsageError(
+                "notion/assign-proposal.json : une entrée de « proposal » est invalide."
+            )
+        row = by_page.get(entry["page_id"])
+        if row is None:
+            raise UsageError(
+                f"notion/assign-proposal.json : la page « {entry['page_id']} » "
+                "n'est pas une ligne de rows.json."
+            )
+        if entry["page_id"] in seen:
+            raise UsageError(
+                f"notion/assign-proposal.json : la ligne {_row_label(row)} apparaît deux fois."
+            )
+        seen.add(entry["page_id"])
+        assignee = entry.get("assignee")
+        if assignee in (None, ""):
+            continue
+        if assignee not in options:
+            raise UsageError(
+                f"« {assignee} » n'est pas une option de « Assignée à » : "
+                "aucune option n'est créée, choisir une option existante."
+            )
+        before = list(row.get("assignees") or [])
+        if assignee in before:
+            unchanged += 1
+        else:
+            ops.append(_assign_operation(row, before, before + [assignee]))
+    return ops, unchanged
+
+
+def _assign_operation(row: dict, before: list, after: list) -> dict:
+    return {
+        "key": operation_key("assign", row["page_id"], after, ""),
+        "kind": "assign",
+        "page_id": row["page_id"],
+        "ref": row.get("ref"),
+        "verdict": None,
+        "before": before,
+        "after": after,
+        "text": "",
+        "human_override": False,
+    }
+
+
+def _page_comment_operation(page_id: str, text: str) -> dict:
+    return {
+        "key": operation_key("page_comment", page_id, None, text),
+        "kind": "page_comment",
+        "page_id": page_id,
+        "ref": None,
+        "verdict": None,
+        "before": None,
+        "after": None,
+        "text": text,
+        "human_override": False,
+    }
+
+
+def _assignment_comment(ops: list, context: dict, lead: str) -> str:
+    """Return the comment for the copy page: how many rows each person was given."""
+    counts = Counter(op["after"][-1] for op in ops)
+    order = [name for name in context["notion"]["assignee_options"] if name in counts]
+    order += [name for name in counts if name not in order]
+    total = sum(counts.values())
+    plural = "s" if total > 1 else ""
+    start = _run_start(context)
+    lines = [
+        f"Répartition PRE-MEL · {start:%d/%m/%Y} · lancée par {lead}",
+        f"{total} ligne{plural} assignée{plural} :",
+        *(f"- {name} : {counts[name]}" for name in order),
+    ]
+    text = "\n".join(lines).replace(_EM_DASH, "-")
+    return text if len(text) <= _MAX_COMMENT else text[: _MAX_COMMENT - 1].rstrip() + "…"
 
 
 def _emit(value) -> None:

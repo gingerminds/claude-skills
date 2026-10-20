@@ -1,0 +1,63 @@
+{
+  "lots": [
+    {
+      "id": "code-performance",
+      "kind": "code",
+      "needs_toolbox": false,
+      "needs_server_facts": false,
+      "refs": [
+        101,
+        102
+      ]
+    },
+    {
+      "id": "code-securite",
+      "kind": "code",
+      "needs_toolbox": false,
+      "needs_server_facts": false,
+      "refs": [
+        103,
+        104
+      ]
+    }
+  ],
+  "excluded": [
+    {
+      "ref": 105,
+      "page_id": "page-105",
+      "reason": "techno",
+      "verdict": "na",
+      "detail": "tâche propre à Wordpress, projet Laravel + Nuxt",
+      "tools": [
+        "Code"
+      ]
+    },
+    {
+      "ref": 106,
+      "page_id": "page-106",
+      "reason": "no_tools",
+      "verdict": "unknown",
+      "detail": "outils indisponibles : Navigateur",
+      "tools": [
+        "Navigateur"
+      ]
+    }
+  ],
+  "coverage": {
+    "total": 6,
+    "evaluable": 4,
+    "evaluable_human": 1,
+    "partial": 0,
+    "not_evaluable": 1,
+    "deferred": 0,
+    "na": 1,
+    "standby": 0,
+    "gains": [
+      {
+        "tool": "Navigateur",
+        "action": "Claude in Chrome connecté",
+        "rows": 1
+      }
+    ]
+  }
+}

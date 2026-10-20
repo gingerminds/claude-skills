@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "run_id": "2026-10-20-1430",
+  "plugin_version": "0.9.0",
+  "project": {
+    "slug": "acme-shop",
+    "name": "Acme - Shop",
+    "protection": null
+  },
+  "lead": {
+    "name": "Julien Durand",
+    "option": "Julien D"
+  },
+  "team": [
+    {
+      "name": "Léa Martin",
+      "role": "front",
+      "option": "Léa"
+    },
+    {
+      "name": "Marc Petit",
+      "role": "back",
+      "option": "Marc"
+    },
+    {
+      "name": "Zoé Bernard",
+      "role": null,
+      "option": null
+    }
+  ],
+  "repos": [
+    {
+      "name": "laravel",
+      "path": "/work/repos/laravel",
+      "remote": "git@gitlab.example.org:acme/back.git",
+      "web_url": "https://gitlab.example.org/acme/back",
+      "stack": "laravel",
+      "techno": "Laravel",
+      "audited_sha": "3f2a1c9eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "preprod_branch": "release",
+      "deployed_sha": null,
+      "aligned": null
+    }
+  ],
+  "technos": [
+    "Laravel",
+    "Nuxt"
+  ],
+  "target": {
+    "preprod_url": "https://preprod.example.org",
+    "prod_url": null,
+    "prod_live": false,
+    "access": "open"
+  },
+  "ssh": {
+    "alias": null,
+    "app_dirs": {}
+  },
+  "test_accounts": {
+    "front": false,
+    "backoffice": false
+  },
+  "key_pages": [
+    {
+      "template": "Accueil",
+      "url": "https://preprod.example.org/"
+    },
+    {
+      "template": "Article",
+      "url": "https://preprod.example.org/actualites/exemple"
+    },
+    {
+      "template": "Externe",
+      "url": "https://other.example.net/page"
+    }
+  ],
+  "notion": {
+    "copy_page_id": "page-copy",
+    "copy_data_source_id": "ds-copy",
+    "reference_data_source_id": "ds-reference",
+    "bot_id": "bot-1",
+    "assignee_options": [
+      "Léa",
+      "Marc",
+      "Julien D"
+    ]
+  },
+  "available_tools": [
+    "Code",
+    "CLI local",
+    "HTTP"
+  ],
+  "phase_filter": null,
+  "dry_run": false
+}
