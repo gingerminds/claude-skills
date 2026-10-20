@@ -12,6 +12,7 @@ from cqa.checklist import (
     STATUS_TODO,
     ref_label,
 )
+from cqa.git_tools import blob_url
 
 VERDICT_LABELS = {
     "ok": "Ok / Recetté",
@@ -157,12 +158,6 @@ def parse_verdict(text: str) -> Optional[str]:
     return None
 
 
-def _blob_url(web_url: str, sha: str, path: str, line: Optional[int] = None) -> str:
-    """Return the GitLab link of a file at a commit, anchored on line when there is one."""
-    url = f"{web_url}/-/blob/{sha}/{path}"
-    return url if line is None else f"{url}#L{line}"
-
-
 def _compose(
     *, head: list[str], summary: str, evidence: list[str], extras: list[tuple], foot: str
 ) -> str:
@@ -225,7 +220,7 @@ def _evidence_line(item: dict, repos: list[dict]) -> str:
         repo = next((known for known in repos if known["name"] == item.get("repo")), None)
         if repo is None:
             return place
-        return f"{place} ({_blob_url(repo['web_url'], repo['audited_sha'], path, line)})"
+        return f"{place} ({blob_url(repo['web_url'], repo['audited_sha'], path, line)})"
     if kind in ("page", "http"):
         detail = _text(item.get("detail"))
         return f"{item['url']} : {detail}" if detail else item["url"]
