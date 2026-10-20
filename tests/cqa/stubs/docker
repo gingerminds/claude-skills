@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Fake docker for the toolbox launcher tests: logs its argv, prints canned output.
+
+CQA_STUB_LOG        file that receives one JSON array of arguments per call
+CQA_STUB_FAIL       a call whose arguments, joined by spaces, contain this text exits non-zero
+CQA_STUB_FAIL_CODE  exit code of those calls (default 1)
+CQA_STUB_NO_DAEMON  "version" fails, as when the daemon is down
+CQA_STUB_NO_LOGIN   "manifest inspect" fails, as without a registry login
+CQA_STUB_MISSING    comma-separated image names that "image inspect" does not find
+"""
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+log = os.environ.get("CQA_STUB_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(args) + "\n")
+
+for index, arg in enumerate(args[:-1]):
+    if arg == "-v" and args[index + 1].startswith("/"):
+        host = args[index + 1].split(":")[0]
+        if not os.path.isdir(host):
+            sys.stderr.write("stub: bind mount source is not a directory: " + host + "\n")
+            sys.exit(99)
+
+needle = os.environ.get("CQA_STUB_FAIL")
+if needle and needle in " ".join(args):
+    sys.stderr.write("stub: forced failure\n")
+    sys.exit(int(os.environ.get("CQA_STUB_FAIL_CODE", "1")))
+
+if args[:1] == ["version"]:
+    if os.environ.get("CQA_STUB_NO_DAEMON"):
+        sys.stderr.write("Cannot connect to the Docker daemon\n")
+        sys.exit(1)
+    print("27.0.1")
+elif args[:2] == ["manifest", "inspect"]:
+    if os.environ.get("CQA_STUB_NO_LOGIN"):
+        sys.stderr.write("unauthorized\n")
+        sys.exit(1)
+    print("{}")
+elif args[:2] == ["image", "inspect"]:
+    name = args[-1].rsplit("/", 1)[-1].split(":")[0]
+    if name in os.environ.get("CQA_STUB_MISSING", "").split(","):
+        sys.stderr.write("No such image\n")
+        sys.exit(1)
+    print("1.2.3")
+elif args[:2] == ["network", "create"]:
+    print("0123456789ab")
+elif args[:1] == ["ps"]:
+    print("CONTAINER ID   NAMES")
+elif args[:1] == ["run"] and "lint" in args:
+    print('{"problems": []}')
