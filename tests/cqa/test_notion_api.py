@@ -9,7 +9,7 @@ from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 from cqa.notion_api import NotionClient, NotionError, extract_id, urllib_transport
-from tests.cqa.fakes import FakeClock, FakeTransport
+from tests.cqa.fakes import FakeClock, FakeTransport, failure, listing, make_client
 
 API = "https://api.notion.com/v1"
 ID = "0123456789abcdef0123456789abcdef"
@@ -18,30 +18,8 @@ VIEW_ID = "fedcba9876543210fedcba9876543210"
 OK = (200, {}, {"object": "user"})
 
 
-def make_client(responses, frozen=False, **options):
-    transport = FakeTransport(responses)
-    clock = FakeClock(frozen=frozen)
-    client = NotionClient("tok", transport=transport, sleep=clock.sleep, clock=clock, **options)
-    return client, transport, clock
-
-
-def failure(status, code="object_not_found", message="Could not find page", headers=None):
-    body = {"object": "error", "status": status, "code": code, "message": message}
-    return status, headers or {}, body
-
-
 def items(*ids):
     return [{"id": item_id} for item_id in ids]
-
-
-def listing(results, next_cursor=None):
-    body = {
-        "object": "list",
-        "results": results,
-        "has_more": next_cursor is not None,
-        "next_cursor": next_cursor,
-    }
-    return 200, {}, body
 
 
 def markdown_response(truncated=False):

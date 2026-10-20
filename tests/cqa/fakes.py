@@ -2,6 +2,8 @@
 import json
 from typing import NamedTuple, Optional
 
+from cqa.notion_api import NotionClient
+
 
 class Call(NamedTuple):
     """One request as the client sent it to the transport."""
@@ -59,3 +61,26 @@ class FakeClock:
         self.sleeps.append(seconds)
         if not self.frozen:
             self.now += seconds
+
+
+def make_client(responses, frozen=False, **options):
+    """Return (client, transport, clock): a client on a scripted transport and a fake clock."""
+    transport = FakeTransport(responses)
+    clock = FakeClock(frozen=frozen)
+    client = NotionClient("tok", transport=transport, sleep=clock.sleep, clock=clock, **options)
+    return client, transport, clock
+
+
+def failure(status, code="object_not_found", message="Could not find page", headers=None):
+    body = {"object": "error", "status": status, "code": code, "message": message}
+    return status, headers or {}, body
+
+
+def listing(results, next_cursor=None):
+    body = {
+        "object": "list",
+        "results": results,
+        "has_more": next_cursor is not None,
+        "next_cursor": next_cursor,
+    }
+    return 200, {}, body
