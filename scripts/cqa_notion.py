@@ -22,7 +22,7 @@ from cqa.notion_read import (
     write_fiches,
     write_json,
 )
-from cqa.notion_write import ReferenceWriteRefused, apply_plan
+from cqa.notion_write import ReferenceWriteRefused, apply_plan, validate_plan
 from cqa.plan import filter_plan, operation_key
 from cqa.secrets import known_values_from_env
 
@@ -183,11 +183,14 @@ def _cmd_apply(args, client) -> int:
     plan = _read_json(args.run_dir / args.plan, "lancer d'abord cqa_plan.py plan")
     if not isinstance(plan, dict):
         raise UsageError(f"{args.plan.name} : un objet JSON est attendu.")
+    validate_plan(plan)
     if args.skip_human_overrides:
         try:
             plan = filter_plan(plan, skip_human_overrides=True)
         except KeyError as error:
             raise UsageError(f"{args.plan.name} : la clé « {error.args[0]} » est absente.")
+        except (TypeError, AttributeError):
+            raise UsageError(f"{args.plan.name} : « rows » ou « summary » est invalide.")
     notion = _notion_context(args.run_dir, "bot_id")
     row_page_ids = {
         item["page_id"]

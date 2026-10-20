@@ -7,7 +7,7 @@ from typing import Callable, Optional
 from cqa.checklist import ref_label
 from cqa.comments import to_rich_text
 from cqa.notion_api import NotionError
-from cqa.notion_read import write_json
+from cqa.notion_read import assignee_options, write_json
 from cqa.secrets import scan_text
 
 STATUS_PROPERTY = "Statut"
@@ -40,11 +40,13 @@ def apply_plan(
     blocked lists {"key", "labels"} and errors {"key", "message"}.
 
     A plan whose copy is the reference data source is refused with ReferenceWriteRefused, and a
-    malformed plan or journal with ValueError, both before any request. An operation is then
-    blocked, without any request, when its page is not a row of the copy (a page_comment may
-    also target copy_page_id), when its text or target value holds a secret, or when an
-    assignment names an option the plan does not list. Operations go by ref, then status,
-    assign and comment, the page_comment ones last.
+    malformed plan or journal with ValueError, both before any request. When the plan assigns,
+    the schema of the copy is then read: its NotionError is not caught, nothing has been
+    written. An operation is blocked, without any request, when its page is not a row of the
+    copy (a page_comment may also target copy_page_id), when its text or target value holds a
+    secret, or when an assignment names an option that the plan does not list or that the copy
+    no longer has (Notion would create it). Operations go by ref, then status, assign and
+    comment, the page_comment ones last.
 
     notion/applied.json in run_dir lists what was written and is rewritten after each success:
     its keys are skipped on a rerun. A comment is also skipped when the page already shows a
@@ -54,11 +56,11 @@ def apply_plan(
     ones of the same page.
     """
     _refuse_reference(plan, reference_ds_id)
-    ops = _operations(plan)
-    options = plan.get("assignee_options") or []
+    ops = validate_plan(plan)
     allowed = {_normalize(page_id) for page_id in row_page_ids}
     journal = Path(run_dir) / "notion" / "applied.json"
     entries = _load_journal(journal)
+    options = _live_options(client, plan, ops)
     journal.parent.mkdir(parents=True, exist_ok=True)
     recorded = {entry["key"] for entry in entries}
     result = {"done": 0, "skipped": 0, "blocked": [], "errors": []}
@@ -114,7 +116,8 @@ def _refuse_reference(plan: dict, reference_ds_id: str) -> None:
         raise ReferenceWriteRefused(REFUSED_MESSAGE)
 
 
-def _operations(plan: dict) -> list:
+def validate_plan(plan: dict) -> list:
+    """Return the operations of a plan, or raise ValueError when its structure is wrong."""
     ops = plan.get("ops")
     if not isinstance(ops, list):
         raise ValueError("plan invalide : la liste « ops » est absente.")
@@ -123,6 +126,18 @@ def _operations(plan: dict) -> list:
         if problem:
             raise ValueError(f"plan invalide : opération {number} : {problem}.")
     return ops
+
+
+def _live_options(client, plan: dict, ops: list) -> list:
+    """Return the assignee options of the plan that the copy still has, read now.
+
+    The plan's list is a snapshot: an option removed from the copy since would be recreated
+    by Notion on write. Nothing is read when the plan has no assignment.
+    """
+    if not any(item["kind"] == "assign" for item in ops):
+        return []
+    live = assignee_options(client.data_source(plan["copy_data_source_id"]))
+    return [name for name in plan.get("assignee_options") or [] if name in live]
 
 
 def _problem(item) -> Optional[str]:

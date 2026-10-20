@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import cqa_notion
 from cqa.comments import to_rich_text
-from cqa.notion_api import NotionClient
+from cqa.notion_api import NotionClient, NotionError
 from cqa.notion_write import ReferenceWriteRefused, apply_plan
 from cqa.plan import operation_key
 from tests.cqa.fakes import Call, FakeClock, failure
@@ -51,7 +51,9 @@ class FakeNotion:
     post_faults maps the number of a POST /comments to "lost_request" (nothing stored) or
     "lost_response" (stored, but the client sees a network failure). page_errors maps a page id
     to an HTTP failure (status, body), page_unreachable holds pages whose PATCH never answers
-    and comments_unreachable makes every GET /comments fail.
+    and comments_unreachable makes every GET /comments fail. A post fault may also be
+    "rate_limited" (429 with Retry-After, nothing stored). live_options are the "Assignée à"
+    options of the copy, and data_source_error an HTTP failure (status, body) of its schema read.
     writes lists what was stored, in order: (label, page id, payload).
     """
 
@@ -64,6 +66,8 @@ class FakeNotion:
         self.page_errors = {}
         self.page_unreachable = set()
         self.comments_unreachable = False
+        self.live_options = list(OPTIONS)
+        self.data_source_error = None
         self.posts = 0
 
     def __call__(self, method, url, headers, data):
@@ -83,6 +87,12 @@ class FakeNotion:
             return self._post_comment(body)
         if method == "PATCH" and path.startswith("/pages/"):
             return self._patch_page(path.rsplit("/", 1)[1], body["properties"])
+        if method == "GET" and path.startswith("/data_sources/"):
+            if self.data_source_error:
+                return reply(*self.data_source_error)
+            listed = [{"name": name} for name in self.live_options]
+            schema = {"Assignée à": {"type": "multi_select", "multi_select": {"options": listed}}}
+            return reply(200, {"object": "data_source", "properties": schema})
         if method == "GET" and path.startswith("/databases/"):
             sources = self.databases[path.rsplit("/", 1)[1]]
             listed = [{"id": item, "name": "Source"} for item in sources]
@@ -94,6 +104,9 @@ class FakeNotion:
         fault = self.post_faults.get(self.posts)
         if fault == "lost_request":
             raise URLError("connection reset")
+        if fault == "rate_limited":
+            payload = failure(429, "rate_limited", "Slow down")[2]
+            return 429, {"Retry-After": "2"}, json.dumps(payload).encode("utf-8")
         page = body["parent"]["page_id"]
         text = "".join(item["text"]["content"] for item in body["rich_text"])
         entry = {
@@ -131,6 +144,9 @@ class FakeNotion:
     def requests(self, method):
         return [call for call in self.calls if call.method == method]
 
+    def write_requests(self):
+        return self.requests("PATCH") + self.requests("POST")
+
 
 class StubClient:
     """Exposes the three methods apply_plan may use. Any other access fails the test."""
@@ -149,6 +165,10 @@ class StubClient:
 
     def comments(self, block_id):
         return []
+
+    def data_source(self, data_source_id):
+        listed = [{"name": name} for name in OPTIONS]
+        return {"properties": {"Assignée à": {"multi_select": {"options": listed}}}}
 
 
 def op(kind, page_id, ref, *, after=None, text="", verdict="ko", before=None, override=False):
@@ -399,9 +419,10 @@ class SecretGateTest(ApplyTestCase):
     def test_secret_in_an_assignee_name_blocks_too(self):
         assign = assign_op(PAGE_1, 1, ["Léa", "s3cr3t-value-xyz"])
         plan = make_plan(assign, options=[*OPTIONS, "s3cr3t-value-xyz"])
+        self.notion.live_options = [*OPTIONS, "s3cr3t-value-xyz"]
         result = self.apply(plan=plan, known_secrets=["s3cr3t-value-xyz"])
         self.assertEqual(result["blocked"][0]["labels"], ["known_value"])
-        self.assertEqual(self.notion.calls, [])
+        self.assertEqual(self.notion.write_requests(), [])
 
     def test_known_value_from_the_environment_blocks(self):
         comment = comment_op(PAGE_1, 1, "Le mot de passe est hunter2-hunter2.")
@@ -429,28 +450,69 @@ class UnknownOptionTest(ApplyTestCase):
         self.assertEqual(
             result["blocked"], [{"key": refused["key"], "labels": ["unknown_option"]}]
         )
-        self.assertEqual(self.notion.calls, [])
+        self.assertEqual(self.notion.write_requests(), [])
 
     def test_one_unknown_name_blocks_the_whole_assignment(self):
         result = self.apply(assign_op(PAGE_1, 1, ["Léa", "Zoé"]))
         self.assertEqual(len(result["blocked"]), 1)
-        self.assertEqual(self.notion.calls, [])
+        self.assertEqual(self.notion.write_requests(), [])
 
     def test_option_names_are_compared_exactly(self):
         result = self.apply(assign_op(PAGE_1, 1, ["lea"]))
         self.assertEqual(len(result["blocked"]), 1)
-        self.assertEqual(self.notion.calls, [])
+        self.assertEqual(self.notion.write_requests(), [])
 
     def test_plan_without_options_blocks_every_assignment(self):
         plan = make_plan(assign_op(PAGE_1, 1, ["Léa"]), options=[])
         del plan["assignee_options"]
         result = self.apply(plan=plan)
         self.assertEqual(len(result["blocked"]), 1)
-        self.assertEqual(self.notion.calls, [])
+        self.assertEqual(self.notion.write_requests(), [])
 
     def test_known_option_is_written(self):
         result = self.apply(assign_op(PAGE_1, 1, ["Julien D"]))
         self.assertEqual(result["done"], 1)
+
+    def test_option_removed_from_the_copy_since_the_plan_is_blocked(self):
+        self.notion.live_options = ["Julien D"]
+        lost = assign_op(PAGE_1, 1, ["Léa"])
+        kept = assign_op(PAGE_2, 2, ["Julien D"])
+        result = self.apply(lost, kept)
+        self.assertEqual(result["done"], 1)
+        self.assertEqual(result["blocked"], [{"key": lost["key"], "labels": ["unknown_option"]}])
+        self.assertEqual([page for _, page, _ in self.notion.writes], [PAGE_2])
+        self.assertEqual(len(self.notion.requests("PATCH")), 1)
+        self.assertNotIn(lost["key"], self.applied_keys())
+
+    def test_option_added_to_the_copy_but_not_planned_is_blocked(self):
+        self.notion.live_options = [*OPTIONS, "Zoé"]
+        result = self.apply(assign_op(PAGE_1, 1, ["Zoé"]))
+        self.assertEqual(result["blocked"][0]["labels"], ["unknown_option"])
+        self.assertEqual(self.notion.write_requests(), [])
+
+    def test_copy_without_the_assignee_property_blocks_every_assignment(self):
+        self.notion.live_options = []
+        result = self.apply(assign_op(PAGE_1, 1, ["Léa"]))
+        self.assertEqual(result["blocked"][0]["labels"], ["unknown_option"])
+        self.assertEqual(self.notion.write_requests(), [])
+
+    def test_live_schema_is_read_once_from_the_copy_data_source(self):
+        self.apply(assign_op(PAGE_1, 1, ["Léa"]), assign_op(PAGE_2, 2, ["Julien D"]))
+        schema_reads = [call for call in self.notion.calls if "/data_sources/" in call.url]
+        self.assertEqual(len(schema_reads), 1)
+        self.assertTrue(schema_reads[0].url.endswith(f"/v1/data_sources/{COPY_DS}"))
+        self.assertEqual(schema_reads[0].method, "GET")
+
+    def test_schema_is_not_read_without_an_assignment(self):
+        self.apply(status_op(PAGE_1, 1), comment_op(PAGE_1, 1))
+        self.assertEqual([call for call in self.notion.calls if "/data_sources/" in call.url], [])
+
+    def test_schema_read_failure_stops_before_any_write(self):
+        self.notion.data_source_error = http_failure(404, "object_not_found", "Gone")
+        with self.assertRaises(NotionError):
+            self.apply(status_op(PAGE_1, 1), assign_op(PAGE_1, 1, ["Léa"]))
+        self.assertEqual(self.notion.write_requests(), [])
+        self.assertFalse(self.applied_path().exists())
 
 
 class OrderTest(ApplyTestCase):
@@ -590,6 +652,31 @@ class ResumeTest(ApplyTestCase):
         second = self.apply(*ops)
         self.assertEqual(second, {"done": 1, "skipped": 2, "blocked": [], "errors": []})
         self.assertEqual(self.notion.posts, 3)
+        self.assert_each_comment_once(ops)
+
+    def test_resume_after_a_series_of_429(self):
+        ops = self.comment_ops()
+        self.notion.post_faults = {number: "rate_limited" for number in range(2, 7)}
+        first = self.apply(*ops)
+        self.assertEqual(first["done"], 1)
+        self.assertEqual([item["key"] for item in first["errors"]], [ops[1]["key"]])
+        self.assertIn("429", first["errors"][0]["message"])
+        self.assertIn("relancer", first["errors"][0]["message"])
+        self.assertEqual(self.notion.posts, 6)
+        self.assertEqual(self.clock.sleeps.count(2.0), 4)
+        self.assertEqual(self.notion.stored(PAGE_3), [])
+        self.assertEqual(self.applied_keys(), [ops[0]["key"]])
+        second = self.apply(*ops)
+        self.assertEqual(second, {"done": 2, "skipped": 1, "blocked": [], "errors": []})
+        self.assertEqual(self.notion.posts, 8)
+        self.assert_each_comment_once(ops)
+
+    def test_a_429_that_clears_within_the_retries_does_not_stop_the_plan(self):
+        ops = self.comment_ops()
+        self.notion.post_faults = {2: "rate_limited", 3: "rate_limited"}
+        result = self.apply(*ops)
+        self.assertEqual(result, {"done": 3, "skipped": 0, "blocked": [], "errors": []})
+        self.assertEqual(self.clock.sleeps.count(2.0), 2)
         self.assert_each_comment_once(ops)
 
     def test_comment_already_on_the_page_is_not_sent_again(self):
@@ -862,6 +949,79 @@ class ApplyCommandTest(CliTestCase):
         self.assertEqual(code, 2)
         self.assertIn("rows", err)
         self.assertEqual(self.notion.calls, [])
+
+    def test_malformed_plans_exit_2_with_or_without_the_option(self):
+        good = status_op(PAGE_1, 1)
+        plans = {
+            "ops null": {"ops": None},
+            "ops not a list": {"ops": "x"},
+            "op not an object": {"ops": [good, 3]},
+            "op without page": {"ops": [{**good, "page_id": None}]},
+            "op of unknown kind": {"ops": [{**good, "kind": "delete"}]},
+        }
+        for name, fields in plans.items():
+            for flag in ([], ["--skip-human-overrides"]):
+                with self.subTest(name, flag=flag):
+                    self.write_plan(**fields, rows=[], summary={})
+                    code, out, err = self.run_main(["apply", self.run_dir, *flag])
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn("plan invalide", err)
+                    self.assertNotIn("Traceback", err)
+        self.assertEqual(self.notion.calls, [])
+
+    def test_plan_that_is_not_an_object_exit_2(self):
+        self.write_json("notion/plan.json", [])
+        code, out, err = self.run_main(["apply", self.run_dir, "--skip-human-overrides"])
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("plan.json", err)
+
+    def test_skip_human_overrides_with_malformed_rows_or_summary_exit_2(self):
+        for name, fields in (
+            ("rows null", {"rows": None}),
+            ("rows not objects", {"rows": [1]}),
+            ("summary null", {"summary": None}),
+        ):
+            with self.subTest(name):
+                self.write_plan(status_op(PAGE_1, 1, override=True), **fields)
+                code, out, err = self.run_main(["apply", self.run_dir, "--skip-human-overrides"])
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("plan.json", err)
+        self.assertEqual(self.notion.calls, [])
+
+    def test_option_removed_from_the_copy_is_blocked_exit_7(self):
+        self.notion.live_options = ["Julien D"]
+        self.write_plan(assign_op(PAGE_1, 1, ["Léa"]))
+        code, out, _ = self.run_main(["apply", self.run_dir])
+        self.assertEqual(code, 7)
+        self.assertEqual(json.loads(out)["blocked"][0]["labels"], ["unknown_option"])
+        self.assertEqual(self.notion.write_requests(), [])
+
+    def test_schema_read_failure_exit_3(self):
+        self.notion.data_source_error = http_failure(404, "object_not_found", "Gone")
+        self.write_plan(assign_op(PAGE_1, 1, ["Léa"]))
+        code, out, err = self.run_main(["apply", self.run_dir])
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn("object_not_found", err)
+        self.assertEqual(self.notion.write_requests(), [])
+
+    def test_rate_limit_series_exit_3_then_resume(self):
+        self.write_plan(
+            comment_op(PAGE_1, 1, "Constat A"),
+            comment_op(PAGE_2, 2, "Constat B"),
+            comment_op(PAGE_3, 3, "Constat C"),
+        )
+        self.notion.post_faults = {number: "rate_limited" for number in range(2, 7)}
+        code, out, err = self.run_main(["apply", self.run_dir])
+        self.assertEqual(code, 3)
+        self.assertEqual(json.loads(out)["done"], 1)
+        self.assertIn("429", err)
+        self.assertEqual(len(self.read_json("notion/applied.json")["applied"]), 1)
+        self.assertEqual(self.clock.sleeps.count(2.0), 4)
+        code, out, _ = self.run_main(["apply", self.run_dir])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), {"done": 2, "skipped": 1, "blocked": [], "errors": []})
+        for page, text in ((PAGE_1, "Constat A"), (PAGE_2, "Constat B"), (PAGE_3, "Constat C")):
+            self.assertEqual(self.notion.stored(page), [text])
 
     def test_reference_refused_exit_8(self):
         self.write_plan(status_op(PAGE_1, 1), copy_data_source_id=REF_DS)
