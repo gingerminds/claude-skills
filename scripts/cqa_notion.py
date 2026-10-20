@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Notion side of the checklist audit. Results go to stdout as JSON, errors to stderr.
 
-Exit codes: 0 success, 2 environment or usage, 3 Notion API error, 6 invalid schema.
+Exit codes: 0 success, 2 environment or usage, 3 Notion API error, 6 invalid schema,
+7 write operation blocked by a safety gate, 8 write refused on the reference template.
 """
 import argparse
 import json
@@ -10,6 +11,7 @@ import sys
 from pathlib import Path
 
 from cqa.checklist import validate_schema
+from cqa.comments import MAX_COMMENT_LENGTH
 from cqa.notion_api import NotionClient, NotionError, extract_id
 from cqa.notion_read import (
     assemble_rows,
@@ -20,11 +22,16 @@ from cqa.notion_read import (
     write_fiches,
     write_json,
 )
+from cqa.notion_write import ReferenceWriteRefused, apply_plan
+from cqa.plan import filter_plan, operation_key
+from cqa.secrets import known_values_from_env
 
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_API = 3
 EXIT_SCHEMA = 6
+EXIT_BLOCKED = 7
+EXIT_REFUSED = 8
 
 
 class UsageError(Exception):
@@ -45,6 +52,9 @@ def main(argv, *, client=None) -> int:
     except NotionError as error:
         print(error, file=sys.stderr)
         return EXIT_API
+    except ReferenceWriteRefused as error:
+        print(error, file=sys.stderr)
+        return EXIT_REFUSED
     except (UsageError, ValueError) as error:
         print(error, file=sys.stderr)
         return EXIT_USAGE
@@ -52,7 +62,7 @@ def main(argv, *, client=None) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="cqa_notion.py", description="Lecture de la checklist qualité dans Notion."
+        prog="cqa_notion.py", description="Lecture et écriture de la checklist qualité dans Notion."
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="commande")
     commands.add_parser("whoami", help="affiche l'intégration Notion").set_defaults(
@@ -72,6 +82,24 @@ def _build_parser() -> argparse.ArgumentParser:
         sub = commands.add_parser(name, help=help_text)
         sub.add_argument("run_dir", type=Path, help="dossier du run")
         sub.set_defaults(handler=handler)
+    sub = commands.add_parser("apply", help="écrit un plan dans la copie (reprise possible)")
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument(
+        "--plan",
+        type=Path,
+        default=Path("notion/plan.json"),
+        help="plan à écrire, relatif au dossier du run (défaut : notion/plan.json)",
+    )
+    sub.add_argument(
+        "--skip-human-overrides",
+        action="store_true",
+        help="ne touche pas aux pages dont le statut a été posé par un humain",
+    )
+    sub.set_defaults(handler=_cmd_apply)
+    sub = commands.add_parser("comment-page", help="écrit un commentaire sur la page de la copie")
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("text_file", type=Path, help="fichier texte du commentaire")
+    sub.set_defaults(handler=_cmd_comment_page)
     return parser
 
 
@@ -151,6 +179,105 @@ def _cmd_comments(args, client) -> int:
     return EXIT_OK
 
 
+def _cmd_apply(args, client) -> int:
+    plan = _read_json(args.run_dir / args.plan, "lancer d'abord cqa_plan.py plan")
+    if not isinstance(plan, dict):
+        raise UsageError(f"{args.plan.name} : un objet JSON est attendu.")
+    if args.skip_human_overrides:
+        try:
+            plan = filter_plan(plan, skip_human_overrides=True)
+        except KeyError as error:
+            raise UsageError(f"{args.plan.name} : la clé « {error.args[0]} » est absente.")
+    notion = _notion_context(args.run_dir, "bot_id")
+    row_page_ids = {
+        item["page_id"]
+        for item in _read_rows(args.run_dir)
+        if isinstance(item, dict) and isinstance(item.get("page_id"), str)
+    }
+    return _write_plan(client, args.run_dir, plan, notion, row_page_ids)
+
+
+def _cmd_comment_page(args, client) -> int:
+    context = _read_json(args.run_dir / "context.json")
+    section = context.get("notion") if isinstance(context, dict) else None
+    if isinstance(section, dict) and "copy_page_id" in section and section["copy_page_id"] is None:
+        print(
+            "La copie est donnée par l'URL de la base (copy_page_id absent) : "
+            "aucun commentaire n'est écrit sur la page.",
+            file=sys.stderr,
+        )
+        _emit(
+            {"done": 0, "skipped": 0, "blocked": [], "errors": [], "reason": "copy_page_id absent"}
+        )
+        return EXIT_OK
+    notion = _notion_context(args.run_dir, "copy_page_id", "copy_data_source_id", "bot_id")
+    page_id = notion["copy_page_id"]
+    text = _read_comment_text(args.text_file)
+    operation = {
+        "key": operation_key("page_comment", page_id, None, text),
+        "kind": "page_comment",
+        "page_id": page_id,
+        "ref": None,
+        "verdict": None,
+        "before": None,
+        "after": None,
+        "text": text,
+        "human_override": False,
+    }
+    plan = {
+        "copy_data_source_id": notion["copy_data_source_id"],
+        "copy_page_id": page_id,
+        "assignee_options": [],
+        "ops": [operation],
+    }
+    return _write_plan(client, args.run_dir, plan, notion, set())
+
+
+def _write_plan(client, run_dir: Path, plan: dict, notion: dict, row_page_ids: set) -> int:
+    """Apply a plan with the safety gates, print its report and return the exit code."""
+    result = apply_plan(
+        client,
+        plan,
+        run_dir=run_dir,
+        reference_ds_id=_reference_data_source(client, notion),
+        row_page_ids=row_page_ids,
+        copy_page_id=notion.get("copy_page_id") or None,
+        known_secrets=known_values_from_env(),
+        bot_id=notion["bot_id"],
+        log=_log,
+    )
+    _emit(result)
+    if result["errors"]:
+        return EXIT_API
+    return EXIT_BLOCKED if result["blocked"] else EXIT_OK
+
+
+def _reference_data_source(client, notion: dict) -> str:
+    """Return the reference data source: from the context, else by resolving GM_CQA_REFERENCE."""
+    known = notion.get("reference_data_source_id")
+    if isinstance(known, str) and known.strip():
+        return known.strip()
+    reference = os.environ.get("GM_CQA_REFERENCE", "").strip()
+    if not reference:
+        raise UsageError(
+            "Le modèle est inconnu : notion.reference_data_source_id est absent de context.json "
+            "et GM_CQA_REFERENCE de l'environnement. Aucune écriture sans cette vérification."
+        )
+    return resolve(client, reference)["data_source_id"]
+
+
+def _read_comment_text(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError) as error:
+        raise UsageError(f"{path} est illisible : {error}")
+    if not text:
+        raise UsageError(f"{path} est vide : aucun commentaire à écrire.")
+    if len(text) > MAX_COMMENT_LENGTH:
+        raise UsageError(f"{path} dépasse {MAX_COMMENT_LENGTH} caractères ({len(text)}).")
+    return text
+
+
 def _notion_context(run_dir: Path, *keys: str) -> dict:
     """Return the "notion" section of context.json, checking that each key is a filled string."""
     context = _read_json(run_dir / "context.json")
@@ -182,6 +309,10 @@ def _read_json(path: Path, hint: str = ""):
 
 def _emit(value) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
+
+
+def _log(message: str) -> None:
+    print(message, file=sys.stderr)
 
 
 if __name__ == "__main__":
