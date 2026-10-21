@@ -23,6 +23,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `merge-review` | `/gm:merge-review` | Review côté reviewer d'une MR GitLab existante — fond, forme, langue, standards — charge le ticket Mantis lié et rédige une note + recommandation approve / request-changes. Stack-agnostique (via `gm:review`). |
 | `security` | `/gm:security` | Audit sécurité des dépendances et de l'infra — `composer audit` / `npm audit`, advisories CMS/framework, config Docker — priorisé par criticité réelle, avec correctifs ou marches à suivre. Stack-agnostique : les checks spécifiques (ex. SA Drupal) viennent de `stack/`. |
 | `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressources dédiées par techno quand elles existent. |
+| `checklist-quality-audit` | `/gm:checklist-quality-audit` (alias `/gm:cqa`) | Audit PRE-MEL de la checklist qualité d'un projet : vérifie le poste et que la préprod sert le code audité, évalue chaque ligne de la copie Notion du projet (code, préprod, boîte à outils Docker, navigateur), écrit statuts et commentaires de preuve après confirmation du lead, puis répartit le reste entre les devs. Lecture seule sur les repos, les serveurs et les bases. Prérequis : voir « Préparer son poste ». |
 
 ## Installation
 
@@ -75,6 +76,18 @@ Côté reviewer, `/gm:merge-review` prend une MR existante (URL ou numéro), cha
 
 Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépare, génère et maintient un modèle **C4 interactif** (HTML autonome) dans `.archi/` — vue projet (C1/C2) dans `.archi/index.html` et une page par unité custom (C3, C4 à la demande), à ouvrir dans le navigateur.
 
+### Préparer son poste pour `/gm:checklist-quality-audit`
+
+À faire une fois par poste de lead dev. `/gm:cqa diagnostic` vérifie ensuite le poste sans rien écrire dans Notion.
+
+- **Variables d'environnement** : à exporter dans le profil du shell (valeurs dans Vaultwarden), puis relancer Claude Code.
+  - `NOTION_TOKEN` : jeton de l'intégration Notion de l'agence.
+  - `GM_CQA_REFERENCE` : URL de la page du modèle de la checklist (le skill refuse d'auditer le modèle lui-même).
+  - `GM_SF_LICENCE_USER` et `GM_SF_LICENCE_KEY` : licence Screaming Frog, pour le crawl.
+- **Registre Docker** : Docker installé (Docker Desktop sous macOS, Docker Engine sous Linux), puis `docker login registry.gitlab.gingerminds.fr` avec un token GitLab en lecture sur le registre (valeur dans Vaultwarden). Les images de la boîte à outils sont tirées au premier audit.
+- **`glab`** installé et authentifié sur le GitLab de l'agence (`glab auth status`) : il sert à retrouver le commit déployé en préprod.
+- **Claude in Chrome** : extension installée et connectée, pour les contrôles navigateur. Le lead s'y connecte lui-même quand le site est protégé.
+
 ## Structure
 
 ```
@@ -82,8 +95,14 @@ claude-skills/
 ├── .claude-plugin/
 │   ├── marketplace.json     # déclare le marketplace "gingerminds" + le plugin "gm"
 │   └── plugin.json          # manifeste du plugin "gm" (nom + version) — sert au dev local via --plugin-dir
+├── agents/
+│   ├── cqa-auditor.md       # sous-agent d'analyse des lignes de checklist (code, préprod) : consommé par checklist-quality-audit
+│   └── cqa-browser.md       # sous-agent des contrôles navigateur (Claude in Chrome) : consommé par checklist-quality-audit
 ├── scripts/
-│   └── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
+│   ├── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
+│   ├── cqa_notion.py  cqa_plan.py  cqa_ssh_ro.py   # CLI de l'audit : API Notion, plan, garde SSH en lecture seule
+│   ├── cqa/                 # bibliothèque de l'audit (Python >= 3.9, bibliothèque standard seule)
+│   └── cqa-toolbox.sh       # lanceur de la boîte à outils Docker de l'audit
 ├── shared/                  # ressources transverses (indépendantes de la techno)
 │   ├── runner.md            # ordre de priorité du runner : make → docker → lando
 │   ├── stack-detect.md      # cheatsheet de détection de stack + règle de chargement
@@ -96,6 +115,8 @@ claude-skills/
 │   │   └── …
 │   └── vue/
 │       └── MAIN.md          # Forme 1 : fichier unique sectionné (## core / dev / review / security)
+├── tests/
+│   └── cqa/                 # tests unittest de l'audit et hygiène du dépôt public (voir « Contribuer »)
 └── skills/
     ├── ticket/SKILL.md
     ├── drupal/SKILL.md      # point d'entrée : charge stack/drupal/MAIN.md (dev)
@@ -109,6 +130,11 @@ claude-skills/
     ├── merge-request/SKILL.md
     ├── merge-review/SKILL.md
     ├── security/SKILL.md    # générique : détecte la stack → charge stack/<x>/MAIN.md (security)
+    ├── checklist-quality-audit/
+    │   ├── SKILL.md         # orchestrateur de l'audit PRE-MEL
+    │   ├── references/      # lues au fil des étapes de l'audit
+    │   └── schemas/         # finding.schema.json (contrat des sous-agents)
+    ├── cqa/SKILL.md         # alias /gm:cqa de checklist-quality-audit
     └── archi-c4/
         ├── SKILL.md
         └── assets/          # template.html figé + model.example.js (contrat)
@@ -139,3 +165,11 @@ claude --plugin-dir ~/claude-skills   # lit les skills en place (le plugin.json 
 ```
 
 À l'inverse, `/plugin marketplace update gingerminds` puis `/plugin install gm@gingerminds` recopient depuis la source — plus lourd, à réserver à la vérification d'une version installée.
+
+**Tests** : le code de l'audit (`scripts/cqa/`, `scripts/cqa_*.py`) et les contrats de ses skills et sous-agents sont couverts par des tests `unittest` (Python 3.9 minimum, bibliothèque standard seule). À lancer avant de modifier ces fichiers :
+
+```bash
+PYTHONPATH=scripts python3 -m unittest discover -s tests -t . -v
+```
+
+Le dépôt est public : `tests/cqa/test_public_hygiene.py` fait échouer la suite sur toute adresse IP, tout identifiant Notion hors de la liste d'identifiants factices du test, tout secret dans les fichiers de contenu, et toute version désalignée entre `marketplace.json` et `plugin.json`. Dans les tests et les fixtures, utilise des identifiants factices (`0123456789abcdef0123456789abcdef`), des prénoms inventés et des domaines `example.org`.
