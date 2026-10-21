@@ -68,6 +68,13 @@ _BASH_BLOCK = re.compile(r"```bash\n(.*?)\n```", re.DOTALL)
 _TOOLBOX_MAIN = re.compile(r"^main\(\) \{\n(.*?)^\}", re.DOTALL | re.MULTILINE)
 _TOOLBOX_USAGE = re.compile(r"^usage\(\) \{\n(.*?)^\}", re.DOTALL | re.MULTILINE)
 _CASE_LABEL = re.compile(r"^\s+([a-z]+)\)", re.MULTILINE)
+_SCRIPT_NAME = re.compile(r"cqa_notion\.py|cqa_plan\.py|cqa-toolbox\.sh|cqa_ssh_ro\.py")
+_NOTION_WRITE = re.compile(r"cqa_notion\.py\" (?:apply|comment-page)\b")
+_CHAINING = re.compile(r"&&|\|\||;|\|")
+_PLAN_QUESTION = "« Écrire le plan dans la copie Notion ? »"
+_ASSIGN_QUESTION = "« Écrire ces <n> assignations dans Notion ? »"
+_ASSIGN_APPLY = 'apply "$RUN" --plan notion/assign-plan.json'
+_SESSION_CREDENTIALS = "when the session holds the Basic Auth credentials"
 
 
 def _text(path: Path) -> str:
@@ -119,6 +126,13 @@ def _toolbox_commands() -> dict:
 def _shell_segment(text: str) -> str:
     """Return the arguments of one command: up to the remote command or a shell operator."""
     return _SHELL_END.split(text, maxsplit=1)[0]
+
+
+def _section(text: str, heading: str) -> str:
+    """Return the body of a "## " section of a Markdown text, up to the next one."""
+    start = text.index(f"\n## {heading}")
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end != -1 else len(text)]
 
 
 class SkillTest(unittest.TestCase):
@@ -181,6 +195,68 @@ class SkillTest(unittest.TestCase):
 
     def test_skill_sets_the_scripts_dir(self):
         self.assertIn(SCRIPTS_LINE, _text(SKILL))
+
+    def test_one_script_command_per_block(self):
+        for path in _skill_files():
+            for block in _BASH_BLOCK.findall(_text(path)):
+                with self.subTest(file=path.name, block=block.splitlines()[-1]):
+                    self.assertLessEqual(len(_SCRIPT_NAME.findall(block)), 1)
+
+    def test_notion_writes_stand_alone(self):
+        writes = 0
+        for path in _skill_files():
+            for block in _BASH_BLOCK.findall(_text(path)):
+                if not _NOTION_WRITE.search(block):
+                    continue
+                writes += 1
+                lines = [
+                    line
+                    for line in block.splitlines()
+                    if line.strip() and not line.startswith(("S=", "RUN="))
+                ]
+                with self.subTest(file=path.name, block=lines[0]):
+                    self.assertEqual(len(lines), 1)
+                    self.assertNotRegex(lines[0], _CHAINING)
+        self.assertTrue(writes)
+
+    def test_commands_rule(self):
+        rules = _section(_text(SKILL), "1. Imperative rules")
+        for needle in (
+            "One Bash call per command",
+            "never chain a Notion write with anything else",
+            "Never repeat a password",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, rules)
+
+    def test_notion_writes_follow_the_confirmation(self):
+        skill = _text(SKILL)
+        self.assertLess(skill.index(_PLAN_QUESTION), skill.index('cqa_notion.py" apply "$RUN"'))
+        for path in (SKILL, REFERENCES / "assign.md"):
+            with self.subTest(file=path.name):
+                text = _text(path)
+                self.assertLess(text.index(_ASSIGN_QUESTION), text.index(_ASSIGN_APPLY))
+
+    def test_run_is_complete_after_the_final_scan(self):
+        skill = _text(SKILL)
+        resume = _section(skill, "3. Resume")
+        self.assertIn('test -f "<path>/done.json"', resume)
+        self.assertIn("without `done.json` is incomplete", resume)
+        writing = _section(skill, "8. Writing and synthesis")
+        self.assertLess(writing.index('cqa_plan.py" scan'), writing.index("Write `done.json`"))
+
+    def test_toolbox_credentials_come_from_the_session(self):
+        for path in _skill_files():
+            text = _text(path)
+            blocks = [
+                block
+                for block in _BASH_BLOCK.findall(text)
+                if "GM_AUDIT_AUTH_USER=" in block and "cqa-toolbox.sh" in block
+            ]
+            if blocks:
+                with self.subTest(file=path.name):
+                    self.assertIn(_SESSION_CREDENTIALS, text)
+                    self.assertNotIn("when `target.access` is `basic_auth`", text)
 
     def test_no_em_dash_in_skill(self):
         for path in _skill_files():

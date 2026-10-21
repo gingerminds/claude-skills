@@ -24,7 +24,7 @@ python3 "$S/cqa_plan.py" repo-state "<chemin du repo>"
 
 For each repo, take the first source that answers.
 
-**a. Server**, only with `ssh.alias`, after the SSH check of step 7. The folder of the application: ask « Dossier de l'application <name> sur le serveur ? », with the candidates the guard finds (marker per stack in `references/server.md`; `artisan` here):
+**a. Server**, only with `ssh.alias`, after the SSH check of step 7. The folder of the application: ask « Dossier de l'application <name> sur le serveur (ou saisir le chemin dans « Autre ») ? », with the candidates (3 at most) and « Je ne sais pas » as options, plus « Arrêter l'audit » when there is no candidate; « Je ne sais pas » skips the server source. The candidates come from the guard (marker per stack in `references/server.md`; `artisan` here):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -60,7 +60,7 @@ python3 "$S/cqa_plan.py" deployed "<chemin du repo>" --branch <preprod_branch>
 - `{"sha", "source"}`. `source` `environment`: last successful deployment of the preprod environment. `pipeline`: only the last successful pipeline of the branch, a weaker clue: confirm with « D'après GitLab, le dernier pipeline réussi de <branche> est <sha court>. Est-ce bien ce qui tourne en préprod ? » (« Oui », « Je ne sais pas »).
 - `{"sha": null}`: nothing found (or glab missing, not logged in).
 
-**c. The lead**: « Quel commit tourne en préprod pour le repo <name> ? » with « Je ne sais pas » and the free-text field (SHA, short or full).
+**c. The lead**: « Quel commit tourne en préprod pour le repo <name> (saisir le SHA, court ou complet, dans « Autre ») ? » with « Je ne sais pas » and « Arrêter l'audit ».
 
 Then:
 

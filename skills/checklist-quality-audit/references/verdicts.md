@@ -304,7 +304,7 @@ What the lead sees, in French:
 One question, « Écrire le plan dans la copie Notion ? »:
 
 - « Tout écrire »: statuses, assignments of the lead and comments, the human statuses listed included.
-- « Sans toucher aux statuts posés par un humain »: offered only when `human_overrides` is not empty. Those pages are left as they are, comments included. Keep the list shown above: the rebuilt plan no longer holds it, and SKILL.md section 8 adds it to `synthese.md`. Rebuild the plan first, so that the synthesis describes what is written, then apply with the same option:
+- « Sans toucher aux statuts posés par un humain »: offered only when `human_overrides` is not empty. Those pages are left as they are, comments included. Keep the list shown above: the rebuilt plan no longer holds it, and SKILL.md section 8, step 3, adds it to « Remarques » in `synthese.md`. Rebuild the plan first, so that the synthesis describes what is written, then apply with the same option:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -312,7 +312,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
 ```
 
-- « Ne rien écrire »: the plan stays in `notion/plan.json`; synthesis and scan are made locally, nothing goes to Notion.
+- « Ne rien écrire »: the plan stays in `notion/plan.json`; synthesis, « Remarques » and the final scan are made locally, nothing goes to Notion.
 
 ### Exit codes of `cqa_notion.py apply`
 
@@ -322,8 +322,8 @@ python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
 |---|---|---|
 | exit 0 | every operation written or already there | « <done> opérations écrites, <skipped> déjà présentes. » |
 | exit 7 | at least one operation blocked, without any request; the others are written | for each entry of `blocked`, from its labels (`blocked[].labels`): « CQ-<ref> (<kind>) non écrit : <raison> », reasons below |
-| exit 3 | stopped on a network or Notion API error, or an operation refused by Notion; wins over 7 | « Écriture interrompue (<message>). Relancer : la reprise saute ce qui est déjà écrit. » Run the same command again once the cause is fixed: `notion/applied.json` makes it resume where it stopped. An operation refused by Notion skips the later operations of the same page. |
-| exit 8 | the plan targets the reference template | « Écriture refusée : la data source est celle du modèle de référence. » Nothing is written; check the copy URL of `context.json`. |
+| exit 3 | stopped on a network or Notion API error, or an operation refused by Notion; wins over 7 | « Écriture interrompue (<message>). Relancer : la reprise saute ce qui est déjà écrit. » Run the same command once more, only once the cause is fixed: `notion/applied.json` makes it resume where it stopped. Still exit 3: stop, without synthesis; the run stays resumable at section 7. An operation refused by Notion skips the later operations of the same page. |
+| exit 8 | the plan targets the reference template | « Écriture refusée : la data source est celle du modèle de référence. » Nothing is written: stop; a new run with the URL of the copy. |
 | exit 2 | plan or `context.json` unreadable or invalid, environment variable missing | show the message, fix, run again |
 
 Labels of `blocked[].labels`:

@@ -2,6 +2,8 @@
 
 Goal: the `context.json` of the run, accepted by `cqa_plan.py context --check`. Ask one question at a time, with AskUserQuestion, in French, and only what is missing or must be confirmed. Every Bash call starts with the `S=` line of SKILL.md (here unexpanded) and `RUN="<run_dir>"`.
 
+Values to type (URL, identifier, password, path): AskUserQuestion needs 2 to 4 options, so each question below gives real options, and the question text says « (saisir la valeur dans « Autre ») ». When the free-text answer is not available, ask the same question as a plain message and wait for the reply. Never repeat the password back.
+
 ## 1. Project and repos
 
 Output of `cqa_plan.py project "$PWD"` (section 3 ran it):
@@ -14,14 +16,14 @@ Output of `cqa_plan.py project "$PWD"` (section 3 ran it):
 Exit 2: the current folder is not in a git repo, or its name is not « Client - Projet - Techno ». Show the message and stop: the lead launches the skill from a repo of the project.
 
 Question « Repos » : « Repos du projet : <name> (<path>), <name> (<path>). Est-ce la bonne liste ? »
-- Options: « Oui », « Seulement <name du repo courant> », and the free-text field for the path of a missing repo.
+- Options: « Oui », « Seulement <name du repo courant> »; the path of a missing repo in « Autre ».
 - A repo added by path: run `cqa_plan.py project "<path>"` and take its `repos[0]`.
 
 Then:
 - `PROJECT.md` cites a `repo_url` other than the `web_url` of its repo: say « PROJECT.md cite un autre repo (<repo_url>) : le remote git fait foi. », and keep the remote.
 - Repo `name`: keep the one `project` gives (last part of the folder name, as a slug: `laravel`, `nuxt-3`). Two repos with the same name: add `-2` to the second.
 - Technos: the `techno` of each repo (`Drupal`, `Wordpress`, `Laravel`, `Nuxt`), each once.
-- A repo whose `techno` is `null` (Vue without Nuxt, unknown stack): « Quelle techno de la checklist concerne le repo <name> ? » with « Nuxt », « Aucune » and the free-text field.
+- A repo whose `techno` is `null` (Vue without Nuxt, unknown stack): « Quelle techno de la checklist concerne le repo <name> ? » with « Nuxt », « Aucune »; another techno of the checklist in « Autre ».
 
 ## 2. Notion
 
@@ -37,7 +39,7 @@ python3 "$S/cqa_notion.py" whoami
 - A variable absent: stop with « <variable> est absent de l'environnement : l'exporter dans le profil du shell (valeur dans Vaultwarden), puis relancer Claude Code. »
 - `whoami` gives `{"bot_id", "name"}`. Exit 3: token refused or network down.
 
-Question « Copie Notion » : « URL de la copie Notion de la checklist du projet (page ou base) ? » (free text).
+Question « Copie Notion » : « URL de la copie Notion de la checklist du projet, page ou base (saisir la valeur dans « Autre ») ? » with « Le modèle n'est pas encore dupliqué » and « Annuler l'audit ». The first: stop with « Dupliquez le modèle dans la page Notion du projet, puis relancez. »
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -60,8 +62,12 @@ RUN="<run_dir>"
 python3 "$S/cqa_notion.py" schema "<data_source_id de la copie>" > "$RUN/schema.json"
 ```
 
-- `schema.json` holds `{"ok", "problems", "assignee_options"}`.
-- Exit 6: show the `problems` and stop: « La copie n'a pas le schéma v2 attendu : <problèmes>. Dupliquer à nouveau le modèle. »
+The output goes to `schema.json`, the errors still to stderr. By exit code:
+
+- 0: `schema.json` holds `{"ok", "problems", "assignee_options"}`. Go on.
+- 6: read `problems` in `schema.json` (Read), show them and stop: « La copie n'a pas le schéma v2 attendu : <problèmes>. Dupliquer à nouveau le modèle. »
+- 3: Notion API error (message on stderr; `schema.json` is empty). Show it and stop, before `team`.
+- 2: show the message and stop.
 
 Lead and team, from the repo that holds `PROJECT.md`:
 
@@ -72,14 +78,14 @@ python3 "$S/cqa_plan.py" team "<chemin du repo>" "$RUN/schema.json"
 ```
 
 - It gives `{"lead": {"name", "option"}, "team": [{"name", "role", "option"}], "unmatched": [<names>]}`.
-- Exit 2, no `PROJECT.md`: ask « Qui fait partie de l'équipe (prénom, nom et rôle front, back ou full-stack) ? », then match each name with `assignee_options` yourself: accents and case aside, first name alone, or first name and initial of the surname.
-- Confirm the lead: « Vous êtes <lead.name>, option « <lead.option> » de « Assignée à » ? » with « Oui » and the free-text field. `lead.option` must be an existing option: the plan assigns the lead and signs the comments with it.
+- Exit 2, no `PROJECT.md`: ask « Qui fait partie de l'équipe : prénom, nom et rôle front, back ou full-stack (saisir la liste dans « Autre ») ? » with « Je suis seul sur le projet » and « Annuler l'audit », then match each name with `assignee_options` yourself: accents and case aside, first name alone, or first name and initial of the surname.
+- Confirm the lead: « Vous êtes <lead.name>, option « <lead.option> » de « Assignée à » ? » with « Oui » and up to 3 other options of « Assignée à »; another option in « Autre ». `lead.option` must be an existing option: the plan assigns the lead and signs the comments with it.
 - Each name of `unmatched`: « Quelle option de « Assignée à » correspond à <nom> ? » with up to 3 close options and « Aucune ».
 - Never create an option. A person without option stays in `team` with `option: null` and gets no row.
 
 ## 3. Target
 
-- `preprod_url`: `project_md.preprod_url`, confirmed with « URL de la préprod : <url> ? » (« Oui » and the free-text field); asked when missing. Scheme, host and base path only: no `?`, `#` or credentials.
+- `preprod_url`: `project_md.preprod_url`, confirmed with « URL de la préprod : <url> ? » (« Oui », « Annuler l'audit »; another URL in « Autre »). Missing: « URL de la préprod (saisir la valeur dans « Autre ») ? » with « Continuer sans préprod » and « Annuler l'audit ». Scheme, host and base path only: no `?`, `#` or credentials.
 - `prod_url`: `project_md.prod_url`, else `null`.
 - `prod_live`: asked only with `--phase "MEL J0"` or `--phase "Post-MEL J+7"`: « La prod (<prod_url>) est-elle en ligne ? » (« Oui », « Non »). Otherwise false. True needs a `prod_url`.
 
@@ -97,13 +103,13 @@ It gives `{"status", "access"}`, plus `location` for a redirect it did not follo
 | `ip_filtered` | 403 | say « HTTP indisponible hors réseau agence » |
 | `unreachable` | no answer, or another status | say « La préprod ne répond pas depuis ce poste (<status>) : vérifier l'URL ou le VPN. » |
 
-With `location`, the preprod redirects to another origin: show it and ask whether that address is the real preprod.
+With `location`, the preprod redirects to another origin: show it and ask « La préprod redirige vers <location>. Quelle adresse auditer ? » with « <location> » and « <preprod_url> ».
 
 Prod run (`prod_live` true with a J0 or J+7 phase): the toolbox and the sub-agents target `prod_url`. Run `probe-target` on `prod_url` as well; `target.access` is then the answer of the prod.
 
 Credentials, for `basic_auth` only:
-1. « La préprod demande une authentification Basic Auth. Identifiant ? » with « Continuer sans identifiants » and the free-text field.
-2. « Mot de passe Basic Auth ? » (free text).
+1. « La préprod demande une authentification Basic Auth. Identifiant (saisir la valeur dans « Autre ») ? » with « Continuer sans identifiants » and « Annuler l'audit ».
+2. « Mot de passe Basic Auth (saisir la valeur dans « Autre ») ? » with « Continuer sans identifiants » and « Annuler l'audit ». Never repeat it back, never show it in a recap.
 3. Check them. Inside the single quotes, write each `'` of a value as `'\''`.
 
 ```bash
@@ -123,7 +129,7 @@ grep -iE '^[[:space:]]*(Host|Include)[[:space:]]' ~/.ssh/config
 ```
 
 - Show only alias names (also from the included files), never `HostName`, user or key.
-- Question « Alias SSH » : « Quel alias SSH utiliser pour la préprod ? » with up to 3 aliases whose name contains a word of the project slug, « Aucun », and the free-text field.
+- Question « Alias SSH » : « Quel alias SSH utiliser pour la préprod ? » with up to 3 aliases whose name contains a word of the project slug, « Aucun »; another alias in « Autre ».
 - `ssh.alias` is the choice, or `null`. `ssh.app_dirs` (`{"<repo name>": "<folder on the server>"}`) is filled during the diagnostic.
 
 ## 5. Test accounts
@@ -131,7 +137,7 @@ grep -iE '^[[:space:]]*(Host|Include)[[:space:]]' ~/.ssh/config
 Question « Comptes » : « Disposez-vous de comptes de test, pour vous connecter vous-même dans Chrome pendant l'audit ? » with « Front et back-office », « Front seulement », « Back-office seulement », « Aucun ».
 
 - `test_accounts` = `{"front": <bool>, "backoffice": <bool>}`. The skill never reads nor types these accounts.
-- With a back-office: « URL de connexion du back-office ? » with the default of the stack when there is one (Drupal `<preprod_url>/user/login`, WordPress `<preprod_url>/wp-admin/`) and the free-text field. It becomes the key page « Back-office ».
+- With a back-office: « URL de connexion du back-office ? » with the default of the stack when there is one (Drupal `<preprod_url>/user/login`, WordPress `<preprod_url>/wp-admin/`) and « Pas de back-office à auditer »; another URL in « Autre ». It becomes the key page « Back-office ».
 
 ## 6. Key pages
 
@@ -151,7 +157,7 @@ curl -q -sS --max-time 20 -A "GingermindsAudit/<plugin_version>" "<preprod_url>/
 - 404: `<preprod_url>/cqa-page-inexistante-<4 chiffres>`.
 - Other `access`: routes of the code only; the lead completes the URLs.
 
-Show the list (template, URL), then « Valider ces pages clés ? » with « Valider » and the free-text field for corrections. Absolute URLs on the preprod host, or on the back-office host. On a prod run, the same pages on the host of `prod_url`.
+Show the list (template, URL), then « Valider ces pages clés ? » with « Valider » and « Annuler l'audit »; corrections in « Autre », in one answer. Absolute URLs on the preprod host, or on the back-office host. On a prod run, the same pages on the host of `prod_url`.
 
 ## 7. context.json
 

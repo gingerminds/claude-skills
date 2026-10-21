@@ -43,7 +43,7 @@ Exit codes of the four: 2 for a missing file or variable (the message names the 
 
 ## 2. Toolbox in the background
 
-When the toolbox is ready (diagnostic step 6), start it with Bash `run_in_background`, the credentials inline only for `target.access` `basic_auth`:
+When the toolbox is ready (diagnostic step 6), start it with Bash `run_in_background`, with the credentials inline only when the session holds the Basic Auth credentials:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -55,7 +55,24 @@ GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' bash "$S/
 - The launcher reads `cqa_plan.py toolbox-env`, `repos-tsv` and `openapi-specs` itself: never call them by hand.
 - Exit 0: all done. Exit 1: at least one tool failed; the manifest says which, with its reason. Exit 2: usage or environment (Docker, `context.json`).
 - When the background task ends, read `tools/manifest.json` and tell the lead the tools that failed or were skipped, with their reason.
-- After an interruption, `cqa_plan.py manifest "$RUN"` rebuilds the manifest from what finished.
+
+Resume (SKILL.md section 3) with a `tools/` folder but no `tools/manifest.json`: the collection was interrupted. Rebuild the manifest from what finished (a tool folder without `result.json` shows as failed):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" manifest "$RUN"
+```
+
+Then relaunch only the tools absent from it or failed, one at a time, each in its own background Bash call, with the same credentials rule:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' bash "$S/cqa-toolbox.sh" run "$RUN" lighthouse
+```
+
+`run` returns the code of the tool (3: target unreachable or 401) and does not update the manifest: once the last one has ended, run `cqa_plan.py manifest "$RUN"` again. The toolbox counts as finished then. Without any `tools/` folder, launch `all` as above.
 
 Toolbox not ready: no collection. Record each tool as skipped, so that the sub-agents and the synthesis know why:
 
@@ -118,7 +135,7 @@ python3 "$S/cqa_plan.py" probes "$RUN" --followup
 - `discarded`: URLs dropped because they leave the origin of the target; tell the lead how many.
 - `count` 0: no follow-up.
 
-Otherwise, when the toolbox is ready (foreground, credentials inline only for `basic_auth`):
+Otherwise, when the toolbox is ready (foreground, with the credentials inline only when the session holds the Basic Auth credentials):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

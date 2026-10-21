@@ -77,7 +77,7 @@ Exit 4:
 
 1. Never rephrase the command to get it through. If the refusal names a dedicated mode (`--env-keys`, `--php-ini`), use it.
 2. Never run it outside the guard: v1 sends every server command through it.
-3. In the orchestrator, ask the lead, with the impact: « Le garde-fou SSH a refusé : <commande> (<raison>). Impact : <lecture seule, ce qu'elle affiche, ou ce qu'elle modifierait>. » with « Je la lance moi-même et je donne le résultat » and « Passer ». A result given by the lead is used as their answer, never written raw to the run directory.
+3. In the orchestrator, ask the lead, with the impact: « Le garde-fou SSH a refusé : <commande> (<raison>). Impact : <lecture seule, ce qu'elle affiche, ou ce qu'elle modifierait>. » with « Passer » and « Arrêter l'audit »; the lead who runs it himself pastes the useful result in « Autre ». That result is used as their answer, never written raw to the run directory.
 4. In a sub-agent, the part becomes `unknown`, with « Commande à faire confirmer par le lead : <commande> (lecture seule, <ce qu'elle affiche>) » in `human_check`: the lead sees it in the Notion comment.
 
 ## Facts for the browser lots

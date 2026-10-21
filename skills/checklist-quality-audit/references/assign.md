@@ -7,7 +7,7 @@ The lead runs `/gm:checklist-quality-audit assign` after reviewing the statuses 
 1. `cqa_plan.py project "$PWD"` for the slug, then `cqa_plan.py runs "<slug>"`.
 2. Take the most recent run whose `context` is true, preferably with `applied` true (the audit that wrote the statuses). Ask « Utiliser le run <run_id> ? » with « Oui » and « Préparer un nouveau run ».
 3. New run, or no run: create the folder as in SKILL.md section 3, then only steps 1 (repos) and 2 (Notion, lead and team) of `references/context.md`. Write `context.json` as in `references/context.md` step 7, with the other sections empty (`target` with `null` URLs and access and `prod_live` false, `ssh` `{"alias": null, "app_dirs": {}}`, `test_accounts` both false, `key_pages` and `available_tools` empty), then `cqa_plan.py context "$RUN" --check`.
-4. Show the team of `context.json` (name, role, option): « Équipe : <nom> (<rôle>, « <option> »), ... Est-ce à jour ? » with « Oui » and the free-text field. A change: run `cqa_plan.py team` again, or edit `team` in `context.json`, then check it. Never create an option.
+4. Show the team of `context.json` (name, role, option): « Équipe : <nom> (<rôle>, « <option> »), ... Est-ce à jour ? » with « Oui » and « Annuler »; the changes in « Autre ». A change: run `cqa_plan.py team` again, or edit `team` in `context.json`, then check it. Never create an option.
 
 ## Proposal
 
@@ -38,7 +38,7 @@ python3 "$S/cqa_plan.py" assign "$RUN" --include-unknown
 
 Show the proposal grouped by person: « <option> (<n> lignes) : CQ-12 <titre>, CQ-15 <titre>, ... ».
 
-Ask « Valider cette répartition ? » with « Valider », « Annuler », and the free-text field for every adjustment in one answer, for example « CQ-12 et CQ-15 à Léa ; CQ-30 à personne ».
+Ask « Valider cette répartition ? » with « Valider » and « Annuler »; every adjustment in « Autre », in one answer, for example « CQ-12 et CQ-15 à Léa ; CQ-30 à personne ».
 
 - Apply the adjustments to `notion/assign-proposal.json` with Write: change `assignee`, or set it to `null` to leave the row unassigned.
 - An assignee must be one of `notion.assignee_options`, written exactly. A name that matches none: ask once which option it is. Never create one.
@@ -58,7 +58,7 @@ python3 "$S/cqa_plan.py" assign-plan "$RUN"
 
 With `--dry-run`: show the plan and stop.
 
-Otherwise, after « Écrire ces <n> assignations dans Notion ? » (« Écrire », « Ne rien écrire »):
+Otherwise ask « Écrire ces <n> assignations dans Notion ? » with « Écrire » and « Ne rien écrire ». « Ne rien écrire »: stop, nothing written. Only after « Écrire », in a Bash call of its own:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -66,6 +66,6 @@ RUN="<run_dir>"
 python3 "$S/cqa_notion.py" apply "$RUN" --plan notion/assign-plan.json
 ```
 
-- Prefix `GM_AUDIT_AUTH_PASS='<mot de passe>'` when the session holds it, for the secret check.
-- Exit codes and their words for the lead: `references/verdicts.md`, section "For the orchestrator". An `unknown_option`: the option was removed from the copy since the plan; nothing is created.
+- Prefix `GM_AUDIT_AUTH_PASS='<mot de passe>'` when the session holds the Basic Auth credentials, for the secret check.
+- Exit codes: as in SKILL.md section 8, step 1 (3: once more after fixing the cause, then stop; 7: report the blocked rows; 8: stop); their words for the lead: `references/verdicts.md`, section "For the orchestrator". An `unknown_option`: the option was removed from the copy since the plan; nothing is created.
 - End with « <n> lignes assignées. »
