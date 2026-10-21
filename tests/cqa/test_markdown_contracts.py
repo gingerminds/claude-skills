@@ -16,6 +16,8 @@ AUDITOR = ROOT / "agents" / "cqa-auditor.md"
 BROWSER = ROOT / "agents" / "cqa-browser.md"
 SKILL_DIR = ROOT / "skills" / "checklist-quality-audit"
 SKILL = SKILL_DIR / "SKILL.md"
+ALIAS_DIR = ROOT / "skills" / "cqa"
+ALIAS = ALIAS_DIR / "SKILL.md"
 REFERENCES = SKILL_DIR / "references"
 VERDICTS_MD = REFERENCES / "verdicts.md"
 TOOLBOX = ROOT / "scripts" / "cqa-toolbox.sh"
@@ -64,6 +66,7 @@ _GUARD_CALL = re.compile(r"\bcqa_ssh_ro\.py[\"']?([^\n`]*)")
 _FLAG = re.compile(r"(?<![\w-])--[a-z][a-z-]*")
 _SHELL_END = re.compile(r" -- |&&|\|\||;|\s[|>]\s")
 _REFERENCE = re.compile(r"references/([A-Za-z0-9_-]+\.md)")
+_ALIAS_TARGET = re.compile(r"Read `\$\{CLAUDE_SKILL_DIR\}/([^`]+)` and follow it exactly")
 _BASH_BLOCK = re.compile(r"```bash\n(.*?)\n```", re.DOTALL)
 _TOOLBOX_MAIN = re.compile(r"^main\(\) \{\n(.*?)^\}", re.DOTALL | re.MULTILINE)
 _TOOLBOX_USAGE = re.compile(r"^usage\(\) \{\n(.*?)^\}", re.DOTALL | re.MULTILINE)
@@ -259,9 +262,35 @@ class SkillTest(unittest.TestCase):
                     self.assertNotIn("when `target.access` is `basic_auth`", text)
 
     def test_no_em_dash_in_skill(self):
-        for path in _skill_files():
-            with self.subTest(file=path.name):
+        for path in [*_skill_files(), ALIAS]:
+            with self.subTest(file=path.parent.name + "/" + path.name):
                 self.assertNotIn(EM_DASH, _text(path))
+
+
+class AliasTest(unittest.TestCase):
+    def test_alias_frontmatter(self):
+        fields = _frontmatter(ALIAS)
+        self.assertEqual(fields.get("name"), "cqa")
+        self.assertEqual(fields.get("disable-model-invocation"), "true")
+        self.assertEqual(fields.get("argument-hint"), ARGUMENT_HINT)
+        self.assertEqual(fields.get("argument-hint"), _frontmatter(SKILL)["argument-hint"])
+        description = fields.get("description") or ""
+        self.assertLessEqual(len(description), MAX_DESCRIPTION)
+        self.assertIn("/gm:checklist-quality-audit", description)
+
+    def test_alias_points_to_main_skill(self):
+        body = _text(ALIAS)
+        targets = _ALIAS_TARGET.findall(body)
+        self.assertEqual(len(targets), 1)
+        self.assertEqual((ALIAS_DIR / targets[0]).resolve(), SKILL.resolve())
+        self.assertIn("with these arguments: $ARGUMENTS", body)
+        self.assertIn("references/", body)
+        self.assertIn("Resolve every relative path from that skill's directory", body)
+
+    def test_alias_keeps_the_scripts_dir_valid(self):
+        scripts = ALIAS_DIR / SCRIPTS_LINE.split("/", 1)[1].rstrip('"')
+        self.assertEqual(scripts.resolve(), (ROOT / "scripts").resolve())
+        self.assertTrue((scripts / "cqa_notion.py").is_file())
 
 
 class AgentsTest(unittest.TestCase):
