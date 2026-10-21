@@ -18,13 +18,18 @@ S="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_REGISTRY="registry.gitlab.gingerminds.fr/gm/tools/checklist-qualite-outillage-audit"
 IMAGES=(agence screamingfrog nu testssl gitleaks redocly schemathesis)
 ALL_TOOLS=(http gitleaks assets lighthouse a11y nu yellowlab testssl redocly schemathesis crawl)
+# Schemathesis probes undeclared methods (TRACE, PUT, ...) despite --include-method, and
+# --exclude-checks only hides their verdict: this filter is what stops the requests.
+UNSAFE_METHODS_REGEX='^(?!(GET|HEAD|OPTIONS)$)'
 
 RUN_DIR=""
 RUN_ID=""
 UID_GID=""
 declare -a REPO_NAMES
+declare -a REPO_PATHS
 declare -a REPO_MOUNTS
 REPO_NAMES=()
+REPO_PATHS=()
 REPO_MOUNTS=()
 SPECS=""
 
@@ -94,6 +99,7 @@ load_run() {
 
   repos_tsv="$(python3 "$S/cqa_plan.py" repos-tsv "$RUN_DIR")" || exit 2
   REPO_NAMES=()
+  REPO_PATHS=()
   REPO_MOUNTS=()
   while IFS=$'\t' read -r name path; do
     [ -n "$name" ] || continue
@@ -106,6 +112,7 @@ load_run() {
     esac
     [ -d "$path" ] || die "Le repo « $name » est introuvable : $path"
     REPO_NAMES+=("$name")
+    REPO_PATHS+=("$path")
     REPO_MOUNTS+=(-v "$path:/repos/$name:ro")
   done <<<"$repos_tsv"
 }
@@ -253,10 +260,19 @@ tool_testssl() {
 }
 
 tool_gitleaks() {
-  local name failed=0
+  local name mode i=0 failed=0
   prepare_tool gitleaks || return 1
   for name in ${REPO_NAMES[@]+"${REPO_NAMES[@]}"}; do
-    if ! docker_tool gitleaks none -- git "/repos/$name" --redact=100 \
+    # "gitleaks git" reports a clean [] (exit 0) on a folder without .git.
+    if [ -e "${REPO_PATHS[$i]}/.git" ]; then
+      mode=git
+      say "gitleaks : repo « $name » analysé avec son historique git."
+    else
+      mode=dir
+      say "gitleaks : repo « $name » sans .git, analyse des fichiers du dossier (pas de l'historique)."
+    fi
+    i=$((i + 1))
+    if ! docker_tool gitleaks none -- "$mode" "/repos/$name" --redact=100 \
       --report-format json --report-path "/out/gitleaks/raw/$name.json" --exit-code 0; then
       say "gitleaks : l'analyse du repo « $name » a échoué."
       failed=1
@@ -280,7 +296,7 @@ tool_redocly() {
     [ -n "$repo" ] || continue
     n=$((n + 1))
     tolerate redocly docker_tool redocly none -- lint "/repos/$repo/$spec" --format json \
-      >"$RUN_DIR/tools/redocly/raw/$repo-$n.json"
+      --max-problems 10000 >"$RUN_DIR/tools/redocly/raw/$repo-$n.json"
   done <<<"$SPECS"
   summarize redocly
 }
@@ -301,6 +317,7 @@ tool_schemathesis() {
     [ -n "$repo" ] || continue
     tolerate schemathesis docker_tool schemathesis none -- \
       run "/repos/$repo/$spec" --url "${GM_AUDIT_TARGET:-}" --include-method GET \
+      --exclude-method-regex "$UNSAFE_METHODS_REGEX" --exclude-checks unsupported_method \
       --max-examples 20 --rate-limit 2/s --report junit --report-dir /out/schemathesis/raw
   done <<<"$SPECS"
   summarize schemathesis

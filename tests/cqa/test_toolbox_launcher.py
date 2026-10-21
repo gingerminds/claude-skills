@@ -19,6 +19,7 @@ SECRETS = {
     "GM_SF_LICENCE_USER": "sf-user",
     "GM_SF_LICENCE_KEY": "key-sf-456",
 }
+UNSAFE_METHODS = "^(?!(GET|HEAD|OPTIONS)$)"
 IMAGES = ["agence", "screamingfrog", "nu", "testssl", "gitleaks", "redocly", "schemathesis"]
 ALL_ORDER = [
     ("agence", "http --probes"),
@@ -69,6 +70,7 @@ class LauncherCase(unittest.TestCase):
         self.nuxt = self.tmp / "Acme - Shop - Nuxt"
         for repo in (self.laravel, self.nuxt):
             repo.mkdir()
+            (repo / ".git").mkdir()
         (self.laravel / "openapi.yaml").write_text("openapi: 3.0.0\n", encoding="utf-8")
         (self.laravel / "docs").mkdir()
         (self.laravel / "docs" / "swagger v2.json").write_text("{}", encoding="utf-8")
@@ -378,6 +380,49 @@ class ToolCommandsTest(LauncherCase):
             ["summarize", "gitleaks", "--raw", "/out/gitleaks/raw"], self.runs_of("agence")[0][1]
         )
 
+    def gitleaks_scans(self):
+        return {args[1].rsplit("/", 1)[-1]: args for _, args in self.runs_of("gitleaks")}
+
+    def test_gitleaks_scans_files_when_the_repo_has_no_git_folder(self):
+        shutil.rmtree(self.nuxt / ".git")
+        result = self.run_tool("gitleaks")
+        self.assertEqual(0, result.returncode, result.stderr)
+        scans = self.gitleaks_scans()
+        self.assertEqual("git", scans["laravel"][0])
+        self.assertEqual(
+            [
+                "dir",
+                "/repos/nuxt",
+                "--redact=100",
+                "--report-format",
+                "json",
+                "--report-path",
+                "/out/gitleaks/raw/nuxt.json",
+                "--exit-code",
+                "0",
+            ],
+            scans["nuxt"],
+        )
+        self.assertEqual(1, len(self.runs_of("agence")))
+
+    def test_gitleaks_keeps_git_mode_when_git_is_a_file(self):
+        shutil.rmtree(self.nuxt / ".git")
+        (self.nuxt / ".git").write_text("gitdir: ../elsewhere/.git\n", encoding="utf-8")
+        result = self.run_tool("gitleaks")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual({"git"}, {args[0] for args in self.gitleaks_scans().values()})
+
+    def test_gitleaks_announces_the_mode_of_each_repo(self):
+        shutil.rmtree(self.nuxt / ".git")
+        result = self.run_tool("gitleaks")
+        lines = {
+            name: next((line for line in result.stderr.splitlines() if f"« {name} »" in line), "")
+            for name in ("laravel", "nuxt")
+        }
+        self.assertIn("historique git", lines["laravel"])
+        self.assertIn("sans .git", lines["nuxt"])
+        self.assertTrue(all(line.startswith("gitleaks :") for line in lines.values()), lines)
+
     def test_gitleaks_failure_skips_summary(self):
         result = self.run_tool("gitleaks", CQA_STUB_FAIL="git /repos/nuxt")
         self.assertEqual(1, result.returncode)
@@ -389,10 +434,11 @@ class ToolCommandsTest(LauncherCase):
         result = self.run_tool("redocly")
         self.assertEqual(0, result.returncode, result.stderr)
         lints = [args for _, args in self.runs_of("redocly")]
+        cap = ["--max-problems", "10000"]
         self.assertEqual(
             [
-                ["lint", "/repos/laravel/docs/swagger v2.json", "--format", "json"],
-                ["lint", "/repos/laravel/openapi.yaml", "--format", "json"],
+                ["lint", "/repos/laravel/docs/swagger v2.json", "--format", "json", *cap],
+                ["lint", "/repos/laravel/openapi.yaml", "--format", "json", *cap],
             ],
             lints,
         )
@@ -402,6 +448,11 @@ class ToolCommandsTest(LauncherCase):
         self.assertEqual(
             ["summarize", "redocly", "--raw", "/out/redocly/raw"], self.runs_of("agence")[0][1]
         )
+
+    def test_redocly_is_not_capped_at_one_hundred_problems(self):
+        self.run_tool("redocly")
+        for _, args in self.runs_of("redocly"):
+            self.assertTrue(has_pair(args, "--max-problems", "10000"), args)
 
     def test_redocly_findings_exit_code_does_not_stop_summary(self):
         result = self.run_tool("redocly", CQA_STUB_FAIL="lint", CQA_STUB_FAIL_CODE="1")
@@ -418,6 +469,10 @@ class ToolCommandsTest(LauncherCase):
             TARGET,
             "--include-method",
             "GET",
+            "--exclude-method-regex",
+            UNSAFE_METHODS,
+            "--exclude-checks",
+            "unsupported_method",
             "--max-examples",
             "20",
             "--rate-limit",
@@ -438,6 +493,24 @@ class ToolCommandsTest(LauncherCase):
             ["summarize", "schemathesis", "--raw", "/out/schemathesis/raw"],
             self.runs_of("agence")[0][1],
         )
+
+    def schemathesis_args(self):
+        self.assertEqual(0, self.run_tool("schemathesis").returncode)
+        return [args for _, args in self.runs_of("schemathesis")]
+
+    def test_schemathesis_excludes_the_unsupported_method_check(self):
+        for args in self.schemathesis_args():
+            self.assertTrue(has_pair(args, "--exclude-checks", "unsupported_method"), args)
+
+    def test_schemathesis_never_probes_an_unsafe_method(self):
+        for args in self.schemathesis_args():
+            self.assertTrue(has_pair(args, "--include-method", "GET"), args)
+            pattern = args[args.index("--exclude-method-regex") + 1]
+            excluded = re.compile(pattern, re.IGNORECASE)
+            for method in ("POST", "PUT", "PATCH", "DELETE", "TRACE", "QUERY", "CONNECT", "trace"):
+                self.assertTrue(excluded.search(method), method)
+            for method in ("GET", "HEAD", "OPTIONS", "get"):
+                self.assertFalse(excluded.search(method), method)
 
     def test_schemathesis_skipped_with_auth(self):
         result = self.run_tool("schemathesis", **SECRETS)
