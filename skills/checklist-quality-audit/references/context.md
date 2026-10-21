@@ -170,7 +170,7 @@ Write `$RUN/context.json` with Write. Example (values to replace):
   "plugin_version": "0.9.0",
   "project": {"slug": "acme-shop", "name": "Acme - Shop", "protection": "Basic Auth sur la préprod"},
   "lead": {"name": "Camille Bernard", "option": "Camille B"},
-  "team": [{"name": "Léa Petit", "role": "front", "option": "Léa"}, {"name": "Hugo Moreau", "role": "back", "option": null}],
+  "team": [{"name": "Inès Petit", "role": "front", "option": "Inès"}, {"name": "Hugo Moreau", "role": "back", "option": null}],
   "repos": [
     {"name": "laravel", "path": "/home/camille/Projets/Acme - Shop - Laravel", "remote": "git@gitlab.example.org:acme/back.git",
      "web_url": "https://gitlab.example.org/acme/back", "stack": "laravel", "techno": "Laravel",
@@ -183,7 +183,7 @@ Write `$RUN/context.json` with Write. Example (values to replace):
   "key_pages": [{"template": "Accueil", "url": "https://preprod.example.org/"}],
   "notion": {"copy_page_id": "<page_id de la copie ou null>", "copy_data_source_id": "<data_source_id de la copie>",
              "reference_data_source_id": "<data_source_id du modèle>", "bot_id": "<bot_id de whoami>",
-             "assignee_options": ["Camille B", "Léa"]},
+             "assignee_options": ["Camille B", "Inès"]},
   "available_tools": [],
   "phase_filter": null,
   "dry_run": false

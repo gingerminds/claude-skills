@@ -38,7 +38,7 @@ python3 "$S/cqa_plan.py" assign "$RUN" --include-unknown
 
 Show the proposal grouped by person: « <option> (<n> lignes) : CQ-12 <titre>, CQ-15 <titre>, ... ».
 
-Ask « Valider cette répartition ? » with « Valider » and « Annuler »; every adjustment in « Autre », in one answer, for example « CQ-12 et CQ-15 à Léa ; CQ-30 à personne ».
+Ask « Valider cette répartition ? » with « Valider » and « Annuler »; every adjustment in « Autre », in one answer, for example « CQ-12 et CQ-15 à Inès ; CQ-30 à personne ».
 
 - Apply the adjustments to `notion/assign-proposal.json` with Write: change `assignee`, or set it to `null` to leave the row unassigned.
 - An assignee must be one of `notion.assignee_options`, written exactly. A name that matches none: ask once which option it is. Never create one.

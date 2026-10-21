@@ -872,7 +872,7 @@ class PlanTest(AuditCase):
         self.assertEqual(plan["run_id"], RUN_ID)
         self.assertEqual(plan["copy_data_source_id"], "ds-copy")
         self.assertEqual(plan["copy_page_id"], "page-copy")
-        self.assertEqual(plan["assignee_options"], ["Léa", "Marc", "Julien D"])
+        self.assertEqual(plan["assignee_options"], ["Inès", "Marc", "Côme D"])
         validate_plan(plan)
 
     def test_plan_operations(self):
@@ -924,7 +924,7 @@ class PlanTest(AuditCase):
         self.edit(run_dir, "context.json", lambda context: context.update(run_id="2026-03-02-0900"))
         self.plan(run_dir)
         text = self.ops(run_dir)[(103, "comment")]["text"]
-        self.assertIn("Audit PRE-MEL · 02/03/2026 · lancé par Julien D", text)
+        self.assertIn("Audit PRE-MEL · 02/03/2026 · lancé par Côme D", text)
         self.assertIn("develop@3f2a1c9", text)
         self.assertIn("gm:checklist-quality-audit 0.9.0", text)
         self.assertLessEqual(len(text), 1500)
@@ -1177,7 +1177,7 @@ class SynthesisTest(AuditCase):
         self.assertNotIn("CQ-102", blocking)
         self.assertLessEqual(len(comment), 1500)
         self.assertIn("CQ-101", comment)
-        self.assertIn("lancé par Julien D", comment)
+        self.assertIn("lancé par Côme D", comment)
         self.assertNotIn(EM_DASH, text + comment)
 
     def test_synthesis_sections(self):
@@ -1504,7 +1504,7 @@ class AssignTest(AuditCase):
         run_dir = self.make_run()
         document = self.assign(run_dir)
         self.assertEqual(document, self.read(run_dir, "notion/assign-proposal.json"))
-        expected = {101: "Marc", 103: "Marc", 104: "Léa", 105: "Léa", 106: "Léa"}
+        expected = {101: "Marc", 103: "Marc", 104: "Inès", 105: "Inès", 106: "Inès"}
         self.assertEqual(self.proposed(document), expected)
         self.assertEqual(document["sans_option"], ["Zoé Bernard"])
         self.assertFalse(document["include_unknown"])
@@ -1523,7 +1523,7 @@ class AssignTest(AuditCase):
         run_dir = self.make_run()
         self.edit(run_dir, "context.json", lambda c: c.update(team=[]))
         document = self.assign(run_dir)
-        self.assertEqual({item["assignee"] for item in document["proposal"]}, {"Julien D"})
+        self.assertEqual({item["assignee"] for item in document["proposal"]}, {"Côme D"})
         self.assertEqual(document["sans_option"], [])
 
     def test_unknown_rows_are_added_on_request(self):
@@ -1627,7 +1627,7 @@ class AssignPlanTest(AuditCase):
         self.assertEqual(plan["run_id"], RUN_ID)
         self.assertEqual(plan["copy_data_source_id"], "ds-copy")
         self.assertEqual(plan["copy_page_id"], "page-copy")
-        self.assertEqual(plan["assignee_options"], ["Léa", "Marc", "Julien D"])
+        self.assertEqual(plan["assignee_options"], ["Inès", "Marc", "Côme D"])
         validate_plan(plan)
         assigns = [op for op in plan["ops"] if op["kind"] == "assign"]
         self.assertEqual(
@@ -1635,9 +1635,9 @@ class AssignPlanTest(AuditCase):
             [
                 (101, "page-101", [], ["Marc"]),
                 (103, "page-103", [], ["Marc"]),
-                (104, "page-104", [], ["Léa"]),
-                (105, "page-105", [], ["Léa"]),
-                (106, "page-106", [], ["Léa"]),
+                (104, "page-104", [], ["Inès"]),
+                (105, "page-105", [], ["Inès"]),
+                (106, "page-106", [], ["Inès"]),
             ],
         )
         for op in plan["ops"]:
@@ -1660,9 +1660,9 @@ class AssignPlanTest(AuditCase):
         self.assertEqual(plan["ops"][-1], op)
         self.assertEqual(op["page_id"], "page-copy")
         self.assertEqual(op["key"], operation_key("page_comment", "page-copy", None, op["text"]))
-        self.assertIn("Répartition PRE-MEL · 20/10/2026 · lancée par Julien D", op["text"])
+        self.assertIn("Répartition PRE-MEL · 20/10/2026 · lancée par Côme D", op["text"])
         self.assertIn("5 lignes assignées", op["text"])
-        self.assertIn("- Léa : 3", op["text"])
+        self.assertIn("- Inès : 3", op["text"])
         self.assertIn("- Marc : 2", op["text"])
         self.assertLessEqual(len(op["text"]), 1500)
         self.assertNotIn(EM_DASH, op["text"])
@@ -1737,13 +1737,13 @@ class AssignPlanTest(AuditCase):
 
         self.prepare_plan(run_dir, adjust)
         assign = [op for op in self.plan(run_dir)["ops"] if op["kind"] == "assign"][0]
-        self.assertEqual((assign["before"], assign["after"]), (["Léa"], ["Léa", "Marc"]))
+        self.assertEqual((assign["before"], assign["after"]), (["Inès"], ["Inès", "Marc"]))
 
     def test_an_assignee_already_on_the_row_is_left_alone(self):
         run_dir = self.make_run()
 
         def adjust(document):
-            document["proposal"] = [self.entry_for_102("Léa")]
+            document["proposal"] = [self.entry_for_102("Inès")]
 
         result = self.prepare_plan(run_dir, adjust)
         self.assertEqual(self.plan(run_dir)["ops"], [])
@@ -1829,7 +1829,7 @@ class FakeNotion:
 class ApplyContractTest(AuditCase):
     def apply(self, run_dir, name):
         plan = self.read(run_dir, name)
-        client = FakeNotion(["Léa", "Marc", "Julien D"])
+        client = FakeNotion(["Inès", "Marc", "Côme D"])
         context = self.read(run_dir, "context.json")
         rows = self.read(run_dir, "rows.json")["rows"]
         result = apply_plan(

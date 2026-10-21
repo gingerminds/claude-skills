@@ -15,7 +15,7 @@ from cqa.secrets import scan_text
 
 EM_DASH = chr(0x2014)
 RUN_DATE = date(2026, 10, 20)
-LEAD = "Julien D"
+LEAD = "Côme D"
 VERSION = "0.9.0"
 SHA_NUXT = "3f2a1c9" + "e" * 33
 SHA_LARAVEL = "8b1d4e2" + "f" * 33
@@ -31,7 +31,7 @@ REPO_LARAVEL = {
 }
 ROW_79 = {"ref": 79, "title": "Ordre de tabulation logique"}
 BLOB_NUXT = f"https://gitlab.example.org/acme/front/-/blob/{SHA_NUXT}"
-HEADER = "Audit PRE-MEL · 20/10/2026 · lancé par Julien D"
+HEADER = "Audit PRE-MEL · 20/10/2026 · lancé par Côme D"
 FOOTER = "Réf CQ-79 · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0"
 
 F_KO = {
@@ -180,7 +180,7 @@ class FormatCommentTest(unittest.TestCase):
                 finding=F_KO,
                 row=ROW_79,
                 run_date=date(2026, 10, 20),
-                lead_option="Julien D",
+                lead_option="Côme D",
                 repos=[REPO_NUXT],
                 plugin_version="0.9.0",
             ),

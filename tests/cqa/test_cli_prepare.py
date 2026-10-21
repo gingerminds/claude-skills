@@ -559,8 +559,8 @@ def valid_context():
             "name": "Acme - Shop",
             "protection": "Basic Auth sur preprod",
         },
-        "lead": {"name": "Julien Durand", "option": "Julien D"},
-        "team": [{"name": "Léa Martin", "role": "front", "option": "Léa"}],
+        "lead": {"name": "Côme Dorval", "option": "Côme D"},
+        "team": [{"name": "Inès Morel", "role": "front", "option": "Inès"}],
         "repos": [
             {
                 "name": "laravel",
@@ -602,7 +602,7 @@ def valid_context():
             "copy_data_source_id": "0123456789abcdef0123456789abcdef",
             "reference_data_source_id": "fedcba9876543210fedcba9876543210",
             "bot_id": "00112233445566778899aabbccddeeff",
-            "assignee_options": ["Léa", "Julien D"],
+            "assignee_options": ["Inès", "Côme D"],
         },
         "available_tools": ["Code", "CLI local", "HTTP"],
         "phase_filter": None,
@@ -738,7 +738,7 @@ class ContextCheckTest(RunDirCase):
             "repos": [],
             "repos.0.name": "two words",
             "repos.0.aligned": "yes",
-            "team": {"name": "Léa"},
+            "team": {"name": "Inès"},
             "notion.assignee_options": [1, 2],
             "key_pages.0.url": None,
             "ssh.app_dirs": [],
@@ -879,7 +879,7 @@ class ProjectCommandTest(CliCase):
         self.assertEqual((repo["stack"], repo["techno"]), ("laravel", "Laravel"))
         self.assertEqual(repo["remote"], f"{GITLAB}:acme/shop-back.git")
         self.assertEqual(repo["web_url"], "https://gitlab.example.org/acme/shop-back")
-        self.assertEqual(repo["project_md"]["lead"], "Julien Durand")
+        self.assertEqual(repo["project_md"]["lead"], "Côme Dorval")
         self.assertEqual(repo["project_md"]["branches"], {"prod": "master", "preprod": "release"})
         self.assertTrue(repo["protected"])
 
@@ -1032,7 +1032,7 @@ class ProjectCommandTest(CliCase):
 
     def test_protected_is_false_without_the_label_or_the_file(self):
         with_file = make_repo(
-            self.parent, "A - Shop - Repo", files={"PROJECT.md": "- **Lead technique** : Julien\n"}
+            self.parent, "A - Shop - Repo", files={"PROJECT.md": "- **Lead technique** : Côme\n"}
         )
         without_file = make_repo(self.parent, "B - Shop - Repo")
         for path in (with_file, without_file):
@@ -1059,42 +1059,42 @@ class TeamCommandTest(CliCase):
         return path
 
     def test_team_matches_names_with_options(self):
-        options = self.options_file(["Julien D", "Julien L", "Léa", "Vincent", "Marie"])
+        options = self.options_file(["Côme D", "Côme L", "Inès", "Aurèle", "Marie"])
         code, out, err = self.run_main(["team", self.repo, options])
         self.assertEqual(code, 0, err)
-        self.assertIn("Léa", out)
+        self.assertIn("Inès", out)
         self.assertEqual(
             json.loads(out),
             {
-                "lead": {"name": "Julien Durand", "option": "Julien D"},
+                "lead": {"name": "Côme Dorval", "option": "Côme D"},
                 "team": [
-                    {"name": "Julien Durand", "role": "fullstack", "option": "Julien D"},
-                    {"name": "Léa Martin", "role": "front", "option": "Léa"},
-                    {"name": "Vincent Roux", "role": "back", "option": "Vincent"},
+                    {"name": "Côme Dorval", "role": "fullstack", "option": "Côme D"},
+                    {"name": "Inès Morel", "role": "front", "option": "Inès"},
+                    {"name": "Aurèle Roussel", "role": "back", "option": "Aurèle"},
                 ],
                 "unmatched": [],
             },
         )
 
     def test_unmatched_names_are_listed(self):
-        options = self.options_file(["Julien L", "Lea", "Marie"])
+        options = self.options_file(["Côme L", "Ines", "Marie"])
         result = self.run_json(["team", self.repo, options])
-        self.assertEqual(result["lead"], {"name": "Julien Durand", "option": None})
+        self.assertEqual(result["lead"], {"name": "Côme Dorval", "option": None})
         self.assertEqual(
-            [member["option"] for member in result["team"]], [None, "Lea", None]
+            [member["option"] for member in result["team"]], [None, "Ines", None]
         )
-        self.assertEqual(result["unmatched"], ["Julien Durand", "Vincent Roux"])
+        self.assertEqual(result["unmatched"], ["Côme Dorval", "Aurèle Roussel"])
 
     def test_options_file_may_be_the_schema_output(self):
         options = self.options_file(
-            {"ok": True, "problems": [], "assignee_options": ["Julien D", "Léa", "Vincent"]}
+            {"ok": True, "problems": [], "assignee_options": ["Côme D", "Inès", "Aurèle"]}
         )
         result = self.run_json(["team", self.repo, options])
         self.assertEqual(result["unmatched"], [])
 
     def test_no_lead_and_no_devs(self):
         (self.repo / "PROJECT.md").write_text("# PROJECT.md\n", encoding="utf-8")
-        options = self.options_file(["Julien D"])
+        options = self.options_file(["Côme D"])
         self.assertEqual(
             self.run_json(["team", self.repo, options]),
             {"lead": {"name": None, "option": None}, "team": [], "unmatched": []},
@@ -1102,7 +1102,7 @@ class TeamCommandTest(CliCase):
 
     def test_missing_project_md(self):
         (self.repo / "PROJECT.md").unlink()
-        options = self.options_file(["Julien D"])
+        options = self.options_file(["Côme D"])
         code, out, err = self.run_main(["team", self.repo, options])
         self.assertEqual((code, out), (2, ""))
         self.assertIn("PROJECT.md", err)

@@ -14,8 +14,8 @@ def read(name):
 class ParseProjectMdTest(unittest.TestCase):
     def test_parse_fixture(self):
         p = parse_project_md(read("PROJECT.md"))
-        self.assertEqual(p["lead"], "Julien Durand")
-        self.assertEqual(p["devs"][1], {"name": "Léa Martin", "role": "front"})
+        self.assertEqual(p["lead"], "Côme Dorval")
+        self.assertEqual(p["devs"][1], {"name": "Inès Morel", "role": "front"})
         self.assertEqual(p["branches"], {"prod": "master", "preprod": "release"})
 
     def test_fixture_values(self):
@@ -23,9 +23,9 @@ class ParseProjectMdTest(unittest.TestCase):
         self.assertEqual(
             p["devs"],
             [
-                {"name": "Julien Durand", "role": "fullstack"},
-                {"name": "Léa Martin", "role": "front"},
-                {"name": "Vincent Roux", "role": "back"},
+                {"name": "Côme Dorval", "role": "fullstack"},
+                {"name": "Inès Morel", "role": "front"},
+                {"name": "Aurèle Roussel", "role": "back"},
             ],
         )
         self.assertEqual(p["prod_url"], "https://www.example.org/")

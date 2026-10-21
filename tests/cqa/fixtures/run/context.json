@@ -8,14 +8,14 @@
     "protection": null
   },
   "lead": {
-    "name": "Julien Durand",
-    "option": "Julien D"
+    "name": "Côme Dorval",
+    "option": "Côme D"
   },
   "team": [
     {
-      "name": "Léa Martin",
+      "name": "Inès Morel",
       "role": "front",
-      "option": "Léa"
+      "option": "Inès"
     },
     {
       "name": "Marc Petit",
@@ -80,9 +80,9 @@
     "reference_data_source_id": "ds-reference",
     "bot_id": "bot-1",
     "assignee_options": [
-      "Léa",
+      "Inès",
       "Marc",
-      "Julien D"
+      "Côme D"
     ]
   },
   "available_tools": [

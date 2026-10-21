@@ -19,7 +19,7 @@ from cqa.plan import operation_key
 from tests.cqa.fakes import Call, FakeClock, failure
 
 BOT = "bot-1"
-OPTIONS = ["Léa", "Julien D"]
+OPTIONS = ["Inès", "Côme D"]
 SECRET_HEADER = "Authorization: Basic dXNlcjpwYXNz"
 
 
@@ -265,9 +265,9 @@ class RequestBodiesTest(ApplyTestCase):
         )
 
     def test_assign_body_keeps_the_order_of_names(self):
-        self.apply(assign_op(PAGE_1, 1, ["Léa", "Julien D"]))
+        self.apply(assign_op(PAGE_1, 1, ["Inès", "Côme D"]))
         [call] = self.notion.requests("PATCH")
-        expected = {"Assignée à": {"multi_select": [{"name": "Léa"}, {"name": "Julien D"}]}}
+        expected = {"Assignée à": {"multi_select": [{"name": "Inès"}, {"name": "Côme D"}]}}
         self.assertEqual(call.body, {"properties": expected})
 
     def test_comment_body(self):
@@ -283,7 +283,7 @@ class RequestBodiesTest(ApplyTestCase):
         client = StubClient()
         plan_ops = [
             status_op(PAGE_1, 1),
-            assign_op(PAGE_1, 1, ["Léa"]),
+            assign_op(PAGE_1, 1, ["Inès"]),
             comment_op(PAGE_1, 1, "Constat"),
             page_comment_op("Synthèse"),
         ]
@@ -293,7 +293,7 @@ class RequestBodiesTest(ApplyTestCase):
             client.updates,
             [
                 (PAGE_1, {"Statut": {"status": {"name": "Ok / Recetté"}}}),
-                (PAGE_1, {"Assignée à": {"multi_select": [{"name": "Léa"}]}}),
+                (PAGE_1, {"Assignée à": {"multi_select": [{"name": "Inès"}]}}),
             ],
         )
         self.assertEqual(
@@ -417,7 +417,7 @@ class SecretGateTest(ApplyTestCase):
         self.assertEqual(self.notion.calls, [])
 
     def test_secret_in_an_assignee_name_blocks_too(self):
-        assign = assign_op(PAGE_1, 1, ["Léa", "s3cr3t-value-xyz"])
+        assign = assign_op(PAGE_1, 1, ["Inès", "s3cr3t-value-xyz"])
         plan = make_plan(assign, options=[*OPTIONS, "s3cr3t-value-xyz"])
         self.notion.live_options = [*OPTIONS, "s3cr3t-value-xyz"]
         result = self.apply(plan=plan, known_secrets=["s3cr3t-value-xyz"])
@@ -453,30 +453,30 @@ class UnknownOptionTest(ApplyTestCase):
         self.assertEqual(self.notion.write_requests(), [])
 
     def test_one_unknown_name_blocks_the_whole_assignment(self):
-        result = self.apply(assign_op(PAGE_1, 1, ["Léa", "Zoé"]))
+        result = self.apply(assign_op(PAGE_1, 1, ["Inès", "Zoé"]))
         self.assertEqual(len(result["blocked"]), 1)
         self.assertEqual(self.notion.write_requests(), [])
 
     def test_option_names_are_compared_exactly(self):
-        result = self.apply(assign_op(PAGE_1, 1, ["lea"]))
+        result = self.apply(assign_op(PAGE_1, 1, ["ines"]))
         self.assertEqual(len(result["blocked"]), 1)
         self.assertEqual(self.notion.write_requests(), [])
 
     def test_plan_without_options_blocks_every_assignment(self):
-        plan = make_plan(assign_op(PAGE_1, 1, ["Léa"]), options=[])
+        plan = make_plan(assign_op(PAGE_1, 1, ["Inès"]), options=[])
         del plan["assignee_options"]
         result = self.apply(plan=plan)
         self.assertEqual(len(result["blocked"]), 1)
         self.assertEqual(self.notion.write_requests(), [])
 
     def test_known_option_is_written(self):
-        result = self.apply(assign_op(PAGE_1, 1, ["Julien D"]))
+        result = self.apply(assign_op(PAGE_1, 1, ["Côme D"]))
         self.assertEqual(result["done"], 1)
 
     def test_option_removed_from_the_copy_since_the_plan_is_blocked(self):
-        self.notion.live_options = ["Julien D"]
-        lost = assign_op(PAGE_1, 1, ["Léa"])
-        kept = assign_op(PAGE_2, 2, ["Julien D"])
+        self.notion.live_options = ["Côme D"]
+        lost = assign_op(PAGE_1, 1, ["Inès"])
+        kept = assign_op(PAGE_2, 2, ["Côme D"])
         result = self.apply(lost, kept)
         self.assertEqual(result["done"], 1)
         self.assertEqual(result["blocked"], [{"key": lost["key"], "labels": ["unknown_option"]}])
@@ -492,12 +492,12 @@ class UnknownOptionTest(ApplyTestCase):
 
     def test_copy_without_the_assignee_property_blocks_every_assignment(self):
         self.notion.live_options = []
-        result = self.apply(assign_op(PAGE_1, 1, ["Léa"]))
+        result = self.apply(assign_op(PAGE_1, 1, ["Inès"]))
         self.assertEqual(result["blocked"][0]["labels"], ["unknown_option"])
         self.assertEqual(self.notion.write_requests(), [])
 
     def test_live_schema_is_read_once_from_the_copy_data_source(self):
-        self.apply(assign_op(PAGE_1, 1, ["Léa"]), assign_op(PAGE_2, 2, ["Julien D"]))
+        self.apply(assign_op(PAGE_1, 1, ["Inès"]), assign_op(PAGE_2, 2, ["Côme D"]))
         schema_reads = [call for call in self.notion.calls if "/data_sources/" in call.url]
         self.assertEqual(len(schema_reads), 1)
         self.assertTrue(schema_reads[0].url.endswith(f"/v1/data_sources/{COPY_DS}"))
@@ -510,7 +510,7 @@ class UnknownOptionTest(ApplyTestCase):
     def test_schema_read_failure_stops_before_any_write(self):
         self.notion.data_source_error = http_failure(404, "object_not_found", "Gone")
         with self.assertRaises(NotionError):
-            self.apply(status_op(PAGE_1, 1), assign_op(PAGE_1, 1, ["Léa"]))
+            self.apply(status_op(PAGE_1, 1), assign_op(PAGE_1, 1, ["Inès"]))
         self.assertEqual(self.notion.write_requests(), [])
         self.assertFalse(self.applied_path().exists())
 
@@ -521,7 +521,7 @@ class OrderTest(ApplyTestCase):
             comment_op(PAGE_2, 2, "Constat 2"),
             page_comment_op("Synthèse"),
             status_op(PAGE_2, 2),
-            assign_op(PAGE_2, 2, ["Léa"]),
+            assign_op(PAGE_2, 2, ["Inès"]),
             comment_op(PAGE_1, 1, "Constat 1"),
             status_op(PAGE_1, 1),
         ]
@@ -799,8 +799,8 @@ class PlanValidationTest(ApplyTestCase):
             "unknown kind": {**good, "kind": "delete"},
             "no page": {**good, "page_id": ""},
             "status without name": {**good, "after": None},
-            "assign without list": {**assign_op(PAGE_1, 1, ["Léa"]), "after": "Léa"},
-            "assign with a number": {**assign_op(PAGE_1, 1, ["Léa"]), "after": [3]},
+            "assign without list": {**assign_op(PAGE_1, 1, ["Inès"]), "after": "Inès"},
+            "assign with a number": {**assign_op(PAGE_1, 1, ["Inès"]), "after": [3]},
             "empty comment": {**comment_op(PAGE_1, 1), "text": "  "},
             "comment without text": {**comment_op(PAGE_1, 1), "text": None},
             "text not a string": {**good, "text": 3},
@@ -897,7 +897,7 @@ class ApplyCommandTest(CliTestCase):
 
     def test_plan_option_reads_another_plan(self):
         self.write_plan(status_op(PAGE_1, 1))
-        self.write_plan(assign_op(PAGE_2, 2, ["Léa"]), name="notion/assign-plan.json")
+        self.write_plan(assign_op(PAGE_2, 2, ["Inès"]), name="notion/assign-plan.json")
         code, out, _ = self.run_main(["apply", self.run_dir, "--plan", "notion/assign-plan.json"])
         self.assertEqual(code, 0)
         written = [(label, page) for label, page, _ in self.notion.writes]
@@ -905,7 +905,7 @@ class ApplyCommandTest(CliTestCase):
 
     def test_both_plans_share_the_journal(self):
         self.write_plan(status_op(PAGE_1, 1))
-        self.write_plan(assign_op(PAGE_1, 1, ["Léa"]), name="notion/assign-plan.json")
+        self.write_plan(assign_op(PAGE_1, 1, ["Inès"]), name="notion/assign-plan.json")
         self.run_main(["apply", self.run_dir])
         self.run_main(["apply", self.run_dir, "--plan", "notion/assign-plan.json"])
         entries = self.read_json("notion/applied.json")["applied"]
@@ -989,8 +989,8 @@ class ApplyCommandTest(CliTestCase):
         self.assertEqual(self.notion.calls, [])
 
     def test_option_removed_from_the_copy_is_blocked_exit_7(self):
-        self.notion.live_options = ["Julien D"]
-        self.write_plan(assign_op(PAGE_1, 1, ["Léa"]))
+        self.notion.live_options = ["Côme D"]
+        self.write_plan(assign_op(PAGE_1, 1, ["Inès"]))
         code, out, _ = self.run_main(["apply", self.run_dir])
         self.assertEqual(code, 7)
         self.assertEqual(json.loads(out)["blocked"][0]["labels"], ["unknown_option"])
@@ -998,7 +998,7 @@ class ApplyCommandTest(CliTestCase):
 
     def test_schema_read_failure_exit_3(self):
         self.notion.data_source_error = http_failure(404, "object_not_found", "Gone")
-        self.write_plan(assign_op(PAGE_1, 1, ["Léa"]))
+        self.write_plan(assign_op(PAGE_1, 1, ["Inès"]))
         code, out, err = self.run_main(["apply", self.run_dir])
         self.assertEqual((code, out), (3, ""))
         self.assertIn("object_not_found", err)

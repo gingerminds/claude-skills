@@ -3,8 +3,8 @@
 ## 🏢 Client & équipe projet
 
 - **Nom du client** : Acme
-- **Lead technique** : Julien Durand
-- **Devs principaux** : Julien Durand (full-stack), Léa Martin (front), Vincent Roux (back)
+- **Lead technique** : Côme Dorval
+- **Devs principaux** : Côme Dorval (full-stack), Inès Morel (front), Aurèle Roussel (back)
 
 ## 🌐 Environnements
 

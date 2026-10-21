@@ -19,7 +19,7 @@ from cqa.plan import (
 
 EM_DASH = chr(0x2014)
 RUN_DATE = date(2026, 10, 20)
-LEAD = "Julien D"
+LEAD = "Côme D"
 COPY_DS = "0123456789abcdef0123456789abcdef"
 OTHER_DS = f"{2:032x}"
 SHA = "3f2a1c9" + "e" * 33
@@ -82,7 +82,7 @@ def make_context(lead=LEAD, copy_page_id=COPY_DS):
         "schema": 1,
         "run_id": "2026-10-20-1430",
         "plugin_version": "0.9.0",
-        "lead": {"name": "Julien Durand", "option": lead},
+        "lead": {"name": "Côme Dorval", "option": lead},
         "repos": [
             {
                 "name": "nuxt",
@@ -93,7 +93,7 @@ def make_context(lead=LEAD, copy_page_id=COPY_DS):
         "notion": {
             "copy_page_id": copy_page_id,
             "copy_data_source_id": COPY_DS,
-            "assignee_options": ["Léa", LEAD],
+            "assignee_options": ["Inès", LEAD],
         },
     }
 
@@ -251,11 +251,11 @@ class AssignTest(unittest.TestCase):
         return make_finding(verdict="ok_human", todo=None, human_check="Valider le rendu.")
 
     def test_assign_lead_to_ok_human(self):
-        row = make_row(assignees=["Léa"])
+        row = make_row(assignees=["Inès"])
         plan = plan_for([row], [self.ok_human()])
         op = sole_op(self, plan, "assign")
-        self.assertEqual(op["before"], ["Léa"])
-        self.assertEqual(op["after"], ["Léa", LEAD])
+        self.assertEqual(op["before"], ["Inès"])
+        self.assertEqual(op["after"], ["Inès", LEAD])
         self.assertEqual(op["text"], "")
         self.assertFalse(op["human_override"])
 
@@ -265,11 +265,11 @@ class AssignTest(unittest.TestCase):
         self.assertEqual(ops_of(plan, "assign"), [])
 
     def test_assign_keeps_current_assignees_untouched(self):
-        row = make_row(assignees=["Léa"])
+        row = make_row(assignees=["Inès"])
         plan = plan_for([row], [self.ok_human()])
-        self.assertEqual(row["assignees"], ["Léa"])
+        self.assertEqual(row["assignees"], ["Inès"])
         sole_op(self, plan, "assign")["after"].append("x")
-        self.assertEqual(row["assignees"], ["Léa"])
+        self.assertEqual(row["assignees"], ["Inès"])
 
     def test_assign_only_for_ok_human(self):
         for verdict in ("ok", "partial", "ko", "unknown", "na"):
@@ -297,7 +297,7 @@ class CommentTest(unittest.TestCase):
         op = sole_op(self, plan, "comment")
         self.assertEqual(op["verdict"], "ko")
         self.assertEqual(parse_verdict(op["text"]), "ko")
-        self.assertIn("Audit PRE-MEL · 20/10/2026 · lancé par Julien D", op["text"])
+        self.assertIn("Audit PRE-MEL · 20/10/2026 · lancé par Côme D", op["text"])
         self.assertIn("Réf CQ-79 · develop@3f2a1c9", op["text"])
 
     def test_first_run_comments(self):
@@ -480,7 +480,7 @@ class MissingFindingTest(unittest.TestCase):
 
 class OperationShapeTest(unittest.TestCase):
     def build(self, **overrides):
-        row = make_row(status="Mis en place", assignees=["Léa"])
+        row = make_row(status="Mis en place", assignees=["Inès"])
         finding = make_finding(verdict="ok_human", todo=None, human_check="Valider.")
         return plan_for([row], [finding], **overrides)
 
@@ -550,14 +550,14 @@ class OperationShapeTest(unittest.TestCase):
         self.assertEqual(plan["run_id"], "2026-10-20-1430")
         self.assertEqual(plan["copy_data_source_id"], COPY_DS)
         self.assertEqual(plan["copy_page_id"], COPY_DS)
-        self.assertEqual(plan["assignee_options"], ["Léa", LEAD])
+        self.assertEqual(plan["assignee_options"], ["Inès", LEAD])
 
     def test_plan_is_json_serializable(self):
         plan = self.build(missing=[{"ref": 5, "title": "Absente"}])
         self.assertEqual(json.loads(json.dumps(plan)), plan)
 
     def test_inputs_are_not_modified(self):
-        rows = [make_row(status="Mis en place", assignees=["Léa"])]
+        rows = [make_row(status="Mis en place", assignees=["Inès"])]
         findings = {79: make_finding(verdict="ok", evidence=[], todo=None)}
         snapshot = copy.deepcopy((rows, findings))
         build_plan(

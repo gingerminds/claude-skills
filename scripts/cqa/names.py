@@ -23,7 +23,7 @@ def match_option(full_name: str, options: list[str]) -> Optional[str]:
 
     Options with the person's first name as their first word are searched. A single one
     without second word is the answer; otherwise the answer is the option made of the first
-    name and the initial of the surname ("Julien L"). Accents and case are ignored.
+    name and the initial of the surname ("Côme L"). Accents and case are ignored.
     """
     words = normalize(full_name).split()
     if not words:
