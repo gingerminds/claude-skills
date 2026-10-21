@@ -385,9 +385,9 @@ def _check(argv) -> None:
     name, args = argv[0], list(argv[1:])
     if name in _DENIED:
         raise Refused(f"« {name} » refusé : {_DENIED[name]}")
-    if _is_named(name, "drush"):
+    if _is_binary(name, "drush"):
         _drush(args)
-    elif _is_named(name, "wp"):
+    elif _is_binary(name, "wp"):
         _wp(args)
     elif name in _SIMPLE:
         _simple(name, args)
@@ -397,14 +397,47 @@ def _check(argv) -> None:
         raise Refused(f"« {name} » est hors de la liste blanche des commandes de lecture")
 
 
-def _is_named(token: str, name: str) -> bool:
-    """True for name itself or a path to it; such a path must be literal."""
-    if token == name:
+_BINARY_FORMS = {
+    "drush": ("drush", "vendor/bin/drush", "./vendor/bin/drush"),
+    "wp": ("wp",),
+    "artisan": ("artisan",),
+}
+_BINARY_SUFFIXES = {"drush": "/vendor/bin/drush", "artisan": "/artisan"}
+_BINARY_HINTS = {
+    "drush": "drush, vendor/bin/drush ou /<dossier>/vendor/bin/drush",
+    "wp": "wp seul",
+    "artisan": "artisan (depuis le dossier de l'application) ou /<dossier>/artisan",
+}
+_UNSAFE_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/", "/home/", "/root/", "/run/user/")
+
+
+def _is_binary(token: str, name: str) -> bool:
+    """True for an allowed form of an application binary; refuse any other path to it.
+
+    Only fixed forms and absolute, normalized paths outside temporary and home folders are
+    allowed, so that a file planted on the server is not run.
+    """
+    if token in _BINARY_FORMS[name]:
         return True
-    if token.endswith("/" + name):
-        _check_path(token)
-        return True
-    return False
+    if token != name and not token.endswith("/" + name):
+        return False
+    _check_path(token)
+    suffix = _BINARY_SUFFIXES.get(name)
+    absolute = (
+        suffix is not None
+        and token.endswith(suffix)
+        and token.startswith("/")
+        and not token.startswith("//")
+        and posixpath.normpath(token) == token
+        and not token.startswith(_UNSAFE_DIRS)
+    )
+    if not absolute:
+        raise Refused(
+            f"{name} : chemin refusé « {token} » (fichier peut-être déposé sur le serveur) ; "
+            f"formes permises : {_BINARY_HINTS[name]}, hors de /tmp, /var/tmp, /dev/shm, "
+            "/home, /root et /run/user"
+        )
+    return True
 
 
 def _simple(name: str, args: list) -> None:
@@ -494,7 +527,7 @@ def _crontab(args: list) -> None:
 
 
 def _php(args: list) -> None:
-    if args and _is_named(args[0], "artisan"):
+    if args and _is_binary(args[0], "artisan"):
         _artisan(args[1:])
         return
     if "-i" in args:
@@ -664,6 +697,13 @@ _SQL_WRITE = re.compile(
 _SQL_CREDENTIAL = re.compile(
     r"pass|pwd|secret|token|salt|authentication_string|api_?key|\bCREATE\s+USER\b", re.I
 )
+_SQL_TOKEN = re.compile(r"\s+|'(?:[^']|'')*'|\"[^\"]*\"|`[^`]*`|[A-Za-z0-9_$]+|.")
+_SQL_SENSITIVE_TABLES = frozenset({"users", "wp_users", "users_field_data", "sessions"})
+_SQL_ALIAS = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*|`[^`]*`|\"[^\"]*\"")
+_SQL_LIST_END = frozenset({
+    "FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "UNION", "INTERSECT", "EXCEPT",
+    "WINDOW", "FOR", "INTO", "LOCK", "OFFSET", "FETCH",
+})
 
 
 def check_sql(query: str) -> tuple[bool, str]:
@@ -707,7 +747,105 @@ def _sql_body(query) -> str:
         raise Refused(f"mot-clé d'écriture ou de verrou refusé : « {write.group(1).upper()} »")
     if _SQL_CREDENTIAL.search(body):
         raise Refused("requête refusée : elle vise des mots de passe, jetons ou secrets")
+    _check_select_lists(_sql_tokens(body))
     return body
+
+
+def _sql_tokens(body: str) -> list:
+    """Split a statement into tokens; whitespace dropped, quoted strings and names kept whole."""
+    tokens = [token for token in _SQL_TOKEN.findall(body) if not token.isspace()]
+    for token in tokens:
+        if token in ("'", '"', "`"):
+            raise Refused(f"guillemet « {token} » non fermé dans la requête")
+    return tokens
+
+
+def _check_select_lists(tokens: list) -> None:
+    """Refuse a "*" in a select list, and any select list but COUNT(...) near a sensitive table.
+
+    A sensitive table counts wherever its name stands (FROM, JOIN, subquery, condition): the
+    check stays on the safe side. SHOW and DESCRIBE, without SELECT, keep the schema readable.
+    """
+    lists = [_select_list(tokens, index) for index, token in enumerate(tokens)
+             if token.upper() == "SELECT"]
+    for items in lists:
+        stars = [index for index, token in enumerate(items) if token == "*"]
+        if not all(_counts_rows(items, index) for index in stars):
+            raise Refused(
+                "« * » refusé dans la liste des colonnes : nommer les colonnes utiles "
+                "(COUNT(*) reste permis)"
+            )
+    sensitive = next((name for name in map(_sql_name, tokens) if _is_sensitive(name)), None)
+    if sensitive and not all(_only_counts(items) for items in lists):
+        raise Refused(
+            f"table sensible « {sensitive} » : seul COUNT(...) est permis dans la liste "
+            "des colonnes"
+        )
+
+
+def _select_list(tokens: list, start: int) -> list:
+    """Return the tokens of the select list of the SELECT at tokens[start]."""
+    depth, items = 0, []
+    for token in tokens[start + 1:]:
+        if token == ")" and depth == 0:
+            break
+        if depth == 0 and token.upper() in _SQL_LIST_END:
+            break
+        depth += {"(": 1, ")": -1}.get(token, 0)
+        items.append(token)
+    return items
+
+
+def _counts_rows(items: list, index: int) -> bool:
+    """True for the "*" of COUNT(*) at items[index]."""
+    before = [token.upper() for token in items[max(0, index - 2):index]]
+    return before == ["COUNT", "("] and items[index + 1:index + 2] == [")"]
+
+
+def _only_counts(items: list) -> bool:
+    """True when every item of a select list is COUNT(...), with an optional alias."""
+    for item in _split_items(items):
+        if [token.upper() for token in item[:2]] != ["COUNT", "("]:
+            return False
+        close = _closing(item, 1)
+        if close is None:
+            return False
+        rest = item[close + 1:]
+        if rest[:1] and rest[0].upper() == "AS":
+            rest = rest[1:]
+        if rest and (len(rest) > 1 or not _SQL_ALIAS.fullmatch(rest[0])):
+            return False
+    return True
+
+
+def _split_items(items: list) -> list:
+    parts, current, depth = [], [], 0
+    for token in items:
+        if token == "," and depth == 0:
+            parts.append(current)
+            current = []
+            continue
+        depth += {"(": 1, ")": -1}.get(token, 0)
+        current.append(token)
+    return parts + [current]
+
+
+def _closing(tokens: list, opening: int) -> Optional[int]:
+    depth = 0
+    for index in range(opening, len(tokens)):
+        depth += {"(": 1, ")": -1}.get(tokens[index], 0)
+        if depth == 0:
+            return index
+    return None
+
+
+def _sql_name(token: str) -> str:
+    return token[1:-1] if token[:1] in ('"', "`") else token
+
+
+def _is_sensitive(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in _SQL_SENSITIVE_TABLES or lowered.endswith("_tokens")
 
 
 def build_sql_remote(

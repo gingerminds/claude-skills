@@ -78,6 +78,7 @@
     "copy_page_id": "page-copy",
     "copy_data_source_id": "ds-copy",
     "reference_data_source_id": "ds-reference",
+    "reference_page_id": "page-reference",
     "bot_id": "bot-1",
     "assignee_options": [
       "Inès",

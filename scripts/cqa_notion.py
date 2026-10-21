@@ -238,15 +238,17 @@ def _cmd_comment_page(args, client) -> int:
 
 def _write_plan(client, run_dir: Path, plan: dict, notion: dict, row_page_ids: set) -> int:
     """Apply a plan with the safety gates, print its report and return the exit code."""
+    reference_ds_id, reference_page_id = _reference(client, notion)
     result = apply_plan(
         client,
         plan,
         run_dir=run_dir,
-        reference_ds_id=_reference_data_source(client, notion),
+        reference_ds_id=reference_ds_id,
         row_page_ids=row_page_ids,
         copy_page_id=notion.get("copy_page_id") or None,
         known_secrets=known_values_from_env(),
         bot_id=notion["bot_id"],
+        reference_page_id=reference_page_id,
         log=_log,
     )
     _emit(result)
@@ -255,18 +257,32 @@ def _write_plan(client, run_dir: Path, plan: dict, notion: dict, row_page_ids: s
     return EXIT_BLOCKED if result["blocked"] else EXIT_OK
 
 
-def _reference_data_source(client, notion: dict) -> str:
-    """Return the reference data source: from the context, else by resolving GM_CQA_REFERENCE."""
-    known = notion.get("reference_data_source_id")
-    if isinstance(known, str) and known.strip():
-        return known.strip()
+def _reference(client, notion: dict) -> tuple:
+    """Return the reference (data source id, page id or None) to keep the writes away from.
+
+    Both come from the context; when one is missing, GM_CQA_REFERENCE is resolved.
+    """
+    data_source = notion.get("reference_data_source_id")
+    if not isinstance(data_source, str) or not data_source.strip():
+        data_source = None
+    has_page = "reference_page_id" in notion
+    page = notion.get("reference_page_id")
+    if page is not None and (not isinstance(page, str) or not page.strip()):
+        raise UsageError("context.json : notion.reference_page_id doit être un texte ou null.")
+    if data_source and has_page:
+        return data_source.strip(), page
     reference = os.environ.get("GM_CQA_REFERENCE", "").strip()
     if not reference:
         raise UsageError(
-            "Le modèle est inconnu : notion.reference_data_source_id est absent de context.json "
-            "et GM_CQA_REFERENCE de l'environnement. Aucune écriture sans cette vérification."
+            "Le modèle est inconnu : notion.reference_data_source_id ou "
+            "notion.reference_page_id est absent de context.json et GM_CQA_REFERENCE de "
+            "l'environnement. Aucune écriture sans cette vérification."
         )
-    return resolve(client, reference)["data_source_id"]
+    resolved = resolve(client, reference)
+    return (
+        data_source.strip() if data_source else resolved["data_source_id"],
+        page if has_page else resolved["page_id"],
+    )
 
 
 def _read_comment_text(path: Path) -> str:

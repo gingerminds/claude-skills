@@ -651,6 +651,24 @@ class ContextCheckTest(RunDirCase):
         code, report, _ = self.check(valid_context())
         self.assertEqual((code, report), (0, {"ok": True, "errors": []}))
 
+    def test_reference_page_id_is_optional(self):
+        for value in ("fedcba9876543210fedcba9876543210", None):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["notion"]["reference_page_id"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report["errors"]), (0, []))
+
+    def test_reference_page_id_must_be_a_text_or_null(self):
+        for value in (3, "  ", ["x"]):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["notion"]["reference_page_id"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                self.assertIn("notion.reference_page_id", report["errors"][0])
+
     def test_nullable_values_are_accepted(self):
         context = valid_context()
         context["lead"]["option"] = None

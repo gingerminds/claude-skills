@@ -118,7 +118,7 @@
         "path": {
           "type": "string",
           "pattern": "\\S",
-          "description": "Path of the file inside the repo."
+          "description": "Path of a file inside the repo, relative to its root; a folder or the root itself is rejected."
         },
         "line": {
           "type": ["integer", "null"],

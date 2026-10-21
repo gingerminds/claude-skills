@@ -757,16 +757,32 @@ class ValidateTest(AuditCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("hors du repo", errors[0])
 
-    def test_file_evidence_accepts_a_directory_and_a_file(self):
+    def test_file_evidence_accepts_a_file(self):
         run_dir = self.make_run()
         self.set_evidence(
             run_dir,
             [
                 {"type": "file", "repo": "laravel", "path": "app/Http/Kernel.php", "line": 3},
-                {"type": "file", "repo": "laravel", "path": "app/Http"},
+                {"type": "file", "repo": "laravel", "path": "./app/Http/Kernel.php"},
             ],
         )
         self.assertEqual(self.validate_errors(run_dir), [])
+
+    def test_file_evidence_refuses_the_repo_root(self):
+        run_dir = self.make_run()
+        for path in (".", "./", "./."):
+            self.set_evidence(run_dir, [{"type": "file", "repo": "laravel", "path": path}])
+            errors = self.validate_errors(run_dir)
+            self.assertEqual(len(errors), 1, path)
+            self.assertIn("racine du repo", errors[0], path)
+
+    def test_file_evidence_refuses_a_directory(self):
+        run_dir = self.make_run()
+        for path in ("app/Http", "app/Http/", "app"):
+            self.set_evidence(run_dir, [{"type": "file", "repo": "laravel", "path": path}])
+            errors = self.validate_errors(run_dir)
+            self.assertEqual(len(errors), 1, path)
+            self.assertIn("pas un fichier", errors[0], path)
 
     def test_tool_evidence_needs_a_summary(self):
         run_dir = self.make_run()

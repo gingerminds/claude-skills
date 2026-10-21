@@ -31,6 +31,7 @@ def dashed(number):
 REF_DATABASE = dashed(4)
 COPY_DS = dashed(3)
 REF_DS = dashed(5)
+REF_PAGE = dashed(6)
 COPY_PAGE = dashed(10)
 PAGE_1, PAGE_2, PAGE_3 = dashed(21), dashed(22), dashed(23)
 OUTSIDE_PAGE = dashed(99)
@@ -54,6 +55,7 @@ class FakeNotion:
     and comments_unreachable makes every GET /comments fail. A post fault may also be
     "rate_limited" (429 with Retry-After, nothing stored). live_options are the "Assignée à"
     options of the copy, and data_source_error an HTTP failure (status, body) of its schema read.
+    pages maps a page id to the id of its child database, for resolve.
     writes lists what was stored, in order: (label, page id, payload).
     """
 
@@ -62,6 +64,7 @@ class FakeNotion:
         self.writes = []
         self.comments = {}
         self.databases = {}
+        self.pages = {}
         self.post_faults = {}
         self.page_errors = {}
         self.page_unreachable = set()
@@ -93,7 +96,15 @@ class FakeNotion:
             listed = [{"name": name} for name in self.live_options]
             schema = {"Assignée à": {"type": "multi_select", "multi_select": {"options": listed}}}
             return reply(200, {"object": "data_source", "properties": schema})
+        if method == "GET" and path.startswith("/blocks/") and path.endswith("/children"):
+            database = self.pages[path.split("/")[2]]
+            results = [{"type": "child_database", "id": database}]
+            return reply(
+                200, {"object": "list", "results": results, "has_more": False, "next_cursor": None}
+            )
         if method == "GET" and path.startswith("/databases/"):
+            if path.rsplit("/", 1)[1] in self.pages:
+                return reply(*http_failure(404, "object_not_found", "Not a database"))
             sources = self.databases[path.rsplit("/", 1)[1]]
             listed = [{"id": item, "name": "Source"} for item in sources]
             return reply(200, {"data_sources": listed})
@@ -317,6 +328,24 @@ class ReferenceProtectionTest(ApplyTestCase):
         self.assertEqual(str(caught.exception), "écriture refusée : data source du modèle")
         self.assertEqual(self.notion.calls, [])
         self.assertFalse(self.applied_path().exists())
+
+    def test_reference_page_refused(self):
+        for reference in (REF_PAGE, REF_PAGE.replace("-", "").upper()):
+            with self.subTest(reference=reference):
+                with self.assertRaises(ReferenceWriteRefused) as caught:
+                    self.apply(
+                        status_op(PAGE_1, 1),
+                        page_comment_op(page_id=REF_PAGE),
+                        copy_page_id=REF_PAGE,
+                        reference_page_id=reference,
+                    )
+                self.assertEqual(str(caught.exception), "écriture refusée : page du modèle")
+        self.assertEqual(self.notion.calls, [])
+        self.assertFalse(self.applied_path().exists())
+
+    def test_known_reference_page_lets_the_copy_page_be_commented(self):
+        result = self.apply(page_comment_op(), reference_page_id=REF_PAGE)
+        self.assertEqual(result["done"], 1)
 
     def test_reference_refused_whatever_the_id_spelling(self):
         for copy_ds, reference in (
@@ -838,15 +867,18 @@ class CliTestCase(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
-    def write_context(self, **notion):
+    def write_context(self, without=(), **notion):
         values = {
             "copy_page_id": COPY_PAGE,
             "copy_data_source_id": COPY_DS,
             "reference_data_source_id": REF_DS,
+            "reference_page_id": REF_PAGE,
             "bot_id": BOT,
             "assignee_options": OPTIONS,
         }
         values.update(notion)
+        for key in without:
+            del values[key]
         self.write_json("context.json", {"schema": 1, "run_id": "r1", "notion": values})
 
     def write_rows(self, page_ids):
@@ -1031,6 +1063,14 @@ class ApplyCommandTest(CliTestCase):
         self.assertIn("écriture refusée : data source du modèle", err)
         self.assertEqual(self.notion.calls, [])
 
+    def test_page_comment_on_the_reference_page_refused_exit_8(self):
+        self.write_context(copy_page_id=REF_PAGE)
+        self.write_plan(assign_op(PAGE_1, 1, ["Inès"]), page_comment_op(page_id=REF_PAGE))
+        code, out, err = self.run_main(["apply", self.run_dir])
+        self.assertEqual((code, out), (8, ""))
+        self.assertIn("écriture refusée : page du modèle", err)
+        self.assertEqual(self.notion.calls, [])
+
     def test_reference_is_resolved_from_the_environment_when_the_context_lacks_it(self):
         self.write_context(reference_data_source_id=None)
         self.notion.databases = {REF_DATABASE: [REF_DS]}
@@ -1209,6 +1249,48 @@ class CommentPageCommandTest(CliTestCase):
         code, _, err = self.run_main(["comment-page", self.run_dir, self.write_text()])
         self.assertEqual(code, 8)
         self.assertIn("écriture refusée", err)
+        self.assertEqual(self.notion.calls, [])
+
+    def test_reference_page_refused_exit_8(self):
+        for page in (REF_PAGE, REF_PAGE.replace("-", "").upper()):
+            with self.subTest(page=page):
+                self.write_context(copy_page_id=page)
+                code, out, err = self.run_main(["comment-page", self.run_dir, self.write_text()])
+                self.assertEqual((code, out), (8, ""))
+                self.assertIn("écriture refusée : page du modèle", err)
+                self.assertEqual(self.notion.calls, [])
+
+    def test_reference_page_is_resolved_from_the_environment_when_the_context_lacks_it(self):
+        self.notion.pages = {REF_PAGE: REF_DATABASE}
+        self.notion.databases = {REF_DATABASE: [REF_DS]}
+        self.write_context(copy_page_id=REF_PAGE, without=("reference_page_id",))
+        url = f"https://www.notion.so/ws/Modele-{REF_PAGE.replace('-', '')}"
+        code, _, err = self.run_main(
+            ["comment-page", self.run_dir, self.write_text()],
+            {"NOTION_TOKEN": "tok", "GM_CQA_REFERENCE": url},
+        )
+        self.assertEqual(code, 8)
+        self.assertIn("page du modèle", err)
+        self.assertEqual(self.notion.write_requests(), [])
+
+    def test_unknown_reference_page_is_a_usage_error(self):
+        self.write_context(without=("reference_page_id",))
+        code, _, err = self.run_main(["comment-page", self.run_dir, self.write_text()])
+        self.assertEqual(code, 2)
+        self.assertIn("GM_CQA_REFERENCE", err)
+        self.assertEqual(self.notion.calls, [])
+
+    def test_null_reference_page_lets_the_copy_page_be_commented(self):
+        self.write_context(reference_page_id=None)
+        code, out, _ = self.run_main(["comment-page", self.run_dir, self.write_text()])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["done"], 1)
+
+    def test_invalid_reference_page_is_a_usage_error(self):
+        self.write_context(reference_page_id=3)
+        code, _, err = self.run_main(["comment-page", self.run_dir, self.write_text()])
+        self.assertEqual(code, 2)
+        self.assertIn("reference_page_id", err)
         self.assertEqual(self.notion.calls, [])
 
     def test_text_file_problems_are_usage_errors(self):

@@ -773,6 +773,11 @@ def validate_context(context: dict) -> list:
     _check_fields(errors, "", context, _TOP_FIELDS)
     for name, fields in _SECTIONS.items():
         _check_object(errors, name, context, fields)
+    for name, fields in _OPTIONAL_SECTION_FIELDS.items():
+        section = context.get(name)
+        if isinstance(section, dict):
+            present = {key: check for key, check in fields.items() if key in section}
+            _check_fields(errors, name, section, present)
     _check_list(errors, "team", context, _TEAM_FIELDS)
     _check_list(errors, "repos", context, _REPO_FIELDS, minimum=1)
     _check_list(errors, "key_pages", context, _PAGE_FIELDS, maximum=MAX_KEY_PAGES)
@@ -852,6 +857,12 @@ def _text_or_null(value) -> Optional[str]:
     return None if value is None or isinstance(value, str) else "doit être un texte ou null"
 
 
+def _filled_text_or_null(value) -> Optional[str]:
+    if value is None or _text(value) is None:
+        return None
+    return "doit être un texte non vide ou null"
+
+
 def _boolean(value) -> Optional[str]:
     return None if isinstance(value, bool) else "doit être un booléen"
 
@@ -927,6 +938,7 @@ _SECTIONS = {
         "assignee_options": _texts,
     },
 }
+_OPTIONAL_SECTION_FIELDS = {"notion": {"reference_page_id": _filled_text_or_null}}
 _TEAM_FIELDS = {"name": _text, "role": _text_or_null, "option": _text_or_null}
 _REPO_FIELDS = {
     "name": _repo_name,
@@ -1169,11 +1181,15 @@ def _file_problem(item: dict, roots: dict) -> Optional[str]:
     relative = Path(path)
     if relative.is_absolute() or ".." in relative.parts:
         return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
+    if relative.parts == ():
+        return f"chemin {_quoted(path)} : la racine du repo {_quoted(repo)} n'est pas une preuve"
     candidate = roots[repo] / relative
     if not candidate.exists():
         return f"chemin {_quoted(path)} introuvable dans le repo {_quoted(repo)}"
     if not candidate.resolve().is_relative_to(roots[repo].resolve()):
         return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
+    if not candidate.is_file():
+        return f"chemin {_quoted(path)} : pas un fichier dans le repo {_quoted(repo)} (dossier ?)"
     return None
 
 

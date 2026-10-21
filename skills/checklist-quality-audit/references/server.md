@@ -50,7 +50,7 @@ python3 "$S/cqa_ssh_ro.py" <alias> --php-ini display_errors expose_php
 - PHP: `php -v`, `php -m`, `php --ini`. `php -i` is refused (it prints the environment): use `--php-ini`.
 - Git, to read the deployed commit: `git -C <dossier> rev-parse HEAD` and `git -C <dossier> log -1 --format=<format>`.
 - Web servers: `nginx -v`, `apachectl -v`.
-- Applications: `drush status`, `pm:list`, `pm:security`, `--version`; `wp core version`, `plugin list`, `theme list`, `cron event list`, `option get <nom>` (names that look like a secret refused), `--version`; `php artisan about`, `route:list`, `schedule:list`, `--version`.
+- Applications: `drush status`, `pm:list`, `pm:security`, `--version`; `wp core version`, `plugin list`, `theme list`, `cron event list`, `option get <nom>` (names that look like a secret refused), `--version`; `php artisan about`, `route:list`, `schedule:list`, `--version`. Binary forms: `drush`, `vendor/bin/drush` or an absolute `<dossier>/vendor/bin/drush`; `wp` alone; `php artisan` or `php <dossier absolu>/artisan`. An absolute path under `/tmp`, `/var/tmp`, `/dev/shm`, `/home`, `/root` or `/run/user` is refused (a file planted there would run).
 - Containers: `docker ps`, `docker compose ps`, and `docker exec` or `docker compose exec` of an allowed command. `-T` goes only with `docker compose exec`, never with `docker exec`. `docker inspect`, `env`, `printenv`, `set` and `/proc/<x>/environ` are refused: they show secrets.
 - Always refused: `sudo`, `su`, `sh`, `bash`, any shell metacharacter (`;`, `|`, `&`, `>`, `<`, backquote), `$`, globs, `~`, `..`, non-ASCII characters, reads in `/proc`, `/sys`, `/dev`.
 - Files that carry secrets (`.env*`, `wp-config.php`, `settings*.php`, `.htpasswd`, `auth.json`, keys and certificates, `.git/config`, shell histories): raw read refused, use `--env-keys`.
@@ -60,7 +60,7 @@ Folder of an application (diagnostic): ask the lead, with the candidates of `ls 
 ## Database
 
 - Through `--sql` only, via the CLI of the application: `drush sql:query`, `wp db query`, `php artisan db`. The guard sends the query on standard input; never pipe it yourself.
-- One statement: `SELECT`, `SHOW`, `DESCRIBE`, `DESC` or `EXPLAIN`, at most one final `;`, no comment, no `INTO`, no `\`, no function that reads a file, waits or has a side effect, no write or lock keyword, nothing that targets passwords, tokens or secrets. Prefer counts, always with `LIMIT`.
+- One statement: `SELECT`, `SHOW`, `DESCRIBE`, `DESC` or `EXPLAIN`, at most one final `;`, no comment, no `INTO`, no `\`, no function that reads a file, waits or has a side effect, no write or lock keyword, nothing that targets passwords, tokens or secrets, no `*` in a select list (`COUNT(*)` allowed). A query that names `users`, `wp_users`, `users_field_data`, `sessions` or a `*_tokens` table selects only `COUNT(...)`; `SHOW` and `DESCRIBE` stay allowed on them. Prefer counts, always with `LIMIT`.
 - The guard first puts the session in read-only mode with `SET SESSION TRANSACTION READ ONLY`, which targets MySQL and MariaDB. PostgreSQL is not supported in v1: the query is refused or fails, and the row part is `unknown`.
 - The connection credentials are never read.
 

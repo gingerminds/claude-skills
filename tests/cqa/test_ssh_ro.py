@@ -67,6 +67,9 @@ ALLOWED = [
     ["drush", "--version"],
     ["drush", "pm:list", "--status=enabled", "--type=module", "--format=json"],
     ["/var/www/app/vendor/bin/drush", "--root=/var/www/app/web", "pm:security"],
+    ["vendor/bin/drush", "status"],
+    ["./vendor/bin/drush", "--version"],
+    ["/srv/shop/vendor/bin/drush", "--version"],
     ["wp", "core", "version", "--path=/var/www/html"],
     ["wp", "plugin", "list", "--format=json", "--fields=name,status,version,update"],
     ["wp", "theme", "list"],
@@ -77,6 +80,7 @@ ALLOWED = [
     ["php", "artisan", "route:list", "--json"],
     ["php", "artisan", "schedule:list"],
     ["php", "/var/www/app/artisan", "--version"],
+    ["php", "/srv/shop/artisan", "about"],
     # Containers.
     ["docker", "ps"],
     ["docker", "ps", "-a", "--format", "{{.Names}} {{.Image}}"],
@@ -311,6 +315,37 @@ REFUSED = [
     ["php", "artisan", "about", "--env=production"],
     ["php", "artisan"],
     ["php", "/var/www/app/artisan.php", "about"],
+    # Application binaries outside the allowed forms (a file planted on the server).
+    ["/tmp/x/drush", "status"],
+    ["./drush", "status"],
+    ["drush/drush", "status"],
+    ["bin/drush", "status"],
+    ["/usr/local/bin/drush", "status"],
+    ["/tmp/vendor/bin/drush", "status"],
+    ["/var/tmp/app/vendor/bin/drush", "status"],
+    ["/dev/shm/vendor/bin/drush", "status"],
+    ["/home/web/app/vendor/bin/drush", "status"],
+    ["/root/app/vendor/bin/drush", "status"],
+    ["/run/user/1000/vendor/bin/drush", "status"],
+    ["//tmp/x/vendor/bin/drush", "status"],
+    ["/./tmp/x/vendor/bin/drush", "status"],
+    ["/var/www/app/./vendor/bin/drush", "status"],
+    ["x/vendor/bin/drush", "status"],
+    ["/tmp/x/wp", "core", "version"],
+    ["./wp", "core", "version"],
+    ["/usr/local/bin/wp", "--version"],
+    ["php", "/tmp/x/artisan", "about"],
+    ["php", "./artisan", "about"],
+    ["php", "app/artisan", "about"],
+    ["php", "/var/tmp/artisan", "--version"],
+    ["php", "/dev/shm/artisan", "about"],
+    ["php", "/home/web/app/artisan", "about"],
+    ["php", "/root/app/artisan", "about"],
+    ["php", "/run/user/1000/artisan", "about"],
+    ["php", "//tmp/artisan", "about"],
+    ["php", "/var/www/./app/artisan", "about"],
+    ["docker", "exec", "app", "./drush", "status"],
+    ["docker", "compose", "exec", "-T", "app", "php", "/tmp/x/artisan", "about"],
     # Containers.
     ["docker", "container", "inspect", "app"],
     ["docker", "compose", "config"],
@@ -371,13 +406,16 @@ REASONS = [
     (["docker", "exec", "app", "env"], "conteneur"),
     (["php", "-i"], "--php-ini"),
     (["wp", "option", "get", "auth_key"], "secret"),
+    (["/tmp/x/drush", "status"], "drush : chemin refusé"),
+    (["./wp", "core", "version"], "wp : chemin refusé"),
+    (["php", "/tmp/x/artisan", "about"], "artisan : chemin refusé"),
     (["systemctl", "restart", "nginx"], "systemctl"),
     (["rm", "-rf", "/tmp/x"], "liste blanche"),
     (["cat", "/dev/urandom"], "/dev"),
 ]
 
 SQL_OK = [
-    "SELECT id FROM users LIMIT 5",
+    "SELECT nid FROM node_field_data LIMIT 5",
     "select 1;",
     "SHOW TABLES",
     "EXPLAIN SELECT 1",
@@ -387,8 +425,18 @@ SQL_OK = [
     "desc users",
     "SHOW CREATE TABLE users",
     "SHOW VARIABLES LIKE 'max_connections'",
-    "SELECT name, REPLACE(name, 'a', 'b') FROM users",
+    "SELECT name, REPLACE(name, 'a', 'b') FROM taxonomy_term_field_data",
     "SELECT option_name FROM wp_options WHERE autoload = 'yes' LIMIT 20",
+    # Sensitive tables: counts only; their schema stays readable.
+    "SELECT COUNT(*) FROM users",
+    "SELECT COUNT(*) AS total FROM wp_users",
+    "select count(*) total, count(uid) from users_field_data where status = 1",
+    "SELECT COUNT(*) FROM sessions LIMIT 1",
+    "SELECT COUNT(*) FROM `users`",
+    "SELECT COUNT(*) FROM node_field_data WHERE type = 'users'",
+    "SHOW COLUMNS FROM users",
+    "DESCRIBE wp_users",
+    "SELECT users_count FROM stats",
 ]
 
 SQL_REFUSED = [
@@ -444,6 +492,43 @@ SQL_REFUSED = [
     "SELECT authentication_string FROM mysql.user",
     "SELECT option_value FROM wp_options WHERE option_name = 'stripe_secret_key'",
     "SELECT remember_token FROM users",
+    # Star in a select list.
+    "SELECT * FROM node",
+    "select * from node limit 1",
+    "SELECT n.* FROM node n",
+    "SELECT nid, * FROM node",
+    "SELECT COUNT(*), * FROM node",
+    "EXPLAIN SELECT * FROM node",
+    "SELECT (SELECT * FROM node LIMIT 1)",
+    "SELECT nid FROM node WHERE nid IN (SELECT * FROM node)",
+    "SELECT nid*2 FROM node",
+    # Sensitive tables without COUNT(...) only.
+    "SELECT id FROM users LIMIT 5",
+    "SELECT name, REPLACE(name, 'a', 'b') FROM users",
+    "SELECT mail FROM users_field_data",
+    "SELECT user_login FROM wp_users",
+    "SELECT id FROM sessions",
+    "SELECT payload FROM sessions",
+    "SELECT email FROM password_reset_tokens",
+    "SELECT name FROM personal_access_tokens",
+    "SELECT COUNT(id) FROM personal_access_tokens",
+    "SELECT uid FROM `users`",
+    'SELECT uid FROM "users"',
+    "SELECT name FROM appdb.users",
+    "SELECT name FROM `appdb`.`users`",
+    "SELECT n.title FROM node n JOIN users u ON u.uid = n.uid",
+    "SELECT title FROM node, users",
+    "SELECT title FROM (node, users)",
+    "SELECT title FROM node WHERE uid IN (SELECT uid FROM users)",
+    "SELECT COUNT(*), mail FROM users_field_data",
+    "SELECT COUNT(*) FROM users UNION SELECT mail FROM users_field_data",
+    "SELECT COUNT(*) + 1 FROM users",
+    "SELECT id FROM USERS",
+    "SELECT ID FROM Sessions",
+    "EXPLAIN SELECT id FROM users",
+    # Quotes left open.
+    "SELECT 'abc FROM node",
+    "SELECT `abc FROM node",
     "SHOW CREATE USER root",
 ]
 
@@ -537,6 +622,13 @@ class CheckSqlTest(unittest.TestCase):
         self.assertIn("SELECT", check_sql("DELETE FROM users")[1])
         self.assertIn("INTO", check_sql("SELECT 1 INTO @x")[1])
         self.assertIn("SLEEP", check_sql("SELECT SLEEP(1)")[1])
+        self.assertIn("« * »", check_sql("SELECT * FROM node")[1])
+        self.assertIn("COUNT(*)", check_sql("SELECT * FROM node")[1])
+        reason = check_sql("SELECT mail FROM users_field_data")[1]
+        self.assertIn("« users_field_data »", reason)
+        self.assertIn("COUNT", reason)
+        self.assertIn("« sessions »", check_sql("SELECT id FROM sessions")[1])
+        self.assertIn("non fermé", check_sql("SELECT 'abc FROM node")[1])
 
     def test_non_text_refused(self):
         self.assertFalse(check_sql(None)[0])
@@ -740,7 +832,7 @@ class CliTest(unittest.TestCase):
     def test_sql(self):
         runner = FakeRunner("id\n1\n")
         code, out, _ = self.run_main(
-            [ALIAS, "--sql", "artisan", "--app-dir", "/srv/app", "SELECT id FROM users LIMIT 1"],
+            [ALIAS, "--sql", "artisan", "--app-dir", "/srv/app", "SELECT nid FROM node LIMIT 1"],
             runner,
         )
         self.assertEqual(code, 0)
@@ -748,7 +840,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(runner.remote, "cd /srv/app && php artisan db")
         self.assertEqual(
             runner.options["input"],
-            "SET SESSION TRANSACTION READ ONLY;\nSELECT id FROM users LIMIT 1;\n",
+            "SET SESSION TRANSACTION READ ONLY;\nSELECT nid FROM node LIMIT 1;\n",
         )
 
     def test_sql_options_any_order(self):

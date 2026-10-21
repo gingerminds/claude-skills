@@ -198,7 +198,7 @@ List the strongest evidence first: the comment shows the first 5.
 
 | `type` | Keys | Rules |
 |---|---|---|
-| `file` | `repo`, `path`, `line` (optional: integer from 1, or `null`) | `repo` is a `repos[].name` of `context.json`. `path` is relative to the repo root and must exist; never absolute, never `..`. The comment links it to GitLab at the audited commit. |
+| `file` | `repo`, `path`, `line` (optional: integer from 1, or `null`) | `repo` is a `repos[].name` of `context.json`. `path` is relative to the repo root and names an existing file (never a folder nor the root `.`); never absolute, never `..`. The comment links it to GitLab at the audited commit. |
 | `page` | `url`, `detail` (optional) | A page seen in the browser. `detail` says what was observed, in French. |
 | `tool` | `tool`, `ref` | `tool` is a folder of `tools/` that holds a `summary.json`. `ref` is relative to `tools/<tool>/`, for example `summary.json#home/3`. |
 | `http` | `url`, `detail` | A URL requested. `detail` gives the status, the header or a short excerpt, in French and without any secret. |
@@ -323,7 +323,7 @@ python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
 | exit 0 | every operation written or already there | « <done> opérations écrites, <skipped> déjà présentes. » |
 | exit 7 | at least one operation blocked, without any request; the others are written | for each entry of `blocked`, from its labels (`blocked[].labels`): « CQ-<ref> (<kind>) non écrit : <raison> », reasons below |
 | exit 3 | stopped on a network or Notion API error, or an operation refused by Notion; wins over 7 | « Écriture interrompue (<message>). Relancer : la reprise saute ce qui est déjà écrit. » Run the same command once more, only once the cause is fixed: `notion/applied.json` makes it resume where it stopped. Still exit 3: stop, without synthesis; the run stays resumable at section 7. An operation refused by Notion skips the later operations of the same page. |
-| exit 8 | the plan targets the reference template | « Écriture refusée : la data source est celle du modèle de référence. » Nothing is written: stop; a new run with the URL of the copy. |
+| exit 8 | the plan targets the reference template (its data source, or its page for a comment) | « Écriture refusée : la cible est le modèle de référence. » Nothing is written: stop; a new run with the URL of the copy. |
 | exit 2 | plan or `context.json` unreadable or invalid, environment variable missing | show the message, fix, run again |
 
 Labels of `blocked[].labels`:

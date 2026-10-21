@@ -182,7 +182,8 @@ Write `$RUN/context.json` with Write. Example (values to replace):
   "test_accounts": {"front": false, "backoffice": true},
   "key_pages": [{"template": "Accueil", "url": "https://preprod.example.org/"}],
   "notion": {"copy_page_id": "<page_id de la copie ou null>", "copy_data_source_id": "<data_source_id de la copie>",
-             "reference_data_source_id": "<data_source_id du modèle>", "bot_id": "<bot_id de whoami>",
+             "reference_data_source_id": "<data_source_id du modèle>", "reference_page_id": "<page_id du modèle ou null>",
+             "bot_id": "<bot_id de whoami>",
              "assignee_options": ["Camille B", "Inès"]},
   "available_tools": [],
   "phase_filter": null,
@@ -194,7 +195,7 @@ Write `$RUN/context.json` with Write. Example (values to replace):
 - `project`: `slug` and `name` from `project`; `protection`: `project_md.protection`, else `null`.
 - `repos[]`: `name` from `project` (letters, digits, `.`, `-`, `_`; unique), `path` absolute (no tab, no line break), `remote`, `web_url`, `stack`, `techno` from `project`. `preprod_branch`: `project_md.branches.preprod`, else `release`. `audited_sha`, `deployed_sha` and `aligned` stay `null` until the diagnostic.
 - `target.access`: `open`, `basic_auth`, `ip_filtered` or `unreachable`.
-- `notion`: `copy_page_id` from the resolve of the copy (`null` for a database URL), `copy_data_source_id`, `reference_data_source_id` from the resolve of `GM_CQA_REFERENCE`, `bot_id` from `whoami`, `assignee_options` from `schema.json`.
+- `notion`: `copy_page_id` from the resolve of the copy (`null` for a database URL), `copy_data_source_id`, `reference_data_source_id` and `reference_page_id` (`null` for a database URL) from the resolve of `GM_CQA_REFERENCE`: the writes refuse this page and this data source (exit 8), `bot_id` from `whoami`, `assignee_options` from `schema.json`.
 - `available_tools`: `[]` until the diagnostic. `phase_filter`: the value of `--phase`, else `null`. `dry_run`: true with `--dry-run`.
 - Never a secret: no credential, no token.
 

@@ -13,6 +13,7 @@ from cqa.secrets import scan_text
 STATUS_PROPERTY = "Statut"
 ASSIGNEE_PROPERTY = "Assignée à"
 REFUSED_MESSAGE = "écriture refusée : data source du modèle"
+REFUSED_PAGE_MESSAGE = "écriture refusée : page du modèle"
 
 _KIND_ORDER = {"status": 0, "assign": 1, "comment": 2, "page_comment": 3}
 _STOPPING_STATUSES = (0, 401, 429)
@@ -32,6 +33,7 @@ def apply_plan(
     copy_page_id: Optional[str],
     known_secrets: list[str],
     bot_id: Optional[str] = None,
+    reference_page_id: Optional[str] = None,
     log: Callable[[str], None] = print,
 ) -> dict:
     """Write the operations of a plan to Notion and return its report.
@@ -39,8 +41,9 @@ def apply_plan(
     The report is {"done", "skipped", "blocked", "errors"}: done and skipped are counts,
     blocked lists {"key", "labels"} and errors {"key", "message"}.
 
-    A plan whose copy is the reference data source is refused with ReferenceWriteRefused, and a
-    malformed plan or journal with ValueError, both before any request. When the plan assigns,
+    A plan whose copy is the reference data source, or with an operation on reference_page_id
+    (the page of the template), is refused with ReferenceWriteRefused, and a malformed plan or
+    journal with ValueError, all before any request. When the plan assigns,
     the schema of the copy is then read: its NotionError is not caught, nothing has been
     written. An operation is blocked, without any request, when its page is not a row of the
     copy (a page_comment may also target copy_page_id), when its text or target value holds a
@@ -57,6 +60,10 @@ def apply_plan(
     """
     _refuse_reference(plan, reference_ds_id)
     ops = validate_plan(plan)
+    if reference_page_id is not None:
+        reference_page = _normalize(reference_page_id)
+        if any(_normalize(item["page_id"]) == reference_page for item in ops):
+            raise ReferenceWriteRefused(REFUSED_PAGE_MESSAGE)
     allowed = {_normalize(page_id) for page_id in row_page_ids}
     journal = Path(run_dir) / "notion" / "applied.json"
     entries = _load_journal(journal)
