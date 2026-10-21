@@ -786,12 +786,12 @@ class ValidateTest(AuditCase):
 
     def test_tool_evidence_needs_a_summary(self):
         run_dir = self.make_run()
-        self.set_evidence(run_dir, [{"type": "tool", "tool": "a11y", "ref": "a11y/summary.json#x"}])
+        self.set_evidence(run_dir, [{"type": "tool", "tool": "a11y", "ref": "summary.json#x"}])
         errors = self.validate_errors(run_dir)
         self.assertEqual(len(errors), 1)
         self.assertIn("a11y", errors[0])
         self.assertIn("tools/a11y/summary.json", errors[0])
-        known = {"type": "tool", "tool": "http", "ref": "http/summary.json#root"}
+        known = {"type": "tool", "tool": "http", "ref": "summary.json#root"}
         self.set_evidence(run_dir, [known])
         self.assertEqual(self.validate_errors(run_dir), [])
 

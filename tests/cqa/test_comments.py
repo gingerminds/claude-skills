@@ -48,7 +48,7 @@ F_KO = {
             "url": "https://preprod.example.org/actualites/x",
             "detail": "parcours au clavier",
         },
-        {"type": "tool", "tool": "a11y", "ref": "a11y/summary.json#home/3"},
+        {"type": "tool", "tool": "a11y", "ref": "summary.json#home/3"},
     ],
     "todo": "Supprimer les tabindex positifs et suivre l'ordre du DOM.",
     "human_check": None,
@@ -65,7 +65,7 @@ EXPECTED_KO_TEXT = "\n".join(
         "Preuves :",
         f"- components/AppHeader.vue:42 ({BLOB_NUXT}/components/AppHeader.vue#L42)",
         "- https://preprod.example.org/actualites/x : parcours au clavier",
-        "- a11y : a11y/summary.json#home/3",
+        "- a11y : summary.json#home/3",
         "À faire : Supprimer les tabindex positifs et suivre l'ordre du DOM.",
         FOOTER,
     ]

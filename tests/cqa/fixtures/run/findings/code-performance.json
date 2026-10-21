@@ -38,7 +38,7 @@
         {
           "type": "tool",
           "tool": "http",
-          "ref": "http/summary.json#root"
+          "ref": "summary.json#root"
         }
       ],
       "todo": null,

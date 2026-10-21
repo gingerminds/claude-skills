@@ -42,7 +42,7 @@ def make_finding(**overrides):
                 "url": "https://preprod.example.org/actualites/x",
                 "detail": "parcours au clavier",
             },
-            {"type": "tool", "tool": "a11y", "ref": "a11y/summary.json#home/3"},
+            {"type": "tool", "tool": "a11y", "ref": "summary.json#home/3"},
         ],
         "todo": "Supprimer les tabindex positifs et suivre l'ordre du DOM.",
         "human_check": None,
@@ -324,7 +324,7 @@ class ValidateDocumentTest(unittest.TestCase):
         full = {
             "file": {"type": "file", "repo": "nuxt", "path": "a.vue"},
             "page": {"type": "page", "url": "https://preprod.example.org/"},
-            "tool": {"type": "tool", "tool": "a11y", "ref": "a11y/summary.json#1"},
+            "tool": {"type": "tool", "tool": "a11y", "ref": "summary.json#1"},
             "http": {"type": "http", "url": "https://preprod.example.org/", "detail": "200"},
         }
         for kind, keys in EVIDENCE_REQUIRED.items():

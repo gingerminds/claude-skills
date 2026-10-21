@@ -96,7 +96,7 @@
               "url": "https://preprod.example.org/actualites/x",
               "detail": "parcours au clavier"
             },
-            {"type": "tool", "tool": "a11y", "ref": "a11y/summary.json#home/3"}
+            {"type": "tool", "tool": "a11y", "ref": "summary.json#home/3"}
           ],
           "todo": "Supprimer les tabindex positifs et suivre l'ordre du DOM.",
           "human_check": null,

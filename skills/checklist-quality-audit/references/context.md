@@ -129,7 +129,7 @@ grep -iE '^[[:space:]]*(Host|Include)[[:space:]]' ~/.ssh/config
 ```
 
 - Show only alias names (also from the included files), never `HostName`, user or key.
-- Question « Alias SSH » : « Quel alias SSH utiliser pour la préprod ? » with up to 3 aliases whose name contains a word of the project slug, « Aucun »; another alias in « Autre ».
+- Question « Alias SSH » : « Quel alias SSH utiliser pour la préprod (ou saisir l'alias dans « Autre ») ? » with up to 2 aliases whose name contains a word of the project slug, then always « Autre alias » and « Aucun »; another alias in « Autre ». « Autre alias » chosen without a typed value: ask the alias as a plain message.
 - `ssh.alias` is the choice, or `null`. `ssh.app_dirs` (`{"<repo name>": "<folder on the server>"}`) is filled during the diagnostic.
 
 ## 5. Test accounts
@@ -137,7 +137,7 @@ grep -iE '^[[:space:]]*(Host|Include)[[:space:]]' ~/.ssh/config
 Question « Comptes » : « Disposez-vous de comptes de test, pour vous connecter vous-même dans Chrome pendant l'audit ? » with « Front et back-office », « Front seulement », « Back-office seulement », « Aucun ».
 
 - `test_accounts` = `{"front": <bool>, "backoffice": <bool>}`. The skill never reads nor types these accounts.
-- With a back-office: « URL de connexion du back-office ? » with the default of the stack when there is one (Drupal `<preprod_url>/user/login`, WordPress `<preprod_url>/wp-admin/`) and « Pas de back-office à auditer »; another URL in « Autre ». It becomes the key page « Back-office ».
+- With a back-office: « URL de connexion du back-office (ou saisir l'URL dans « Autre ») ? » with the default of the stack when there is one (Drupal `<preprod_url>/user/login`, WordPress `<preprod_url>/wp-admin/`), then always « Saisir l'URL » and « Pas de back-office à auditer »; another URL in « Autre ». « Saisir l'URL » chosen without a typed value: ask the URL as a plain message. It becomes the key page « Back-office ».
 
 ## 6. Key pages
 
