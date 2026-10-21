@@ -51,13 +51,7 @@ S="${CLAUDE_SKILL_DIR}/../../scripts"
 python3 "$S/cqa_plan.py" runs "<slug>"
 ```
 
-A run is complete once its final scan has run: section 8 then writes `done.json` in it. `runs` does not report that file, so check it for each run of today (`run_id` starting with today's date):
-
-```bash
-test -f "<path>/done.json" && echo complet || echo incomplet
-```
-
-A run of today without `done.json` is incomplete. Ask « Le run <run_id> du jour n'est pas terminé. » with « Reprendre ce run » and « Lancer un nouveau run ». To resume:
+A run is complete once its final scan has run: section 8 then writes `done.json` in it, and `runs` reports it as `done`. A run of today (`run_id` starting with today's date) whose `done` is false is incomplete. Ask « Le run <run_id> du jour n'est pas terminé. » with « Reprendre ce run » and « Lancer un nouveau run ». To resume:
 
 1. `RUN` is its `path`.
 2. The current invocation wins over what the run stored. A `--phase` other than its `phase_filter` cannot reuse its lots and findings: say « Ce run a été lancé pour une autre phase : nouveau run. » and start a new run. Otherwise write the current `dry_run` in `context.json`.

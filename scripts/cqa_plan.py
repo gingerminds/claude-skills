@@ -68,6 +68,7 @@ _RUN_FILES = {
     "plan": "notion/plan.json",
     "applied": "notion/applied.json",
     "synthese": "synthese.md",
+    "done": "done.json",
 }
 
 

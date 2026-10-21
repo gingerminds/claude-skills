@@ -1599,6 +1599,7 @@ class RunsCommandTest(CliCase):
             "notion/plan.json",
             "notion/applied.json",
             "synthese.md",
+            "done.json",
         )
         empty = self.make_run("2026-10-19-1000")
         result = self.runs()
@@ -1611,13 +1612,19 @@ class RunsCommandTest(CliCase):
         self.assertEqual(full_state["path"], str(full))
         self.assertEqual(old_state["path"], str(old))
         self.assertEqual(empty_state["path"], str(empty))
-        keys = ["context", "lots", "findings", "plan", "applied", "synthese"]
+        keys = ["context", "lots", "findings", "plan", "applied", "synthese", "done"]
         self.assertEqual(sorted(full_state), sorted(["run_id", "path", *keys]))
-        self.assertEqual([full_state[key] for key in keys], [True] * 6)
-        self.assertEqual([empty_state[key] for key in keys], [False] * 6)
+        self.assertEqual([full_state[key] for key in keys], [True] * 7)
+        self.assertEqual([empty_state[key] for key in keys], [False] * 7)
         self.assertEqual(
-            [old_state[key] for key in keys], [True, False, False, False, False, False]
+            [old_state[key] for key in keys], [True, False, False, False, False, False, False]
         )
+
+    def test_done_needs_the_final_scan_file(self):
+        self.make_run("2026-10-20-1000", "context.json", "synthese.md", "notion/applied.json")
+        self.assertFalse(self.runs()["runs"][0]["done"])
+        (self.base / "2026-10-20-1000" / "done.json").mkdir()
+        self.assertFalse(self.runs()["runs"][0]["done"])
 
     def test_partial_states_are_told_apart(self):
         self.make_run("2026-10-20-1000", "context.json", "lots.json", "notion/plan.json")

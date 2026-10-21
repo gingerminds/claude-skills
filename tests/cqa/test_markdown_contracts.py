@@ -243,8 +243,9 @@ class SkillTest(unittest.TestCase):
     def test_run_is_complete_after_the_final_scan(self):
         skill = _text(SKILL)
         resume = _section(skill, "3. Resume")
-        self.assertIn('test -f "<path>/done.json"', resume)
-        self.assertIn("without `done.json` is incomplete", resume)
+        self.assertNotIn("test -f", resume)
+        self.assertIn("`runs` reports it as `done`", resume)
+        self.assertIn("whose `done` is false is incomplete", resume)
         writing = _section(skill, "8. Writing and synthesis")
         self.assertLess(writing.index('cqa_plan.py" scan'), writing.index("Write `done.json`"))
 

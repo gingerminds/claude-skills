@@ -99,11 +99,11 @@ class LauncherCase(unittest.TestCase):
         env.update(extra)
         return env
 
-    def launch(self, *args, path=None, **extra):
+    def launch(self, *args, path=None, script=SCRIPT, cwd=None, **extra):
         return subprocess.run(
-            [shutil.which("bash"), str(SCRIPT), *args],
+            [shutil.which("bash"), str(script), *args],
             env=self.environment(path, **extra),
-            cwd=self.tmp,
+            cwd=cwd or self.tmp,
             capture_output=True,
             text=True,
             timeout=120,
@@ -144,6 +144,22 @@ class CommonOptionsTest(LauncherCase):
         self.assertTrue(has_pair(options, "-v", f"{self.laravel}:/repos/laravel:ro"))
         self.assertTrue(has_pair(options, "-v", f"{self.nuxt}:/repos/nuxt:ro"))
         self.assertEqual(["http", "--probes", "/in/probes.json"], args)
+
+    def test_cdpath_does_not_divert_relative_paths(self):
+        decoy = self.tmp / "decoy"
+        (decoy / RUN_ID).mkdir(parents=True)
+        (decoy / "scripts").mkdir()
+        result = self.launch("run", RUN_ID, "http", CDPATH=str(decoy))
+        self.assertEqual(0, result.returncode, result.stderr)
+        (options, _), = self.runs_of("agence")
+        self.assertTrue(has_pair(options, "-v", f"{self.run_dir}:/in:ro"))
+        self.log.unlink()
+        result = self.launch(
+            "run", str(self.run_dir), "http",
+            script="scripts/cqa-toolbox.sh", cwd=ROOT, CDPATH=str(decoy),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(1, len(self.runs_of("agence")))
 
     def test_image_ref_default_and_override(self):
         self.launch("run", str(self.run_dir), "assets")
@@ -262,14 +278,16 @@ class ToolCommandsTest(LauncherCase):
         calls = self.calls()
         net, name = f"cqa-{RUN_ID}", f"cqa-nu-{RUN_ID}"
         create = calls.index(["network", "create", net])
+        stale = [call for call in calls[:create] if call[:1] != ["image"]]
+        self.assertEqual([["rm", "-f", name], ["network", "rm", net]], stale)
         service = next(i for i, call in enumerate(calls) if call[:2] == ["run", "-d"])
         self.assertEqual(
             ["run", "-d", "--rm", "--name", name, "--network", net, f"{REGISTRY}/nu:1"],
             calls[service],
         )
         audit = next(i for i, call in enumerate(calls) if "--user" in call)
-        removal = calls.index(["rm", "-f", name])
-        network_removal = calls.index(["network", "rm", net])
+        removal = calls.index(["rm", "-f", name], audit)
+        network_removal = calls.index(["network", "rm", net], audit)
         self.assertTrue(create < service < audit < removal < network_removal)
         options, args = self.runs_of("agence")[0]
         self.assertEqual(["nu", "--pages", "/in/context.json"], args)
@@ -282,6 +300,14 @@ class ToolCommandsTest(LauncherCase):
         calls = self.calls()
         self.assertIn(["rm", "-f", f"cqa-nu-{RUN_ID}"], calls)
         self.assertIn(["network", "rm", f"cqa-{RUN_ID}"], calls)
+
+    def test_nu_stale_network_from_a_killed_run_is_removed_first(self):
+        result = self.run_tool("nu", CQA_STUB_FAIL="network rm")
+        self.assertEqual(0, result.returncode, result.stderr)
+        calls = self.calls()
+        create = calls.index(["network", "create", f"cqa-{RUN_ID}"])
+        self.assertLess(calls.index(["network", "rm", f"cqa-{RUN_ID}"]), create)
+        self.assertLess(calls.index(["rm", "-f", f"cqa-nu-{RUN_ID}"]), create)
 
     def test_nu_network_failure_starts_nothing(self):
         result = self.run_tool("nu", CQA_STUB_FAIL="network create")

@@ -10,6 +10,8 @@
 # exit code of the tool container. Secret values never appear on a command line: they are
 # forwarded to containers by name only (--env NAME).
 set -euo pipefail
+# A set CDPATH makes "cd" print the directory, or pick another one, inside $(...).
+unset CDPATH
 
 S="$(cd "$(dirname "$0")" && pwd)"
 
@@ -211,6 +213,9 @@ tool_nu() {
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    # Leftovers of a killed run would make "network create" fail on a resume.
+    docker rm -f "$NU_CONTAINER" >/dev/null 2>&1 </dev/null || true
+    docker network rm "$NU_NETWORK" >/dev/null 2>&1 </dev/null || true
     docker network create "$NU_NETWORK" >/dev/null </dev/null \
       || { say "nu : impossible de créer le réseau Docker $NU_NETWORK."; exit 1; }
     docker run -d --rm --name "$NU_CONTAINER" --network "$NU_NETWORK" "$(image_ref nu)" >/dev/null </dev/null \
