@@ -986,6 +986,9 @@ class ProjectCommandTest(CliCase):
             ("drupal dev", {"composer.json": composer(dev=("drupal/core",))}, "drupal", "Drupal"),
             ("roots", {"composer.json": composer("roots/wordpress")}, "wordpress", "Wordpress"),
             ("wp-content", {"wp-content/index.php": ""}, "wordpress", "Wordpress"),
+            ("johnpbloch", {"composer.json": composer("johnpbloch/wordpress")}, "wordpress", "Wordpress"),
+            ("wpackagist plugin", {"composer.json": composer("wpackagist-plugin/wordpress-seo")}, "wordpress", "Wordpress"),
+            ("wpackagist theme", {"composer.json": composer(dev=("wpackagist-theme/twentytwentyfive",))}, "wordpress", "Wordpress"),
             ("laravel", {"composer.json": composer("laravel/framework")}, "laravel", "Laravel"),
             (
                 "laravel with a vue front",

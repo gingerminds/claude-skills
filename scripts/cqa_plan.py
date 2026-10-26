@@ -641,13 +641,16 @@ def _is_protected(project_md: Optional[dict]) -> bool:
     return normalize(value).strip(" .!") not in _UNPROTECTED
 
 
+_WORDPRESS_PACKAGES = ("roots/wordpress", "johnpbloch/wordpress", "wpackagist-plugin/", "wpackagist-theme/")
+
+
 def _detect_stack(repo: Path) -> tuple:
     """Return (stack, Notion techno) read from composer.json, package.json and wp-content/."""
     composer = _dependencies(repo / "composer.json", ("require", "require-dev"))
     if any(name.startswith("drupal/core") for name in composer):
         return "drupal", "Drupal"
-    roots = any(name.startswith("roots/wordpress") for name in composer)
-    if roots or (repo / "wp-content").is_dir():
+    wordpress = any(name.startswith(_WORDPRESS_PACKAGES) for name in composer)
+    if wordpress or (repo / "wp-content").is_dir():
         return "wordpress", "Wordpress"
     if "laravel/framework" in composer:
         return "laravel", "Laravel"
