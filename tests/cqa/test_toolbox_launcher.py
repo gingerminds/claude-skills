@@ -671,13 +671,14 @@ class DoctorTest(LauncherCase):
     def test_report_without_run_directory(self):
         report = self.doctor()
         self.assertEqual(
-            {"docker", "docker_version", "registry_login", "images", "sf_licence", "arch"},
+            {"docker", "docker_version", "registry_login", "images", "sf_licence", "sf_eula", "arch"},
             set(report),
         )
         self.assertIs(True, report["docker"])
         self.assertEqual("27.0.1", report["docker_version"])
         self.assertIs(True, report["registry_login"])
         self.assertIs(False, report["sf_licence"])
+        self.assertIs(True, report["sf_eula"])
         self.assertIn(report["arch"], ("amd64", "arm64"))
         self.assertEqual(IMAGES, list(report["images"]))
         self.assertEqual({"1.2.3"}, set(report["images"].values()))
@@ -708,6 +709,17 @@ class DoctorTest(LauncherCase):
         for value in SECRETS.values():
             self.assertNotIn(value, result.stdout + result.stderr)
 
+    def test_eula_is_read_from_the_screamingfrog_image(self):
+        self.assertIs(False, self.doctor(CQA_STUB_NO_EULA="1")["sf_eula"])
+        self.assertIsNone(self.doctor(CQA_STUB_MISSING="screamingfrog")["sf_eula"])
+        self.assertTrue(
+            any(
+                call[:2] == ["image", "inspect"] and ".Config.Env" in " ".join(call)
+                and call[-1] == f"{REGISTRY}/screamingfrog:1"
+                for call in self.calls()
+            )
+        )
+
     def test_registry_and_tag_overrides(self):
         self.doctor(GM_CQA_REGISTRY="registry.example.org/team", GM_CQA_TOOLBOX_TAG="3")
         self.assertIn(["manifest", "inspect", "registry.example.org/team/agence:3"], self.calls())
@@ -722,6 +734,7 @@ class DoctorTest(LauncherCase):
         self.assertIsNone(report["docker_version"])
         self.assertIs(False, report["registry_login"])
         self.assertEqual({None}, set(report["images"].values()))
+        self.assertIsNone(report["sf_eula"])
 
 
 class PullTest(LauncherCase):

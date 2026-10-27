@@ -409,7 +409,7 @@ cmd_pull() {
 }
 
 cmd_doctor() {
-  local present=0 docker_ok=0 login=0 licence=0 version label name ref arch
+  local present=0 docker_ok=0 login=0 licence=0 eula="" version label name ref arch line
   local -a facts
   facts=()
   version=""
@@ -428,6 +428,14 @@ cmd_doctor() {
       fi
       facts+=("$name" "$present" "$label")
     done
+    # An image without the EULA value skips every crawl.
+    ref="$(image_ref screamingfrog)"
+    if label="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$ref" 2>/dev/null </dev/null)"; then
+      eula=0
+      while IFS= read -r line; do
+        case "$line" in SF_EULA_ACCEPTED=?*) eula=1 ;; esac
+      done <<< "$label"
+    fi
   else
     for name in "${IMAGES[@]}"; do
       facts+=("$name" 0 "")
@@ -441,11 +449,11 @@ cmd_doctor() {
     arm64 | aarch64) arch="arm64" ;;
     *) arch="$(uname -m)" ;;
   esac
-  python3 - "$docker_ok" "$version" "$login" "$licence" "$arch" "${facts[@]}" <<'PY'
+  python3 - "$docker_ok" "$version" "$login" "$licence" "$eula" "$arch" "${facts[@]}" <<'PY'
 import json
 import sys
 
-docker_ok, version, login, licence, arch, *facts = sys.argv[1:]
+docker_ok, version, login, licence, eula, arch, *facts = sys.argv[1:]
 images = {}
 for index in range(0, len(facts), 3):
     name, present, label = facts[index : index + 3]
@@ -459,6 +467,7 @@ report = {
     "registry_login": login == "1",
     "images": images,
     "sf_licence": licence == "1",
+    "sf_eula": eula == "1" if eula else None,
     "arch": arch,
 }
 print(json.dumps(report, indent=2, ensure_ascii=False))
