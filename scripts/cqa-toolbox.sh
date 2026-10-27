@@ -16,7 +16,7 @@ unset CDPATH
 S="$(cd "$(dirname "$0")" && pwd)"
 
 DEFAULT_REGISTRY="registry.gitlab.gingerminds.fr/gm/tools/checklist-qualite-outillage-audit"
-IMAGES=(agence screamingfrog nu testssl gitleaks redocly schemathesis)
+IMAGES=(agence nu testssl gitleaks redocly schemathesis)
 ALL_TOOLS=(http gitleaks assets lighthouse a11y nu yellowlab testssl redocly schemathesis crawl)
 # Schemathesis probes undeclared methods (TRACE, PUT, ...) despite --include-method, and
 # --exclude-checks only hides their verdict: this filter is what stops the requests.
@@ -89,7 +89,7 @@ load_run() {
   env_lines="$(python3 "$S/cqa_plan.py" toolbox-env "$RUN_DIR")" || exit 2
   while IFS='=' read -r key value; do
     case "$key" in
-      GM_AUDIT_TARGET | GM_AUDIT_ROBOTS | GM_AUDIT_RATE | GM_AUDIT_USER_AGENT)
+      GM_AUDIT_TARGET | GM_AUDIT_ROBOTS | GM_AUDIT_RATE | GM_AUDIT_USER_AGENT | GM_AUDIT_PROD_ORIGIN)
         export "$key=$value"
         ;;
       "") ;;
@@ -146,7 +146,7 @@ docker_tool() {
   fi
   case "$envset" in
     web) names=(GM_AUDIT_TARGET GM_AUDIT_RATE GM_AUDIT_USER_AGENT GM_AUDIT_ROBOTS GM_AUDIT_AUTH_USER GM_AUDIT_AUTH_PASS) ;;
-    crawl) names=(GM_AUDIT_TARGET GM_AUDIT_ROBOTS GM_AUDIT_AUTH_USER GM_SF_LICENCE_USER GM_SF_LICENCE_KEY) ;;
+    crawl) names=(GM_AUDIT_TARGET GM_AUDIT_ROBOTS GM_AUDIT_RATE GM_AUDIT_USER_AGENT GM_AUDIT_AUTH_USER GM_AUDIT_AUTH_PASS GM_AUDIT_PROD_ORIGIN) ;;
     *) names=() ;;
   esac
   for env_name in ${names[@]+"${names[@]}"}; do
@@ -325,8 +325,7 @@ tool_schemathesis() {
 
 tool_crawl() {
   prepare_tool crawl || return 1
-  tolerate crawl docker_tool screamingfrog crawl --
-  summarize crawl
+  tolerate crawl docker_tool agence crawl -- crawl
 }
 
 run_tool() {
@@ -409,7 +408,7 @@ cmd_pull() {
 }
 
 cmd_doctor() {
-  local present=0 docker_ok=0 login=0 licence=0 eula="" version label name ref arch line
+  local present=0 docker_ok=0 login=0 version label name ref arch
   local -a facts
   facts=()
   version=""
@@ -428,32 +427,22 @@ cmd_doctor() {
       fi
       facts+=("$name" "$present" "$label")
     done
-    # An image without the EULA value skips every crawl.
-    ref="$(image_ref screamingfrog)"
-    if label="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$ref" 2>/dev/null </dev/null)"; then
-      eula=0
-      while IFS= read -r line; do
-        case "$line" in SF_EULA_ACCEPTED=?*) eula=1 ;; esac
-      done <<< "$label"
-    fi
   else
     for name in "${IMAGES[@]}"; do
       facts+=("$name" 0 "")
     done
-  fi
-  if [ -n "${GM_SF_LICENCE_USER:-}" ] && [ -n "${GM_SF_LICENCE_KEY:-}" ]; then
-    licence=1
   fi
   case "$(uname -m)" in
     x86_64 | amd64) arch="amd64" ;;
     arm64 | aarch64) arch="arm64" ;;
     *) arch="$(uname -m)" ;;
   esac
-  python3 - "$docker_ok" "$version" "$login" "$licence" "$eula" "$arch" "${facts[@]}" <<'PY'
+  python3 - "$docker_ok" "$version" "$login" "$arch" "${facts[@]}" <<'PY'
 import json
+import re
 import sys
 
-docker_ok, version, login, licence, eula, arch, *facts = sys.argv[1:]
+docker_ok, version, login, arch, *facts = sys.argv[1:]
 images = {}
 for index in range(0, len(facts), 3):
     name, present, label = facts[index : index + 3]
@@ -461,13 +450,14 @@ for index in range(0, len(facts), 3):
         images[name] = None
     else:
         images[name] = label if label and label != "<no value>" else "unknown"
+agence = images.get("agence")
+match = re.fullmatch(r"(\d+)\.(\d+)\.\d+", agence or "")
 report = {
     "docker": docker_ok == "1",
     "docker_version": version or None,
     "registry_login": login == "1",
     "images": images,
-    "sf_licence": licence == "1",
-    "sf_eula": eula == "1" if eula else None,
+    "agence_crawl": bool(match) and (int(match[1]), int(match[2])) >= (1, 1),
     "arch": arch,
 }
 print(json.dumps(report, indent=2, ensure_ascii=False))

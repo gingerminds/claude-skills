@@ -7,7 +7,7 @@ CQA_STUB_FAIL_CODE  exit code of those calls (default 1)
 CQA_STUB_NO_DAEMON  "version" fails, as when the daemon is down
 CQA_STUB_NO_LOGIN   "manifest inspect" fails, as without a registry login
 CQA_STUB_MISSING    comma-separated image names that "image inspect" does not find
-CQA_STUB_NO_EULA    "image inspect" of the environment gives an empty SF_EULA_ACCEPTED
+CQA_STUB_VERSION    version label given by "image inspect" (default 1.2.3)
 """
 import json
 import os
@@ -46,11 +46,7 @@ elif args[:2] == ["image", "inspect"]:
     if name in os.environ.get("CQA_STUB_MISSING", "").split(","):
         sys.stderr.write("No such image\n")
         sys.exit(1)
-    if ".Config.Env" in " ".join(args):
-        print("PATH=/usr/bin")
-        print("SF_EULA_ACCEPTED=" + ("" if os.environ.get("CQA_STUB_NO_EULA") else "15"))
-    else:
-        print("1.2.3")
+    print(os.environ.get("CQA_STUB_VERSION", "1.2.3"))
 elif args[:2] == ["network", "create"]:
     print("0123456789ab")
 elif args[:1] == ["ps"]:

@@ -324,6 +324,20 @@ def _context_repos(run_dir: Path) -> list:
     return found
 
 
+def _prod_origin(url) -> Optional[str]:
+    """Return scheme://host of a prod URL, or None when it is absent or unusable."""
+    if not isinstance(url, str) or not url:
+        return None
+    try:
+        validate_url(url)
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.username or parts.password:
+        return None
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 def _cmd_toolbox_env(args, services) -> int:
     context = _load_context(args.run_dir)
     target = context.get("target")
@@ -333,14 +347,17 @@ def _cmd_toolbox_env(args, services) -> int:
         url, robots = _target_url(target, "prod_url"), "respect"
     else:
         url, robots = _target_url(target, "preprod_url"), "ignore"
-    _emit_lines(
-        [
-            f"GM_AUDIT_TARGET={url}",
-            f"GM_AUDIT_ROBOTS={robots}",
-            f"GM_AUDIT_RATE={TOOLBOX_RATE}",
-            f"GM_AUDIT_USER_AGENT=GingermindsAudit/{plugin_version()}",
-        ]
-    )
+    lines = [
+        f"GM_AUDIT_TARGET={url}",
+        f"GM_AUDIT_ROBOTS={robots}",
+        f"GM_AUDIT_RATE={TOOLBOX_RATE}",
+        f"GM_AUDIT_USER_AGENT=GingermindsAudit/{plugin_version()}",
+    ]
+    if robots == "ignore":
+        origin = _prod_origin(target.get("prod_url"))
+        if origin:
+            lines.append(f"GM_AUDIT_PROD_ORIGIN={origin}")
+    _emit_lines(lines)
     return EXIT_OK
 
 

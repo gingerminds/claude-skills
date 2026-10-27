@@ -1432,6 +1432,19 @@ class ToolboxEnvTest(RunDirCase):
             ],
         )
 
+    def test_toolbox_env_passes_the_prod_origin_on_preprod(self):
+        lines = self.env_lines(target__prod_url="https://www.example.org/fr")
+        self.assertIn("GM_AUDIT_PROD_ORIGIN=https://www.example.org", lines)
+        self.assertEqual(lines[0], "GM_AUDIT_TARGET=https://preprod.example.org")
+        lines = self.env_lines(target__prod_url=None)
+        self.assertFalse(any(line.startswith("GM_AUDIT_PROD_ORIGIN") for line in lines))
+        lines = self.env_lines(
+            phase_filter="MEL J0",
+            target__prod_url="https://www.example.org/fr",
+            target__prod_live=True,
+        )
+        self.assertFalse(any(line.startswith("GM_AUDIT_PROD_ORIGIN") for line in lines))
+
     def test_toolbox_env_phase_prod(self):
         for phase in ("MEL J0", "Post-MEL J+7", "J0", "J+7"):
             with self.subTest(phase=phase):
@@ -1466,12 +1479,11 @@ class ToolboxEnvTest(RunDirCase):
         env = {
             "GM_AUDIT_AUTH_USER": USER,
             "GM_AUDIT_AUTH_PASS": PASSWORD,
-            "GM_SF_LICENCE_KEY": "licence-0123",
             "NOTION_TOKEN": "ntn_0123",
         }
         code, out, err = self.run_main(["toolbox-env", self.run_dir], env=env)
         self.assertEqual(code, 0, err)
-        for secret in (USER, PASSWORD, "licence-0123", "ntn_0123"):
+        for secret in (USER, PASSWORD, "ntn_0123"):
             self.assertNotIn(secret, out + err)
         self.assertEqual(
             [line.partition("=")[0] for line in out.splitlines()],

@@ -16,11 +16,9 @@ TARGET = "https://preprod.example.org"
 SECRETS = {
     "GM_AUDIT_AUTH_USER": "cqa-user",
     "GM_AUDIT_AUTH_PASS": "pass-xyz-123",
-    "GM_SF_LICENCE_USER": "sf-user",
-    "GM_SF_LICENCE_KEY": "key-sf-456",
 }
 UNSAFE_METHODS = "^(?!(GET|HEAD|OPTIONS)$)"
-IMAGES = ["agence", "screamingfrog", "nu", "testssl", "gitleaks", "redocly", "schemathesis"]
+IMAGES = ["agence", "nu", "testssl", "gitleaks", "redocly", "schemathesis"]
 ALL_ORDER = [
     ("agence", "http --probes"),
     ("gitleaks", "git /repos/laravel"),
@@ -39,8 +37,7 @@ ALL_ORDER = [
     ("schemathesis", "run /repos/laravel/docs/swagger v2.json"),
     ("schemathesis", "run /repos/laravel/openapi.yaml"),
     ("agence", "summarize schemathesis"),
-    ("screamingfrog", ""),
-    ("agence", "summarize crawl"),
+    ("agence", "crawl"),
 ]
 
 
@@ -193,7 +190,6 @@ class CommonOptionsTest(LauncherCase):
             "GM_AUDIT_AUTH_PASS",
         ):
             self.assertTrue(has_pair(options, "--env", name), name)
-        self.assertNotIn("GM_SF_LICENCE_KEY", options)
         for value in (TARGET, "ignore", "GingermindsAudit/"):
             self.assertFalse(any(value in arg for arg in options), value)
 
@@ -210,13 +206,30 @@ class CommonOptionsTest(LauncherCase):
         self.assertEqual(["HOME=/tmp"], env_args(options))
         self.log.unlink()
         self.launch("run", str(self.run_dir), "crawl", **SECRETS)
-        (options, args), = self.runs_of("screamingfrog")
-        self.assertEqual([], args)
-        for name in ("GM_AUDIT_TARGET", "GM_AUDIT_ROBOTS", "GM_SF_LICENCE_USER", "GM_SF_LICENCE_KEY"):
+        (options, args), = self.runs_of("agence")
+        self.assertEqual(["crawl"], args)
+        for name in (
+            "GM_AUDIT_TARGET",
+            "GM_AUDIT_ROBOTS",
+            "GM_AUDIT_RATE",
+            "GM_AUDIT_USER_AGENT",
+            "GM_AUDIT_AUTH_USER",
+            "GM_AUDIT_AUTH_PASS",
+        ):
             self.assertTrue(has_pair(options, "--env", name), name)
-        self.assertTrue(has_pair(options, "--env", "GM_AUDIT_AUTH_USER"))
-        self.assertNotIn("GM_AUDIT_AUTH_PASS", options)
-        self.assertNotIn("GM_AUDIT_RATE", options)
+        self.assertFalse(any(name.startswith("GM_SF_") for name in env_args(options)))
+
+    def test_crawl_passes_the_prod_origin_when_given(self):
+        context = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))
+        context["target"]["prod_url"] = "https://www.example.org/fr"
+        (self.run_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
+        self.launch("run", str(self.run_dir), "crawl")
+        (options, _), = self.runs_of("agence")
+        self.assertTrue(has_pair(options, "--env", "GM_AUDIT_PROD_ORIGIN"))
+        self.log.unlink()
+        self.launch("run", str(self.run_dir), "http")
+        (options, _), = self.runs_of("agence")
+        self.assertNotIn("GM_AUDIT_PROD_ORIGIN", options)
 
     def test_secret_values_never_in_args(self):
         result = self.launch("all", str(self.run_dir), **SECRETS)
@@ -227,7 +240,6 @@ class CommonOptionsTest(LauncherCase):
             self.assertNotIn(value, result.stdout)
             self.assertNotIn(value, result.stderr)
         self.assertIn('"--env", "GM_AUDIT_AUTH_PASS"', text)
-        self.assertIn('"--env", "GM_SF_LICENCE_KEY"', text)
 
     def test_stale_output_is_wiped_and_raw_is_created(self):
         stale = self.run_dir / "tools" / "testssl"
@@ -534,15 +546,12 @@ class ToolCommandsTest(LauncherCase):
     def test_crawl(self):
         result = self.run_tool("crawl", **SECRETS)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual([[]], [args for _, args in self.runs_of("screamingfrog")])
-        self.assertEqual(
-            ["summarize", "crawl", "--raw", "/out/crawl/raw"], self.runs_of("agence")[0][1]
-        )
+        self.assertEqual([["crawl"]], [args for _, args in self.runs_of("agence")])
 
-    def test_crawl_summary_still_runs_when_crawler_refuses(self):
-        result = self.run_tool("crawl", CQA_STUB_FAIL="screamingfrog", CQA_STUB_FAIL_CODE="2")
+    def test_crawl_failure_is_tolerated(self):
+        result = self.run_tool("crawl", CQA_STUB_FAIL="agence:1 crawl", CQA_STUB_FAIL_CODE="2")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(1, len(self.runs_of("agence")))
+        self.assertIn("code de sortie 2", result.stderr)
 
     def test_tool_exit_code_is_passed_through(self):
         result = self.run_tool("http", CQA_STUB_FAIL="http --probes", CQA_STUB_FAIL_CODE="3")
@@ -565,7 +574,7 @@ class AllTest(LauncherCase):
         result = self.launch("all", str(self.run_dir), CQA_STUB_FAIL="lighthouse --pages")
         self.assertEqual(1, result.returncode)
         names = [name for _, name, _ in self.tool_runs()]
-        self.assertIn("screamingfrog", names)
+        self.assertIn("testssl", names)
         self.assertIn(["a11y", "--pages", "/in/context.json"], [args for _, _, args in self.tool_runs()])
         self.assertIn("lighthouse", result.stderr)
         self.assertTrue((self.run_dir / "tools" / "manifest.json").is_file())
@@ -671,14 +680,13 @@ class DoctorTest(LauncherCase):
     def test_report_without_run_directory(self):
         report = self.doctor()
         self.assertEqual(
-            {"docker", "docker_version", "registry_login", "images", "sf_licence", "sf_eula", "arch"},
+            {"docker", "docker_version", "registry_login", "images", "agence_crawl", "arch"},
             set(report),
         )
         self.assertIs(True, report["docker"])
         self.assertEqual("27.0.1", report["docker_version"])
         self.assertIs(True, report["registry_login"])
-        self.assertIs(False, report["sf_licence"])
-        self.assertIs(True, report["sf_eula"])
+        self.assertIs(True, report["agence_crawl"])
         self.assertIn(report["arch"], ("amd64", "arm64"))
         self.assertEqual(IMAGES, list(report["images"]))
         self.assertEqual({"1.2.3"}, set(report["images"].values()))
@@ -702,23 +710,12 @@ class DoctorTest(LauncherCase):
         self.assertIs(True, report["docker"])
         self.assertIsNone(report["docker_version"])
 
-    def test_licence_needs_both_values_and_is_never_printed(self):
-        self.assertIs(True, self.doctor(**SECRETS)["sf_licence"])
-        self.assertIs(False, self.doctor(GM_SF_LICENCE_USER="sf-user")["sf_licence"])
-        result = self.launch("doctor", **SECRETS)
-        for value in SECRETS.values():
-            self.assertNotIn(value, result.stdout + result.stderr)
-
-    def test_eula_is_read_from_the_screamingfrog_image(self):
-        self.assertIs(False, self.doctor(CQA_STUB_NO_EULA="1")["sf_eula"])
-        self.assertIsNone(self.doctor(CQA_STUB_MISSING="screamingfrog")["sf_eula"])
-        self.assertTrue(
-            any(
-                call[:2] == ["image", "inspect"] and ".Config.Env" in " ".join(call)
-                and call[-1] == f"{REGISTRY}/screamingfrog:1"
-                for call in self.calls()
-            )
-        )
+    def test_agence_crawl_needs_toolbox_1_1(self):
+        cases = {"1.1.0": True, "1.2.3": True, "2.0.0": True, "1.0.2": False, "0.0.0-dev": False}
+        for version, expected in cases.items():
+            with self.subTest(version=version):
+                self.assertIs(expected, self.doctor(CQA_STUB_VERSION=version)["agence_crawl"])
+        self.assertIs(False, self.doctor(CQA_STUB_MISSING="agence")["agence_crawl"])
 
     def test_registry_and_tag_overrides(self):
         self.doctor(GM_CQA_REGISTRY="registry.example.org/team", GM_CQA_TOOLBOX_TAG="3")
@@ -734,7 +731,7 @@ class DoctorTest(LauncherCase):
         self.assertIsNone(report["docker_version"])
         self.assertIs(False, report["registry_login"])
         self.assertEqual({None}, set(report["images"].values()))
-        self.assertIsNone(report["sf_eula"])
+        self.assertIs(False, report["agence_crawl"])
 
 
 class PullTest(LauncherCase):
