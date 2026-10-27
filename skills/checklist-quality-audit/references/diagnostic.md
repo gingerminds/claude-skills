@@ -109,7 +109,7 @@ S="${CLAUDE_SKILL_DIR}/../../scripts"
 bash "$S/cqa-toolbox.sh" doctor
 ```
 
-It prints `{"docker", "docker_version", "registry_login", "images": {"<image>": "<version>" or null}, "sf_licence", "sf_eula", "arch"}`. `sf_eula` is null when the `screamingfrog` image is not pulled.
+It prints `{"docker", "docker_version", "registry_login", "images": {"<image>": "<version>" or null}, "agence_crawl", "arch"}`. `agence_crawl` is true when the `agence` image is version 1.1.0 or later.
 
 | Fact | Meaning | What the lead does |
 |---|---|---|
@@ -117,8 +117,7 @@ It prints `{"docker", "docker_version", "registry_login", "images": {"<image>": 
 | `docker_version` null | Docker not started | start Docker |
 | `registry_login` false and images null | no access to the registry | `docker login registry.gitlab.gingerminds.fr` with a GitLab token that can read the registry |
 | `registry_login` true, an image null | images not pulled | accept the download (below) |
-| `sf_licence` false | Screaming Frog licence absent | export `GM_SF_LICENCE_USER` and `GM_SF_LICENCE_KEY` (Vaultwarden) |
-| `sf_eula` false | `screamingfrog` image older than toolbox 1.0.3, without the agency's EULA acceptance: every crawl is skipped | accept the download again (below) |
+| `agence_crawl` false | `agence` image older than 1.1.0, crawl unavailable | accept the download again (below) |
 | `arch` `arm64` | Apple Silicon | nothing; an image without arm64 runs emulated, more slowly |
 
 Download, only after « Télécharger les images de la boîte à outils (plus de 2 Go) ? » (« Oui », « Non »), with Bash `run_in_background`:
@@ -132,7 +131,7 @@ Exit 1: an image failed, usually the registry login. Then run `doctor` again.
 
 - The toolbox is **ready** when `docker_version` is set and `images.agence` is not null.
 - "Audit web": toolbox ready, and the target reachable from the workstation (`access` `open`, or `basic_auth` with accepted credentials).
-- "Crawler": "Audit web", `images.screamingfrog` not null, `sf_licence` true and `sf_eula` true.
+- "Crawler": "Audit web", `agence_crawl` true.
 
 ## 7. SSH (tool "SSH serveur")
 

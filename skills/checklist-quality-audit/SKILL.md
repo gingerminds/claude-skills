@@ -17,7 +17,7 @@ Load each reference with Read when its section starts, not before.
 
 - **Read-only (v1).** Never modify a project repo: no checkout, switch, stash, pull, commit, install, file edit, runner start. Never write on a server or in a database, never submit a form, never deploy. When something needs one of these, give the lead the exact command and let them run it.
 - **Notion.** Write only through `cqa_notion.py apply` and `cqa_notion.py comment-page`, after the lead's confirmation. Never through another tool, never on the reference template (exit 8). Never create an option, a row or a page; never delete anything.
-- **Secrets (spec § 10).** Never print, write or hand to a sub-agent the value of `NOTION_TOKEN`, `GM_SF_LICENCE_USER`, `GM_SF_LICENCE_KEY` or the preprod Basic Auth credentials. Never run `env`, `printenv` or `set`, never `echo` these variables: test their presence only, as in `references/context.md`.
+- **Secrets (spec § 10).** Never print, write or hand to a sub-agent the value of `NOTION_TOKEN` or the preprod Basic Auth credentials. Never run `env`, `printenv` or `set`, never `echo` these variables: test their presence only, as in `references/context.md`.
 - **Basic Auth credentials.** Asked only after a 401, kept in this session, never stored. They go only as inline environment variables (`GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>'`) to `cqa_plan.py probe-target --auth-env` and `cqa-toolbox.sh`, and only when the session holds the Basic Auth credentials (accepted by `probe-target --auth-env`). `GM_AUDIT_AUTH_PASS` alone also goes, the same way, to the secret checks of `cqa_notion.py apply`, `cqa_notion.py comment-page` and `cqa_plan.py scan`. Never in a file, a URL, Notion, a sub-agent prompt or Chrome (the lead types it there).
 - **SSH (agency rule).** Ask which alias to use before any SSH command (aliases read in `~/.ssh/config`). Run every server command through `cqa_ssh_ro.py`, except the connection test `ssh -o BatchMode=yes <alias> true`. Exit 4 of the guard means "commande à faire confirmer par le lead": stop and ask, stating the impact, even if the lead asked to go faster (`references/server.md`).
 - **Questions.** One at a time, with AskUserQuestion, in French, and only when the answer is missing or must be confirmed. AskUserQuestion takes 2 to 4 options and always adds a free-text answer (« Autre »). For a value to type (URL, SHA, identifier, password, folder), give real options (« Annuler l'audit », « Je ne sais pas », « Continuer sans identifiants »...) and say in the question to type the value in « Autre ». If the free-text answer is not available in this session, ask the same question as a plain message and wait for the reply. Never repeat a password back to the lead, in a message, a summary or a recap of the answers.
@@ -102,7 +102,7 @@ Read `references/diagnostic.md`. It gives the exact command of each check:
 | Runner up | `shared/runner.md` (make, docker compose, lando), never started by the skill | CLI local |
 | Preprod reachable | `probe-target` of section 4 | HTTP |
 | Claude in Chrome connected | a tab opened on the preprod (`references/browser.md`) | Navigateur |
-| Docker, registry, images, Screaming Frog licence | `cqa-toolbox.sh doctor` | Audit web, Crawler |
+| Docker, registry, images | `cqa-toolbox.sh doctor` | Audit web, Crawler |
 | SSH alias reachable | `ssh -o BatchMode=yes <alias> true` | SSH serveur |
 | Application CLI on the server (drush, wp, artisan) | through the guard | BDD |
 | Test accounts | answer of section 4 | Comptes de test |

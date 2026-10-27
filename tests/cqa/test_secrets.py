@@ -237,14 +237,13 @@ class KnownValuesFromEnvTest(unittest.TestCase):
             ["ntn_abcdef"],
         )
 
-    def test_three_variables_in_a_stable_order(self):
+    def test_two_variables_in_a_stable_order(self):
         env = {
-            "GM_SF_LICENCE_KEY": "licence-1",
             "NOTION_TOKEN": "notion-1",
             "GM_AUDIT_AUTH_PASS": "auth-pass-1",
             "HOME": "/home/someone",
         }
-        self.assertEqual(known_values_from_env(env), ["notion-1", "auth-pass-1", "licence-1"])
+        self.assertEqual(known_values_from_env(env), ["notion-1", "auth-pass-1"])
 
     def test_minimum_length_is_six(self):
         self.assertEqual(known_values_from_env({"NOTION_TOKEN": "12345"}), [])

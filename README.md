@@ -83,7 +83,6 @@ Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépar
 - **Variables d'environnement** : à exporter dans le profil du shell (valeurs dans Vaultwarden), puis relancer Claude Code.
   - `NOTION_TOKEN` : jeton de l'intégration Notion de l'agence.
   - `GM_CQA_REFERENCE` : URL de la page du modèle de la checklist (le skill refuse d'auditer le modèle lui-même).
-  - `GM_SF_LICENCE_USER` et `GM_SF_LICENCE_KEY` : licence Screaming Frog, pour le crawl.
 - **Registre Docker** : Docker installé (Docker Desktop sous macOS, Docker Engine sous Linux), puis `docker login registry.gitlab.gingerminds.fr` avec un token GitLab en lecture sur le registre (valeur dans Vaultwarden). Les images de la boîte à outils sont tirées au premier audit.
 - **`glab`** installé et authentifié sur le GitLab de l'agence (`glab auth status`) : il sert à retrouver le commit déployé en préprod.
 - **Claude in Chrome** : extension installée et connectée, pour les contrôles navigateur. Le lead s'y connecte lui-même quand le site est protégé.

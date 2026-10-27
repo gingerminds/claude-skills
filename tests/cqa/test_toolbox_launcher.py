@@ -217,7 +217,7 @@ class CommonOptionsTest(LauncherCase):
             "GM_AUDIT_AUTH_PASS",
         ):
             self.assertTrue(has_pair(options, "--env", name), name)
-        self.assertFalse(any(name.startswith("GM_SF_") for name in env_args(options)))
+        self.assertFalse(any(name.startswith("GM_" + "SF_") for name in env_args(options)))
 
     def test_crawl_passes_the_prod_origin_when_given(self):
         context = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))

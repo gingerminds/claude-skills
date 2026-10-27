@@ -6,7 +6,7 @@ from pathlib import Path
 
 MASK = "[secret masqué]"
 
-_ENV_NAMES = ("NOTION_TOKEN", "GM_AUDIT_AUTH_PASS", "GM_SF_LICENCE_KEY")
+_ENV_NAMES = ("NOTION_TOKEN", "GM_AUDIT_AUTH_PASS")
 _MIN_ENV_LENGTH = 6
 
 _PRIVATE_KEY = re.compile(

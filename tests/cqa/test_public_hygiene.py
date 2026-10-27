@@ -13,7 +13,7 @@ from cqa.secrets import scan_tree
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
-EXPECTED_VERSION = "0.9.0"
+EXPECTED_VERSION = "0.10.0"
 NEW_SKILL = "/gm:checklist-quality-audit"
 
 SCOPE = [
@@ -138,6 +138,15 @@ class PublicHygieneTest(unittest.TestCase):
             (path.relative_to(ROOT).as_posix(), identifier)
             for path in scope_files(SCOPE)
             for identifier in find_notion_ids(read(path))
+        ]
+        self.assertEqual(leaks, [])
+
+    def test_no_screaming_frog_licence_left(self):
+        needles = ("GM_" + "SF_", "sf_" + "licence", "Scream" + "ing")
+        leaks = [
+            path.relative_to(ROOT).as_posix()
+            for path in scope_files(SCOPE)
+            if any(needle in read(path) for needle in needles)
         ]
         self.assertEqual(leaks, [])
 

@@ -562,7 +562,7 @@ def clean_env(extra=None):
     kept = {
         key: value
         for key, value in os.environ.items()
-        if key not in ("NOTION_TOKEN", "GM_AUDIT_AUTH_PASS", "GM_SF_LICENCE_KEY")
+        if key not in ("NOTION_TOKEN", "GM_AUDIT_AUTH_PASS")
     }
     kept.update(extra or {})
     return mock.patch.dict(os.environ, kept, clear=True)

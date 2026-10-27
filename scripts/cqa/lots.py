@@ -22,7 +22,7 @@ TOOLS = [
 
 TOOL_ACTIONS = {
     "Audit web": "docker login + pull de la boîte à outils",
-    "Crawler": "licence Screaming Frog dans l'environnement",
+    "Crawler": "boîte à outils 1.1 ou plus (docker pull)",
     "SSH serveur": "alias SSH vers la préprod",
     "BDD": "CLI de l'application accessible en SSH",
     "Navigateur": "Claude in Chrome connecté",

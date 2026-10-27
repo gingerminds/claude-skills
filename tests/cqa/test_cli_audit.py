@@ -15,7 +15,7 @@ from tests.cqa import test_cli_prepare as prepare
 FIXTURE_RUN = Path(__file__).resolve().parent / "fixtures" / "run"
 RUN_ID = "2026-10-20-1430"
 EM_DASH = chr(0x2014)
-NO_SECRETS = {"NOTION_TOKEN": "", "GM_AUDIT_AUTH_PASS": "", "GM_SF_LICENCE_KEY": ""}
+NO_SECRETS = {"NOTION_TOKEN": "", "GM_AUDIT_AUTH_PASS": ""}
 OP_KEYS = {
     "key",
     "kind",

@@ -23,7 +23,7 @@ You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your i
 - Never start the project runner, and never start, stop, build or restart a container or a service, even where `/gm:security` says to. If the runner is not up, run the read-only audits on the host (`composer audit --locked`, `npm audit` against the lockfile), or give `unknown`.
 - Before a `make` target, read the target in the Makefile. Run only read-only targets (lint without fix, audit); never a target that fixes, installs, migrates, builds or starts services.
 - Never send an authenticated request, and never a method other than GET or HEAD. With curl, never use `-u`, `--user`, `-b`, `-c`, `-d`, `--data*`, `-F`, `-T`, an `Authorization` or `Cookie` header, or `-X` with another method.
-- Never print a secret. Never run `env`, `printenv` or `set`; never print `NOTION_TOKEN`, `GM_AUDIT_AUTH_*` or `GM_SF_LICENCE_*`. In a repo, never print the values of a secret-bearing file (`.env*`, `auth.json`, `wp-config.php`, `settings*.php`, `*.key`, `*.pem`): print key names or line counts only, for example `grep -oE '^[A-Z0-9_]+=' .env`.
+- Never print a secret. Never run `env`, `printenv` or `set`; never print `NOTION_TOKEN` or `GM_AUDIT_AUTH_*`. In a repo, never print the values of a secret-bearing file (`.env*`, `auth.json`, `wp-config.php`, `settings*.php`, `*.key`, `*.pem`): print key names or line counts only, for example `grep -oE '^[A-Z0-9_]+=' .env`.
 - Never write a secret in a finding or a fact.
 - Never run a command on a server except through `${CLAUDE_PLUGIN_ROOT}/scripts/cqa_ssh_ro.py`. Never call `ssh`, `scp`, `rsync` or a database client yourself.
 - Never send a project URL to a third-party service, unless `available_tools` contains "Service externe" and the fiche names that service.
@@ -58,6 +58,47 @@ Read, in this order:
 | Intervention humaine | Never above `ok_human`; `human_check` says what the human must do. |
 
 A tool that is missing, failed or skipped makes the parts that depend on it `unknown`, with the tool and its reason in `summary`.
+
+### Crawl
+
+`tools/crawl/summary.json` lists, per rule, the pages found (at most 20 per rule); `tools/crawl/result.json` has the findings and `raw/` the raw outputs. Severities: `red` blocking, `orange` to fix, `info` to look at.
+
+| Rule | Rows | Severity | Meaning |
+|---|---|---|---|
+| `http-4xx` | CQ-3, CQ-36 | orange | internal URL answering 4xx; `value` is a page that links to it |
+| `http-5xx` |  | red | internal URL answering 5xx |
+| `internal-redirect` | CQ-4 | info | internal link to a URL that redirects |
+| `url-not-clean` | CQ-1 | info | uppercase, non-ASCII character, space, underscore, or more than 2 parameters |
+| `url-node-id` | CQ-2 | orange | page served at `/node/{id}` |
+| `url-variant-duplicate` | CQ-4 | orange | host variant answering 200 without redirect, or same page in 200 with and without trailing slash |
+| `pagination-first-page` | CQ-34 | orange | first list page also served with a page parameter (same title and H1 as the URL without it) |
+| `title-missing` | CQ-141 | orange | title missing or empty |
+| `title-duplicate` | CQ-141, CQ-34 | orange | same title on several HTML pages answering 200 |
+| `meta-description-missing` |  | orange | meta description missing or empty |
+| `canonical-missing` | CQ-7 | orange | canonical missing |
+| `canonical-error` | CQ-7 | orange | canonical relative, or pointing to a URL in error or that redirects |
+| `noindex` | CQ-16 | info | page in noindex (meta or header) |
+| `og-incomplete` | CQ-10 | info | og:title, og:description or og:image missing |
+| `lang-missing` | CQ-26 | orange | `<html>` without `lang` |
+| `lang-hreflang-mismatch` | CQ-26, CQ-28 | info | `lang` differs from the language the hreflang declares for the page |
+| `hreflang-missing` | CQ-22 | orange | multilingual site (several `lang` values) and page without hreflang |
+| `hreflang-error` | CQ-22 | orange | hreflang to a URL in error, or not reciprocal |
+| `h1-missing` | CQ-12 | orange | no H1 |
+| `h1-multiple` | CQ-12 | orange | several H1 |
+| `heading-skip` | CQ-12 | info | heading level skipped (h2 then h4) |
+| `link-javascript` | CQ-36 | orange | `javascript:` link, lone `href="#"`, or `<a>` without `href` |
+| `link-text-generic` | CQ-78 | orange | generic link text ("read more", "click here"...) without a more precise accessible name |
+| `duplicate-id` | CQ-94 | orange | same `id` twice in a page |
+| `table-no-caption` | CQ-110 | info | data table (with `<th>`) without `<caption>` or associated description |
+| `media-no-captions` | CQ-102 | orange | `<video>` without captions or subtitles track; `<audio>` and embedded players are `info`, to check by hand |
+| `orphan-page` | CQ-3 | orange | sitemap URL answering 200 that no internal link reaches |
+| `prod-host-reference` | CQ-4, CQ-7, CQ-22 | info | on a preprod, page whose canonical, hreflang or links point to the prod origin |
+| `other-host-unverified` | CQ-7, CQ-22 | info | canonical, hreflang or sitemap URL to another domain, not verified |
+| `privacy-page-missing` | CQ-131 | orange | no internal link whose text or URL suggests a privacy page |
+
+- CQ-16 (robots.txt content), CQ-28 (page translated into the right language) and CQ-118 (hijacked tags) are your judgment, from `tools/crawl/raw/pages.jsonl` and `raw/robots.txt`.
+- CQ-25 is judged on `tools/nu` (Nu validator on the key pages), not on the crawl.
+- A crawl in `failed` leaves its rows `unknown`, even when partial outputs exist.
 
 ## Method
 

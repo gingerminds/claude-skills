@@ -56,7 +56,7 @@ class ConstantsTest(unittest.TestCase):
 
     def test_actions_text(self):
         self.assertEqual(TOOL_ACTIONS["Audit web"], "docker login + pull de la boîte à outils")
-        self.assertEqual(TOOL_ACTIONS["Crawler"], "licence Screaming Frog dans l'environnement")
+        self.assertEqual(TOOL_ACTIONS["Crawler"], "boîte à outils 1.1 ou plus (docker pull)")
         self.assertEqual(TOOL_ACTIONS["SSH serveur"], "alias SSH vers la préprod")
         self.assertEqual(TOOL_ACTIONS["BDD"], "CLI de l'application accessible en SSH")
         self.assertEqual(TOOL_ACTIONS["Navigateur"], "Claude in Chrome connecté")
