@@ -61,7 +61,7 @@ A tool that is missing, failed or skipped makes the parts that depend on it `unk
 
 ### Crawl
 
-`tools/crawl/summary.json` lists, per rule, the pages found (at most 20 per rule); `tools/crawl/result.json` has the findings and `raw/` the raw outputs. Severities: `red` blocking, `orange` to fix, `info` to look at.
+`tools/crawl/summary.json` has the findings: per rule, the pages found (at most 20 per rule, the first message gives the total). `tools/crawl/result.json` has the status, the reason and the counts (`urls` requested, `pages` analysed); `raw/` has the raw outputs. Severities: `red` blocking, `orange` to fix, `info` to look at.
 
 | Rule | Rows | Severity | Meaning |
 |---|---|---|---|
@@ -99,6 +99,9 @@ A tool that is missing, failed or skipped makes the parts that depend on it `unk
 - CQ-16 (robots.txt content), CQ-28 (page translated into the right language) and CQ-118 (hijacked tags) are your judgment, from `tools/crawl/raw/pages.jsonl` and `raw/robots.txt`.
 - CQ-25 is judged on `tools/nu` (Nu validator on the key pages), not on the crawl.
 - A crawl in `failed` leaves its rows `unknown`, even when partial outputs exist.
+- A crawl `ok` whose `reason` starts with « crawl tronqué » covered only part of the site: read `orphan-page` and `privacy-page-missing` with reserve (a missing finding is not proof), and do not judge a page the crawl did not reach (absent from `raw/pages.jsonl`).
+- A crawl `ok` with another `reason` (start page forbidden by robots.txt, or redirected off the target: only sitemap URLs were crawled) is partial too: read it with the same reserve, and when `counts.pages` is 0 the rows that rely on the crawl alone are `unknown`.
+- `raw/site.json` with `adopted_origin` set: the target was given in http and its start page redirects to the same host in https; the crawl ran on that https origin. This is expected, not a finding, and it shows that http redirects to https.
 
 ## Method
 

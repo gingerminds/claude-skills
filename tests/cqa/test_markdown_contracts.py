@@ -328,6 +328,14 @@ class AgentsTest(unittest.TestCase):
         self.assertIn("Never start the project runner", text)
         self.assertIn("read the target in the Makefile", text)
 
+    def test_auditor_reads_the_crawl_outputs_with_their_limits(self):
+        text = _text(AUDITOR)
+        self.assertNotIn("`tools/crawl/result.json` has the findings", text)
+        self.assertIn("`tools/crawl/summary.json` has the findings", text)
+        for needle in ("crawl tronqué", "a missing finding is not proof", "`counts.pages`", "`adopted_origin`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
     def test_auditor_curl_ignores_curlrc(self):
         commands = _CURL.findall(_text(AUDITOR))
         self.assertTrue(commands)
