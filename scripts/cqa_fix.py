@@ -14,8 +14,10 @@ import sys
 from pathlib import Path
 from typing import Callable, NamedTuple
 
-from cqa import fix_gitlab, fix_names
+from cqa import fix_gitlab, fix_names, fix_rows
+from cqa.checklist import parse_refs
 from cqa.notion_read import write_json
+from cqa.rerun import latest_findings, read_grounded_findings
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -63,6 +65,10 @@ def _build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True, metavar="commande")
     sub = _command(commands, "doctor", "accès GitLab et état des repos", _cmd_doctor)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub = _command(commands, "candidates", "lignes que le mode correction peut traiter", _cmd_candidates)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("--refs", default="", help="Réf à ajouter, séparées par des virgules (CQ-12)")
+    sub.add_argument("--without", default="", help="Réf à retirer, séparées par des virgules")
     return parser
 
 
@@ -126,6 +132,62 @@ def _ahead(path, run, sha, base: str):
         return int(count.stdout.strip())
     except ValueError:
         return None
+
+
+def _read_run_json(run_dir: Path, name: str, hint: str) -> dict:
+    try:
+        document = json.loads((run_dir / name).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise UsageError(f"{name} est introuvable dans {run_dir} : lancer d'abord {hint}.")
+    except (OSError, ValueError) as error:
+        raise UsageError(f"{name} est illisible : {error}")
+    if not isinstance(document, dict):
+        raise UsageError(f"{name} : un objet JSON est attendu.")
+    return document
+
+
+def _cmd_candidates(args, services: Services) -> int:
+    run_dir = args.run_dir.resolve()
+    refs, without = parse_refs(args.refs), parse_refs(args.without)
+    if not (run_dir / "fix" / "doctor.json").is_file():
+        raise UsageError("Lancez d'abord cqa_fix.py doctor.")
+    doctor = _read_run_json(run_dir, "fix/doctor.json", "cqa_fix.py doctor")
+    context = _load_context(run_dir)
+    repos = [repo for repo in context.get("repos") or [] if isinstance(repo, dict)]
+    rows = _read_run_json(run_dir, "rows.json", "cqa_notion.py rows").get("rows")
+    lots = _read_run_json(run_dir, "lots.json", "cqa_plan.py lots")
+    if not isinstance(rows, list) or not isinstance(lots.get("lots"), list):
+        raise UsageError("rows.json ou lots.json : listes « rows » et « lots » attendues.")
+    excluded = [entry for entry in lots.get("excluded") or [] if isinstance(entry, dict)]
+    findings = latest_findings(
+        run_dir, lots["lots"], lambda lot, name: read_grounded_findings(run_dir, context, lot, name)
+    )
+    access = [entry for entry in doctor.get("repos") or [] if isinstance(entry, dict)]
+    flights = _flights(repos, access, services.run)
+    try:
+        result = fix_rows.select(
+            rows, findings, excluded, repos, access, flights,
+            refs=refs, without=without, run_dir=run_dir,
+        )
+    except ValueError as error:
+        raise UsageError(str(error))
+    write_json(run_dir / "fix" / "candidates.json", result)
+    _emit(result)
+    return EXIT_OK
+
+
+def _flights(repos: list, access: list, run) -> dict:
+    by_name = {entry.get("repo"): entry for entry in access}
+    flights = {}
+    for repo in repos:
+        entry = by_name.get(repo.get("name"))
+        if not entry or entry.get("status") == "not_gitlab":
+            continue
+        flights[repo["name"]] = fix_gitlab.in_flight(
+            run, repo, entry["host"], entry["project"], entry.get("base") or "develop",
+            api=entry["status"] in ("ok", "no_push"),
+        )
+    return flights
 
 
 def _emit(value) -> None:

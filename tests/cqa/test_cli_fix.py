@@ -5,8 +5,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import cqa_fix
+from cqa import fix_gitlab
 from tests.cqa.test_git_tools import commit, git as real_git
 from tests.cqa.test_cli_prepare import clean_environ
 
@@ -107,9 +109,90 @@ class DoctorTest(FixCase):
             self.assertIn("context.json", err)
 
 
+class CandidatesTest(FixCase):
+    def make_run(self, root, statuses=None):
+        repos = []
+        for name in ("front", "back"):
+            repo = root / name
+            repo.mkdir()
+            (repo / "a.php").write_text("<?php", encoding="utf-8")
+            repos.append({"name": name, "path": str(repo), "remote": REMOTE})
+        run_dir = root / "run"
+        (run_dir / "findings").mkdir(parents=True)
+        (run_dir / "fiches").mkdir()
+        (run_dir / "fiches" / "CQ-001.md").write_text("x", encoding="utf-8")
+        (run_dir / "context.json").write_text(json.dumps({"repos": repos}), encoding="utf-8")
+        rows = [
+            {"ref": 1, "page_id": "p1", "title": "Un", "status": "À traiter", "assignees": [],
+             "category": "SÉCURITÉ", "automation": "Auto : détection + MR"},
+            {"ref": 2, "page_id": "p2", "title": "Deux", "status": "À traiter", "assignees": [],
+             "category": "SEO / GEO", "automation": "Manuel"},
+        ]
+        (run_dir / "rows.json").write_text(json.dumps({"rows": rows}), encoding="utf-8")
+        (run_dir / "lots.json").write_text(json.dumps({
+            "lots": [{"id": "lot-a", "refs": [1, 2]}], "excluded": []}), encoding="utf-8")
+        item = {"verdict": "ko", "confidence": "high", "summary": "s", "todo": "t",
+                "human_check": None, "divergence": None, "needs_probes": [],
+                "evidence": [{"type": "file", "repo": "front", "path": "a.php"}]}
+        (run_dir / "findings" / "lot-a.json").write_text(json.dumps({
+            "findings": [{"ref": 1, **item}, {"ref": 2, **item}]}), encoding="utf-8")
+        statuses = statuses or {"front": "ok", "back": "ok"}
+        doctor = {"repos": [{"repo": n, "host": "gitlab.example.org", "project": "acme/shop",
+                             "status": s, "base": "develop"} for n, s in statuses.items()]}
+        (run_dir / "fix").mkdir()
+        (run_dir / "fix" / "doctor.json").write_text(json.dumps(doctor), encoding="utf-8")
+        return run_dir
+
+    def empty_flight(self, run, repo, host, project, base, *, api):
+        self.calls[repo["name"]] = api
+        return {"open": [], "closed": [], "merged": [], "branches": [], "notes": ["n"]}
+
+    def test_candidates_writes_the_file_and_needs_the_doctor(self):
+        self.calls = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp), {"front": "ok", "back": "unauthenticated"})
+            with mock.patch.object(fix_gitlab, "in_flight", self.empty_flight):
+                code, out, err = self.run_main(["candidates", run_dir])
+            self.assertEqual(code, 0, err)
+            written = json.loads((run_dir / "fix" / "candidates.json").read_text(encoding="utf-8"))
+            self.assertEqual(written, json.loads(out))
+            self.assertEqual([k["key"] for k in written["keys"]], ["front/securite"])
+            self.assertEqual(written["keys"][0]["rows"][0]["fiche_path"], "fiches/CQ-001.md")
+            self.assertEqual([e["reason"] for e in written["left"]], ["Manuel"])
+            self.assertEqual(self.calls, {"front": True, "back": False})
+            self.assertEqual(written["notes"], ["n"])
+            self.assertEqual(set(written["flights"]), {"front", "back"})
+            (run_dir / "fix" / "doctor.json").unlink()
+            code, out, err = self.run_main(["candidates", run_dir])
+            self.assertEqual(code, 2)
+            self.assertIn("Lancez d'abord cqa_fix.py doctor.", err)
+
+    def test_candidates_options_and_flight_api_flags(self):
+        self.calls = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp), {"front": "no_push", "back": "glab_missing"})
+            with mock.patch.object(fix_gitlab, "in_flight", self.empty_flight):
+                code, out, err = self.run_main(
+                    ["candidates", run_dir, "--refs", "CQ-2,CQ-999", "--without", "CQ-1"])
+            self.assertEqual(code, 0, err)
+            result = json.loads(out)
+            self.assertEqual(self.calls, {"front": True, "back": False})
+            self.assertEqual([r["ref"] for k in result["keys"] for r in k["rows"]], [2])
+            self.assertIn("CQ-999 ne figure pas dans la copie : ignorée.", result["notes"])
+            self.assertFalse(result["keys"][0]["push_ready"])
+
+    def test_candidates_without_rows_json_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            (run_dir / "rows.json").unlink()
+            code, out, err = self.run_main(["candidates", run_dir])
+            self.assertEqual(code, 2)
+            self.assertIn("rows.json", err)
+
+
 class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
-        for name in ("doctor",):
+        for name in ("doctor", "candidates"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)
 
