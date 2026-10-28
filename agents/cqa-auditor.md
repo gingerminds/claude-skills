@@ -48,7 +48,7 @@ Read, in this order:
 
 | Required tool | Where to look |
 |---|---|
-| Code | Read, Grep and Glob in each repo (`repos[].path`). |
+| Code | Read, Grep and Glob in each repo (`repos[].path`). The folders listed in `repos[].third_party_paths` of `context.json` are third-party code (plugins): they are outside the scope of the code rows (CQ-40, CQ-66, CQ-113), so do not judge them; say so in `summary` when it matters (for example « plugins tiers exclus »). |
 | CLI local | Read-only commands through the project runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`) when it is already up, such as `composer audit --locked`, `npm audit --omit=dev`, linters in check mode. Runner not up: the same audits on the host, against the lockfile; otherwise `unknown`. |
 | HTTP | `tools/http/summary.json`. Missing answer: your own GET or HEAD (see "HTTP"), else `needs_probes`. |
 | Audit web | `tools/lighthouse`, `a11y`, `nu`, `yellowlab`, `assets`, `testssl`, `gitleaks`, `redocly`, `schemathesis`. |

@@ -871,6 +871,32 @@ class SkillTest(unittest.TestCase):
         skill = _text(SKILL)
         self.assertLess(skill.index("Other sites"), skill.index("Mode and Notion consent"))
 
+    def test_third_party_plugins_question_is_asked_with_the_context(self):
+        context = _text(REFERENCES / "context.md")
+        for needle in (
+            "Plugins maison à analyser ?",
+            "cqa_plan.py\" wp-plugins",
+            "third_party_paths",
+            "WordPress only",
+            "No plugin found: no question",
+            "never asked after the audit starts",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, context)
+        skill = _text(SKILL)
+        self.assertIn("wp-plugins", skill)
+        self.assertIn("third_party_paths", skill)
+        self.assertLess(skill.index("third_party_paths"), skill.index("Mode and Notion consent"))
+        self.assertLess(
+            context.index("Plugins maison à analyser ?"), context.index("## 6.2 Without PROJECT.md")
+        )
+
+    def test_auditor_leaves_third_party_code_out_of_the_code_rows(self):
+        auditor = _text(AUDITOR)
+        for needle in ("third_party_paths", "CQ-40", "CQ-66", "CQ-113", "outside the scope"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, auditor)
+
     def test_multisite_domains_homes_and_login_tabs(self):
         browser = _text(REFERENCES / "browser.md")
         agent = _text(BROWSER)

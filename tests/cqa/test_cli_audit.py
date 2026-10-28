@@ -2738,6 +2738,7 @@ class RegistrationTest(AuditCase):
             "key-pages-check",
             "crawl-estimate",
             "reuse-context",
+            "wp-plugins",
         ):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)

@@ -173,6 +173,8 @@ def _register_preparation(commands) -> None:
     sub = _command(commands, "reuse-context", "reprend les réponses d'un run précédent", _cmd_reuse)
     sub.add_argument("new_run_dir", type=Path, help="dossier du nouveau run")
     sub.add_argument("old_run_dir", type=Path, help="dossier du run à réutiliser")
+    sub = _command(commands, "wp-plugins", "plugins WordPress maison ou tiers", _cmd_wp_plugins)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub = _command(commands, "context", "contrôle de context.json", _cmd_context)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("--check", action="store_true", required=True, help="valide context.json")
@@ -578,10 +580,118 @@ def _reuse_repos(old: dict, new: dict) -> bool:
         ]
         return True
     branches = {repo.get("name"): repo.get("preprod_branch") for repo in old_repos}
+    third_party = {
+        repo.get("name"): repo["third_party_paths"]
+        for repo in old_repos
+        if "third_party_paths" in repo and _third_party_paths(repo["third_party_paths"]) is None
+    }
     for repo in new["repos"]:
-        if isinstance(repo, dict) and branches.get(repo.get("name")):
+        if not isinstance(repo, dict):
+            continue
+        if branches.get(repo.get("name")):
             repo["preprod_branch"] = branches[repo["name"]]
+        if repo.get("name") in third_party:
+            repo["third_party_paths"] = third_party[repo["name"]]
     return True
+
+
+WP_PLUGIN_ROOTS = ("plugins", "mu-plugins")
+WP_READ_CAP = 64 * 1024
+WP_KNOWN_THIRD_PARTY = frozenset((
+    "wordfence", "gravityforms", "wp-all-import", "wp-all-export", "advanced-custom-fields",
+    "advanced-custom-fields-pro", "wordpress-seo", "wordpress-seo-premium", "yoast",
+    "sitepress-multilingual-cms", "wpml", "woocommerce", "contact-form-7", "elementor",
+    "elementor-pro", "wp-rocket", "akismet", "jetpack", "redirection", "updraftplus",
+    "polylang", "all-in-one-seo-pack", "really-simple-ssl", "wp-mail-smtp",
+))
+_PLUGIN_HEADER = re.compile(r"^[ \t/*#@]*(Plugin URI|Author URI|Plugin Name)[ \t]*:[ \t]*(.*)$", re.I | re.M)
+_STABLE_TAG = re.compile(r"^[ \t]*Stable tag[ \t]*:", re.I | re.M)
+
+
+def _cmd_wp_plugins(args, services) -> int:
+    context = _load_context(args.run_dir)
+    own = _project_domains(context)
+    plugins, unreadable = [], []
+    for repo in context.get("repos") or []:
+        if not (isinstance(repo, dict) and repo.get("stack") == "wordpress"):
+            continue
+        name, path = repo.get("name"), repo.get("path")
+        if not isinstance(name, str) or not isinstance(path, str):
+            continue
+        listed = _git(services.run, Path(path), "ls-files", "-z")
+        if listed.returncode != 0:
+            unreadable.append({"repo": name, "reason": "liste des fichiers illisible"})
+            continue
+        files = [entry for entry in listed.stdout.split("\0") if entry]
+        for folder in _plugin_folders(files):
+            plugins.append(_plugin_entry(name, Path(path), folder, files, own, services.run))
+    result = {"plugins": sorted(plugins, key=lambda entry: (entry["repo"], entry["path"]))}
+    if unreadable:
+        result["unreadable"] = unreadable
+    _emit(result)
+    return EXIT_OK
+
+
+def _plugin_folders(files: list) -> list:
+    """Return the plugins/<name> and mu-plugins/<name> folders holding versioned files."""
+    folders = set()
+    for entry in files:
+        parts = entry.split("/")
+        for index, segment in enumerate(parts[:-2]):
+            if segment in ("node_modules", "vendor"):
+                break
+            if segment in WP_PLUGIN_ROOTS:
+                folders.add("/".join(parts[: index + 2]))
+                break
+    return sorted(folders)
+
+
+def _project_domains(context: dict) -> set:
+    """Return the base domains (last two labels) of the preprod, the prod and the sites."""
+    urls = []
+    target = context.get("target")
+    if isinstance(target, dict):
+        urls += [target.get("preprod_url"), target.get("prod_url")]
+    for site in context.get("sites") or []:
+        if isinstance(site, dict):
+            urls += [site.get("home"), f"https://{site.get('domain')}"]
+    return {_base_domain(urlsplit(url).hostname) for url in urls if isinstance(url, str)} - {None}
+
+
+def _base_domain(host) -> Optional[str]:
+    if not host:
+        return None
+    return ".".join(host.lower().rstrip(".").split(".")[-2:])
+
+
+def _read_capped(run, path: Path, relative: str) -> str:
+    result = _git(run, path, "show", f":{relative}")
+    return result.stdout[:WP_READ_CAP] if result.returncode == 0 else ""
+
+
+def _plugin_entry(repo: str, path: Path, folder: str, files: list, own: set, run) -> dict:
+    entry = {"repo": repo, "path": folder}
+    name = folder.rsplit("/", 1)[1].lower()
+    if name in WP_KNOWN_THIRD_PARTY:
+        return {**entry, "third_party": True, "why": "plugin tiers connu"}
+    if f"{folder}/readme.txt" in files:
+        if _STABLE_TAG.search(_read_capped(run, path, f"{folder}/readme.txt")):
+            return {**entry, "third_party": True, "why": "readme.txt avec « Stable tag »"}
+    for relative in sorted(files):
+        if relative.startswith(folder + "/") and relative.endswith(".php") and "/" not in relative[len(folder) + 1:]:
+            headers = _PLUGIN_HEADER.findall(_read_capped(run, path, relative))
+            if not any(key.lower() == "plugin name" for key, _ in headers):
+                continue
+            for key, value in headers:
+                host = urlsplit(value.strip()).hostname
+                if key.lower() != "plugin name" and host and _base_domain(host) not in own:
+                    return {
+                        **entry,
+                        "third_party": True,
+                        "why": f"{key} hors du projet ({host})",
+                    }
+            break
+    return {**entry, "third_party": False, "why": "aucun signe de plugin tiers"}
 
 
 def _cmd_context(args, services) -> int:
@@ -1518,6 +1628,7 @@ def validate_context(context: dict) -> list:
             _check_fields(errors, name, section, present)
     _check_list(errors, "team", context, _TEAM_FIELDS)
     _check_list(errors, "repos", context, _REPO_FIELDS, minimum=1)
+    _check_third_party_paths(errors, context.get("repos"))
     _check_list(errors, "key_pages", context, _PAGE_FIELDS, maximum=MAX_KEY_PAGES)
     _check_repo_names(errors, context.get("repos"))
     _check_app_dirs(errors, context)
@@ -1570,6 +1681,14 @@ def _check_fields(errors: list, label: str, node: dict, fields: dict) -> None:
         problem = check(node[key])
         if problem:
             errors.append(_invalid(path, problem))
+
+
+def _check_third_party_paths(errors: list, repos) -> None:
+    for index, repo in enumerate(repos if isinstance(repos, list) else []):
+        if isinstance(repo, dict) and "third_party_paths" in repo:
+            problem = _third_party_paths(repo["third_party_paths"])
+            if problem:
+                errors.append(_invalid(f"repos[{index}].third_party_paths", problem))
 
 
 def _check_repo_names(errors: list, repos) -> None:
@@ -1773,6 +1892,25 @@ def _tools(value) -> Optional[str]:
         return problem
     unknown = [tool for tool in value if tool not in TOOLS]
     return f"contient des outils inconnus : {', '.join(unknown)}" if unknown else None
+
+
+MAX_THIRD_PARTY_PATHS = 200
+
+
+def _third_party_paths(value) -> Optional[str]:
+    """Check a list of folders of a repo, as the toolbox reads them (CONTRACT.md)."""
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return "doit être une liste de textes"
+    if len(value) > MAX_THIRD_PARTY_PATHS:
+        return f"doit contenir {MAX_THIRD_PARTY_PATHS} chemins au plus ({len(value)})"
+    for item in value:
+        segments = item.split("/")
+        if "\\" in item or any(segment in ("", ".", "..") for segment in segments):
+            return (
+                f"contient « {item} » : un chemin relatif au repo est attendu, "
+                "sans « / » initial ou final, ni « \\ », ni segment vide, « . » ou « .. »"
+            )
+    return None
 
 
 def _repo_name(value) -> Optional[str]:

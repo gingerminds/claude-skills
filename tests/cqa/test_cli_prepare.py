@@ -2533,6 +2533,25 @@ class ReuseContextTest(RunDirCase):
         self.assertEqual([repo["audited_sha"] for repo in repos], ["f" * 40] * 2)
         self.assertEqual([repo["preprod_branch"] for repo in repos], ["release"] * 2)
 
+    def test_reuse_context_keeps_third_party_paths(self):
+        old = json.loads((self.old / "context.json").read_text())
+        old["repos"][0]["third_party_paths"] = ["wp-content/plugins/seo-pack"]
+        self.write_context(old)
+        self.fresh()
+        self.reuse()
+        repos = self.written()["repos"]
+        self.assertEqual(repos[0]["third_party_paths"], ["wp-content/plugins/seo-pack"])
+        self.assertNotIn("third_party_paths", repos[1])
+        self.assertEqual(repos[0]["audited_sha"], "f" * 40)
+
+    def test_an_invalid_old_third_party_paths_is_not_copied(self):
+        old = json.loads((self.old / "context.json").read_text())
+        old["repos"][0]["third_party_paths"] = ["../x"]
+        self.write_context(old)
+        self.fresh()
+        self.reuse()
+        self.assertNotIn("third_party_paths", self.written()["repos"][0])
+
     def test_repos_of_an_old_run_are_reset_when_the_new_run_has_none(self):
         self.reuse()
         for repo in self.written()["repos"]:
@@ -2578,3 +2597,139 @@ class ReuseContextTest(RunDirCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThirdPartyPathsTest(RunDirCase):
+    def test_third_party_paths_are_validated(self):
+        valid = [[], ["wp-content/plugins/acme-forms"], ["src/plugins/a", "plugins/b.c"]]
+        for value in valid:
+            with self.subTest(value=value):
+                context = valid_context()
+                context["repos"][0]["third_party_paths"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report["errors"]), (0, []))
+        invalid = {
+            "not a list": "plugins/a",
+            "not texts": ["plugins/a", 3],
+            "parent segment": ["plugins/../a"],
+            "leading slash": ["/plugins/a"],
+            "backslash": ["plugins\\a"],
+            "empty segment": ["plugins//a"],
+            "trailing slash": ["plugins/a/"],
+            "empty path": [""],
+            "dot segment": ["./plugins/a"],
+            "too many": [f"plugins/p{n}" for n in range(201)],
+        }
+        for label, value in invalid.items():
+            with self.subTest(label):
+                context = valid_context()
+                context["repos"][1]["third_party_paths"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1)
+                self.assertIn("repos[1].third_party_paths", report["errors"][0])
+
+    def test_an_absent_third_party_paths_stays_valid(self):
+        code, report, _ = self.check(valid_context())
+        self.assertEqual((code, report["errors"]), (0, []))
+
+
+class WpPluginsTest(RunDirCase):
+    def make_wordpress(self, files, name="Acme - Shop - WordPress"):
+        repo = self.tmp_dir() / name
+        repo.mkdir()
+        git_fixtures.git(repo, "init", "-q")
+        for relative, text in files.items():
+            target = repo / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        git_fixtures.git(repo, "add", "-A")
+        git_fixtures.git(repo, "commit", "-q", "-m", "init")
+        return repo
+
+    def context_for(self, repo, stack="wordpress"):
+        context = valid_context()
+        context["repos"] = [
+            dict(context["repos"][0], name="wordpress", path=str(repo), stack=stack)
+        ]
+        context["target"]["prod_url"] = "https://www.example.org"
+        self.write_context(context)
+
+    def plugins(self):
+        found = self.run_json(["wp-plugins", self.run_dir])["plugins"]
+        return {entry["path"]: entry for entry in found}
+
+    def test_wp_plugins_proposes_third_party_and_custom(self):
+        header = "<?php\n/*\nPlugin Name: {}\n{}*/\n"
+        repo = self.make_wordpress({
+            "wp-content/plugins/acme-forms/acme-forms.php": header.format("Acme Forms", ""),
+            "wp-content/plugins/acme-forms/inc/a.php": "<?php\n",
+            "wp-content/plugins/seo-pack/readme.txt": "=== SEO ===\nStable tag: 1.4.2\n",
+            "wp-content/plugins/seo-pack/seo-pack.php": header.format("SEO", ""),
+            "wp-content/plugins/vendor-tool/main.php": header.format(
+                "Vendor Tool", "Plugin URI: https://vendor.example.com/tool\n"
+            ),
+            "wp-content/plugins/own-links/main.php": header.format(
+                "Own", "Author URI: https://www.example.org/\n"
+            ),
+            "wp-content/plugins/wordfence/wordfence.php": header.format("Wordfence", ""),
+            "wp-content/mu-plugins/acme-hooks/loader.php": header.format("Hooks", ""),
+            "wp-content/plugins/index.php": "<?php\n",
+            "wp-content/themes/acme/plugins/skip/a.php": "<?php\n",
+        })
+        self.context_for(repo)
+        found = self.plugins()
+        base = "wp-content/plugins/"
+        self.assertEqual(
+            {path: entry["third_party"] for path, entry in found.items()},
+            {
+                base + "acme-forms": False,
+                base + "seo-pack": True,
+                base + "vendor-tool": True,
+                base + "own-links": False,
+                base + "wordfence": True,
+                "wp-content/mu-plugins/acme-hooks": False,
+                "wp-content/themes/acme/plugins/skip": False,
+            },
+        )
+        self.assertEqual(set(found[base + "seo-pack"]), {"repo", "path", "third_party", "why"})
+        self.assertEqual(found[base + "seo-pack"]["repo"], "wordpress")
+        self.assertIn("Stable tag", found[base + "seo-pack"]["why"])
+        self.assertIn("vendor.example.com", found[base + "vendor-tool"]["why"])
+        self.assertIn("connu", found[base + "wordfence"]["why"])
+
+    def test_plugin_folders_under_bedrock_and_src_are_found(self):
+        repo = self.make_wordpress({
+            "web/app/plugins/acme-a/a.php": "<?php\n",
+            "src/plugins/acme-b/b.php": "<?php\n",
+        })
+        self.context_for(repo)
+        self.assertEqual(set(self.plugins()), {"web/app/plugins/acme-a", "src/plugins/acme-b"})
+
+    def test_only_wordpress_repos_are_listed(self):
+        repo = self.make_wordpress({"plugins/acme-a/a.php": "<?php\n"})
+        self.context_for(repo, stack="vue")
+        self.assertEqual(self.run_json(["wp-plugins", self.run_dir]), {"plugins": []})
+
+    def test_reads_are_capped_and_the_plugin_code_never_runs(self):
+        calls = []
+        repo = self.make_wordpress({
+            "plugins/big/readme.txt": "x" * 200000 + "\nStable tag: 1.0\n",
+            "plugins/big/big.php": "<?php\n",
+        })
+        self.context_for(repo)
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.run(command, **kwargs)
+
+        found = {e["path"]: e for e in self.run_json(["wp-plugins", self.run_dir], run=run)["plugins"]}
+        self.assertFalse(found["plugins/big"]["third_party"])
+        self.assertTrue(all(command[0] == "git" for command in calls))
+        self.assertTrue(all("ls-files" in command or "show" in command for command in calls))
+
+    def test_unreadable_repo_is_reported_not_fatal(self):
+        self.context_for(self.tmp_dir() / "missing")
+        result = self.run_json(["wp-plugins", self.run_dir])
+        self.assertEqual(result["plugins"], [])
+        self.assertEqual([item["repo"] for item in result["unreadable"]], ["wordpress"])
