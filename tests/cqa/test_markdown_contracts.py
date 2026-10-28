@@ -1352,5 +1352,47 @@ class VerdictsReferenceTest(unittest.TestCase):
                 self.assertIsNone(kept["guardrail"])
 
 
+class LotCReadingTest(unittest.TestCase):
+    def test_auditor_reads_stylelint_and_deps(self):
+        text = _text(AUDITOR)
+        for needle in (
+            "`tools/stylelint`", "`selector-class-pattern`", "`config-custom-pattern`",
+            "`max-nesting-depth`", "`config-gap`", "`config-missing`", "`config-unresolved`",
+            "`tools/deps`", "`vulnerable-package`", "`lockfile-missing`", "`minimum-stability`",
+            "`abandoned-package`", "`lockfile-not-audited`", "`audit-unavailable`",
+            "`not-at-audited-commit`", "`viewport`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        self.assertIn("only when `deps` is missing, failed or skipped", text)
+
+    def test_auditor_reads_both_lighthouse_passes(self):
+        text = _text(AUDITOR)
+        for needle in ("`tools/lighthouse-desktop`", "`yellowlab-desktop`", "CQ-72"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        self.assertIn("limits the proof to mobile", text)
+
+    def test_agents_read_grouped_summaries(self):
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            with self.subTest(path=path.name):
+                self.assertIn("one finding per rule and per page", text)
+                self.assertIn("`selector`", text)
+                self.assertIn("`raw/`", text)
+
+    def test_browser_reads_the_viewport_tool_first(self):
+        text = _text(BROWSER)
+        for needle in (
+            "`viewport`", "`lighthouse-desktop`", "`tools/viewport`", "`horizontal-scroll`",
+            "`overflowing-element`", "`clipped-text`", "`zoom-200`", "CQ-17", "CQ-120",
+            "320 to 1920", "`ok_human`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        self.assertIn("only when `viewport` is missing, failed or skipped", text)
+        self.assertIn("Look at the capture", text)
+
+
 if __name__ == "__main__":
     unittest.main()

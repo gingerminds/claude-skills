@@ -49,9 +49,9 @@ Read, in this order:
 | Required tool | Where to look |
 |---|---|
 | Code | Read, Grep and Glob in each repo (`repos[].path`). The folders listed in `repos[].third_party_paths` of `context.json` are third-party code (plugins): they are outside the scope of the code rows (CQ-40, CQ-66, CQ-113), so do not judge them; say so in `summary` when it matters (for example « plugins tiers exclus »). |
-| CLI local | Read-only commands through the project runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`) when it is already up, such as `composer audit --locked`, `npm audit --omit=dev`, linters in check mode. Runner not up: the same audits on the host, against the lockfile; otherwise `unknown`. |
+| CLI local | For the Composer and npm audits: `tools/deps` (audited commit) first, and your own command only when `deps` is missing, failed or skipped. Other read-only commands through the project runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`) when it is already up, such as `composer audit --locked`, `npm audit --omit=dev`, linters in check mode. Runner not up: the same audits on the host, against the lockfile; otherwise `unknown`. |
 | HTTP | `tools/http/summary.json`. Missing answer: your own GET or HEAD (see "HTTP"), else `needs_probes`. |
-| Audit web | `tools/lighthouse`, `a11y`, `nu`, `yellowlab`, `assets`, `testssl`, `gitleaks`, `redocly`, `schemathesis`. |
+| Audit web | `tools/lighthouse`, `lighthouse-desktop`, `a11y`, `nu`, `yellowlab`, `yellowlab-desktop`, `viewport`, `stylelint`, `deps`, `assets`, `testssl`, `gitleaks`, `redocly`, `schemathesis`. |
 | Crawler | `tools/crawl`. |
 | SSH serveur, BDD | In a `server` lot: the SSH guard (see "Server lot"). In other lots: `facts/server.json`. |
 | Navigateur | Not yours (a browser lot reaches you only when the browser is unavailable): judge what the code and the tools show, `unknown` for the rest. |
@@ -107,6 +107,29 @@ The counts also hold the requests that went wrong: `http_5xx`, `http_503`, `http
 - A crawl `ok` whose `reason` starts with « crawl tronqué » covered only part of the site: read `orphan-page` and `privacy-page-missing` with reserve (a missing finding is not proof), and do not judge a page the crawl did not reach (absent from `raw/pages.jsonl`).
 - A crawl `ok` with another `reason` (start page forbidden by robots.txt, or redirected off the target: only sitemap URLs were crawled) is partial too: read it with the same reserve, and when `counts.pages` is 0 the rows that rely on the crawl alone are `unknown`.
 - `raw/site.json` with `adopted_origin` set: the target was given in http and its start page redirects to the same host in https; the crawl ran on that https origin. This is expected, not a finding, and it shows that http redirects to https.
+
+### Stylelint
+
+`tools/stylelint` (`summary.json`) lists the violations per rule and per file, and the configuration findings.
+- CQ-40: `selector-class-pattern` violations and `config-custom-pattern` (the project's own class pattern).
+- CQ-66: `max-nesting-depth` violations.
+- `config-gap`, `config-missing` and `config-unresolved` go in the `summary` of the row, with the file concerned. `config-missing` is orange, or info when the files sit outside every configuration's folder.
+- `not-at-audited-commit` (the folder was read instead of the audited commit) narrows the scope of the proof: say so in `summary`. `file-unchecked` names a file the tool could not lint: do not judge it.
+
+### Dependencies
+
+`tools/deps/summary.json` covers CQ-113 (the audit at the audited commit).
+- `vulnerable-package`: `red` for a high or critical advisory, lower severities give `partial`.
+- `lockfile-missing`, `minimum-stability`, `abandoned-package`: part of the row, orange or info as the finding says.
+- `lockfile-not-audited`, `audit-unavailable`, `not-at-audited-commit`: the advisory part is `unknown` or narrowed, with the reason in `summary`. Never conclude "no vulnerability" from them.
+
+### Lighthouse and Yellow Lab
+
+CQ-72 reads `tools/lighthouse` (mobile) and `tools/lighthouse-desktop`, completed by `yellowlab` and `yellowlab-desktop`. A desktop pass that is missing or skipped limits the proof to mobile: say so in `summary`.
+
+### a11y and Nu
+
+`tools/a11y` and `tools/nu` give one finding per rule and per page: `value` is the number of occurrences, `selector` and `message` the first example. Read `raw/` only for a precise example.
 
 ## Method
 

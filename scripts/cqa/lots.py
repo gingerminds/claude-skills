@@ -46,7 +46,7 @@ _BACKOFFICE_SECTION = re.compile(r"^(back|bo$)", re.IGNORECASE)
 # Matches tool names, not substrings ("syntaxe", "taxe").
 _TOOLBOX_HINT = re.compile(
     r"gitleaks|testssl|lighthouse|\baxe\b|validateur nu|\bnu html|yellow ?lab|redocly"
-    r"|schemathesis|\bcrawl",
+    r"|schemathesis|\bcrawl|\bstylelint|\bcomposer audit|\bnpm audit|\bd[ée]bordements?",
     re.IGNORECASE,
 )
 

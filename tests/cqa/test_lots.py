@@ -765,5 +765,22 @@ class SessionLotsTest(unittest.TestCase):
                 self.assertEqual(lot_ids(built), ["code-qualite-outils"])
 
 
+    def test_lot_c_rows_go_to_outils_lots(self):
+        for hint in (
+            "Stylelint (max-nesting-depth)",
+            "composer audit, npm audit",
+            "détection des débordements horizontaux",
+            "zoom 200 %, détection des débordements",
+            "Débordement à 320 px",
+        ):
+            with self.subTest(hint=hint):
+                built = build_lots([make_row(1, tooling_hint=hint)])
+                self.assertEqual(lot_ids(built), ["code-qualite-outils"])
+        for hint in ("Navigateur piloté (onglet Coverage)", "audit", "audit de code", "relecture"):
+            with self.subTest(hint=hint):
+                built = build_lots([make_row(1, tooling_hint=hint)])
+                self.assertEqual(lot_ids(built), ["code-qualite"])
+
+
 if __name__ == "__main__":
     unittest.main()
