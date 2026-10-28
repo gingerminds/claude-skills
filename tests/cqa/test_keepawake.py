@@ -166,6 +166,27 @@ class KeepawakeTest(unittest.TestCase):
         self.assertEqual(self.pid(), first)
         self.assertEqual(len(self.log.read_text().splitlines()), 1)
 
+    def test_keepawake_warns_when_the_inhibitor_exits_at_once(self):
+        self.stub("systemd-inhibit", "#!/bin/sh\nexit 1\n")
+        result = self.keepawake("start", str(self.run_dir))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("mise en veille", result.stderr)
+        self.assertFalse(self.pid_file.exists())
+
+    def test_keepawake_without_setsid_still_kills_the_group(self):
+        (self.bin / "setsid").unlink()
+        self.stub("systemd-inhibit", INHIBITOR_STUB)
+        result = self.keepawake("start", str(self.run_dir))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        time.sleep(0.3)
+        pid = self.pid()
+        members = self.children_of_group(pid)
+        self.assertGreaterEqual(len(members), 2, members)
+        self.assertEqual(self.keepawake("stop", str(self.run_dir)).returncode, 0)
+        for member in members:
+            self.assertTrue(wait_gone(member), member)
+        self.assertFalse(self.pid_file.exists())
+
     def test_keepawake_usage(self):
         self.assertEqual(self.keepawake().returncode, 2)
         self.assertEqual(self.keepawake("nope", str(self.run_dir)).returncode, 2)

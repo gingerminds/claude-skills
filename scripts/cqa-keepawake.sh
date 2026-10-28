@@ -52,6 +52,21 @@ launch() {
   LAUNCHED_PID=$!
 }
 
+warn_unprotected() {
+  say "Avertissement : la mise en veille n'est pas empêchée (aucun outil disponible ou outil inopérant sur ce poste : systemd-inhibit, caffeinate). Gardez le poste éveillé vous-même pendant l'audit."
+}
+
+# True when the pid is a running process (a zombie counts as dead).
+is_running() {
+  local state
+  state="$(ps -o stat= -p "$1" 2>/dev/null)" || return 1
+  state="${state//[[:space:]]/}"
+  case "$state" in
+    '' | Z*) return 1 ;;
+  esac
+  return 0
+}
+
 start() {
   local run_dir="$1" file tool
   file="$run_dir/keepawake.pid"
@@ -68,7 +83,12 @@ start() {
     tool="caffeinate"
     launch caffeinate -dims
   else
-    say "Avertissement : aucun outil pour empêcher la mise en veille (systemd-inhibit, caffeinate). Gardez le poste éveillé vous-même pendant l'audit."
+    warn_unprotected
+    return 0
+  fi
+  sleep 0.3
+  if ! is_running "$LAUNCHED_PID"; then
+    warn_unprotected
     return 0
   fi
   printf '%s %s\n' "$LAUNCHED_PID" "$tool" > "$file"
