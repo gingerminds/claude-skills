@@ -1622,6 +1622,25 @@ class SynthesisTest(AuditCase):
         self.assertNotIn("## Remarques", text)
         self.assertNotIn("## Décisions mises de côté", text)
 
+    def test_not_applicable_tools_are_listed_apart(self):
+        run_dir = self.make_planned_run()
+        self.run_json(["skip", run_dir, "redocly", "aucune spec", "--not-applicable"])
+        self.run_json(["skip", run_dir, "nu", "relance"])
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 17))
+        tools = text.split("## Outils\n")[1].split("\n## ")[0]
+        apart = text.split("## Outils non applicables\n")[1].split("\n## ")[0]
+        self.assertIn("- nu : ignoré (relance)", tools)
+        self.assertNotIn("redocly", tools)
+        self.assertIn("- redocly (aucune spec)", apart)
+        self.assertNotIn("nu", apart)
+        self.assertLess(text.index("## Outils\n"), text.index("## Outils non applicables"))
+
+    def test_synthesis_without_not_applicable_tools(self):
+        run_dir = self.make_planned_run()
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 17))
+        apart = text.split("## Outils non applicables\n")[1].split("\n## ")[0]
+        self.assertEqual("Aucun.", apart.strip())
+
     def test_synthesis_lists_deferred_decisions(self):
         run_dir = self.make_planned_run()
         self.write(run_dir, "deferred.json", {"items": [
@@ -2020,6 +2039,15 @@ class SkipTest(AuditCase):
         self.assertEqual(document["duration_s"], 0)
         self.assertEqual((document["targets"], document["files"], document["counts"]), ([], [], {}))
         self.assertRegex(document["started_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+    def test_skip_not_applicable_writes_the_status(self):
+        run_dir = self.make_run()
+        self.run_json(["skip", run_dir, "redocly", "aucune spec", "--not-applicable"])
+        document = self.read(run_dir, "tools/redocly/result.json")
+        self.assertEqual(document["status"], "not_applicable")
+        self.assertEqual(document["reason"], "aucune spec")
+        self.run_json(["skip", run_dir, "schemathesis", "aucune spec"])
+        self.assertEqual(self.read(run_dir, "tools/schemathesis/result.json")["status"], "skipped")
 
     def test_skip_overwrites_an_earlier_result(self):
         run_dir = self.make_run()

@@ -532,15 +532,25 @@ class ToolCommandsTest(LauncherCase):
         self.assertEqual("skipped", document["status"])
         self.assertEqual("authentification requise", document["reason"])
 
-    def test_no_openapi_spec_skips_redocly_and_schemathesis(self):
+    def test_no_openapi_spec_makes_redocly_and_schemathesis_not_applicable(self):
         (self.laravel / "openapi.yaml").unlink()
         (self.laravel / "docs" / "swagger v2.json").unlink()
         for tool in ("redocly", "schemathesis"):
             result = self.run_tool(tool)
             self.assertEqual(0, result.returncode, result.stderr)
             document = self.read_json(f"tools/{tool}/result.json")
-            self.assertEqual("skipped", document["status"])
-            self.assertIn("OpenAPI", document["reason"])
+            self.assertEqual("not_applicable", document["status"])
+            self.assertEqual("aucune spec OpenAPI trouvée dans les repos", document["reason"])
+            self.assertIn(f"{tool} : non applicable (aucune spec OpenAPI", result.stdout + result.stderr)
+        self.assertEqual([], self.tool_runs())
+
+    def test_schemathesis_without_spec_is_not_applicable_even_with_auth(self):
+        (self.laravel / "openapi.yaml").unlink()
+        (self.laravel / "docs" / "swagger v2.json").unlink()
+        result = self.run_tool("schemathesis", **SECRETS)
+        self.assertEqual(0, result.returncode, result.stderr)
+        document = self.read_json("tools/schemathesis/result.json")
+        self.assertEqual("not_applicable", document["status"])
         self.assertEqual([], self.tool_runs())
 
     def test_crawl(self):

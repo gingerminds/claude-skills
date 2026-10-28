@@ -250,6 +250,11 @@ def _register_audit(commands) -> None:
     sub = _run_command(commands, "skip", "marque un outil comme ignoré", _cmd_skip)
     sub.add_argument("tool", help="nom de l'outil")
     sub.add_argument("reason", help="raison, affichée dans la synthèse")
+    sub.add_argument(
+        "--not-applicable",
+        action="store_true",
+        help="statut non applicable (rien à examiner) au lieu d'ignoré",
+    )
     sub = _run_command(commands, "assign", "propose une répartition des lignes", _cmd_assign)
     sub.add_argument(
         "--include-unknown", action="store_true", help="ajoute les lignes non évaluées"
@@ -1117,7 +1122,7 @@ def _cmd_skip(args, services) -> int:
         "tool": args.tool,
         "toolbox_version": None,
         "tool_version": None,
-        "status": "skipped",
+        "status": "not_applicable" if args.not_applicable else "skipped",
         "reason": reason,
         "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "duration_s": 0,

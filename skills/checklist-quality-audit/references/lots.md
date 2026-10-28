@@ -56,7 +56,7 @@ GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' bash "$S/
 - It runs `http`, `gitleaks`, `assets`, `lighthouse`, `a11y`, `nu`, `yellowlab`, `testssl`, `redocly`, `schemathesis` and `crawl`, one after the other, then writes `tools/manifest.json`.
 - The launcher reads `cqa_plan.py toolbox-env`, `repos-tsv` and `openapi-specs` itself: never call them by hand.
 - Exit 0: all done. Exit 1: at least one tool failed; the manifest says which, with its reason. Exit 2: usage or environment (Docker, `context.json`).
-- When the background task ends, read `tools/manifest.json` and tell the lead the tools that failed or were skipped, with their reason.
+- When the background task ends, read `tools/manifest.json` and tell the lead the tools that failed or were skipped, with their reason. Then add one separate line naming the `not_applicable` tools (nothing to examine, for example no OpenAPI spec) and their reason; ask nothing about them.
 
 Resume (SKILL.md section 3) with a `tools/` folder but no `tools/manifest.json`: the collection was interrupted. Rebuild the manifest from what finished (a tool folder without `result.json` shows as failed):
 

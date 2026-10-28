@@ -1107,6 +1107,11 @@ class AgentsTest(unittest.TestCase):
                 with self.subTest(agent=path.name, needle=needle):
                     self.assertIn(needle, text)
 
+    def test_not_applicable_status_is_documented(self):
+        for path in (AUDITOR, BROWSER, REFERENCES / "lots.md"):
+            with self.subTest(path=path.name):
+                self.assertIn("not_applicable", _text(path))
+
     def test_agents_never_request_php_files(self):
         server = _text(SKILL_DIR / "references" / "server.md")
         for path in (AUDITOR, BROWSER):

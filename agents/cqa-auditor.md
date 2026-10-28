@@ -58,7 +58,7 @@ Read, in this order:
 | Comptes de test | `unknown` for the parts that need a logged-in session, with the steps in `human_check`. |
 | Intervention humaine | Never above `ok_human`; `human_check` says what the human must do. |
 
-A tool that is missing, failed or skipped makes the parts that depend on it `unknown`, with the tool and its reason in `summary`.
+A tool that is missing, failed or skipped makes the parts that depend on it `unknown`, with the tool and its reason in `summary`. `not_applicable`: the tool had nothing to examine (its `reason` says why); it is not a failure: judge the row from the code and the other sources.
 
 ### Crawl
 

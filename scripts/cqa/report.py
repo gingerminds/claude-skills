@@ -29,7 +29,12 @@ _STATUS_ORDER = (
     STATUS_NA,
     STATUS_STANDBY,
 )
-_TOOL_STATUS = {"ok": "ok", "failed": "en échec", "skipped": "ignoré"}
+_TOOL_STATUS = {
+    "ok": "ok",
+    "failed": "en échec",
+    "skipped": "ignoré",
+    "not_applicable": "non applicable",
+}
 _NO_CATEGORY = "Sans catégorie"
 _NO_RESULT = "result.json absent ou illisible"
 _UNKNOWN_STATUS = "statut inconnu"
@@ -48,6 +53,7 @@ _EMPTY = {
     _HUMAN_SECTION: "Aucun.",
     "Écarts relevés": "Aucun.",
     "Outils": "Aucun outil lancé.",
+    "Outils non applicables": "Aucun.",
 }
 
 
@@ -141,6 +147,7 @@ def _synthesis(context, plan, lots, rows, tools, now, run_dir) -> str:
         ),
         ("Écarts relevés", _gap_lines(context)),
         ("Outils", _tool_lines(tools)),
+        ("Outils non applicables", _not_applicable_lines(tools)),
     ]
     deferred = _deferred_lines(run_dir)
     if deferred:
@@ -390,10 +397,21 @@ def _tool_lines(tools: dict) -> list:
     lines = []
     for item in tools["tools"]:
         status = item.get("status")
+        if status == "not_applicable":
+            continue
         label = _TOOL_STATUS.get(status, status) if isinstance(status, str) and status else None
         label = label or _UNKNOWN_STATUS
         reason = _line(item.get("reason"))
         lines.append(f"- {item['tool']} : {label}" + (f" ({reason})" if reason else ""))
+    return lines
+
+
+def _not_applicable_lines(tools: dict) -> list:
+    lines = []
+    for item in tools["tools"]:
+        if item.get("status") == "not_applicable":
+            reason = _line(item.get("reason"))
+            lines.append(f"- {item['tool']}" + (f" ({reason})" if reason else ""))
     return lines
 
 

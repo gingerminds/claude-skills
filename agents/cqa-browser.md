@@ -54,7 +54,7 @@ Read, in this order:
 2. `rows.json`: the rows whose `ref` is in `refs`. Use `title`, `category`, `sections`, `tools`, `tooling_hint` and `fiche_path`.
 3. The fiche of each row (`fiche_path`). "Comment tester" is the test to run, "À faire" the requirement, "Par techno" the techno part.
 4. `context.json`: `target`, `key_pages` (`template`, `url`), `sites` when present (`domain`, `backoffice`, `sso`, `home`: visit each `home` after the key pages, in addition to them), `test_accounts` (`front`, `backoffice`: whether the lead has test accounts to log in with), `repos`, `available_tools`, `phase_filter`.
-5. `tools/<tool>/summary.json` of the tools your rows need (`a11y`, `lighthouse`, `nu`, `http`...). Read `tools/<tool>/result.json` first: a tool without `result.json` has not finished, do not wait for it; a `status` other than `ok` comes with its `reason`. Note the `started_at` of each `result.json` you read.
+5. `tools/<tool>/summary.json` of the tools your rows need (`a11y`, `lighthouse`, `nu`, `http`...). Read `tools/<tool>/result.json` first: a tool without `result.json` has not finished, do not wait for it; a `status` other than `ok` comes with its `reason`. `not_applicable`: the tool had nothing to examine (its `reason` says why); it is not a failure: judge the row from the code and the other sources. Note the `started_at` of each `result.json` you read.
 6. `facts/server.json` when `needs_server_facts` is true: the server part of the mixed rows. A fact that is missing makes that part `unknown`.
 7. `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/references/verdicts.md`: the verdict rules. Follow them exactly.
 

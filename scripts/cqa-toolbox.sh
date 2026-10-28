@@ -130,6 +130,11 @@ skip_tool() {
   say "$1 : ignoré ($2)."
 }
 
+na_tool() {
+  python3 "$S/cqa_plan.py" skip "$RUN_DIR" "$1" "$2" --not-applicable >/dev/null || return 1
+  say "$1 : non applicable ($2)."
+}
+
 # docker_tool <image> <env set> [docker options ...] -- [image arguments ...]
 docker_tool() {
   local image="$1" envset="$2" env_name
@@ -289,7 +294,7 @@ tool_redocly() {
   prepare_tool redocly || return 1
   list_specs || return 1
   if [ -z "$SPECS" ]; then
-    skip_tool redocly "aucune spec OpenAPI trouvée dans les repos"
+    na_tool redocly "aucune spec OpenAPI trouvée dans les repos"
     return
   fi
   while IFS=$'\t' read -r repo spec; do
@@ -304,13 +309,13 @@ tool_redocly() {
 tool_schemathesis() {
   local repo spec
   prepare_tool schemathesis || return 1
-  if [ -n "${GM_AUDIT_AUTH_USER:-}" ]; then
-    skip_tool schemathesis "authentification requise"
-    return
-  fi
   list_specs || return 1
   if [ -z "$SPECS" ]; then
-    skip_tool schemathesis "aucune spec OpenAPI trouvée dans les repos"
+    na_tool schemathesis "aucune spec OpenAPI trouvée dans les repos"
+    return
+  fi
+  if [ -n "${GM_AUDIT_AUTH_USER:-}" ]; then
+    skip_tool schemathesis "authentification requise"
     return
   fi
   while IFS=$'\t' read -r repo spec; do
