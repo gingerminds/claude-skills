@@ -8,6 +8,7 @@ from typing import Callable, Optional
 
 from cqa.checklist import ref_label
 from cqa.findings import validate_document
+from cqa.lots import build_lots
 
 _HUMAN = "Intervention humaine"
 _MINUTES = {"code": 5, "server": 10, "browser": 15}
@@ -105,18 +106,29 @@ def rerun_candidates(
     lot_of = {ref: lot["id"] for lot in lots for ref in lot.get("refs") or []}
     available = set(context.get("available_tools") or [])
 
-    for ref, item in sorted(latest.items()):
-        if item["verdict"] == "unknown":
-            add(ref, lot_of.get(ref), "cause_levee", "constat non évalué (unknown)")
+    for ref in sorted(lot_of):
+        item = latest.get(ref)
+        if item is None:
+            add(ref, lot_of[ref], "cause_levee", "aucun constat valide")
+        elif item["verdict"] == "unknown":
+            add(ref, lot_of[ref], "cause_levee", "constat non évalué (unknown)")
+    rows = {
+        row["ref"]: row
+        for row in _read_object(run_dir / "rows.json").get("rows") or []
+        if isinstance(row, dict) and isinstance(row.get("ref"), int)
+    }
     for entry in excluded:
         required = [tool for tool in entry.get("tools") or [] if tool != _HUMAN]
         if entry.get("reason") == "no_tools" and required and set(required) <= available:
-            add(
-                entry["ref"],
-                None,
-                "cause_levee",
-                f"outils désormais disponibles : {', '.join(required)}",
-            )
+            ref = entry["ref"]
+            placed = _placement(rows.get(ref), lots, rows)
+            if placed is None:
+                notes.append(
+                    f"{ref_label(ref)} ne peut pas être relancée dans ce run : "
+                    "aucun lot existant ne lui convient, il faut un nouveau run."
+                )
+            lot_of[ref] = placed
+            add(ref, placed, "cause_levee", f"outils désormais disponibles : {', '.join(required)}")
 
     tools = _tool_reasons(run_dir, latest, lot_of, add, notes)
     _code_reasons(context, latest, lot_of, git_run, add, notes)
@@ -146,6 +158,19 @@ def rerun_candidates(
         "estimate_min": sum(_MINUTES.get(lot.get("kind"), 5) for lot in chosen),
         "notes": notes,
     }
+
+
+def _placement(row: Optional[dict], lots: list, rows: dict) -> Optional[str]:
+    """Return the id of the existing lot the lot builder gives a row, None when none fits."""
+    if row is None:
+        return None
+    kept = [rows[ref] for lot in lots for ref in lot.get("refs") or [] if ref in rows]
+    kept = [item for item in kept if item["ref"] != row["ref"]] + [row]
+    for lot in build_lots(kept):
+        if row["ref"] in lot["refs"]:
+            existing = {item.get("id") for item in lots}
+            return lot["id"] if lot["id"] in existing else None
+    return None
 
 
 def _read_object(path: Path) -> dict:
