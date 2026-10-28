@@ -119,9 +119,10 @@ The counts also hold the requests that went wrong: `http_5xx`, `http_503`, `http
 ### Dependencies
 
 `tools/deps/summary.json` covers CQ-113 (the audit at the audited commit).
-- `vulnerable-package`: `red` for a high or critical advisory, lower severities give `partial`.
+- `vulnerable-package`: `red` for a high or critical advisory, a moderate advisory is `orange` and a low one `info`, as the finding says.
 - `lockfile-missing`, `minimum-stability`, `abandoned-package`: part of the row, orange or info as the finding says.
 - `lockfile-not-audited`, `audit-unavailable`, `not-at-audited-commit`: the advisory part is `unknown` or narrowed, with the reason in `summary`. Never conclude "no vulnerability" from them.
+- `file-unchecked` (a lock file the tool could not read) is not judged.
 
 ### Lighthouse and Yellow Lab
 

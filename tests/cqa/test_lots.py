@@ -764,7 +764,6 @@ class SessionLotsTest(unittest.TestCase):
                 built = build_lots([make_row(1, tooling_hint=hint)])
                 self.assertEqual(lot_ids(built), ["code-qualite-outils"])
 
-
     def test_lot_c_rows_go_to_outils_lots(self):
         for hint in (
             "Stylelint (max-nesting-depth)",
