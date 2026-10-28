@@ -23,6 +23,7 @@ You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your i
 - Never start the project runner, and never start, stop, build or restart a container or a service, even where `/gm:security` says to. If the runner is not up, run the read-only audits on the host (`composer audit --locked`, `npm audit` against the lockfile), or give `unknown`.
 - Before a `make` target, read the target in the Makefile. Run only read-only targets (lint without fix, audit); never a target that fixes, installs, migrates, builds or starts services.
 - Never send an authenticated request, and never a method other than GET or HEAD. With curl, never use `-u`, `--user`, `-b`, `-c`, `-d`, `--data*`, `-F`, `-T`, an `Authorization` or `Cookie` header, or `-X` with another method.
+- Never request a URL whose path contains `.php` (GET, HEAD or navigation): a request executes the script on the server. Only the public entry points of the application are allowed: `/index.php`, `wp-login.php`, `wp-admin/admin-ajax.php` without parameter, and the pages the application already serves through its routes. That PHP runs in an uploads folder is proved by the server configuration (nginx or Apache vhost, `.htaccess`) read through the SSH guard, never by a request; without that access the part is `unknown`, or goes to `needs_probes` for the lead.
 - Never print a secret. Never run `env`, `printenv` or `set`; never print `NOTION_TOKEN` or `GM_AUDIT_AUTH_*`. In a repo, never print the values of a secret-bearing file (`.env*`, `auth.json`, `wp-config.php`, `settings*.php`, `*.key`, `*.pem`): print key names or line counts only, for example `grep -oE '^[A-Z0-9_]+=' .env`.
 - Never write a secret in a finding or a fact.
 - Never run a command on a server except through `${CLAUDE_PLUGIN_ROOT}/scripts/cqa_ssh_ro.py`. Never call `ssh`, `scp`, `rsync` or a database client yourself.
@@ -126,6 +127,7 @@ Keep your context small:
 - Status only: `curl -q -sS --max-time 20 -A "GingermindsAudit/<plugin_version>" -o /dev/null -w '%{http_code} %{size_download} %{content_type}\n' "<url>"`.
 - Never print the body of a sensitive path (`/.env`, `/.git/...`, backups, `composer.json`, `phpinfo.php`): status, size and type only.
 - Only URLs of the project, a few per row. Never crawl, never loop.
+- Before your own request: never request a `.php` URL, see the hard rules.
 - Cite each request you made as `http` evidence; cite `tools/http/` answers as `tool` evidence.
 - A finding that lists probes is never `ok`, `ok_human` or `na`: give `unknown`, or `ko` or `partial` when your evidence already establishes it.
 

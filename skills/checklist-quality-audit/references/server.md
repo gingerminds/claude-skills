@@ -64,6 +64,17 @@ Folder of an application (diagnostic): ask the lead, with the candidates of `ls 
 - The guard first puts the session in read-only mode with `SET SESSION TRANSACTION READ ONLY`, which targets MySQL and MariaDB. PostgreSQL is not supported in v1: the query is refused or fails, and the row part is `unknown`.
 - The connection credentials are never read.
 
+## PHP in an uploads folder (CQ-97, CQ-144)
+
+Never request a `.php` file under `wp-content/uploads` (or any uploads folder) to prove that the server runs it: a GET executes the script. Read the configuration instead, through the guard:
+
+1. Find the vhost: `ls /etc/nginx/sites-enabled`, `/etc/nginx/conf.d` or `/etc/apache2/sites-enabled`, then `cat` the file for the site (`grep` is not recursive).
+2. nginx: look for a `location ~ \.php$` block passed to PHP-FPM and for a `location` on the uploads path that comes first and carries `deny all` (or `return 403`). A `location ~ \.php$` that also matches the uploads path, with no such `deny`, means PHP runs there: `ko`.
+3. Apache: `cat` the `.htaccess` of the uploads folder and the vhost, look for `php_flag engine off`, `RemoveHandler .php`, `Require all denied` or a `FilesMatch` on `\.php`.
+4. A container or a front proxy that hides the config: the part is `unknown`, with the file you could not read.
+
+Cite the config file and the matching lines as `file` evidence, never a secret.
+
 ## Exit codes
 
 | Code | Meaning | What to do |

@@ -332,6 +332,18 @@ class AgentsTest(unittest.TestCase):
                 with self.subTest(agent=path.name, needle=needle):
                     self.assertIn(needle, text)
 
+    def test_agents_never_request_php_files(self):
+        server = _text(SKILL_DIR / "references" / "server.md")
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            with self.subTest(agent=path.name):
+                self.assertIn("Never request a URL whose path contains `.php`", text)
+                for needle in ("GET, HEAD or navigation", "/index.php", "wp-login.php", "wp-admin/admin-ajax.php", "never by a request"):
+                    self.assertIn(needle, text)
+        for needle in ("CQ-97", "CQ-144", "location ~ \\.php$", "php_flag engine off", ".htaccess", "Never request a `.php` file"):
+            with self.subTest(server=needle):
+                self.assertIn(needle, server)
+
     def test_followup_writes_a_complete_lot_document(self):
         for path in (AUDITOR, BROWSER):
             with self.subTest(agent=path.name):
