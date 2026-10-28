@@ -194,13 +194,13 @@ def verdict_text(label, note="Constat"):
 
 
 OLD_LAYOUT = (
-    "Audit PRE-MEL · 27/10/2026 · lancé par Julien L\n"
+    "Audit PRE-MEL · 27/10/2026 · lancé par Camille D\n"
     "Verdict : À traiter (confiance haute)\nConstat : x"
 )
 
 
 def verdict_blocks(label, note="x"):
-    head = "Audit PRE-MEL · 27/10/2026 · lancé par Julien L"
+    head = "Audit PRE-MEL · 27/10/2026 · lancé par Camille D"
     return f"{head}\n\nVerdict :\n{label}\n\nConstat :\n{note}"
 
 
