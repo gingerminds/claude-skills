@@ -97,7 +97,10 @@ grep -E '^[A-Za-z0-9_-]+:' "<chemin du repo>/Makefile"
 docker compose --project-directory "<chemin du repo>" ps --status running --services
 ```
 
-- "CLI local" is available when the runner of each repo is up, or, failing that, when the host has `composer` (repo with `composer.lock`) and `npm` (repo with `package-lock.json`) for the read-only audits, or when `agence_1_2` is true (section 6): `stylelint` and `deps` run these checks in the toolbox.
+- "CLI local" is available when any of these holds:
+  - the runner of each repo is up;
+  - the host has `composer` (repo with `composer.lock`) and `npm` (repo with `package-lock.json`), for the read-only audits;
+  - `agence_1_2` is true (from the `doctor` run of step 6): `stylelint` and `deps` do these checks in the toolbox.
 - Runner down: « Le runner du repo <name> n'est pas démarré. » with « Je le démarre, revérifier » and « Continuer sans ». Never start it yourself.
 - In autonomous mode, do not ask: record `cqa_plan.py defer "$RUN" --kind gap --detail "Le runner du repo <name> n'est pas démarré."` and go on as with « Continuer sans » ("CLI local" as the fallback above allows); never start it.
 

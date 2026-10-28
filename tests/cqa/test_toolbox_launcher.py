@@ -662,7 +662,13 @@ class AllTest(LauncherCase):
         json.loads(result.stdout)
 
     def test_toolbox_older_than_1_2_skips_the_new_tools(self):
-        result = self.launch("all", str(self.run_dir), CQA_STUB_VERSION="1.1.0")
+        self.check_new_tools_skipped("1.1.0")
+
+    def test_unknown_image_label_skips_the_new_tools(self):
+        self.check_new_tools_skipped("unknown")
+
+    def check_new_tools_skipped(self, version):
+        result = self.launch("all", str(self.run_dir), CQA_STUB_VERSION=version)
         self.assertEqual(0, result.returncode, result.stderr)
         new_tools = ("stylelint", "deps", "lighthouse-desktop", "viewport", "yellowlab-desktop")
         for tool in new_tools:
@@ -815,7 +821,8 @@ class DoctorTest(LauncherCase):
         self.assertIs(False, self.doctor(CQA_STUB_MISSING="agence")["agence_crawl"])
 
     def test_agence_1_2_needs_toolbox_1_2(self):
-        cases = {"1.2.0": True, "1.2.3": True, "2.0.0": True, "1.1.0": False, "0.0.0-dev": False}
+        cases = {"1.2.0": True, "1.2.3": True, "2.0.0": True, "1.10.0": True, "1.1.0": False,
+                 "1.2.0-rc1": False, "0.0.0-dev": False}
         for version, expected in cases.items():
             with self.subTest(version=version):
                 self.assertIs(expected, self.doctor(CQA_STUB_VERSION=version)["agence_1_2"])

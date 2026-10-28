@@ -213,7 +213,7 @@ tool_pages() {
   docker_tool agence web -- "$1" --pages /in/context.json
 }
 
-# True when the local agence image is toolbox 1.2.0 or later.
+# True when the local agence image is toolbox 1.2.0 or later (keep in sync with agence_1_2 in doctor).
 agence_supports_1_2() {
   local label
   if [ "$AGENCE_1_2" = "unset" ]; then
@@ -521,6 +521,7 @@ report = {
     "registry_login": login == "1",
     "images": images,
     "agence_crawl": bool(match) and (int(match[1]), int(match[2])) >= (1, 1),
+    # Keep in sync with agence_supports_1_2.
     "agence_1_2": bool(match) and (int(match[1]), int(match[2])) >= (1, 2),
     "arch": arch,
 }
