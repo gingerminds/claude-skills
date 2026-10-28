@@ -1366,6 +1366,20 @@ class ScanTest(AuditCase):
         )
         self.assertNotIn("hunter22", out + err)
 
+    def test_final_scan_skips_the_fiches(self):
+        run_dir = self.make_run()
+        text = '{"Authorization":"Basic BASE64_USER_PASS"}'
+        (run_dir / "fiches").mkdir(exist_ok=True)
+        (run_dir / "fiches" / "CQ-072.md").write_text(text, encoding="utf-8")
+        self.assertEqual(self.run_json(["scan", run_dir]), {"ok": True, "found": []})
+        (run_dir / "findings").mkdir(exist_ok=True)
+        (run_dir / "findings" / "CQ-072.md").write_text(text, encoding="utf-8")
+        code, out, err = self.run_main(["scan", run_dir])
+        self.assertEqual(code, 7)
+        self.assertEqual(
+            json.loads(out)["found"], [{"path": "findings/CQ-072.md", "label": "authorization_header"}]
+        )
+
     def test_scan_of_the_clean_fixture(self):
         run_dir = self.make_run()
         self.assertEqual(self.run_json(["scan", run_dir]), {"ok": True, "found": []})

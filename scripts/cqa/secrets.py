@@ -47,6 +47,28 @@ _AUTH_HEADER = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+_FORM_ATTRIBUTE = re.compile(r"(?:type|autocomplete|name|id)=", re.IGNORECASE)
+_FORM_TOKENS = frozenset(
+    {"password", "current-password", "new-password", "one-time-code", "text", "hidden", "required"}
+)
+_CODE_PREFIX = re.compile(r"[A-Za-z_][\w\\]*(?:::|->)")
+_CODE_CALL = re.compile(r"[A-Za-z_][\w.\\]*\(.*\)", re.DOTALL)
+
+
+def _is_non_secret(match: re.Match) -> bool:
+    """True when a credential match is a form field description or a code expression."""
+    value = match.group("val")
+    if _FORM_ATTRIBUTE.match(value) or value.lower().strip(",;)]") in _FORM_TOKENS:
+        return True
+    if value.startswith(("$", ":")) or _CODE_PREFIX.match(value):
+        return True
+    if match.group("q"):
+        return False
+    end = match.string.find("\n", match.end("val"))
+    rest = match.string[match.start("val"):None if end < 0 else end]
+    return bool(_CODE_CALL.fullmatch(rest.rstrip().rstrip(",;]").rstrip()))
+
+
 _PATTERNS = (
     ("private_key", _PRIVATE_KEY),
     ("aws_key", _AWS),
@@ -64,8 +86,16 @@ def scan_text(text: str, known_values: list[str]) -> list[str]:
     labels = []
     if any(value in text for value in known_values if value):
         labels.append("known_value")
-    labels.extend(label for label, pattern in _PATTERNS if pattern.search(text))
+    labels.extend(label for label, pattern in _PATTERNS if _search(pattern, text))
     return labels
+
+
+def _search(pattern: re.Pattern, text: str) -> bool:
+    return any(not _skipped(pattern, m) for m in pattern.finditer(text))
+
+
+def _skipped(pattern: re.Pattern, match: re.Match) -> bool:
+    return pattern is _CREDENTIAL and _is_non_secret(match)
 
 
 def redact(text: str, known_values: list[str]) -> str:
@@ -74,7 +104,7 @@ def redact(text: str, known_values: list[str]) -> str:
     if values:
         text = re.sub("|".join(re.escape(value) for value in values), lambda _: MASK, text)
     for _, pattern in _PATTERNS:
-        text = pattern.sub(_mask, text)
+        text = pattern.sub(lambda m, p=pattern: m.group(0) if _skipped(p, m) else _mask(m), text)
     return text
 
 
@@ -84,8 +114,12 @@ def known_values_from_env(env: Mapping[str, str] = os.environ) -> list[str]:
     return [value for value in values if len(value) >= _MIN_ENV_LENGTH]
 
 
-def scan_tree(root: Path, known_values: list[str]) -> list[tuple[str, str]]:
+def scan_tree(
+    root: Path, known_values: list[str], exclude: tuple[str, ...] = ()
+) -> list[tuple[str, str]]:
     """Return (relative path, label) pairs for every file under root, sorted by path.
+
+    Paths whose first segment is in exclude are skipped.
 
     A missing root or an unreadable file raises OSError instead of passing as clean.
     """
@@ -98,6 +132,8 @@ def scan_tree(root: Path, known_values: list[str]) -> list[tuple[str, str]]:
                 continue
             text = path.read_bytes().decode("utf-8", errors="replace")
             relative = path.relative_to(root).as_posix()
+            if relative.split("/", 1)[0] in exclude:
+                continue
             found.extend((relative, label) for label in scan_text(text, known_values))
     found.sort(key=lambda pair: pair[0])
     return found

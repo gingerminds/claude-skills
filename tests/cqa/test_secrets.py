@@ -136,6 +136,50 @@ class ScanTextTest(unittest.TestCase):
                 self.assertEqual(scan_text(text, []), [])
 
 
+class NonSecretTest(unittest.TestCase):
+    NON_SECRETS = [
+        "password : type=password, autocomplete=current-password",
+        'autocomplete="new-password"',
+        'type="password"',
+        "name=password",
+        "'password' => ['required', 'confirmed', Password::defaults()]",
+        "$token = bin2hex(random_bytes(32))",
+        "'secret' => config('services.turnstile.secret')",
+        "password=$PASSWORD",
+    ]
+    SECRETS = [
+        'password: "S3cr3t-Pass!"',
+        'password: "Pa(ss)word!"',
+        "DB_PASSWORD=Pa55word2024",
+        "'password' => 'hunter2hunter2'",
+        "api_key=sk_live_51Habcdefghijkl",
+        "token: abcd1234efgh5678",
+    ]
+
+    def test_form_field_descriptions_are_not_secrets(self):
+        for text in self.NON_SECRETS[:4]:
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, []), [])
+                self.assertEqual(redact(text, []), text)
+
+    def test_code_expressions_are_not_secrets(self):
+        for text in self.NON_SECRETS[4:]:
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, []), [])
+                self.assertEqual(redact(text, []), text)
+
+    def test_credential_assignment_still_catches_real_secrets(self):
+        for text in self.SECRETS:
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, []), ["credential_assignment"])
+                self.assertIn("[secret masqué]", redact(text, []))
+
+    def test_secret_after_a_form_description_is_still_masked(self):
+        text = "password : type=password\nDB_PASSWORD=Pa55word2024"
+        self.assertEqual(scan_text(text, []), ["credential_assignment"])
+        self.assertEqual(redact(text, []), "password : type=password\nDB_PASSWORD=[secret masqué]")
+
+
 class RedactTest(unittest.TestCase):
     def test_redact_keeps_label(self):
         self.assertEqual(redact("token=abcdef123456", []), "token=[secret masqué]")
@@ -308,6 +352,14 @@ class ScanTreeTest(unittest.TestCase):
     def test_binary_file_is_scanned_without_error(self):
         (self.root / "blob.bin").write_bytes(b"\xff\xfe\x00DB_PASSWORD=hunter22\x80")
         self.assertEqual(scan_tree(self.root, []), [("blob.bin", "credential_assignment")])
+
+    def test_exclude_skips_by_first_segment(self):
+        self.write("fiches/a.md", "DB_PASSWORD=hunter22")
+        self.write("findings/fiches/b.md", "DB_PASSWORD=hunter22")
+        self.assertEqual(
+            scan_tree(self.root, [], exclude=("fiches",)),
+            [("findings/fiches/b.md", "credential_assignment")],
+        )
 
     def test_missing_root_raises(self):
         with self.assertRaises(FileNotFoundError):

@@ -495,7 +495,7 @@ def _cmd_synthesis(args, services) -> int:
 def _cmd_scan(args, services) -> int:
     found = [
         {"path": path, "label": label}
-        for path, label in scan_tree(args.run_dir, known_values_from_env())
+        for path, label in scan_tree(args.run_dir, known_values_from_env(), exclude=("fiches",))
     ]
     _emit({"ok": not found, "found": found})
     return EXIT_SECRET if found else EXIT_OK
