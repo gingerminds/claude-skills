@@ -159,6 +159,14 @@ class NonSecretTest(unittest.TestCase):
         "$token = $request->header('X-Api-Token');",
         "['password' => $password, 'remember' => $remember]",
         "`password=$PASSWORD` : d'abord l'ordre, L'app, N'oubliez pas, qu'on, s'il, jusqu'ici, aujourd'hui.",
+        "password=${DB_PASSWORD}",
+        "MYSQL_PASSWORD: $MYSQL_PASSWORD",
+        "'password' => $_ENV['DB_PASSWORD'],",
+        "Le mot de passe vient de password=$PASSWORD.",
+        "PGPASSWORD=$DB_PASS psql -h db.example.org",
+        "$token = $this->token;",
+        "'token' => $request->bearerToken(),",
+        "password: $password,",
     ]
     # (line, its secret literal): masking must remove that literal, not only the first token.
     SECRETS = [
@@ -194,6 +202,17 @@ class NonSecretTest(unittest.TestCase):
         ("password = make_password(f'Adm1nP@ss2024')", "Adm1nP@ss2024"),
         ("password = HASHBYTES('SHA2_256', N'Adm1nP@ss2024')", "Adm1nP@ss2024"),
         ("'password' => Hash::make('Adm1nP@ss2024'), // l'admin d'origine", "Adm1nP@ss2024"),
+        ("MYSQL_PASSWORD: $$ecretPa55", "$ecretPa55"),
+        ("WORDPRESS_DB_PASSWORD=$$ecretPa55", "$ecretPa55"),
+        ("password_hash=$2y$10$abcdefghijklmnopqrstuv", "$2y$10$abcdefghijklmnopqrstuv"),
+        ("password=$PASSWORD&token=abcd1234efgh5678", "abcd1234efgh5678"),
+        ("?password=$PASSWORD&api_key=sk_live_51Habcdefghijkl", "sk_live_51Habcdefghijkl"),
+        ("password=$user->name;secret=abcd1234efgh5678", "abcd1234efgh5678"),
+        ("api_key=id=sk_live_51Habcdefghijkl", "sk_live_51Habcdefghijkl"),
+        ("token=name=abcd1234efgh5678", "abcd1234efgh5678"),
+        ("password=type=text&token=abcd1234efgh5678", "abcd1234efgh5678"),
+        ("SECRET_KEY = b'RealSecretKey123'", "RealSecretKey123"),
+        ("password = r'Adm1nP@ss2024'", "Adm1nP@ss2024"),
     ]
 
     def test_form_field_descriptions_are_not_secrets(self):

@@ -19,14 +19,16 @@ _GITHUB = re.compile(r"\b(?:gh[pousr]_[0-9A-Za-z]{36,}|github_pat_[0-9A-Za-z_]{2
 _NOTION = re.compile(r"\b(?:ntn|secret)_[0-9A-Za-z]{40,}")
 _JWT = re.compile(r"\beyJ[0-9A-Za-z_\-]{10,}\.eyJ[0-9A-Za-z_\-]{10,}\.[0-9A-Za-z_\-]{10,}")
 
-# redact keeps "pre" and masks "val". "q" is an opening quote: a quoted value runs to its
-# closing quote, a bare one to the next space or quote. The lookahead skips masked values.
-# The bounded name suffix keeps scans linear on long runs of keywords.
+# redact keeps "pre" and masks "val". "q" is an opening quote, maybe after a string prefix
+# (b'', r'', f''...): a quoted value runs to its closing quote, a bare one to the next space or
+# quote. The lookahead skips masked values. The bounded name suffix keeps scans linear on long
+# runs of keywords.
 _CREDENTIAL = re.compile(
     r"""
     (?P<pre>
-        (?:password|passwd|pwd|secret|token|api[_-]?key)[\w\-]{0,64}
+        (?P<kw>password|passwd|pwd|secret|token|api[_-]?key)[\w\-]{0,64}
         \\?["']?[ \t]*(?:=>|[:=])[ \t]*
+        (?:[bBrRuUfF]{1,2}(?=\\?["']))?
         (?:\\?(?P<q>["']))?
     )
     (?!\[secret\ masqué\])
@@ -47,8 +49,21 @@ _AUTH_HEADER = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
-_FORM_ATTRIBUTE = re.compile(r"(?:type|autocomplete|name|id)=", re.IGNORECASE)
+# A form field description (type=password, autocomplete=current-password), for a password
+# keyword only. Another "=" or a "&" means a following pair, which may hold a secret.
+_FORM_KEYWORDS = ("password", "passwd", "pwd")
+_FORM_ATTRIBUTE = re.compile(r"(?:type|autocomplete|name|id)=[^=&]*", re.IGNORECASE)
 _ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_]\w*\}")
+# A whole bare value that is a variable reference ($password, ${DB_PASSWORD}, $x->y(, $_ENV[,
+# $a[0]), ended by punctuation. $$ (compose escape), $2y$ (hash) or $X&token=... are not.
+_VARIABLE_REFERENCE = re.compile(
+    r"""
+    \$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)
+    (?:(?:\??->|::|\.)[A-Za-z_]\w*|\(\)?|\[[\w$]*\]?)*
+    [.,;)\]]*
+    """,
+    re.VERBOSE,
+)
 _CODE_PREFIX = re.compile(r"[A-Za-z_][\w\\]*(?:::|->)")
 _CODE_CALL = re.compile(r"[A-Za-z_][\w.\\]*\(.*\)", re.DOTALL)
 _QUOTED_LITERAL = re.compile(r"""(?:(?<!\w)|(?<=\b[bBrRuUfF])|(?<=\b[bBrRfF][bBrRfF]))(["'])(.*?)\1""")
@@ -67,13 +82,13 @@ def _is_non_secret(match: re.Match) -> bool:
     value = match.group("val")
     if match.group("q"):
         return bool(_ENV_REFERENCE.fullmatch(value))
-    if _FORM_ATTRIBUTE.match(value):
+    if match.group("kw").lower() in _FORM_KEYWORDS and _FORM_ATTRIBUTE.fullmatch(value):
         return True
     text = match.string
     end = text.find("\n", match.end("val"))
     rest = text[match.start("val"):None if end < 0 else end]
     is_code = (
-        value.startswith("$")
+        bool(_VARIABLE_REFERENCE.fullmatch(value))
         or bool(_CODE_PREFIX.match(value))
         or bool(_CODE_CALL.fullmatch(rest.rstrip().rstrip(",;]").rstrip()))
         or (value.startswith(":") and text[match.start("val") - 1:match.start("val")] == ":")
