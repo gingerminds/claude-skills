@@ -923,31 +923,57 @@ class RecetteCommandTest(CliTestCase):
         refs = [item["ref"] for item in self.read_json("notion/recette.json")["rows"]]
         self.assertEqual(refs, [79, 80])
 
-    def test_recette_adds_the_rows_whose_code_changed(self):
+    def write_code_finding(self, *, path="app/Redirect.php", probes=(), preprod_url=None):
+        """A code lot whose finding of CQ-81 cites path in a repo that holds app/Redirect.php."""
         self.write_audit()
         self.write_json(
             "lots.json",
             {"lots": [{"id": "code-a", "kind": "code", "refs": [79, 80, 81, 82]}], "excluded": []},
         )
-        evidence = [{"type": "file", "repo": "laravel", "path": "app/Redirect.php", "line": 1}]
+        evidence = [{"type": "file", "repo": "laravel", "path": path, "line": 1}]
         finding = {
-            "ref": 81, "verdict": "ko", "confidence": "high", "summary": "x", "evidence": evidence,
-            "todo": "x", "human_check": None, "divergence": None, "needs_probes": [],
+            "ref": 81, "verdict": "unknown" if probes else "ko", "confidence": "high",
+            "summary": "x", "evidence": evidence, "todo": None if probes else "x",
+            "human_check": None, "divergence": None, "needs_probes": list(probes),
         }
         self.write_json("findings/code-a.json", {"lot": "code-a", "findings": [finding]})
+        repo = self.run_dir / "repos" / "laravel"
+        (repo / "app").mkdir(parents=True, exist_ok=True)
+        (repo / "app" / "Redirect.php").write_text("<?php\n", encoding="utf-8")
         context = self.read_json("context.json")
-        context["repos"] = [{"name": "laravel", "path": "/work/repos/laravel", "audited_sha": "a" * 40}]
+        context["repos"] = [{"name": "laravel", "path": str(repo), "audited_sha": "a" * 40}]
+        if preprod_url:
+            context["target"] = {"preprod_url": preprod_url, "prod_url": None, "prod_live": False}
         self.write_json("context.json", context)
 
+    def recette_refs(self, changed):
         def git(command, **kwargs):
-            return subprocess.CompletedProcess(command, 0, "app/Redirect.php\n", "")
+            return subprocess.CompletedProcess(command, 0, changed + "\n", "")
 
-        code, _, err, _ = self.run_recette(git_run=git)
+        code, out, err, _ = self.run_recette(git_run=git)
         self.assertEqual(code, 0, err)
-        found = {item["ref"]: item for item in self.read_json("notion/recette.json")["rows"]}
+        return json.loads(out)["code_modifie"], self.read_json("notion/recette.json")["rows"]
+
+    def test_recette_adds_the_rows_whose_code_changed(self):
+        self.write_code_finding()
+        changed, rows = self.recette_refs("app/Redirect.php")
+        self.assertEqual(changed, [81])
+        found = {item["ref"]: item for item in rows}
         self.assertEqual(sorted(found), [79, 81])
         self.assertEqual(found[81]["status"], "À traiter")
         self.assertEqual(found[81]["comments"], [])
+
+    def test_recette_reads_only_the_findings_whose_evidence_holds(self):
+        self.write_code_finding(path="app/Missing.php")
+        changed, rows = self.recette_refs("app/Missing.php")
+        self.assertEqual(changed, [])
+        self.assertEqual([item["ref"] for item in rows], [79])
+
+    def test_recette_reads_the_findings_with_the_path_of_the_application(self):
+        probe = {"url": "https://preprod.example.org/blog/index.php/node/1", "method": "GET"}
+        self.write_code_finding(probes=[probe], preprod_url="https://preprod.example.org/blog/")
+        changed, _ = self.recette_refs("app/Redirect.php")
+        self.assertEqual(changed, [81])
 
 
 class FichesCommandTest(CliTestCase):

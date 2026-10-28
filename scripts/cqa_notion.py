@@ -27,7 +27,13 @@ from cqa.notion_read import (
 )
 from cqa.notion_write import ReferenceWriteRefused, apply_plan, validate_plan
 from cqa.plan import filter_plan, operation_key
-from cqa.rerun import list_of, recette_candidates, rerun_candidates, skill_last_of
+from cqa.rerun import (
+    list_of,
+    read_grounded_findings,
+    recette_candidates,
+    rerun_candidates,
+    skill_last_of,
+)
 from cqa.secrets import known_values_from_env, redact
 
 EXIT_OK = 0
@@ -213,7 +219,13 @@ def _cmd_recette(args, client) -> int:
     )
     known = known_values_from_env()
     chosen = {item["ref"]: item for item in recette_candidates(rows, plan, applied)}
-    candidates = rerun_candidates(run_dir, extra_refs=[], git_run=args.git_run)
+    context = _read_json(run_dir / "context.json")
+    candidates = rerun_candidates(
+        run_dir,
+        extra_refs=[],
+        git_run=args.git_run,
+        read=lambda lot, name: read_grounded_findings(run_dir, context, lot, name),
+    )
     for note in candidates["notes"]:
         _log(note)
     changed = [entry["ref"] for entry in candidates["candidates"] if "code_modifie" in entry["reasons"]]

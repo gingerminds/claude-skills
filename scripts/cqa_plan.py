@@ -37,7 +37,7 @@ from cqa.lots import TOOLS, build_lots, coverage, select_rows
 from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
 from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_digest
-from cqa.rerun import latest_findings, rerun_candidates
+from cqa.rerun import latest_findings, read_grounded_findings, rerun_candidates
 from cqa.project import parse_project_md, project_slug, sibling_repos
 from cqa.secrets import known_values_from_env, scan_tree
 from cqa.target import build_opener, fetch_page, probe_target, validate_url
@@ -62,7 +62,6 @@ _REPO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _UNPROTECTED = frozenset({"", "non", "aucun", "aucune", "n/a"})
 _ACCESS_VALUES = ("open", "basic_auth", "ip_filtered", "unreachable")
 _TOOL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
-_EVIDENCE_TOOL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _REF_KEY = re.compile(r"[0-9]+")
 _SPEC_NAME = re.compile(r"(?:openapi|swagger).*\.(?:ya?ml|json)")
 _SPEC_SKIPPED_DIRS = frozenset({"vendor", "node_modules", ".git"})
@@ -1849,23 +1848,7 @@ def _read_findings_file(run_dir: Path, context: dict, lot: dict, name: str) -> O
 
     The valid findings are those of validate_document whose evidence also holds against the run.
     """
-    try:
-        document = json.loads((run_dir / "findings" / name).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as error:
-        return [], [f"findings/{name} est illisible : {error}"]
-    valid, errors = validate_document(
-        document, set(lot["refs"]), app_path=probes.app_path(context)
-    )
-    roots = {repo["name"]: Path(repo["path"]) for repo in context["repos"]}
-    grounded = []
-    for item in valid:
-        problems = _evidence_problems(item["evidence"], roots, run_dir)
-        errors.extend(f"constat {ref_label(item['ref'])} : {problem}" for problem in problems)
-        if not problems:
-            grounded.append(item)
-    return grounded, errors
+    return read_grounded_findings(run_dir, context, lot, name)
 
 
 def _collect_findings(run_dir: Path, context: dict, lots: list) -> tuple:
@@ -1916,55 +1899,6 @@ def _verdicts(run_dir: Path, context: dict, rows: list) -> dict:
                     "verdict"
                 ]
     return verdicts
-
-
-def _evidence_problems(evidence: list, roots: dict, run_dir: Path) -> list:
-    """Return what the evidence of a valid finding claims that the run does not hold."""
-    problems = []
-    for number, item in enumerate(evidence, start=1):
-        kind = item["type"]
-        if kind == "file":
-            problem = _file_problem(item, roots)
-        elif kind == "tool":
-            problem = _tool_problem(item, run_dir)
-        else:
-            problem = None
-        if problem:
-            problems.append(f"preuve n° {number} ({kind}) : {problem}")
-    return problems
-
-
-def _file_problem(item: dict, roots: dict) -> Optional[str]:
-    repo, path = item["repo"], item["path"]
-    if repo not in roots:
-        return f"repo {_quoted(repo)} absent de context.json (repos : {', '.join(roots)})"
-    relative = Path(path)
-    if relative.is_absolute() or ".." in relative.parts:
-        return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
-    if relative.parts == ():
-        return f"chemin {_quoted(path)} : la racine du repo {_quoted(repo)} n'est pas une preuve"
-    candidate = roots[repo] / relative
-    if not candidate.exists():
-        return f"chemin {_quoted(path)} introuvable dans le repo {_quoted(repo)}"
-    if not candidate.resolve().is_relative_to(roots[repo].resolve()):
-        return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
-    if not candidate.is_file():
-        return f"chemin {_quoted(path)} : pas un fichier dans le repo {_quoted(repo)} (dossier ?)"
-    return None
-
-
-def _tool_problem(item: dict, run_dir: Path) -> Optional[str]:
-    tool = item["tool"]
-    if not _EVIDENCE_TOOL.fullmatch(tool):
-        return f"nom d'outil {_quoted(tool)} invalide"
-    if not (run_dir / "tools" / tool / "summary.json").is_file():
-        return f"outil {_quoted(tool)} sans résumé (tools/{tool}/summary.json est introuvable)"
-    return None
-
-
-def _quoted(value) -> str:
-    text = str(value)
-    return f"« {text if len(text) <= 60 else text[:59] + '…'} »"
 
 
 def _openapi_files(root: Path) -> list:
