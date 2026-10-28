@@ -819,14 +819,13 @@ _SQL_WRITE = re.compile(
 )
 _SQL_CREDENTIAL = re.compile(
     r"pass|pwd|secret|token|salt|authentication_string|api_?key|activation_key|recovery_code"
-    r"|consumer_key|licen[cs]e_?key|private_key|cron_key|totp|order_key|\bCREATE\s+USER\b",
+    r"|consumer_key|licen[cs]e_?key|private_key|cron_key|totp|\bCREATE\s+USER\b",
     re.I,
 )
 # Columns that hold secrets under a common name, refused when their table is named anywhere.
 _SQL_SECRET_COLUMNS = (
     (lambda table: table == "sessions" or table.endswith("_sessions"),
      frozenset({"id", "sid", "ssid", "session", "payload", "session_key", "session_value"})),
-    (lambda table: table.endswith(("usermeta", "sitemeta")), frozenset({"meta_value"})),
     (lambda table: table in ("config", "cache", "users_data")
      or table.endswith(("_config", "_cache", "_users_data"))
      or table.startswith("cache_") or "_cache_" in table or "key_value" in table,
@@ -834,6 +833,13 @@ _SQL_SECRET_COLUMNS = (
     (lambda table: table in ("jobs", "failed_jobs", "job_batches") or table.endswith("_jobs"),
      frozenset({"payload"})),
 )
+# Values of WordPress options and of every meta table: keys, passwords, personal data.
+_SQL_SECRET_VALUES = {
+    "option_value": "les options portent des clés d'API et des mots de passe ; lire une "
+                    "option sans secret avec wp option get <nom>",
+    "meta_value": "les métadonnées portent des secrets et des données personnelles "
+                  "(clés de commande, e-mails, adresses) ; compter les lignes par meta_key",
+}
 # The text of the statements of other sessions (it can quote a session id or a token).
 _SQL_HISTORY = frozenset(
     {"processlist", "performance_schema", "general_log", "slow_log", "binlog", "relaylog"}
@@ -939,11 +945,15 @@ def _check_statement_history(tokens: list) -> None:
 def _check_secret_columns(tokens: list) -> None:
     """Refuse any mention of a secret column: no value, no condition, no function on it."""
     names = [_sql_name(token).lower() for token in tokens]
-    if "option_value" in names:
-        raise Refused(
-            "colonne « option_value » refusée : les options portent des clés d'API et des "
-            "mots de passe ; lire une option sans secret avec wp option get <nom>"
-        )
+    for name in names:
+        if name in _SQL_SECRET_VALUES:
+            raise Refused(f"colonne « {name} » refusée : {_SQL_SECRET_VALUES[name]}")
+    for token, name in zip(tokens, names):
+        if "order_key" in name and not token.startswith("'"):
+            raise Refused(
+                f"colonne « {name} » refusée : clé d'accès d'une commande WooCommerce "
+                "(un texte '_order_key' reste permis pour compter les lignes)"
+            )
     for is_table, columns in _SQL_SECRET_COLUMNS:
         table = next((name for name in names if is_table(name)), None)
         column = next((name for name in names if name in columns), None)
