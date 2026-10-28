@@ -87,6 +87,20 @@ Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépar
 - **`glab`** installé et authentifié sur le GitLab de l'agence (`glab auth status`) : il sert à retrouver le commit déployé en préprod.
 - **Claude in Chrome** : extension installée et connectée, pour les contrôles navigateur. Le lead s'y connecte lui-même quand le site est protégé.
 
+### Relancer et recetter : `rerun` et `recette`
+
+- **`/gm:cqa rerun`** : relance ciblée, sans refaire tout l'audit. Le skill choisit les lignes selon un motif : cause supprimée, outil relancé, code modifié depuis le commit audité, ou demande du lead. Il les montre au lead avant de lancer quoi que ce soit. Au démarrage, les restes d'une relance interrompue sont mis de côté et un instantané est pris ; à la clôture, les fichiers invalides sont écartés.
+- **`/gm:cqa recette`** : revoit les lignes que les devs ont passées en « Mis en place », en lisant leurs commentaires (hors ceux du skill). Un statut humain n'est modifié que pour ces lignes, réévaluées dans la recette : le skill écrit « Ok / Recetté », ou remet la ligne en « À traiter » ou « Mise en place partielle ».
+- **Commentaires** : une seule note du skill par ligne Notion, elle remplace la précédente. Les commentaires humains ne sont jamais touchés.
+- **Deux questions à chaque lancement** (audit, rerun, recette) : « Mode 100 % autonome ? » et le consentement d'écriture Notion (`none` n'écrit rien, garanti par le code).
+  - En mode autonome, tout ce qui demande le lead est mis de côté jusqu'à la fin (`deferred.json`) : connexion, commandes SSH refusées par le garde-fou (jamais exécutées), lacunes et questions. Les lots avec session attendent la connexion, demandée à la fin.
+- **Multisite** : les domaines supplémentaires sont détectés ou demandés ; back-office commun ou propre et SSO sont demandés site par site, avec un onglet de connexion par back-office propre.
+- **Ordre des lots navigateur** : le front sans session d'abord, puis la pause de connexion, puis les lots `-session`. Les lignes couvertes par la boîte à outils vont dans des lots `-outils`.
+- **Contexte** : `key-pages-check` (404 et liens morts de l'accueil), `reuse-context` (reprend les réponses d'un run précédent, sauf le mode et le consentement), repli sur le CLAUDE.md sans PROJECT.md, compte à rôle restreint demandé quand une ligne l'exige.
+- **Garde-fou SSH** : compte les formats de hash de mots de passe sans les révéler (4 caractères au plus), colonnes secrètes illisibles, `wp option get` limité à une liste d'options cœur, `wp site list --field=url`, `wp post list` (pages) et `wp user list --role=<rôle> --format=count` autorisés, racines d'app `/var/www /srv /app /opt`, `app_dirs` sous la forme `{host, container}`.
+- **Synthèse** : les « Remarques » viennent de `remarques.md` et ne sont jamais effacées ; une section « Décisions mises de côté » et la durée active s'ajoutent.
+- **Veille** : si la fermeture du capot ne peut pas être bloquée, l'empêchement se replie sur `sleep:idle`.
+
 ## Structure
 
 ```
