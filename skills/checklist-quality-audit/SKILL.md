@@ -73,6 +73,16 @@ RUN="<run_dir>"
 bash "$S/cqa-keepawake.sh" start "$RUN"
 ```
 
+Earlier runs: when `runs` lists at least one run of the project (done or not, of any date, other than an incomplete run of today that the lead resumes), offer to start from its answers. Ask « Un run existe déjà pour ce projet. » with « Réutiliser le contexte du run <run_id> » (the most recent one; another run in « Autre ») and « Repartir de zéro ». After creating the new run folder (below), reuse it:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" reuse-context "$RUN" "<path du run réutilisé>"
+```
+
+It copies the answers that hold from one run to the next (`repos`, `notion`, `lead`, `team`, `target` without `access`, `ssh`, `test_accounts`, `key_pages`, `sites`) into `$RUN/context.json` and prints the list taken. `mode`, `notion_write`, `available_tools` and what the diagnostic recomputes (`audited_sha`, `deployed_sha`, `aligned`) are never taken. Section 4 then asks only what may have changed: the probe of the target (`access`, and the Basic Auth credentials, never stored), the key pages that answer 404 (`cqa_plan.py key-pages-check`), and the launch questions (mode, consent). `cqa_notion.py schema` is run again into `$RUN/schema.json`; the lead confirms nothing else. « Repartir de zéro »: section 4 in full.
+
 New run (also for `diagnostic`):
 
 ```bash
@@ -91,7 +101,7 @@ Read `references/context.md`. In order, one question at a time:
 3. Target: preprod URL read in `PROJECT.md` and confirmed, then `cqa_plan.py probe-target`. Access `basic_auth`: ask the identifier, then the password, and check them with `cqa_plan.py probe-target --auth-env`. Access `ip_filtered`: announce « HTTP indisponible hors réseau agence ».
 4. SSH alias, from the list of `~/.ssh/config`, or none.
 5. Test accounts (front, back-office).
-6. Key pages: one per template, 10 at most, proposed from the sitemap, the links of the home page and the routes of the code, validated by the lead. Other sites (multisite), still before the launch questions: detect the other domains, then ask for each one its back-office (common or its own) and its SSO login (`references/context.md`, section 6.1).
+6. Key pages: one per template, 10 at most, proposed from the sitemap, the links of the home page and the routes of the code (WordPress: the « Formulaire » page found through the guard, `references/context.md`, section 6), validated by the lead. Other sites (multisite), still before the launch questions: detect the other domains, then ask for each one its back-office (common or its own) and its SSO login (`references/context.md`, section 6.1).
 7. Mode and Notion consent, two questions, one at a time, with AskUserQuestion (neither is asked with `diagnostic`, which runs only sections 3 to 5; the second one is not asked with `--dry-run`, which writes nothing). Each invocation asks them again and overwrites both keys: a value stored by an earlier invocation never counts (a resume reuses its own):
    - « Mode 100 % autonome ? » with « Oui, je m'absente » and « Non, je reste disponible ». Store `mode` to `"autonome"` for the first, `"interactif"` for the second.
    - « Écrire dans la copie Notion à la fin de l'audit ? » with « Tout écrire », « Sans toucher aux statuts posés par un humain » and « Ne rien écrire ». Store `notion_write` to `"all"`, `"keep_human"` or `"none"` (`null` when not asked). The copy does not change during the audit, so this consent holds for section 7.
@@ -114,6 +124,7 @@ Read `references/diagnostic.md`. It gives the exact command of each check:
 | Preprod aligned on the audited code | `cqa_plan.py align` | launch condition |
 | Runner up | `shared/runner.md` (make, docker compose, lando), never started by the skill | CLI local |
 | Preprod reachable | `probe-target` of section 4 | HTTP |
+| Key pages and dead links of the home page | `cqa_plan.py key-pages-check`; a 404 is a gap | HTTP |
 | Claude in Chrome connected | a tab opened on the preprod (`references/browser.md`) | Navigateur |
 | Docker, registry, images | `cqa-toolbox.sh doctor` | Audit web, Crawler |
 | SSH alias reachable | `ssh -o BatchMode=yes <alias> true` | SSH serveur |
@@ -150,7 +161,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" coverage "$RUN"
 ```
 
-Show the table of checks, the coverage and the gains as `references/diagnostic.md` words them. `evaluable` already includes `evaluable_human`: never add them. With `diagnostic`, stop here. Otherwise ask « Lancer l'audit » or « Compléter mon poste d'abord » (then stop: a later launch the same day offers to resume); in autonomous mode do not ask, the audit starts.
+Show the table of checks, the coverage and the gains as `references/diagnostic.md` words them. `evaluable` already includes `evaluable_human`: never add them. A selected row that needs an account with a restricted role (CQ-115): `references/diagnostic.md`, section 11, before « Lancer l'audit ». With `diagnostic`, stop here. Otherwise ask « Lancer l'audit » or « Compléter mon poste d'abord » (then stop: a later launch the same day offers to resume); in autonomous mode do not ask, the audit starts.
 
 ## 6. Audit
 

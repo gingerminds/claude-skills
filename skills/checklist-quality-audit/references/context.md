@@ -154,6 +154,14 @@ curl -q -sS --max-time 20 -A "GingermindsAudit/<plugin_version>" "<preprod_url>/
 ```
 
 - Routes of the code: Nuxt `pages/`; Laravel `routes/web.php` (back-office); Drupal content types and views in `config/sync/`; WordPress templates of the theme (`archive-*.php`, `single-*.php`, `page-*.php`).
+- WordPress with an SSH alias: the « Formulaire » page, found through the guard (the only `wp post list` form it allows; `url` is a field of this command):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+python3 "$S/cqa_ssh_ro.py" <alias> -- wp post list --post_type=page --s=gravityform --fields=ID,post_title,url --path=<dossier>
+```
+
+  Propose the `url` of the page found as the key page « Formulaire »; none found or a guard refusal: go on without it, never work around the guard.
 - 404: `<preprod_url>/cqa-page-inexistante-<4 chiffres>`.
 - Other `access`: routes of the code only; the lead completes the URLs.
 
@@ -191,6 +199,14 @@ Show the domains found as a proposal for the lead to confirm or correct. No othe
 `sites` (optional top-level list, 10 at most, unique domains) is `[{"domain": "<host>", "backoffice": "commun" or "propre", "sso": <bool>, "home": "<URL of the home page>"}]`, the preprod site included. `home` is an absolute URL on the host `domain`. More than 10 domains: keep the 10 the lead picks and say so. A `context.json` without `sites` is a single site.
 
 The browser may only visit the hosts of `target.preprod_url`, of `sites` and of `key_pages` (plus `target.prod_url` on a prod run). Each `home` is visited in addition to the 10 key pages, so the sites never use their places.
+
+## 6.2 Without PROJECT.md
+
+`project_md` is `null` (exit 2 of `team`, no preprod URL): do not ask everything from scratch. Read the `CLAUDE.md` of the repo and the Markdown files of `docs/` (Read, only these), look for the preprod and prod URLs, the other domains and the people of the team (name, role), and propose what you found for the lead to confirm or correct, one question at a time, in the questions of sections 2, 3 and 6.1 (the `team` matching with `assignee_options` stays as in section 2). Nothing found: ask as usual. Once the context is written, offer « Générer un PROJECT.md à partir de ces réponses ? » with « Oui » and « Non » : on « Oui », write `PROJECT.md` at the root of the repo from the answers (lead, team, URLs, protection, branches) with Write, following the layout of the `PROJECT.md` of the other projects when the lead gives one; never commit it. In autonomous mode the question is asked before the lead leaves (it is a context question).
+
+## 6.3 Earlier run
+
+`cqa_plan.py reuse-context` (SKILL.md, section 3) pre-fills `context.json` from a previous run. Ask again only: the probe of the target (section 3 above, `probe-target`, and the credentials), then `cqa_plan.py key-pages-check "$RUN"` (`--auth-env` with the credentials), and for each key page that answers 404 « La page <template> (<url>) répond 404. Quelle URL la remplace ? » with « Retirer cette page » and « Garder cette page » (the new URL in « Autre »). Everything else is kept as copied.
 
 ## 7. context.json
 

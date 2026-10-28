@@ -98,6 +98,20 @@ docker compose --project-directory "<chemin du repo>" ps --status running --serv
 
 From section 4: "HTTP" is available when `target.access` is `open`, or `basic_auth` with credentials accepted and the toolbox ready (step 6). `ip_filtered` and `unreachable`: unavailable.
 
+## 4.1 Key pages and links of the home page (tool "HTTP")
+
+Only when "HTTP" is available. Authenticated with `--auth-env` (credentials of section 4 of SKILL.md) when `target.access` is `basic_auth`:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" key-pages-check "$RUN"
+```
+
+- It requests every key page and the internal links of the home page (50 requests at most, at the toolbox rate, on the origin of the target only) and prints `{"pages": [{"url", "status"}], "home_links_404": [<urls>]}`.
+- A key page that does not answer 2xx or 3xx (`status` 404 or `null`) and every url of `home_links_404` is a gap: say it in French in the table of checks (« <url> répond 404 ») and keep it in `diagnostic.json`. A key page in 404 is not audited as it is: ask the lead for a replacement (section 6.3 of `references/context.md`).
+- WordPress with an SSH alias: the « Formulaire » page is proposed from `wp post list --post_type=page --s=gravityform --fields=ID,post_title,url` through the guard (`references/context.md`, section 6).
+
 ## 5. Claude in Chrome (tool "Navigateur")
 
 Open a tab on the preprod, as `references/browser.md` says (diagnostic), then close it. Available when the tab opens. A Basic Auth dialog in the tab is expected: the lead logs in during the audit.
@@ -213,3 +227,7 @@ It prints `{"total", "evaluable", "evaluable_human", "partial", "not_evaluable",
 4. The gaps found: repo not on `develop` up to date, preprod behind, `PROJECT.md` that cites another repo.
 
 With `diagnostic`, stop here: « Diagnostic terminé, rien n'a été écrit dans Notion. Dossier du run : <run_dir>. » Otherwise ask « Que faire ? » with « Lancer l'audit » and « Compléter mon poste d'abord ». The second stops the skill: a later launch the same day offers to resume this run, and redoes the diagnostic.
+
+## 11. Account for a restricted role
+
+After `rows.json` is read and the coverage is computed, before « Lancer l'audit »: a selected row that needs an account with a restricted role (a non-administrator role, for instance CQ-115) cannot be evaluated with the account of the lead. For each such row, ask « La ligne CQ-<n> demande un compte à rôle restreint (<rôle>). En avez-vous un pour vous connecter vous-même dans Chrome ? » with « Oui, j'en ai un » and « Non, laisser la ligne non évaluée ». The skill never reads nor types it. « Non »: the row stays `unknown` and its detail says « Compte à rôle restreint manquant. ». In autonomous mode do not ask: `cqa_plan.py defer --kind login --detail "<texte en français>" --refs CQ-<n>` and the row stays `unknown`.

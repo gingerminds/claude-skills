@@ -714,6 +714,53 @@ class SkillTest(unittest.TestCase):
         self.assertIn("site list --field=url", _text(REFERENCES / "server.md"))
         self.assertIn("site list --field=url", _text(AUDITOR))
 
+    def test_context_step_checks_pages_reuses_runs_and_asks_for_accounts(self):
+        skill = _text(SKILL)
+        context = _text(REFERENCES / "context.md")
+        diagnostic = _text(REFERENCES / "diagnostic.md")
+        for label, text, needles in (
+            ("SKILL.md", skill, (
+                "Réutiliser le contexte du run <run_id>",
+                "cqa_plan.py\" reuse-context",
+                "`mode`, `notion_write`, `available_tools`",
+                "cqa_plan.py key-pages-check",
+                "section 11",
+            )),
+            ("context.md", context, (
+                "wp post list --post_type=page --s=gravityform --fields=ID,post_title,url",
+                "## 6.2 Without PROJECT.md",
+                "`CLAUDE.md`",
+                "`docs/`",
+                "Générer un PROJECT.md",
+                "key-pages-check",
+                "répond 404",
+            )),
+            ("diagnostic.md", diagnostic, (
+                "key-pages-check",
+                "home_links_404",
+                "répond 404",
+                "wp post list --post_type=page --s=gravityform",
+                "CQ-115",
+                "compte à rôle restreint",
+                "Compte à rôle restreint manquant.",
+            )),
+        ):
+            for needle in needles:
+                with self.subTest(file=label, needle=needle):
+                    self.assertIn(needle, text)
+        self.assertLess(skill.index("Earlier runs"), skill.index("New run (also for"))
+        self.assertLess(diagnostic.index("## 4.1"), diagnostic.index("## 5."))
+
+    def test_the_guard_allows_only_the_post_list_form_the_skill_uses(self):
+        for argv, allowed in (
+            (["wp", "post", "list", "--post_type=page", "--s=gravityform",
+              "--fields=ID,post_title,url"], True),
+            (["wp", "post", "list", "--post_type=page", "--fields=ID,post_content"], False),
+            (["wp", "post", "delete", "1"], False),
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(cqa_ssh_ro.check_command(argv)[0], allowed)
+
 
 class AliasTest(unittest.TestCase):
     def test_alias_frontmatter(self):

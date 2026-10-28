@@ -346,6 +346,8 @@ _WP_VALUED = {
     "--path": "path", "--url": _URI, "--format": _FORMAT, "--fields": _FIELDS,
     "--status": _WORD,
 }
+_WP_SEARCH = re.compile(r"[A-Za-z0-9_-]{1,40}")
+_WP_POST_FIELDS = frozenset({"ID", "post_title", "post_name", "post_status", "guid", "url"})
 _WP_FLAGS = frozenset({"--skip-plugins", "--skip-themes", "--allow-root", "--extra"})
 
 _ARTISAN_COMMANDS = ("about", "route:list", "schedule:list")
@@ -571,12 +573,36 @@ def _wp(args: list) -> None:
         options = [option for option in options if option != "--field=url"]
         if any(option.partition("=")[0] in ("--field", "--format", "--fields") for option in options):
             raise Refused("wp site list : seule la forme --field=url est autorisée")
+    elif words == ("post", "list"):
+        options = _wp_post_list(options)
     elif words not in _WP_COMMANDS:
         raise Refused(
             "wp : seuls core version, plugin list, theme list, cron event list, option get, "
-            "site list --field=url et --version sont autorisés"
+            "site list --field=url, post list --post_type=page et --version sont autorisés"
         )
     _check_app_options("wp", options, _WP_VALUED, _WP_FLAGS)
+
+
+def _wp_post_list(options: list) -> list:
+    """Check the one read form of wp post list (pages, titles and links only); return the rest."""
+    if "--post_type=page" not in options:
+        raise Refused("wp post list : seule la forme --post_type=page est autorisée")
+    rest = []
+    for option in options:
+        name, _, value = option.partition("=")
+        if option == "--post_type=page":
+            continue
+        if name == "--s":
+            _check_value("wp post list", name, value, _WP_SEARCH)
+        elif name == "--fields":
+            if not set(value.split(",")) <= _WP_POST_FIELDS:
+                raise Refused(
+                    "wp post list : --fields n'accepte que "
+                    + ", ".join(sorted(_WP_POST_FIELDS))
+                )
+        else:
+            rest.append(option)
+    return rest
 
 
 def _git(args: list) -> None:

@@ -73,10 +73,7 @@ def probe_target(
         _require_encryption(url)
     if opener is None:
         opener = build_opener(authenticated=auth is not None)
-    headers = {"User-Agent": f"GingermindsAudit/{plugin_version()}"}
-    if auth is not None:
-        token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode("utf-8")).decode("ascii")
-        headers["Authorization"] = f"Basic {token}"
+    headers = _headers(auth)
     status, location = _answer(opener, url, "HEAD", headers, timeout)
     if status == 405:
         status, location = _answer(opener, url, "GET", headers, timeout)
@@ -84,6 +81,50 @@ def probe_target(
     if location:
         result["location"] = location
     return result
+
+
+def fetch_page(
+    url: str,
+    *,
+    auth: Optional[tuple] = None,
+    opener=None,
+    timeout: float = 10.0,
+    max_bytes: int = 1_000_000,
+    with_body: bool = False,
+) -> dict:
+    """Return {"status", "url", "body"} for a GET of url, under the rules of probe_target.
+
+    status is None when nothing answered. url is the final address after the redirects probe_target
+    follows. body is the text of the page (max_bytes at most) when with_body is true and the
+    answer is 2xx, else "". Raises ValueError for a URL validate_url refuses, or for credentials
+    on a clear-text URL.
+    """
+    validate_url(url)
+    if auth is not None:
+        _require_encryption(url)
+    if opener is None:
+        opener = build_opener(authenticated=auth is not None)
+    request = urllib.request.Request(url, headers=_headers(auth), method="GET")
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = response.getcode()
+            body = ""
+            if with_body and 200 <= status < 300:
+                body = response.read(max_bytes).decode("utf-8", errors="replace")
+            return {"status": status, "url": response.geturl() or url, "body": body}
+    except urllib.error.HTTPError as error:
+        error.close()
+        return {"status": error.code, "url": url, "body": ""}
+    except (urllib.error.URLError, http.client.HTTPException, OSError, UnicodeError):
+        return {"status": None, "url": url, "body": ""}
+
+
+def _headers(auth: Optional[tuple]) -> dict:
+    headers = {"User-Agent": f"GingermindsAudit/{plugin_version()}"}
+    if auth is not None:
+        token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode("utf-8")).decode("ascii")
+        headers["Authorization"] = f"Basic {token}"
+    return headers
 
 
 def build_opener(*handlers, authenticated: bool = False):

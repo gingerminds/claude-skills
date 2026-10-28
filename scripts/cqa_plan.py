@@ -14,12 +14,14 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional
-from urllib.parse import urlsplit
+from html.parser import HTMLParser
+from urllib.parse import urldefrag, urljoin, urlsplit
 
 from cqa import deferred, probes, report
 from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
@@ -38,7 +40,7 @@ from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_
 from cqa.rerun import latest_findings, rerun_candidates
 from cqa.project import parse_project_md, project_slug, sibling_repos
 from cqa.secrets import known_values_from_env, scan_tree
-from cqa.target import probe_target, validate_url
+from cqa.target import build_opener, fetch_page, probe_target, validate_url
 from cqa.version import plugin_version
 
 EXIT_OK = 0
@@ -48,6 +50,7 @@ EXIT_SECRET = 7
 
 MAX_KEY_PAGES = 10
 MAX_SITES = 10
+MAX_KEY_PAGE_REQUESTS = 50
 TOOLBOX_RATE = "2"
 
 _SEPARATOR = " - "
@@ -152,6 +155,16 @@ def _register_preparation(commands) -> None:
         action="store_true",
         help="envoie GM_AUDIT_AUTH_USER et GM_AUDIT_AUTH_PASS en Basic Auth",
     )
+    sub = _command(commands, "key-pages-check", "pages clés et liens de l'accueil", _cmd_key_pages)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument(
+        "--auth-env",
+        action="store_true",
+        help="envoie GM_AUDIT_AUTH_USER et GM_AUDIT_AUTH_PASS en Basic Auth",
+    )
+    sub = _command(commands, "reuse-context", "reprend les réponses d'un run précédent", _cmd_reuse)
+    sub.add_argument("new_run_dir", type=Path, help="dossier du nouveau run")
+    sub.add_argument("old_run_dir", type=Path, help="dossier du run à réutiliser")
     sub = _command(commands, "context", "contrôle de context.json", _cmd_context)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("--check", action="store_true", required=True, help="valide context.json")
@@ -332,6 +345,162 @@ def _cmd_align(args, services) -> int:
 def _cmd_probe_target(args, services) -> int:
     auth = _auth_from_env() if args.auth_env else None
     _emit(probe_target(args.url, auth=auth, opener=services.opener))
+    return EXIT_OK
+
+
+def _cmd_key_pages(args, services) -> int:
+    context = _load_context(args.run_dir)
+    target = context.get("target")
+    if not isinstance(target, dict):
+        raise ContextError("context.json : « target » est absent.")
+    home = _target_url(target, "prod_url" if probes.is_prod_run(context) else "preprod_url")
+    if not urlsplit(home).path:
+        home += "/"
+    key_pages = context.get("key_pages")
+    if not isinstance(key_pages, list):
+        raise ContextError("context.json : « key_pages » est absent.")
+    delay = 1 / _request_rate()
+    auth = _auth_from_env() if args.auth_env else None
+    opener = services.opener
+    if opener is None:
+        opener = build_opener(authenticated=auth is not None)
+    origin = _origin(home)
+    checker = _PageChecker(opener, auth, delay)
+    first = checker.get(home, with_body=True)
+    links = _home_links(first["url"], first["body"], origin)
+    urls = [home]
+    for page in key_pages:
+        url = page.get("url") if isinstance(page, dict) else None
+        if isinstance(url, str) and url not in urls:
+            urls.append(url)
+    pages = []
+    for url in urls:
+        if url == home:
+            status = first["status"]
+        else:
+            status = checker.get(url)["status"] if _same_origin(url, origin) else None
+        pages.append({"url": url, "status": status})
+    dead = []
+    for url in links:
+        if url in urls or len(checker.requests) >= MAX_KEY_PAGE_REQUESTS:
+            continue
+        status = checker.get(url)["status"]
+        pages.append({"url": url, "status": status})
+        if status == 404:
+            dead.append(url)
+    _emit({"pages": pages, "home_links_404": dead})
+    return EXIT_OK
+
+
+class _PageChecker:
+    """GET pages one after the other at the toolbox rate."""
+
+    def __init__(self, opener, auth, delay: float):
+        self.opener, self.auth, self.delay = opener, auth, delay
+        self.requests = []
+
+    def get(self, url: str, *, with_body: bool = False) -> dict:
+        if self.requests:
+            time.sleep(self.delay)
+        self.requests.append(url)
+        try:
+            return fetch_page(url, auth=self.auth, opener=self.opener, with_body=with_body)
+        except ValueError:
+            if len(self.requests) == 1:
+                raise
+            return {"status": None, "url": url, "body": ""}
+
+
+def _request_rate() -> float:
+    raw = os.environ.get("GM_AUDIT_RATE") or TOOLBOX_RATE
+    try:
+        rate = float(raw)
+    except ValueError:
+        rate = 0.0
+    if not rate > 0 or rate == float("inf"):
+        raise UsageError("GM_AUDIT_RATE doit être un nombre de requêtes par seconde supérieur à 0.")
+    return rate
+
+
+def _origin(url: str) -> tuple:
+    parts = urlsplit(url)
+    return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port or (
+        443 if parts.scheme.lower() == "https" else 80
+    )
+
+
+def _same_origin(url: str, origin: tuple) -> bool:
+    try:
+        return _origin(url) == origin
+    except ValueError:
+        return False
+
+
+class _LinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.hrefs = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            href = dict(attrs).get("href")
+            if href:
+                self.hrefs.append(href.strip())
+
+
+def _home_links(base: str, body: str, origin: tuple) -> list:
+    """Return the internal links of an HTML page: absolute, without fragment, once each."""
+    parser = _LinkParser()
+    parser.feed(body)
+    links = []
+    for href in parser.hrefs:
+        try:
+            url = urldefrag(urljoin(base, href))[0]
+            if urlsplit(url).scheme in ("http", "https") and _same_origin(url, origin):
+                validate_url(url)
+            else:
+                continue
+        except ValueError:
+            continue
+        if url not in links and url != urldefrag(base)[0]:
+            links.append(url)
+    return links
+
+
+_REUSED_SECTIONS = ("notion", "lead", "team", "ssh", "test_accounts", "key_pages", "sites")
+_RECOMPUTED_REPO_FIELDS = ("audited_sha", "deployed_sha", "aligned")
+_REUSED_TARGET_FIELDS = ("preprod_url", "prod_url", "prod_live")
+
+
+def _cmd_reuse(args, services) -> int:
+    if not args.new_run_dir.is_dir():
+        raise UsageError(f"{args.new_run_dir} n'est pas un dossier de run.")
+    old = _load_context(args.old_run_dir)
+    path = args.new_run_dir / "context.json"
+    new = _load_context(args.new_run_dir) if path.exists() else {}
+    copied = []
+    repos = old.get("repos")
+    if isinstance(repos, list):
+        new["repos"] = [
+            {**repo, **{field: None for field in _RECOMPUTED_REPO_FIELDS}}
+            for repo in repos
+            if isinstance(repo, dict)
+        ]
+        copied.append("repos")
+    target = old.get("target")
+    if isinstance(target, dict):
+        previous = new.get("target") if isinstance(new.get("target"), dict) else {}
+        new["target"] = {
+            **{field: target[field] for field in _REUSED_TARGET_FIELDS if field in target},
+            "access": previous.get("access"),
+        }
+        copied.append("target")
+    for key in _REUSED_SECTIONS:
+        if key in old:
+            new[key] = old[key]
+            copied.append(key)
+    write_json(path, new)
+    _emit({"copied": copied})
     return EXIT_OK
 
 

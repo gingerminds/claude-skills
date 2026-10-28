@@ -2481,6 +2481,8 @@ class RegistrationTest(AuditCase):
             "rerun-close",
             "defer",
             "deferred",
+            "key-pages-check",
+            "reuse-context",
         ):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)
