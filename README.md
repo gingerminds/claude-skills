@@ -122,7 +122,7 @@ claude-skills/
 │   └── cqa-browser.md       # sous-agent des contrôles navigateur (Claude in Chrome) : consommé par checklist-quality-audit
 ├── scripts/
 │   ├── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
-│   ├── cqa_notion.py  cqa_plan.py  cqa_ssh_ro.py   # CLI de l'audit : API Notion, plan, garde SSH en lecture seule
+│   ├── cqa_fix.py  cqa_notion.py  cqa_plan.py  cqa_ssh_ro.py   # CLI de l'audit : mode correction, API Notion, plan, garde SSH en lecture seule
 │   ├── cqa/                 # bibliothèque de l'audit (Python >= 3.9, bibliothèque standard seule)
 │   ├── cqa-keepawake.sh     # empêche la mise en veille du poste pendant l'audit (systemd-inhibit, caffeinate)
 │   └── cqa-toolbox.sh       # lanceur de la boîte à outils Docker de l'audit

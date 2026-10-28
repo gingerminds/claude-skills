@@ -21,6 +21,7 @@ SCOPE = [
     "skills/cqa",
     "agents",
     "scripts/cqa",
+    "scripts/cqa_fix.py",
     "scripts/cqa_notion.py",
     "scripts/cqa_plan.py",
     "scripts/cqa_ssh_ro.py",
