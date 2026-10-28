@@ -1,7 +1,9 @@
 """Comments the audit writes in Notion: the French texts, their rich_text form, their verdict."""
+import ipaddress
 import re
 from datetime import date
 from typing import Optional
+from urllib.parse import urlsplit
 
 from cqa.checklist import (
     STATUS_IMPLEMENTED,
@@ -47,7 +49,8 @@ _BLOCKING_LABEL = "Lignes bloquantes non conformes"
 
 _VERDICT_BY_LABEL = {label: verdict for verdict, label in VERDICT_LABELS.items()}
 _VERDICT_LINE = re.compile(r"\s*Verdict\s*:\s*(?P<label>.*?)\s*(?:\(confiance[^)]*\))?\s*")
-_URL = re.compile(r"https?://\S+")
+_URL = re.compile(r"https?://[^\s<>\"']+")
+_URL_FORBIDDEN = re.compile(r"[\s<>\"'`\\{}|^\x00-\x1f\x7f]")
 _URL_TRAILING = ".,;:!?'\"`*>»”’…"
 _URL_CLOSERS = {")": "(", "]": "[", "}": "{"}
 
@@ -140,13 +143,36 @@ def to_rich_text(text: str) -> list[dict]:
     start = 0
     for found in _URL.finditer(text):
         url = _trim_url(found.group())
-        if url in ("http://", "https://") or _units(url) > MAX_TEXT_LENGTH:
+        if not is_linkable_url(url) or _units(url) > MAX_TEXT_LENGTH:
             continue
         objects.extend(_plain_objects(text[start : found.start()]))
         objects.append({"type": "text", "text": {"content": url, "link": {"url": url}}})
         start = found.start() + len(url)
     objects.extend(_plain_objects(text[start:]))
     return objects
+
+
+def is_linkable_url(url: str) -> bool:
+    """Return True when Notion can take url as a link: http(s), a real host, allowed characters."""
+    if _URL_FORBIDDEN.search(url):
+        return False
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        parts.port
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    labels = host.split(".")
+    if host != "localhost" and len(labels) < 2:
+        return False
+    return all(labels)
 
 
 def parse_verdict(text: str) -> Optional[str]:

@@ -8,6 +8,7 @@ from cqa.comments import (
     format_comment,
     format_excluded_comment,
     format_page_summary,
+    is_linkable_url,
     parse_verdict,
     to_rich_text,
 )
@@ -518,6 +519,64 @@ class ToRichTextTest(unittest.TestCase):
                 rt = to_rich_text(text)
                 self.assertEqual(links(rt), [])
                 self.assertEqual("".join(contents(rt)), text)
+
+    def test_url_stops_at_markup(self):
+        rt = to_rich_text('<a href="https://www.example.org">Accueil')
+        self.assertEqual(links(rt), ["https://www.example.org"])
+        self.assertEqual("".join(contents(rt)), '<a href="https://www.example.org">Accueil')
+        rt = to_rich_text("https://example.org/a'b")
+        self.assertEqual(links(rt), ["https://example.org/a"])
+        for char in "<>\"'":
+            with self.subTest(char=char):
+                text = f"https://example.org/a{char}b"
+                rt = to_rich_text(text)
+                self.assertEqual(links(rt), ["https://example.org/a"])
+                self.assertEqual("".join(contents(rt)), text)
+
+    def test_placeholder_urls_stay_text(self):
+        for text in ("https://<domaine prod>/robots.txt", "https://", "voir https:// ici"):
+            with self.subTest(text=text):
+                rt = to_rich_text(text)
+                self.assertEqual(links(rt), [])
+                self.assertEqual("".join(contents(rt)), text)
+
+    def test_valid_urls_stay_links(self):
+        for url in (
+            "https://example.org:8443/a/b?x=1#y",
+            "http://[2001:db8::1]/",
+            "https://bücher.example/",
+            "http://localhost:8080/",
+        ):
+            with self.subTest(url=url):
+                rt = to_rich_text(f"voir {url} ok")
+                self.assertEqual(links(rt), [url])
+                self.assertEqual("".join(contents(rt)), f"voir {url} ok")
+
+    def test_is_linkable_url(self):
+        for url in (
+            "https://example.org",
+            "http://localhost",
+            "http://127.0.0.1:80/x",
+            "http://[2001:db8::1]/",
+            "https://bücher.example/",
+        ):
+            with self.subTest(url=url):
+                self.assertTrue(is_linkable_url(url))
+        for url in (
+            "",
+            "https://",
+            "ftp://example.org",
+            "https://nodot",
+            "https:///path",
+            "https://<domaine>/x",
+            "https://example.org/a b",
+            "https://example.org/a\"b",
+            "https://example..org/",
+            "https://example.org:99999/",
+            "http://[2001:db8/",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(is_linkable_url(url))
 
     def test_chunk_boundary(self):
         self.assertEqual([len(c) for c in contents(to_rich_text("a" * 2000))], [2000])
