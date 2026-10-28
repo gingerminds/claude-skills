@@ -90,6 +90,11 @@ def _cmd_doctor(args, services: Services) -> int:
     repos = [repo for repo in context.get("repos") or [] if isinstance(repo, dict)]
     if not repos:
         raise ContextError("context.json : aucun repo à diagnostiquer.")
+    for repo in repos:
+        if not isinstance(repo.get("path"), str) or not repo["path"]:
+            raise ContextError(
+                f"context.json : le repo « {repo.get('name')} » n'a pas de chemin (« path »)."
+            )
     report = {"repos": [_diagnose(repo, services.run) for repo in repos]}
     (args.run_dir / "fix").mkdir(exist_ok=True)
     write_json(args.run_dir / "fix" / "doctor.json", report)

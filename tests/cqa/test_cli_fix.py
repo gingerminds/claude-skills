@@ -68,9 +68,37 @@ class DoctorTest(FixCase):
             self.assertEqual((front["host"], front["project"]), ("gitlab.example.org", "acme/shop"))
             self.assertEqual((front["identity"], back["identity"]), (True, False))
             self.assertEqual(front["ahead"], 2)
-            self.assertIn("fetched", front)
+            self.assertIs(front["fetched"], True)
             written = json.loads((run_dir / "fix" / "doctor.json").read_text(encoding="utf-8"))
             self.assertEqual(written, report)
+
+    def test_doctor_with_a_failing_glab_and_unknown_sha(self):
+        def down(command, **kwargs):
+            if command[0] == "git":
+                return subprocess.run(command, **kwargs)
+            return subprocess.CompletedProcess(command, 1, "", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = self.make_repo(root, "front", True)
+            repo["audited_sha"] = "0123456789abcdef0123456789abcdef01234567"
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "context.json").write_text(json.dumps({"repos": [repo]}), encoding="utf-8")
+            code, out, err = self.run_main(["doctor", run_dir], run=down)
+            self.assertEqual(code, 0, err)
+            entry = json.loads(out)["repos"][0]
+            self.assertEqual(entry["status"], "unauthenticated")
+            self.assertIsNone(entry["ahead"])
+
+    def test_doctor_repo_without_path_exits_6(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "context.json").write_text(
+                json.dumps({"repos": [{"name": "front"}]}), encoding="utf-8"
+            )
+            code, out, err = self.run_main(["doctor", tmp])
+            self.assertEqual(code, 6)
+            self.assertIn("chemin", err)
 
     def test_doctor_without_context_exits_6(self):
         with tempfile.TemporaryDirectory() as tmp:

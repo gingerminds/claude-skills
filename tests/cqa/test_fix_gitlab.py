@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import unquote
 
 from cqa import fix_gitlab, fix_names
 from tests.cqa.test_git_tools import commit, git as real_git
@@ -159,48 +160,117 @@ class AccessTest(unittest.TestCase):
 
 
 class InFlightApiTest(unittest.TestCase):
-    def test_in_flight_reads_refs_from_commit_subjects(self):
-        urls = []
-        mrs = {
-            "opened": [
-                {"iid": 12, "web_url": "https://gitlab.example.org/acme/shop/-/merge_requests/12",
-                 "source_branch": "feature/checklist-qa-fix-securite"},
-                {"iid": 13, "web_url": "u", "source_branch": "feature/other"},
-            ],
-            "closed": [{"iid": 9, "web_url": "u9", "source_branch": "feature/checklist-qa-fix-seo-geo"}],
-            "merged": [{"iid": 7, "web_url": "u7", "source_branch": "feature/checklist-qa-fix-qualite"}],
-        }
-        commits = {
-            12: ["fix(CQ-107): add headers", "fix(CQ-107): follow up", "Apply 1 suggestion(s) to 1 file(s)"],
-            9: ["fix(CQ-40): x"],
-            7: ["fix(CQ-3): y"],
-        }
+    PREFIX = fix_names.BRANCH_PREFIX
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        origin = root / "origin.git"
+        self.repo = root / "repo"
+        real_git(root, "init", "-q", "--bare", str(origin))
+        real_git(root, "clone", "-q", str(origin), str(self.repo))
+        real_git(self.repo, "symbolic-ref", "HEAD", "refs/heads/develop")
+        commit(self.repo, "a.txt", "init")
+        real_git(self.repo, "push", "-q", "origin", "develop")
+        real_git(self.repo, "fetch", "-q", "origin")
+
+    def branch(self, name, subject):
+        real_git(self.repo, "checkout", "-q", "-b", name, "develop")
+        commit(self.repo, name.replace("/", "_") + ".txt", subject)
+        real_git(self.repo, "checkout", "-q", "develop")
+
+    def flight(self, run):
+        return fix_gitlab.in_flight(
+            run, {"path": str(self.repo)}, HOST, "acme/shop", "develop", api=True
+        )
+
+    def api(self, listings, commits, calls=None, fail=()):
+        """Fake run: git is real, glab answers from listings (by state or branch) and commits."""
 
         def run(command, **kwargs):
             if command[0] == "git":
-                return done(command, 128)
-            urls.append(command)
+                return subprocess.run(command, **kwargs)
             path = command[-1]
+            if calls is not None:
+                calls.append(command)
             if "/commits" in path:
                 iid = int(path.split("/merge_requests/")[1].split("/")[0])
+                if iid in fail or commits.get(iid) is None:
+                    return done(command, 1)
                 return done(command, out=json.dumps([{"title": t} for t in commits[iid]]))
-            state = path.split("state=")[1].split("&")[0]
-            return done(command, out=json.dumps(mrs[state]))
+            query = path.split("merge_requests?")[1]
+            key = unquote(query.split("source_branch=")[1].split("&")[0]) if "source_branch=" in query \
+                else query.split("state=")[1].split("&")[0]
+            value = listings.get(key)
+            return done(command, 1) if value is None else done(command, out=json.dumps(value))
 
-        found = fix_gitlab.in_flight(run, {"path": "/nowhere"}, HOST, "acme/shop", "develop", api=True)
+        return run
+
+    def mr(self, iid, branch):
+        return {"iid": iid, "web_url": f"https://{HOST}/acme/shop/-/merge_requests/{iid}",
+                "source_branch": branch}
+
+    def test_in_flight_reads_refs_from_commit_subjects(self):
+        calls = []
+        listings = {
+            "opened": [self.mr(12, self.PREFIX + "securite"), self.mr(13, "feature/other")],
+            "closed": [self.mr(9, self.PREFIX + "seo-geo")],
+        }
+        commits = {
+            12: ["fix(CQ-107): add headers", "fix(CQ-107): follow up",
+                 "Apply 1 suggestion(s) to 1 file(s)"],
+            9: ["fix(CQ-40): x"],
+        }
+        found = self.flight(self.api(listings, commits, calls))
         self.assertEqual(
             found["open"],
-            [{"iid": 12, "url": "https://gitlab.example.org/acme/shop/-/merge_requests/12",
-              "branch": "feature/checklist-qa-fix-securite", "refs": [107]}],
+            [{"iid": 12, "url": f"https://{HOST}/acme/shop/-/merge_requests/12",
+              "branch": self.PREFIX + "securite", "refs": [107]}],
         )
         self.assertEqual(found["closed"][0]["refs"], [40])
-        self.assertEqual(found["merged"][0]["iid"], 7)
-        commit_calls = [c for c in urls if "/commits" in c[-1]]
-        self.assertEqual(len(commit_calls), 3)
-        for call in commit_calls:
+        for call in calls:
             self.assertIn("--paginate", call)
-            self.assertTrue(call[-1].endswith("commits?per_page=100"))
-        self.assertTrue(any("state=opened&per_page=100" in c[-1] for c in urls))
+        self.assertTrue(any("state=opened&per_page=100" in c[-1] for c in calls))
+
+    def test_opened_mr_beyond_the_first_page_is_found(self):
+        def run(command, **kwargs):
+            if command[0] == "git":
+                return subprocess.run(command, **kwargs)
+            path = command[-1]
+            if "/commits" in path:
+                return done(command, out='[{"title": "fix(CQ-1): x"}]')
+            if "state=opened" in path:
+                return done(command, out=json.dumps([self.mr(1, "feature/x")]) + "\n"
+                            + json.dumps([self.mr(120, self.PREFIX + "securite")]))
+            return done(command, out="[]")
+
+        self.assertEqual(self.flight(run)["open"][0]["iid"], 120)
+
+    def test_squash_merged_branch_is_found_by_the_per_branch_query(self):
+        self.branch(self.PREFIX + "qualite", "fix(CQ-3): x")
+        calls = []
+        listings = {self.PREFIX + "qualite": [self.mr(7, self.PREFIX + "qualite")],
+                    "opened": [], "closed": []}
+        found = self.flight(self.api(listings, {7: ["fix(CQ-3): x"]}, calls))
+        self.assertEqual([m["iid"] for m in found["merged"]], [7])
+        self.assertEqual(found["merged"][0]["refs"], [3])
+        self.assertEqual(found["branches"], [])
+        self.assertTrue(any("source_branch=" in c[-1] and "state=merged" in c[-1] for c in calls))
+
+    def test_unreadable_commits_give_unknown_refs_and_a_note(self):
+        listings = {"opened": [self.mr(12, self.PREFIX + "securite")], "closed": []}
+        found = self.flight(self.api(listings, {12: None}))
+        self.assertIsNone(found["open"][0]["refs"])
+        self.assertIn("Commits de la MR !12 illisibles : ses Réf sont inconnues.", found["notes"])
+
+    def test_partial_api_failure_empties_the_mr_lists(self):
+        self.branch(self.PREFIX + "qualite", "fix(CQ-3): x")
+        listings = {"opened": [self.mr(12, self.PREFIX + "securite")], "closed": []}
+        found = self.flight(self.api(listings, {12: ["fix(CQ-1): x"]}))
+        self.assertEqual((found["open"], found["closed"], found["merged"]), ([], [], []))
+        self.assertEqual(found["notes"], ["GitLab illisible : les MR existantes ne sont pas connues."])
+        self.assertEqual([b["branch"] for b in found["branches"]], [self.PREFIX + "qualite"])
 
 
 class InFlightGitTest(unittest.TestCase):
@@ -247,12 +317,15 @@ class InFlightGitTest(unittest.TestCase):
             path = command[-1]
             if "/commits" in path:
                 return done(command, out="[]")
-            state = path.split("state=")[1].split("&")[0]
+            if "source_branch=" in path:
+                if prefix + "squashed" in path:
+                    return done(command, out=json.dumps([{"iid": 3, "web_url": "u",
+                                "source_branch": prefix + "squashed"}]))
+                return done(command, out="[]")
             listing = {
                 "opened": [{"iid": 1, "web_url": "u", "source_branch": prefix + "securite"}],
                 "closed": [{"iid": 2, "web_url": "u", "source_branch": prefix + "seo-geo"}],
-                "merged": [{"iid": 3, "web_url": "u", "source_branch": prefix + "squashed"}],
-            }[state]
+            }[path.split("state=")[1].split("&")[0]]
             return done(command, out=json.dumps(listing))
 
         found = self.flight(api=True, run=run)
@@ -268,9 +341,11 @@ class InFlightGitTest(unittest.TestCase):
             if command[0] == "git":
                 return subprocess.run(command, **kwargs)
             path = command[-1]
-            if "state=merged" in path:
+            if "source_branch=" in path:
                 return done(command, out=json.dumps([{"iid": 3, "web_url": "u",
                                                       "source_branch": prefix + "squashed"}]))
+            if "/commits" in path:
+                return done(command, out="[]")
             return done(command, out="[]")
 
         self.assertEqual(self.flight(api=True, run=run)["branches"], [])

@@ -1,6 +1,5 @@
 """Names and git helper shared by the fix mode: branches, commit subjects, category slugs."""
 import re
-import subprocess
 import unicodedata
 from pathlib import Path
 from typing import Optional

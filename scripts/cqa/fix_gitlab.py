@@ -1,7 +1,6 @@
 """GitLab reading of the fix mode: access diagnostic and fixes already in flight."""
 import json
 import os
-import subprocess
 from typing import Optional
 from urllib.parse import quote
 
@@ -119,47 +118,82 @@ def _access_level(info: dict) -> int:
 
 
 def in_flight(run, repo: dict, host: str, project: str, base: str, *, api: bool) -> dict:
-    """Return the fix MRs and branches already there, with the checklist refs they carry."""
+    """Return the fix MRs and branches already there, with the checklist refs they carry.
+
+    open and closed come from the MR listings; merged only holds the MRs found for the
+    branches that git still knows, one query per branch. The refs of an MR whose commits
+    cannot be read are None. When GitLab answers only partly, the three lists are empty and
+    a note says so.
+    """
     found = {"open": [], "closed": [], "merged": [], "branches": [], "notes": []}
     path = repo.get("path")
-    mr_branches = set()
+    encoded = quote(project, safe="")
+    local = sorted(_branches(path, run).items())
+    tied = set()
     if api:
-        encoded = quote(project, safe="")
-        for key, state in (("open", "opened"), ("closed", "closed"), ("merged", "merged")):
+        for key, state in (("open", "opened"), ("closed", "closed")):
             listing = glab_json(
-                run, host, f"projects/{encoded}/merge_requests?state={state}&per_page=100"
+                run, host, f"projects/{encoded}/merge_requests?state={state}&per_page=100",
+                paginate=True,
             )
-            if listing is None:
-                found["notes"].append(_NO_API_NOTE)
+            if not isinstance(listing, list):
                 api = False
                 break
-            for mr in listing if isinstance(listing, list) else []:
-                branch = mr.get("source_branch") if isinstance(mr, dict) else None
-                if not isinstance(branch, str) or not branch.startswith(fix_names.BRANCH_PREFIX):
+            for mr in listing:
+                entry = _mr_entry(run, host, encoded, mr, found["notes"])
+                if entry:
+                    found[key].append(entry)
+                    tied.add(entry["branch"])
+    candidates = [(b, w) for b, w in local if b not in tied]
+    candidates = [(b, w) for b, w in candidates if not _merged(path, run, _source(b, w), base)]
+    for branch, where in candidates:
+        if api:
+            query = f"merge_requests?source_branch={quote(branch, safe='')}&state=merged&per_page=100"
+            hits = glab_json(run, host, f"projects/{encoded}/{query}")
+            if not isinstance(hits, list):
+                api = False
+            else:
+                entries = [_mr_entry(run, host, encoded, mr, found["notes"]) for mr in hits]
+                entries = [entry for entry in entries if entry]
+                if entries:
+                    found["merged"].extend(entries)
                     continue
-                mr_branches.add(branch)
-                commits = glab_json(
-                    run, host,
-                    f"projects/{encoded}/merge_requests/{mr.get('iid')}/commits?per_page=100",
-                    paginate=True,
-                )
-                subjects = [c.get("title", "") for c in commits or [] if isinstance(c, dict)]
-                found[key].append({
-                    "iid": mr.get("iid"),
-                    "url": mr.get("web_url"),
-                    "branch": branch,
-                    "refs": _refs(subjects),
-                })
-    else:
+        if not api:
+            break
+    if not api:
+        found["open"], found["closed"], found["merged"] = [], [], []
+        found["notes"] = [note for note in found["notes"] if not note.startswith("Commits")]
         found["notes"].append(_NO_API_NOTE)
-    for branch, where in sorted(_branches(path, run).items()):
-        source = branch if where != "origin" else f"origin/{branch}"
-        if branch in mr_branches or _merged(path, run, source, base):
+    merged_branches = {entry["branch"] for entry in found["merged"]}
+    for branch, where in candidates:
+        if branch in merged_branches:
             continue
-        log = fix_names.git(path, run, "log", "--format=%s", f"origin/{base}..{source}")
+        log = fix_names.git(
+            path, run, "log", "--format=%s", f"origin/{base}..{_source(branch, where)}"
+        )
         subjects = log.stdout.splitlines() if log.returncode == 0 else []
         found["branches"].append({"branch": branch, "where": where, "refs": _refs(subjects)})
     return found
+
+
+def _source(branch: str, where: str) -> str:
+    return branch if where != "origin" else f"origin/{branch}"
+
+
+def _mr_entry(run, host: str, encoded: str, mr, notes: list):
+    branch = mr.get("source_branch") if isinstance(mr, dict) else None
+    if not isinstance(branch, str) or not branch.startswith(fix_names.BRANCH_PREFIX):
+        return None
+    commits = glab_json(
+        run, host, f"projects/{encoded}/merge_requests/{mr.get('iid')}/commits?per_page=100",
+        paginate=True,
+    )
+    if isinstance(commits, list):
+        refs = _refs([c.get("title", "") for c in commits if isinstance(c, dict)])
+    else:
+        refs = None
+        notes.append(f"Commits de la MR !{mr.get('iid')} illisibles : ses Réf sont inconnues.")
+    return {"iid": mr.get("iid"), "url": mr.get("web_url"), "branch": branch, "refs": refs}
 
 
 def _refs(subjects: list) -> list:
