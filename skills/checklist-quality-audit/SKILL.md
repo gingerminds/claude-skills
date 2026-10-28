@@ -241,7 +241,7 @@ python3 "$S/cqa_plan.py" defer "$RUN" --kind <login|ssh_refused|gap|question> --
 
 - `--kind ssh_refused`: a command refused by the guard (exit 4) or needing the lead's confirmation. Never run it. The rows concerned stay `unknown`. A refusal a sub-agent reports in its return (the command, its refs, its impact) is recorded the same way, one entry per refused command: `--refs <its refs> --detail "<commande> Impact : <impact>"`. In interactive mode, relay it to the lead as before.
 - `--kind gap`: a deviation found on the way (access that changed at the check before a wave, SSH that fails; the preprod behind `develop` is checked in section 5): note it, launch the wave anyway with what is still possible; the rows concerned may end `unknown` and the synthesis remarks say so. Chrome disconnected at `tabs_context_mcp`: `--kind gap`, and the browser lots go to `gm:cqa-auditor` as with « Continuer sans navigateur ».
-- `--kind login`: the login pause, recorded once (preprod and back-office in the same entry) with the refs of the held session lots. Those lots have no finding yet: they are dispatched at the end of the audit as normal first-round lots (section 8, step 5), after the lead's login or, if they decline, without a session.
+- `--kind login`: the login pause, recorded once (preprod and back-office in the same entry) with the refs of the held session lots. Those lots have no finding yet: they are dispatched at the end of the audit as normal first-round lots (section 8, step 5), after the lead's login or, if they decline, without a session. In a rerun or a recette (section 10, step 8) the held lots already have their first-round file: the entry lists their kept rows, which join the rerun of section 8, step 5 instead.
 - `--kind question`: any other question the orchestrator would have asked.
 - `--detail` is short, in French, without any secret; `--refs` lists the rows left `unknown` because of it, when known.
 
@@ -347,12 +347,15 @@ python3 "$S/cqa_plan.py" deferred "$RUN"
 
 It prints `{"items"}`, the open entries (`id`, `kind`, `detail`, `refs`). The lead is back at this point: the interactive rules of section 6 apply to what is dispatched here (the checks before a wave, the `tabs_context_mcp` call before a browser lot, the answers « Reprendre » and « Continuer sans navigateur »). Go through the entries with the lead, one question at a time, in French, with AskUserQuestion. The `login` entry comes first, then the others:
 
-- `login`: call `tabs_context_mcp` first (it fails: ask the lead to reconnect Claude in Chrome, as in section 6), open the preprod (and the back-office) in new Chrome tabs (`references/browser.md`), then ask « Connectez-vous dans Chrome, dans les onglets ouverts : Basic Auth de la préprod si elle le demande, puis vos comptes de test. N'utilisez pas cette fenêtre Chrome pendant les lots navigateur. » with « C'est fait » and « Passer ». Then dispatch the held session lots as normal first-round lots (`Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no.`, no `Rerun:`), validate each with `cqa_plan.py validate "$RUN" <lot_id>`, relaunch once on errors as in section 6, step 7, then run the probe follow-up for them (section 6, step 8). On « Passer », or when the lead cannot log in, dispatch them the same way without a session: the agents write `unknown` with the reason, so every row still has a finding. Close the tabs afterwards.
+- `login`: call `tabs_context_mcp` first (it fails: ask the lead to reconnect Claude in Chrome, as in section 6), open the preprod (and the back-office) in new Chrome tabs (`references/browser.md`), then ask « Connectez-vous dans Chrome, dans les onglets ouverts : Basic Auth de la préprod si elle le demande, puis vos comptes de test. N'utilisez pas cette fenêtre Chrome pendant les lots navigateur. » with « C'est fait » and « Passer ». Then the held lots run, under the session, or without a session on « Passer » or when the lead cannot log in (the agents then write `unknown` with the reason, so every row still has a finding):
+  - Held lots of an audit (no `findings/<lot_id>.json` yet): dispatch them as normal first-round lots (`Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no.`, no rerun number), validate each with `cqa_plan.py validate "$RUN" <lot_id>` and relaunch once on errors as in section 6, step 7. Then run the probe follow-up of section 6, step 8, and relaunch with `Follow-up: yes` only the held lots among the `lots` that `probes --followup` lists: the other lots already had their only follow-up.
+  - Held lots of a rerun or a recette (their `findings/<lot_id>.json` exists: section 10, step 8 held them): never as first-round lots, which would replace the first-round file. Their kept rows, the `refs` of the entry, join the rerun below: add them to its `--refs` and dispatch them with the `Rerun:` line of that rerun.
+  Close the tabs once those lots are done.
 - `ssh_refused`: as `references/server.md` (exit 4): the command, its impact, « Passer » and the lead's result in « Autre ». The command is never run by the skill; a result the lead gives is a short fact for the dispatch, never raw output in the run directory.
 - `gap`: say what was noted and ask « Relancer les lignes concernées » or « Passer ».
 - `question`: ask the question as recorded. For a restricted-role account (`refs` with the row), ask « Connectez-vous dans Chrome avec le compte à rôle restreint (<rôle>), puis répondez. » with « C'est fait » and « Passer »: after « C'est fait » the rows are rerun (below) under that session, after the other session lots; « Passer »: the row stays `unknown`.
 
-Close an entry only once it is settled: a `login` entry when its held lots are validated, the others when their rerun is closed (an entry passed by the lead is closed at once):
+Close an entry only once it is settled: a `login` entry when its held lots are validated (in a rerun or a recette, when the rerun below is closed), the others when their rerun is closed (an entry passed by the lead is closed at once):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -360,17 +363,9 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" deferred "$RUN" --resolve <id>
 ```
 
-Then rerun automatically, without presenting the list to the lead, the rows whose entry was answered (« C'est fait », a result, « Relancer »): the `refs` of those entries, none for a `login` entry: its held lots were dispatched as first-round lots, so go straight to the plan. Use the mechanism of section 10, steps 4 and 7 to 10, in this order. List the rows with the command below, then keep only the candidates whose reasons include `lead` (the refs you gave); a row without a lot is dropped, say so:
+Then, without presenting anything to the lead, rerun and write again, with the mechanism of section 10 (steps 4 and 7 to 10), in this order. The rows to rerun are the `refs` of the entries answered (« C'est fait », a result, « Relancer »), plus, in a rerun or a recette, the refs of the `login` entry; the `login` entry of an audit adds none (its held lots ran above as first-round lots). Restricted-role `question` entries (the `question` bullet above) are handled last: ask them after every other entry, and rerun their rows in a rerun of their own (1 to 4 again), after the rerun of the other answered entries is closed, so that back-office rows never run under the restricted session.
 
-```bash
-S="${CLAUDE_SKILL_DIR}/../../scripts"
-RUN="<run_dir>"
-python3 "$S/cqa_plan.py" rerun-candidates "$RUN" --refs CQ-3,CQ-12
-```
-
-When no row is left to rerun (the lead answered « Passer » to everything, or no answered row has a lot), run step 4 now (page comment), then go to step 6. Restricted-role `question` entries (the `question` bullet above) are handled last: ask them after every other entry, and rerun their rows in a rerun of their own, after the rerun of the other answered entries is closed, so that back-office rows never run under the restricted session.
-
-1. Open the rerun, relaunch the tools that need it (section 10, step 7):
+1. Open the rerun when there are rows to rerun, and relaunch the tools that need it (section 10, step 7):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -378,7 +373,15 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" rerun-start "$RUN"
 ```
 
-2. Dispatch the lots with `Rerun: <NN>. Rows: CQ-3, CQ-12.` (an extra sentence gives the lead's fact when there is one, `references/lots.md`), then validate each lot with its rows:
+2. List the rows with those refs, then keep only the candidates whose reasons include `lead` (the refs you gave); a row without a lot is dropped, say so:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" rerun-candidates "$RUN" --refs CQ-3,CQ-12
+```
+
+3. Dispatch the lots with `Rerun: <NN>. Rows: CQ-3, CQ-12.` (an extra sentence gives the lead's fact when there is one, `references/lots.md`), then validate each lot with its rows:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -386,13 +389,15 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" validate "$RUN" <lot_id> --rerun <NN> --rows CQ-3,CQ-12
 ```
 
-3. Close the rerun, then rebuild the plan with the write mode of `notion_write` (`--skip-human-overrides` for `keep_human`):
+4. Close the rerun with the union of the rows dispatched (section 10, step 10). Exit 2 with « aucun fichier de la relance NN » (no lot wrote anything): do not close it, tell the lead « Aucune ligne n'a été réévaluée. » and go on with 5:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-python3 "$S/cqa_plan.py" rerun-close "$RUN" <NN>
+python3 "$S/cqa_plan.py" rerun-close "$RUN" <NN> --rows CQ-3,CQ-12
 ```
+
+5. Rebuild the plan with the write mode of `notion_write` (`--skip-human-overrides` for `keep_human`); in a recette, pass `--recette <recette.rerun of notion/plan.json>` (the rerun of the recette, never the number of this rerun: the plan counts the rows this later closed rerun judged):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -400,13 +405,15 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" plan "$RUN"
 ```
 
-4. Write it again without presenting it (`all` or `keep_human`; the comments of the rewritten rows are replaced), run steps 2 to 4 again (the page comment is written here, once), and show a second recap:
+6. Write it again without presenting it (`all` or `keep_human`; the comments of the rewritten rows are replaced), run steps 2 to 4 again (the page comment is written here, once), and show a second recap:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
 GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_notion.py" apply "$RUN"
 ```
+
+When no row is left to rerun (the lead answered « Passer » to everything, or no answered row has a lot), skip 1 to 4 only: no rerun is dispatched or closed (a rerun opened at 1 with nothing to dispatch has no file and needs no closing). After a `login` entry, whatever its answer, always run 5 and 6: its held lots wrote new findings that the plan must take. Without a `login` entry and without rows, skip 5 and 6 too: run the synthesis again (step 2, as below), run step 4 now (page comment), then go to step 6.
 
 Rows whose entry was passed stay `unknown`. Never run a command the guard refused.
 
@@ -515,7 +522,7 @@ RUN="<run_dir>"
 GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' bash "$S/cqa-toolbox.sh" run "$RUN" <tool>
 ```
 
-8. Dispatch the lots that still have rows, with the same agent types, the same limits and the same fallbacks as section 6 (`references/lots.md`, section 3). The line, exactly, with the kept rows of that lot only:
+8. Dispatch the lots that still have rows, with the same agent types, the same limits and the same fallbacks as section 6 (`references/lots.md`, section 3). In autonomous mode the lots whose `needs_session` is true are held as in section 6, step 3: none of them is dispatched now, and once every other lot is validated record one `--kind login` entry whose `--refs` are their kept rows; section 8, step 5 reruns those rows after the login (they join its rerun). The line, exactly, with the kept rows of that lot only:
 
 ```
 Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no. Rerun: <NN>. Rows: CQ-3, CQ-12. Follow your instructions.

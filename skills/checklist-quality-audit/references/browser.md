@@ -36,7 +36,7 @@ Only when "Navigateur" is available, after the browser lots whose `needs_session
 3. Without login, the rows that need a session end `unknown`, with the steps in `human_check`.
 4. After the last `-session` lot, close these tabs with `tabs_close_mcp`.
 
-In autonomous mode (`mode` is `autonome`) there is no pause at this point: the lead is away and the audit never waits. The browser lots whose `needs_session` is false run first; the lots whose `needs_session` is true (back-office, test accounts) are held, not dispatched. The login pause happens last, at the end of the audit (SKILL.md, section 8, step 5), and the held lots are dispatched then, as normal first-round lots; if the lead declines or cannot log in, they are dispatched without a session and the agents write `unknown` with the reason. Record it once, with the refs of the held lots:
+In autonomous mode (`mode` is `autonome`) there is no pause at this point: the lead is away and the audit never waits. The browser lots whose `needs_session` is false run first; the lots whose `needs_session` is true (back-office, test accounts) are held, not dispatched. The login pause happens last, at the end of the audit (SKILL.md, section 8, step 5), and the held lots are dispatched then, as normal first-round lots; in a rerun or a recette their kept rows join the rerun of that step instead (`Rerun:` line), never as first-round lots. If the lead declines or cannot log in, they are dispatched without a session and the agents write `unknown` with the reason. Record it once, with the refs of the held lots:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

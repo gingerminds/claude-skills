@@ -440,6 +440,46 @@ class SkillTest(unittest.TestCase):
         self.assertIn("`--recette <that NN>`", _section(text, "3. Resume"))
         self.assertIn("Statut humain conservé", _section(text, "11. Recette"))
 
+    def _end_block(self):
+        writing = _section(_text(SKILL), "8. Writing and synthesis")
+        return writing[writing.index("**5. Deferred") : writing.index("**6. Final scan**")]
+
+    def test_end_block_always_plans_and_writes_after_the_login_entry(self):
+        end = self._end_block()
+        self.assertNotIn("go straight to the plan", end)
+        rule = end[end.index("When no row is left to rerun") :]
+        for needle in ("skip 1 to 4 only", "After a `login` entry, whatever its answer, "
+                       "always run 5 and 6", "Without a `login` entry and without rows"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, rule)
+        self.assertLess(end.index('cqa_plan.py" rerun-start "$RUN"'),
+                        end.index('cqa_plan.py" rerun-candidates "$RUN" --refs'))
+        self.assertIn('cqa_plan.py" rerun-close "$RUN" <NN> --rows CQ-3,CQ-12', end)
+        self.assertIn("« aucun fichier de la relance NN »", end)
+        self.assertIn("in a recette, pass `--recette <recette.rerun of notion/plan.json>`", end)
+
+    def test_held_lots_of_a_rerun_join_the_rerun_of_the_end_block(self):
+        end = self._end_block()
+        login = end[end.index("- `login`:") : end.index("- `ssh_refused`:")]
+        for needle in ("Held lots of an audit (no `findings/<lot_id>.json` yet)",
+                       "Held lots of a rerun or a recette", "never as first-round lots",
+                       "join the rerun below", "`--refs`",
+                       "only the held lots among the `lots` that `probes --followup` lists"):
+            with self.subTest(login=needle):
+                self.assertIn(needle, login)
+        skill = _text(SKILL)
+        audit = _section(skill, "6. Audit")
+        bullet = audit[audit.index("- `--kind login`:") : audit.index("- `--kind question`:")]
+        self.assertIn("In a rerun or a recette", bullet)
+        step8 = _section(skill, "10. Rerun").split("\n8. ")[1].split("\n9. ")[0]
+        for needle in ("In autonomous mode", "held", "`--kind login`", "section 8, step 5"):
+            with self.subTest(step8=needle):
+                self.assertIn(needle, step8)
+        for name in ("lots.md", "browser.md"):
+            with self.subTest(reference=name):
+                text = _text(REFERENCES / name)
+                self.assertIn("in a rerun or a recette their kept rows join the rerun", text)
+
     def test_rerun_and_recette_check_the_repos_and_date_their_comments(self):
         skill = _text(SKILL)
         for heading in ("10. Rerun", "11. Recette"):
