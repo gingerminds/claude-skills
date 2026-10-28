@@ -34,7 +34,7 @@ _NO_CATEGORY = "Sans catégorie"
 _NO_RESULT = "result.json absent ou illisible"
 _UNKNOWN_STATUS = "statut inconnu"
 _UNKNOWN_WITHOUT_TEXT = "voir le commentaire déjà présent dans Notion"
-_CONSTAT = "Constat : "
+_CONSTAT = "Constat :"
 _HUMAN_SECTION = "Statuts posés par un humain et contredits par l'audit"
 _IDLE_LIMIT = timedelta(minutes=30)
 _DEFERRED_KINDS = {
@@ -350,9 +350,19 @@ def _unknown_lines(refs: list, titles: dict, lots: dict, plan: dict) -> list:
 
 
 def _constat(text: str) -> Optional[str]:
-    for line in text.splitlines():
-        if line.startswith(_CONSTAT):
-            return line[len(_CONSTAT) :].strip() or None
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith(_CONSTAT):
+            continue
+        inline = line[len(_CONSTAT) :].strip()
+        if inline:
+            return inline
+        block = []
+        for following in lines[index + 1 :]:
+            if not following.strip():
+                break
+            block.append(following.strip())
+        return " ".join(block) or None
     return None
 
 

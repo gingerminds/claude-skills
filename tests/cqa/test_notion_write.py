@@ -193,6 +193,17 @@ def verdict_text(label, note="Constat"):
     return f"{note}\nVerdict : {label}"
 
 
+OLD_LAYOUT = (
+    "Audit PRE-MEL · 27/10/2026 · lancé par Julien L\n"
+    "Verdict : À traiter (confiance haute)\nConstat : x"
+)
+
+
+def verdict_blocks(label, note="x"):
+    head = "Audit PRE-MEL · 27/10/2026 · lancé par Julien L"
+    return f"{head}\n\nVerdict :\n{label}\n\nConstat :\n{note}"
+
+
 class StubClient:
     """Exposes the three methods apply_plan may use. Any other access fails the test."""
 
@@ -886,6 +897,39 @@ class CommentReplacementTest(ApplyTestCase):
         self.assertEqual(self.notion.stored(PAGE_1), [text])
         [entry] = self.applied()
         self.assertEqual((entry["comment_id"], entry["mode"]), ("created-1", "create"))
+
+    def assert_replaced(self, existing):
+        self.notion.add_comment(PAGE_1, existing, comment_id="mine")
+        text = verdict_blocks("Ok / Recetté")
+        result = self.apply(comment_op(PAGE_1, 1, text))
+        self.assertEqual(result["done"], 1)
+        self.assertEqual(self.notion.requests("POST"), [])
+        [update] = self.notion.requests("PATCH")
+        self.assertTrue(update.url.endswith("/comments/mine"))
+        self.assertEqual(self.notion.texts(PAGE_1), [text])
+
+    def test_old_layout_comment_is_replaced_without_duplicate(self):
+        self.assert_replaced(OLD_LAYOUT)
+
+    def test_block_layout_comment_is_replaced_without_duplicate(self):
+        self.assert_replaced(verdict_blocks("À traiter (confiance haute)"))
+
+    def test_same_content_in_the_old_layout_is_rewritten_not_skipped(self):
+        old = OLD_LAYOUT
+        self.notion.add_comment(PAGE_1, old, comment_id="old")
+        text = verdict_blocks("À traiter (confiance haute)")
+        result = self.apply(comment_op(PAGE_1, 1, text))
+        self.assertEqual((result["done"], result["skipped"]), (1, 0))
+        [update] = self.notion.requests("PATCH")
+        self.assertTrue(update.url.endswith("/comments/old"))
+        self.assertEqual(self.notion.texts(PAGE_1), [text])
+
+    def test_same_content_in_the_block_layout_is_skipped(self):
+        text = verdict_blocks("À traiter (confiance haute)")
+        self.notion.add_comment(PAGE_1, text)
+        result = self.apply(comment_op(PAGE_1, 1, text))
+        self.assertEqual((result["done"], result["skipped"]), (0, 1))
+        self.assertEqual(self.notion.requests("PATCH"), [])
 
     def test_a_skill_comment_without_verdict_is_not_replaced(self):
         self.notion.add_comment(PAGE_1, "Synthèse sans verdict")

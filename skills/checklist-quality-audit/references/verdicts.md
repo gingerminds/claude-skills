@@ -26,7 +26,7 @@ The contract is the JSON Schema `skills/checklist-quality-audit/schemas/finding.
 
 ## Texts
 
-`summary`, `todo`, `human_check` and `divergence` end up in a Notion comment that the devs read: "Constat : ...", "À faire : ...", "À valider : ...", "Écart code / préprod : ...". The whole comment holds 1,500 characters and shows the first 5 pieces of evidence.
+`summary`, `todo`, `human_check` and `divergence` end up in a Notion comment that the devs read: blocks labelled "Constat", "À faire", "À valider", "Écart code / préprod". The whole comment holds 1,500 characters and shows the first 5 pieces of evidence.
 
 - Always write these texts, and the `detail` of evidence, in French.
 - Never write an em dash. Use a colon, a comma or parentheses.
