@@ -13,7 +13,7 @@ from cqa.secrets import scan_tree
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
-EXPECTED_VERSION = "0.12.0"
+EXPECTED_VERSION = "0.13.0"
 NEW_SKILL = "/gm:checklist-quality-audit"
 
 SCOPE = [

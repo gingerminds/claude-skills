@@ -100,6 +100,15 @@ Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépar
 - **Garde-fou SSH** : compte les formats de hash de mots de passe sans les révéler (4 caractères au plus), colonnes secrètes illisibles, `wp option get` limité à une liste d'options cœur, `wp site list --field=url`, `wp post list` (pages) et `wp user list --role=<rôle> --format=count` autorisés, racines d'app `/var/www /srv /app /opt`, `app_dirs` sous la forme `{host, container}`.
 - **Synthèse** : les « Remarques » viennent de `remarques.md` et ne sont jamais effacées ; une section « Décisions mises de côté » et la durée active s'ajoutent.
 - **Veille** : si la fermeture du capot ne peut pas être bloquée, l'empêchement se replie sur `sleep:idle`.
+- **Boîte à outils 1.2 ou plus** : les nouveaux outils exigent cette version (`cqa-toolbox.sh pull`). Avec une image plus ancienne, ils sont ignorés et la raison donne cette commande.
+  - **Affichage** : 6 largeurs et zoom 200 %, avec captures. Les captures de viewport ne sont pas expurgées : les traiter comme les pages elles-mêmes.
+  - **Stylelint** : la configuration du projet est comparée à celle de la checklist ; une configuration temporaire sert au besoin.
+  - **Dépendances** : `composer audit` et `npm audit` sur le commit audité.
+  - **Lighthouse et Yellow Lab** : passages desktop en plus du mobile.
+  - **Redocly et Schemathesis** : « non applicable » sans spécification OpenAPI.
+- **Page clé 404** (`/gm-cqa-404-<aléa>`) : elle doit répondre 404, toute autre réponse est un soft 404.
+- **Durée du crawl** : proposée au diagnostic ; en mode autonome, la proposition est utilisée telle quelle.
+- **Plugins WordPress** : le lead confirme lesquels sont custom ; les tiers sont exclus de Stylelint et de l'audit des dépendances.
 
 ## Structure
 
