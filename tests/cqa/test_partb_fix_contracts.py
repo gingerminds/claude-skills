@@ -74,5 +74,22 @@ class CrawlDurationContract(unittest.TestCase):
         )
 
 
+class ThirdPartyWordingContract(unittest.TestCase):
+    def test_scope_is_stylelint_and_deps_only(self):
+        ref = section((REFS / "context.md").read_text(encoding="utf-8"), "## 6.1.1")
+        self.assertNotIn("outside the scope of the code rows and of the toolbox", ref)
+        self.assertIn("outside the scope of the code rows and of stylelint and deps", ref)
+        self.assertIn("assets and gitleaks tools of the toolbox still read it", ref)
+        self.assertIn("outside the scope of stylelint and deps (CQ-40, CQ-66, CQ-113)", AUDITOR)
+        self.assertIn("assets and gitleaks still read them", AUDITOR)
+
+    def test_reuse_wording_is_aligned(self):
+        ref = section((REFS / "context.md").read_text(encoding="utf-8"), "## 6.1.1")
+        self.assertIn("copies `third_party_paths` per repo into the new `context.json`", ref)
+        self.assertIn("a plugin added since is custom by default", ref)
+        self.assertNotIn("so an earlier answer is proposed again", ref)
+        self.assertIn("(SSH alias, preprod URL, Notion copy, key pages, excluded third-party plugins)", SKILL)
+
+
 if __name__ == "__main__":
     unittest.main()
