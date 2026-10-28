@@ -1,4 +1,5 @@
 import gzip
+import time
 import unittest
 
 from cqa import crawl_budget as budget
@@ -97,7 +98,55 @@ class SitemapTest(unittest.TestCase):
 
     def test_an_oversized_file_is_ignored(self):
         big = b"<urlset>" + b" " * (budget.MAX_SITEMAP_BYTES + 1) + b"</urlset>"
-        self.assertEqual(0, self.count({ORIGIN + "/sitemap.xml": big})[0])
+        self.assertIsNone(self.count({ORIGIN + "/sitemap.xml": big})[0])
+
+    def test_a_gzip_file_that_inflates_past_the_cap_is_ignored(self):
+        bomb = gzip.compress(b"<urlset>" + b" " * (budget.MAX_SITEMAP_BYTES + 10) + b"</urlset>")
+        self.assertLess(len(bomb), budget.MAX_SITEMAP_BYTES)
+        self.assertIsNone(self.count({ORIGIN + "/sitemap.xml": bomb})[0])
+
+    def test_image_and_video_locations_are_not_pages(self):
+        entries = "".join(
+            f"<url><loc>{ORIGIN}/p{n}</loc><image:image><image:loc>{ORIGIN}/i{n}a.jpg</image:loc></image:image>"
+            f"<image:image><image:loc>{ORIGIN}/i{n}b.jpg</image:loc></image:image>"
+            f"<video:video><video:loc>{ORIGIN}/v{n}.mp4</video:loc></video:video></url>"
+            for n in range(100)
+        )
+        body = f"<urlset xmlns:image='x'>{entries}</urlset>".encode()
+        self.assertEqual(100, self.count({ORIGIN + "/sitemap.xml": body})[0])
+
+    def test_a_sitemap_prefixed_loc_counts(self):
+        body = f"<sm:urlset><sm:url><sm:loc>{ORIGIN}/a</sm:loc></sm:url></sm:urlset>".encode()
+        self.assertEqual(1, self.count({ORIGIN + "/sitemap.xml": body})[0])
+
+    def test_a_soft_404_page_is_not_a_sitemap(self):
+        self.assertIsNone(self.count({ORIGIN + "/sitemap.xml": b"<html><body>Not found</body></html>"})[0])
+
+    def test_a_self_loop_index_is_read_once(self):
+        url = ORIGIN + "/sitemap.xml"
+        result, site = self.count({url: index(url)})
+        self.assertEqual(0, result)
+        self.assertEqual(1, site.urls.count(url))
+
+    def test_an_unclosed_loc_is_fast(self):
+        body = b"<urlset><loc>" + b" " * 10000
+        started = time.monotonic()
+        self.assertEqual(0, self.count({ORIGIN + "/sitemap.xml": body})[0])
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_a_huge_nested_index_stops_at_the_deadline(self):
+        names = [f"{ORIGIN}/m{number}.xml" for number in range(20000)]
+        pages = {ORIGIN + "/sitemap.xml": index(*names)}
+        info = {}
+        started = time.monotonic()
+        result, _ = self.count(pages, deadline=time.monotonic() + 0.2, info=info)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertTrue(info["truncated"])
+
+    def test_truncated_is_false_for_a_complete_count(self):
+        info = {}
+        self.count({ORIGIN + "/sitemap.xml": urlset(ORIGIN + "/a")}, info=info)
+        self.assertFalse(info["truncated"])
 
 
 class ResponseTimeTest(unittest.TestCase):

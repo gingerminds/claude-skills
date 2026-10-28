@@ -2315,6 +2315,20 @@ class CrawlEstimateTest(RunDirCase):
         self.assertNotIn(PASSWORD, out + err)
         self.assertNotIn(USER, out + err)
 
+    def test_crawl_estimate_reports_a_truncated_count_and_refuses_clear_credentials(self):
+        self.serve({"/sitemap.xml": b"<urlset></urlset>", "/": b""})
+        self.write_context(target__preprod_url=self.base, key_pages=[{"template": "A", "url": self.base + "/"}])
+        self.assertFalse(json.loads(self.estimate()[1])["truncated"])
+        self.write_context(
+            target__preprod_url="http://preprod.example.org",
+            key_pages=[{"template": "A", "url": "http://preprod.example.org/"}],
+        )
+        code, out, err = self.estimate(
+            ["--auth-env"], {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        )
+        self.assertNotEqual(0, code)
+        self.assertNotIn(PASSWORD, out + err)
+
     def test_crawl_estimate_without_a_sitemap(self):
         self.serve({"/": b"home"})
         self.write_context(target__preprod_url=self.base, key_pages=[{"template": "A", "url": self.base + "/"}])
@@ -2338,6 +2352,68 @@ class CrawlEstimateTest(RunDirCase):
         self.write_context(target__preprod_url=self.base)
         code, _, _ = self.estimate(["--auth-env"])
         self.assertEqual(2, code)
+
+
+class FetchTimedTest(CliCase):
+    def serve(self, handler):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_a_slowly_streamed_body_counts_as_unanswered(self):
+        class Slow(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                try:
+                    for _ in range(100):
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                except OSError:
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        _, base = self.serve(Slow)
+        started = time.monotonic()
+        status, body, _ = target.fetch_timed(base + "/", timeout=5, deadline=time.monotonic() + 0.3)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual((None, b""), (status, body))
+
+    def test_a_cross_origin_redirect_is_not_followed_and_gets_nothing(self):
+        seen = []
+
+        class Second(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(dict(self.headers))
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        _, other = self.serve(Second)
+
+        class First(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", other + "/x")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        _, base = self.serve(First)
+        status, body, _ = target.fetch_timed(base + "/", auth=(USER, PASSWORD))
+        self.assertEqual((302, b""), (status, body))
+        self.assertEqual([], seen)
 
 
 class ReuseContextTest(RunDirCase):

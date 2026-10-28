@@ -1,4 +1,5 @@
 """Crawl duration proposed at diagnostic time, from the sitemap and the response time."""
+import collections
 import html
 import math
 import re
@@ -16,7 +17,9 @@ MAX_SITEMAP_BYTES = 10 * 1024 * 1024
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 PAGE_PAUSE = 0.5
 
-_LOC = re.compile(r"<(?:\w+:)?loc>\s*(.*?)\s*</(?:\w+:)?loc>", re.DOTALL | re.IGNORECASE)
+_LOC = re.compile(r"<(?:sm:)?loc>([^<]*)</(?:sm:)?loc>", re.IGNORECASE)
+_INDEX = re.compile(r"<(?:\w+:)?sitemapindex[\s>]", re.IGNORECASE)
+_URLSET = re.compile(r"<(?:\w+:)?urlset[\s>]", re.IGNORECASE)
 _ROBOTS_SITEMAP = re.compile(r"^\s*sitemap\s*:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
 
 
@@ -44,17 +47,21 @@ def count_sitemap_urls(
     sleep: Callable = time.sleep,
     delay: float = 0.0,
     deadline: Optional[float] = None,
+    info: Optional[dict] = None,
 ) -> Optional[int]:
     """Count the distinct URLs (path and query) of the sitemaps of origin; None if none answers.
 
     Seeds are origin/sitemap.xml and the Sitemap lines of robots.txt. An address on prod_origin
-    is read on origin. Other hosts are ignored.
+    is read on origin. Other hosts are ignored. Only plain (or sitemap-prefixed) loc elements
+    count, never image:loc or video:loc. When info is given, info["truncated"] tells whether
+    the deadline or the file cap cut the count.
     """
     origin = origin.rstrip("/")
-    state = {"files": 0, "answered": False, "requests": 0}
+    state = {"files": 0, "answered": False, "requests": 0, "truncated": False}
 
     def get(url: str) -> Optional[bytes]:
         if deadline is not None and time.monotonic() >= deadline:
+            state["truncated"] = True
             return None
         if state["requests"]:
             sleep(delay)
@@ -65,37 +72,44 @@ def count_sitemap_urls(
         return bytes(body)
 
     def read(url: str) -> Optional[str]:
-        if state["files"] >= MAX_SITEMAP_FILES:
-            return None
         state["files"] += 1
         body = get(url)
         if body is None:
             return None
-        state["answered"] = True
-        return _unpack(body, url)
+        text = _unpack(body)
+        if text is not None and (_URLSET.search(text) or _INDEX.search(text)):
+            state["answered"] = True
+        return text
 
     seeds = [origin + "/sitemap.xml"]
+    known = set(seeds)
     robots = get(origin + "/robots.txt") or b""
     for line in _ROBOTS_SITEMAP.findall(robots[:MAX_PAGE_BYTES].decode("utf-8", errors="replace")):
         mapped = on_target(line, origin, prod_origin)
-        if mapped and mapped not in seeds:
+        if mapped and mapped not in known:
+            known.add(mapped)
             seeds.append(mapped)
     found, seen = set(), set()
-    queue = [(url, 0) for url in seeds]
+    queue = collections.deque((url, 0) for url in seeds)
     while queue:
-        url, depth = queue.pop(0)
+        if state["files"] >= MAX_SITEMAP_FILES:
+            state["truncated"] = True
+            break
+        url, depth = queue.popleft()
         if url in seen:
             continue
         seen.add(url)
         text = read(url)
+        if state["truncated"]:
+            break
         if text is None:
             continue
-        locations = [html.unescape(item) for item in _LOC.findall(text)]
-        if re.search(r"<(?:\w+:)?sitemapindex", text, re.IGNORECASE):
+        locations = [html.unescape(item.strip()) for item in _LOC.findall(text)]
+        if _INDEX.search(text):
             if depth < MAX_SITEMAP_DEPTH:
                 for item in locations:
                     mapped = on_target(item, origin, prod_origin)
-                    if mapped:
+                    if mapped and mapped not in seen:
                         queue.append((mapped, depth + 1))
             continue
         for item in locations:
@@ -103,6 +117,8 @@ def count_sitemap_urls(
             if mapped:
                 parts = urlsplit(mapped)
                 found.add((parts.path or "/", parts.query))
+    if info is not None:
+        info["truncated"] = state["truncated"]
     return len(found) if state["answered"] else None
 
 
@@ -144,15 +160,15 @@ def on_target(url: str, origin: str, prod_origin: Optional[str]) -> Optional[str
     return origin + rest
 
 
-def _unpack(body: bytes, url: str) -> Optional[str]:
-    """Return the text of a sitemap (gunzipped when needed); None above the size cap."""
+def _unpack(body: bytes) -> Optional[str]:
+    """Return the text of a sitemap (gunzipped by magic bytes); None above the size cap."""
     if len(body) > MAX_SITEMAP_BYTES:
         return None
-    if body[:2] == b"\x1f\x8b" or urlsplit(url).path.endswith(".gz"):
+    if body[:2] == b"\x1f\x8b":
         try:
             unpacker = zlib.decompressobj(16 + zlib.MAX_WBITS)
             body = unpacker.decompress(body, MAX_SITEMAP_BYTES + 1)
-        except (zlib.error, OSError, EOFError):
+        except (zlib.error, EOFError):
             return None
         if len(body) > MAX_SITEMAP_BYTES or unpacker.unconsumed_tail:
             return None

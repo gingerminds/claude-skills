@@ -693,8 +693,22 @@ def _cmd_crawl_estimate(args, services) -> int:
         opener = build_opener(authenticated=auth is not None)
     deadline = time.monotonic() + KEY_PAGES_DEADLINE
 
+    sent = []
+
     def fetcher(limit: int):
-        return lambda page_url: fetch_timed(page_url, auth=auth, opener=opener, max_bytes=limit)
+        def fetch(page_url: str) -> tuple:
+            try:
+                result = fetch_timed(
+                    page_url, auth=auth, opener=opener, max_bytes=limit, deadline=deadline
+                )
+            except ValueError:
+                if not sent:
+                    raise
+                result = (None, b"", 0.0)
+            sent.append(page_url)
+            return result
+
+        return fetch
 
     pages = [
         mapped
@@ -702,24 +716,26 @@ def _cmd_crawl_estimate(args, services) -> int:
         if template != "404"
         for mapped in [crawl_budget.on_target(page_url, origin, prod_origin)]
         if mapped
-    ]
+    ][:MAX_KEY_PAGES - 1]
+    timings, info = [], {}
+    mean = crawl_budget.mean_response_time(
+        pages, fetcher(crawl_budget.MAX_PAGE_BYTES), deadline=deadline, timed=timings
+    )
     sitemap_urls = crawl_budget.count_sitemap_urls(
         origin,
         fetcher(crawl_budget.MAX_SITEMAP_BYTES + 1),
         prod_origin,
         delay=1 / rate,
         deadline=deadline,
+        info=info,
     )
-    timings = []
-    mean = crawl_budget.mean_response_time(
-        pages, fetcher(crawl_budget.MAX_PAGE_BYTES), deadline=deadline, timed=timings
-    )
-    minutes = crawl_budget.propose_crawl_minutes(sitemap_urls, mean, rate)
+    minutes = crawl_budget.propose_crawl_minutes(sitemap_urls, mean, float(TOOLBOX_RATE))
     _emit(
         {
             "sitemap_urls": sitemap_urls,
             "mean_response_s": None if mean is None else round(mean, 3),
             "pages_timed": len(timings),
+            "truncated": bool(info.get("truncated")),
             "proposed_minutes": minutes,
             "max_urls": crawl_budget.crawl_max_urls(minutes),
         }

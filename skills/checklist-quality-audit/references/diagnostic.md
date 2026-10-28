@@ -172,9 +172,10 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" crawl-estimate "$RUN"
 ```
 
-- It counts the URLs of the sitemaps (`sitemap.xml` and the `Sitemap:` lines of `robots.txt`, indexes followed, prod addresses read on the target) and times the key pages (the `404` template excluded), in 80 seconds at most, and prints `{"sitemap_urls", "mean_response_s", "pages_timed", "proposed_minutes", "max_urls"}`. `sitemap_urls` is `null` without a sitemap. No credential is printed.
+- It counts the URLs of the sitemaps (`sitemap.xml` and the `Sitemap:` lines of `robots.txt`, indexes followed, prod addresses read on the target) and times the key pages (the `404` template excluded), (9 key pages at most, then the sitemaps), 100 secondes au plus, and prints `{"sitemap_urls", "mean_response_s", "pages_timed", "truncated", "proposed_minutes", "max_urls"}`. `truncated` is true when the time limit or the file limit cut the count: say so in the question. `sitemap_urls` is `null` without a sitemap. No credential is printed.
 - Ask « Durée maximale du crawl ? » with « <proposed_minutes> min (proposé) » first, then two values among 30, 60 and 120 that differ from the proposal, and any other duration in « Autre » (5 to 240 minutes). The text of the question gives the basis: « <sitemap_urls> URLs dans le sitemap, <mean_response_s> s par page : <proposed_minutes> min, <max_urls> URLs au plus », or « Pas de sitemap : 30 min proposées » when `sitemap_urls` is `null`.
 - Write the answer in `context.json` as `crawl_minutes` (integer, 5 to 240). The URL cap follows the duration (`toolbox-env`). A slowdown of the preprod during the crawl is not anticipated: the crawl lowers its own rate and stops at its duration.
+- If `crawl-estimate` fails (non-zero exit, no output): propose 30 min and ask without a basis (« Pas d'estimation : 30 min proposées »); in autonomous mode use 30.
 - Autonomous mode: do not ask. Use `proposed_minutes` and write it in `crawl_minutes`. No `defer`: nothing is left open.
 - `reuse-context` never copies `crawl_minutes`: it depends on the response time measured on this run.
 

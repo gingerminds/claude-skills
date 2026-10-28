@@ -127,12 +127,14 @@ def fetch_timed(
     opener=None,
     timeout: float = 20.0,
     max_bytes: int = 2_097_152,
+    deadline: Optional[float] = None,
 ) -> tuple:
     """Return (status, body, elapsed_s) of a GET, under the rules of fetch_page.
 
     body is the raw bytes (max_bytes at most, kept as is for a compressed file); elapsed_s runs
-    until the end of the body. status is None when nothing answered. Raises ValueError as
-    fetch_page does.
+    until the end of the body. status is None when nothing answered, or when the body was not
+    complete before the time limit (timeout from the start, and deadline, a time.monotonic
+    value). Raises ValueError as fetch_page does.
     """
     validate_url(url)
     if auth is not None:
@@ -144,8 +146,20 @@ def fetch_timed(
     try:
         with opener.open(request, timeout=timeout) as response:
             status = response.getcode()
-            body = response.read(max_bytes) if 200 <= status < 300 else b""
-            return status, body, time.monotonic() - started
+            if not 200 <= status < 300:
+                return status, b"", time.monotonic() - started
+            limit = started + timeout if deadline is None else min(started + timeout, deadline)
+            chunks, size = [], 0
+            while size < max_bytes:
+                if time.monotonic() >= limit:
+                    return None, b"", time.monotonic() - started
+                read = getattr(response, "read1", response.read)
+                chunk = read(min(65536, max_bytes - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+            return status, b"".join(chunks), time.monotonic() - started
     except urllib.error.HTTPError as error:
         error.close()
         return error.code, b"", time.monotonic() - started
