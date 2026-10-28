@@ -160,35 +160,40 @@ class NonSecretTest(unittest.TestCase):
         "['password' => $password, 'remember' => $remember]",
         "`password=$PASSWORD` : d'abord l'ordre, L'app, N'oubliez pas, qu'on, s'il, jusqu'ici, aujourd'hui.",
     ]
+    # (line, its secret literal): masking must remove that literal, not only the first token.
     SECRETS = [
-        'password: "S3cr3t-Pass!"',
-        'password: "Pa(ss)word!"',
-        "DB_PASSWORD=Pa55word2024",
-        "'password' => 'hunter2hunter2'",
-        "api_key=sk_live_51Habcdefghijkl",
-        "token: abcd1234efgh5678",
-        "'password' => '$uper-Secret1',",
-        'DB_PASSWORD="$ecretPa55"',
-        '"password": "$2y$10$abcdefghijklmnopqrstuv"',
-        'password: ":Secret123"',
-        '"password": "password"',
-        "'password' => env('DB_PASSWORD', 'RealSecret123'),",
-        "'secret' => env('STRIPE_SECRET', 'sk_live_abcdef123456'),",
-        "'password' => Hash::make('Adm1nP@ss2024'),",
-        "'password' => bcrypt('Adm1nP@ss2024'),",
-        "$user->password = Hash::make('Adm1nP@ss2024');",
-        "'password' => $_ENV['DB_PASSWORD'] ?? 'RealSecret123',",
-        "MYSQL_PASSWORD: ${MYSQL_PASSWORD:-S3cretDefault}",
-        "PASSWORD=${DB_PASSWORD:-S3cretDefault}",
-        "DB_PASSWORD=password",
-        "password=:Secret123",
-        "token = hmac.new(b'RealSecretKey123', msg, sha256).hexdigest()",
-        "token = jwt.encode(payload, b'my-signing-secret-123', algorithm='HS256')",
-        "token = base64.b64encode(b'admin:Adm1nP@ss2024').decode()",
-        "password = make_password(r'Adm1nP@ss2024')",
-        "password = make_password(f'Adm1nP@ss2024')",
-        "password = HASHBYTES('SHA2_256', N'Adm1nP@ss2024')",
-        "'password' => Hash::make('Adm1nP@ss2024'), // l'admin d'origine",
+        ('password: "S3cr3t-Pass!"', "S3cr3t-Pass!"),
+        ('password: "Pa(ss)word!"', "Pa(ss)word!"),
+        ("DB_PASSWORD=Pa55word2024", "Pa55word2024"),
+        ("'password' => 'hunter2hunter2'", "hunter2hunter2"),
+        ("api_key=sk_live_51Habcdefghijkl", "sk_live_51Habcdefghijkl"),
+        ("token: abcd1234efgh5678", "abcd1234efgh5678"),
+        ("'password' => '$uper-Secret1',", "$uper-Secret1"),
+        ('DB_PASSWORD="$ecretPa55"', "$ecretPa55"),
+        ('"password": "$2y$10$abcdefghijklmnopqrstuv"', "$2y$10$abcdefghijklmnopqrstuv"),
+        ('password: ":Secret123"', "Secret123"),
+        ('"password": "password"', ': "password"'),
+        ("'password' => env('DB_PASSWORD', 'RealSecret123'),", "RealSecret123"),
+        ("'secret' => env('STRIPE_SECRET', 'sk_live_abcdef123456'),", "sk_live_abcdef123456"),
+        ("'password' => Hash::make('Adm1nP@ss2024'),", "Adm1nP@ss2024"),
+        ("'password' => bcrypt('Adm1nP@ss2024'),", "Adm1nP@ss2024"),
+        ("$user->password = Hash::make('Adm1nP@ss2024');", "Adm1nP@ss2024"),
+        ("'password' => $_ENV['DB_PASSWORD'] ?? 'RealSecret123',", "RealSecret123"),
+        ("MYSQL_PASSWORD: ${MYSQL_PASSWORD:-S3cretDefault}", "S3cretDefault"),
+        ("PASSWORD=${DB_PASSWORD:-S3cretDefault}", "S3cretDefault"),
+        ("DB_PASSWORD=password", "=password"),
+        ("password=:Secret123", "Secret123"),
+        ("token = hmac.new(b'RealSecretKey123', msg, sha256).hexdigest()", "RealSecretKey123"),
+        ("token = jwt.encode(payload, b'my-signing-secret-123', algorithm='HS256')", "my-signing-secret-123"),
+        ("token = jwt.encode(payload, 'my-signing-secret-123', algorithm='HS256')", "my-signing-secret-123"),
+        ("token = hmac.new(key, b'RealSecretKey123')", "RealSecretKey123"),
+        ("token = hmac.new (key, b'RealSecretKey123')", "RealSecretKey123"),
+        ("token = cfg[b'RealSecretKey123']", "RealSecretKey123"),
+        ("token = base64.b64encode(b'admin:Adm1nP@ss2024').decode()", "Adm1nP@ss2024"),
+        ("password = make_password(r'Adm1nP@ss2024')", "Adm1nP@ss2024"),
+        ("password = make_password(f'Adm1nP@ss2024')", "Adm1nP@ss2024"),
+        ("password = HASHBYTES('SHA2_256', N'Adm1nP@ss2024')", "Adm1nP@ss2024"),
+        ("'password' => Hash::make('Adm1nP@ss2024'), // l'admin d'origine", "Adm1nP@ss2024"),
     ]
 
     def test_form_field_descriptions_are_not_secrets(self):
@@ -204,14 +209,19 @@ class NonSecretTest(unittest.TestCase):
                 self.assertEqual(redact(text, []), text)
 
     def test_credential_assignment_still_catches_real_secrets(self):
-        for text in self.SECRETS:
+        for text, literal in self.SECRETS:
             with self.subTest(text=text):
+                self.assertIn(literal, text)
                 self.assertEqual(scan_text(text, []), ["credential_assignment"])
                 masked = redact(text, [])
                 self.assertIn("[secret masqué]", masked)
+                self.assertNotIn(literal, masked)
                 self.assertEqual(scan_text(masked, []), [])
-                for literal in ("RealSecret123", "Adm1nP@ss2024", "S3cretDefault", "sk_live_abcdef123456"):
-                    self.assertNotIn(literal, masked)
+                self.assertEqual(redact(masked, []), masked)
+
+    def test_a_masked_call_stops_at_the_end_of_its_line(self):
+        text = "token = jwt.encode(payload, b'my-signing-secret-123')\nDB_HOST=db.example.org"
+        self.assertEqual(redact(text, []), "token = [secret masqué]\nDB_HOST=db.example.org")
 
     def test_secret_after_a_form_description_is_still_masked(self):
         text = "password : type=password\nDB_PASSWORD=Pa55word2024"

@@ -58,6 +58,8 @@ _ACCESSOR_CALL = re.compile(
     r"|string|boolean|integer)\s*\(\s*\Z"
 )
 _HARMLESS_LITERAL = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+|[A-Z][A-Z0-9_]*")
+# A value cut at a space before "(" or "[" is a call or index: its arguments stay masked.
+_OPENING_BRACKET = re.compile(r"[ \t]*(?:\(|\[(?!secret masqué\]))")
 
 
 def _is_non_secret(match: re.Match) -> bool:
@@ -168,16 +170,17 @@ def scan_tree(
 
 
 def _redact_credentials(text: str) -> str:
-    """Mask credential values; a call or index cut at its quote is masked to the end of line."""
+    """Mask credential values; an unquoted call or index is masked to the end of line."""
     out = []
     position = 0
     for match in _CREDENTIAL.finditer(text):
         if match.start() < position or _is_non_secret(match):
             continue
         end = match.end("val")
-        if not match.group("q") and (match.group("val")[-1] in "([" or (
-            "(" in match.group("val") and text[end:end + 1] in ("'", '"')
-        )):
+        value = match.group("val")
+        if not match.group("q") and (
+            "(" in value or "[" in value or _OPENING_BRACKET.match(text, end)
+        ):
             newline = text.find("\n", end)
             end = len(text) if newline < 0 else newline
         out.append(text[position:match.start()] + match.group("pre") + MASK)
