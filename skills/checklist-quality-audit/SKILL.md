@@ -410,6 +410,8 @@ GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_notion.py" apply "$RUN"
 
 Rows whose entry was passed stay `unknown`. Never run a command the guard refused.
 
+Once the entries are handled (and any rerun is written), run the synthesis (step 2) again, so that « Décisions mises de côté » shows their fresh statuses, then step 4 as said above.
+
 **6. Final scan**, on every path that reached step 2:
 
 ```bash

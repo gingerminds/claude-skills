@@ -1384,7 +1384,10 @@ class SynthesisTest(AuditCase):
             "## Outils",
         ):
             self.assertIn(heading, text)
-        self.assertIn("Durée active de l'audit : 47 min", text)
+        self.assertIn(
+            "Durée de l'audit : 47 min (durée écoulée, dates de fichiers indisponibles)", text
+        )
+        self.assertNotIn("active", text.split("## Couverture")[0])
         self.assertIn("- À traiter : 3", text)
         self.assertIn("- PERFORMANCE : 2 lignes (À traiter : 1, Ok / Recetté : 1)", text)
         self.assertIn("- CQ-190 : Auditer les sauvegardes", text)
@@ -1494,7 +1497,7 @@ class SynthesisTest(AuditCase):
             (datetime(2026, 10, 20, 14, 0), "non mesurée"),
         ):
             text, _ = report.synthesis(run_dir, now=now)
-            self.assertIn(f"Durée active de l'audit : {expected}", text, now)
+            self.assertIn(f"Durée de l'audit : {expected}", text, now)
         self.assertEqual(report.run_start("2026-10-20-1430"), start)
 
     def stamp(self, path, moment):
@@ -1517,6 +1520,42 @@ class SynthesisTest(AuditCase):
         text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 21, 1, 40))
         self.assertIn("Durée active de l'audit : 1 h 10 min", text)
         self.assertNotIn("Durée de l'audit", text)
+
+    def test_active_duration_edge_cases(self):
+        run_dir = self.make_planned_run()
+        start = datetime(2026, 10, 20, 14, 30)
+        now = datetime(2026, 10, 20, 15, 0)
+        self.assertIsNone(report._active_duration(run_dir, start, now))
+        (run_dir / "future.txt").write_text("x", encoding="utf-8")
+        self.stamp(run_dir / "future.txt", datetime(2027, 1, 1))
+        self.assertIsNone(report._active_duration(run_dir, start, now))
+        (run_dir / "mid.txt").write_text("x", encoding="utf-8")
+        self.stamp(run_dir / "mid.txt", datetime(2026, 10, 20, 14, 45))
+        self.assertEqual(report._active_duration(run_dir, start, now), 30)
+        self.assertIsNone(report._active_duration(run_dir, now, start))
+
+    def test_synthesis_redacts_deferred_and_remarks(self):
+        run_dir = self.make_planned_run()
+        self.write(run_dir, "deferred.json", {"items": [
+            {"id": 1, "kind": "gap", "detail": "DB_PASSWORD=Adm1nP4ss2024 dans .env", "refs": [],
+             "at": "2026-10-20T14:40:00Z", "resolved": False},
+        ]})
+        (run_dir / "remarques.md").write_text("- DB_PASSWORD=Adm1nP4ss2024\n", encoding="utf-8")
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 17))
+        self.assertNotIn("Adm1nP4ss2024", text)
+        self.assertIn("## Décisions mises de côté", text)
+
+    def test_remarks_headings_do_not_open_sections(self):
+        run_dir = self.make_planned_run()
+        (run_dir / "remarques.md").write_text(
+            "# Titre\n## Autre section\n- puce\n", encoding="utf-8"
+        )
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 17))
+        tail = text.split("## Remarques")[1]
+        self.assertNotIn("\n#", tail)
+        self.assertIn("**Autre section**", tail)
+        self.assertIn("- puce", tail)
+        self.assertEqual(text.count("\n## Remarques"), 1)
 
     def test_synthesis_keeps_remarks(self):
         run_dir = self.make_planned_run()

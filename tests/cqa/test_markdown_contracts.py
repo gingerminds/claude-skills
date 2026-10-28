@@ -164,6 +164,8 @@ class SkillTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, step)
         self.assertNotIn("with Edit", step)
+        self.assertIn("alignment not confirmed", step)
+        self.assertIn("run the synthesis (step 2) again", _section(text, "8. Writing and synthesis"))
 
     def test_browser_lots_recheck_chrome(self):
         for path in (SKILL, REFERENCES / "browser.md", REFERENCES / "lots.md"):

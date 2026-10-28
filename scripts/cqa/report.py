@@ -17,6 +17,7 @@ from cqa.checklist import (
 )
 from cqa import deferred
 from cqa.comments import format_page_summary
+from cqa.secrets import known_values_from_env, redact
 
 _EM_DASH = chr(0x2014)
 _RUN_ID = re.compile(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})")
@@ -112,7 +113,7 @@ def _synthesis(context, plan, lots, rows, tools, now, run_dir) -> str:
         f"- Projet : {context['project']['name']}",
         f"- Run : {context['run_id']}, lancé par {context['lead']['option']}",
         _versions(context, tools),
-        f"- Durée active de l'audit : {_active_duration(run_dir, start, now)}",
+        _duration_line(run_dir, start, now),
     ]
     sections = [
         ("Couverture", _coverage_lines(lots["coverage"])),
@@ -232,7 +233,8 @@ def _remarks(run_dir: Path) -> list:
         return []
     except (OSError, ValueError) as error:
         raise ValueError(f"remarques.md est illisible : {error}") from None
-    return text.splitlines() if text else []
+    lines = redact(text, known_values_from_env()).splitlines()
+    return [f"**{line.lstrip('#').strip()}**" if line.lstrip().startswith("#") else line for line in lines]
 
 
 def _deferred_lines(run_dir: Path) -> list:
@@ -243,17 +245,28 @@ def _deferred_lines(run_dir: Path) -> list:
         refs = ", ".join(f"CQ-{ref}" for ref in item.get("refs") or [] if isinstance(ref, int))
         outcome = "traitée" if item.get("resolved") else "ouverte"
         where = f" ({refs})" if refs else ""
-        lines.append(f"- {kind}{where} : {_line(item.get('detail'))} ({outcome})")
+        lines.append(f"- {kind}{where} : {_line(redact(str(item.get('detail')), known_values_from_env()))} ({outcome})")
     return lines
 
 
-def _active_duration(run_dir: Path, start: datetime, end: datetime) -> str:
-    """Active time of the run: the gaps shorter than 30 minutes between file modification dates.
+def _duration_line(run_dir: Path, start: datetime, end: datetime) -> str:
+    """Duration line of the header: the active time, or the elapsed time when dates are unusable."""
+    active = _active_duration(run_dir, start, end)
+    if active is not None:
+        return f"- Durée active de l'audit : {_duration_text(active)}"
+    if end < start:
+        return "- Durée de l'audit : non mesurée"
+    elapsed = _duration_text(int((end - start).total_seconds() // 60))
+    return f"- Durée de l'audit : {elapsed} (durée écoulée, dates de fichiers indisponibles)"
 
-    Falls back to the elapsed time when no file of the run was modified between start and end.
+
+def _active_duration(run_dir: Path, start: datetime, end: datetime) -> Optional[int]:
+    """Active minutes: the gaps shorter than 30 minutes between file modification dates.
+
+    Returns None when end is before start or no file date lies between start and end.
     """
     if end < start:
-        return _duration_text(0, measured=False)
+        return None
     dates = []
     for path in Path(run_dir).rglob("*"):
         try:
@@ -263,18 +276,16 @@ def _active_duration(run_dir: Path, start: datetime, end: datetime) -> str:
             continue
     dates = sorted(date for date in dates if start <= date <= end)
     if not dates:
-        return _duration_text(int((end - start).total_seconds() // 60))
+        return None
     points = [start, *dates, end]
     active = sum(
         (later - earlier for earlier, later in zip(points, points[1:]) if later - earlier < _IDLE_LIMIT),
         timedelta(),
     )
-    return _duration_text(int(active.total_seconds() // 60))
+    return int(active.total_seconds() // 60)
 
 
-def _duration_text(minutes: int, measured: bool = True) -> str:
-    if not measured:
-        return "non mesurée"
+def _duration_text(minutes: int) -> str:
     if minutes < 1:
         return "moins d'une minute"
     hours, rest = divmod(minutes, 60)
