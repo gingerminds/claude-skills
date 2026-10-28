@@ -5,12 +5,14 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 from urllib.parse import urljoin, urlsplit
 
 from cqa import probes, report
 from cqa.notion_write import apply_plan, validate_plan
 from cqa.plan import operation_key
 from tests.cqa import test_cli_prepare as prepare
+from tests.cqa.test_findings import PHP_ALLOWED_PATHS, PHP_FILE_ERROR, PHP_FILE_PATHS
 
 FIXTURE_RUN = Path(__file__).resolve().parent / "fixtures" / "run"
 RUN_ID = "2026-10-20-1430"
@@ -592,6 +594,34 @@ class FollowupProbesTest(AuditCase):
         self.edit_finding(run_dir, "code-securite", 103, needs_probes=[])
         found = [(p["method"], p["path"]) for p in probes.followup_probes(run_dir)["probes"]]
         self.assertEqual(found, [("GET", "/Search?q=a"), ("HEAD", "/")])
+
+    def test_followup_never_requests_a_php_file_outside_the_routes(self):
+        run_dir = self.make_run()
+        forbidden = [{"url": f"{BASE}{path}", "method": "GET"} for path in PHP_FILE_PATHS]
+        allowed = [{"url": f"{BASE}{path}", "method": "GET"} for path in PHP_ALLOWED_PATHS]
+        self.edit_finding(run_dir, "code-performance", 101, needs_probes=forbidden)
+        self.edit_finding(run_dir, "code-securite", 103, needs_probes=allowed)
+        errors = self.validate_errors(run_dir, "code-performance")
+        self.assertEqual(len(errors), len(PHP_FILE_PATHS))
+        self.assertTrue(all(PHP_FILE_ERROR in error for error in errors))
+        document = probes.followup_probes(run_dir)
+        self.assertEqual([probe["path"] for probe in document["probes"]], PHP_ALLOWED_PATHS)
+        self.assertEqual(document["lots"], ["code-securite"])
+        self.assertEqual(document["discarded"], [])
+
+    def test_followup_discards_a_php_file_even_from_a_finding_held_valid(self):
+        run_dir = self.make_run()
+        forbidden = [{"url": f"{BASE}{path}", "method": "GET"} for path in PHP_FILE_PATHS]
+        self.edit_finding(run_dir, "code-performance", 101, needs_probes=forbidden)
+
+        def held_valid(document, refs):
+            return [item for item in document["findings"] if item["ref"] == 101], []
+
+        with mock.patch.object(probes, "validate_document", held_valid):
+            document = probes.followup_probes(run_dir)
+        self.assertEqual(document["probes"], [])
+        self.assertEqual([item["url"] for item in document["discarded"]], [p["url"] for p in forbidden])
+        self.assertEqual({item["reason"] for item in document["discarded"]}, {PHP_FILE_ERROR})
 
     def test_followup_sensitive_paths_never_keep_the_body(self):
         run_dir = self.make_run()

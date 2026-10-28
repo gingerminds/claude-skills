@@ -379,6 +379,10 @@ class AgentsTest(unittest.TestCase):
                 self.assertIn("Never request a URL whose path contains `.php`", text)
                 for needle in ("GET, HEAD or navigation", "/index.php", "wp-login.php", "wp-admin/admin-ajax.php", "never by a request"):
                     self.assertIn(needle, text)
+                rule = next(line for line in text.splitlines() if "Never request a URL whose path contains `.php`" in line)
+                self.assertIn("Never ask for such a URL in `needs_probes` either", rule)
+                self.assertIn("the toolbox sends those requests", rule)
+                self.assertNotIn("for the lead", rule)
         for needle in ("CQ-97", "CQ-144", "location ~ \\.php$", "php_flag engine off", ".htaccess", "Never request a `.php` file"):
             with self.subTest(server=needle):
                 self.assertIn(needle, server)

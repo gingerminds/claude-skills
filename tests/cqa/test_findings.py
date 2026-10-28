@@ -27,6 +27,28 @@ SCHEMA_PATH = (
 EM_DASH = chr(0x2014)
 HUMAN = "Intervention humaine"
 LOT_REFS = {79, 80}
+# A GET runs a PHP file: only the public entry points of the application may be probed.
+PHP_FILE_PATHS = [
+    "/wp-content/uploads/x.php",
+    "/x.PHP",
+    "/x.phtml",
+    "/x.php5",
+    "/x.phar",
+    "/x.php/foo",
+    "/x.php?y=1",
+    "/x.%70hp",
+    "/blog/index.php",
+    "/wp-admin/admin-ajax.php?action=heartbeat",
+]
+PHP_ALLOWED_PATHS = [
+    "/index.php",
+    "/index.php?q=node/1",
+    "/wp-login.php",
+    "/wp-login.php?action=lostpassword",
+    "/wp-admin/admin-ajax.php",
+    "/wp-config.php.bak",
+]
+PHP_FILE_ERROR = "fichier PHP hors des routes de l'application"
 
 
 def make_finding(**overrides):
@@ -422,6 +444,22 @@ class ValidateDocumentTest(unittest.TestCase):
                 self.assertEqual([item["ref"] for item in valid], [80])
         _, errors = validate(make_finding(needs_probes="GET /"), make_finding(ref=80))
         self.assertEqual(errors, ["constat CQ-79 : « needs_probes » doit être une liste"])
+
+    def test_needs_probes_refuse_php_files_outside_the_routes(self):
+        for path in PHP_FILE_PATHS:
+            with self.subTest(path=path):
+                probes = [{"url": f"https://preprod.example.org{path}", "method": "GET"}]
+                valid, errors = validate(make_finding(needs_probes=probes), make_finding(ref=80))
+                self.assertEqual(len(errors), 1)
+                self.assertTrue(errors[0].startswith(f"constat CQ-79 : sonde n° 1 : {PHP_FILE_ERROR}"))
+                self.assertEqual([item["ref"] for item in valid], [80])
+        probes = [
+            {"url": f"https://preprod.example.org{path}", "method": "HEAD"}
+            for path in PHP_ALLOWED_PATHS
+        ]
+        valid, errors = validate(make_finding(needs_probes=probes), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 2)
 
     def test_extra_keys_are_tolerated(self):
         valid, errors = validate(make_finding(notes="x"), make_finding(ref=80))

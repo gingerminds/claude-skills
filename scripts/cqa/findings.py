@@ -1,7 +1,9 @@
 """Findings written by the audit sub-agents: validation and verdict guardrails."""
 import copy
+import re
 from collections import Counter
 from typing import Iterable
+from urllib.parse import unquote, urlsplit
 
 from cqa.checklist import ref_label
 
@@ -27,6 +29,11 @@ EVIDENCE_REQUIRED = {
 PROBE_METHODS = ("GET", "HEAD")
 MAX_SUMMARY_LENGTH = 600
 MAX_FIELD_LENGTH = 400
+PHP_FILE_REASON = "fichier PHP hors des routes de l'application"
+
+_PHP_FILE = re.compile(r"\.(?:php\d?|phtml|phar)(?:$|/|\?)", re.IGNORECASE)
+_PHP_ENTRY_POINTS = ("/index.php", "/wp-login.php")
+_PHP_AJAX = "/wp-admin/admin-ajax.php"
 
 _HUMAN_TOOL = "Intervention humaine"
 _OPTIONAL_TEXTS = ("todo", "human_check", "divergence")
@@ -136,6 +143,24 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     result["verdict"] = verdict
     result["guardrail"] = "; ".join(reasons) if reasons else None
     return result
+
+
+def requests_php_file(url: str) -> bool:
+    """Whether a GET of url would run a PHP file other than a public entry point.
+
+    The path is percent-decoded first. Allowed: /index.php and /wp-login.php, with or without a
+    query, and /wp-admin/admin-ajax.php without one. A backup name such as x.php.bak is not a
+    PHP file. A URL that cannot be parsed is left to the other checks.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    path = unquote(parts.path)
+    folded = path.casefold()
+    if folded in _PHP_ENTRY_POINTS or (folded == _PHP_AJAX and not parts.query):
+        return False
+    return bool(_PHP_FILE.search(path))
 
 
 def _is_int(value) -> bool:
@@ -249,6 +274,11 @@ def _probe_problems(probes) -> list[str]:
             problems.append(f"{place} : doit être un objet")
             continue
         problems.extend(_required_text_problems(place, probe, ("url",)))
+        if _is_text(probe.get("url")) and requests_php_file(probe["url"]):
+            problems.append(
+                f"{place} : {PHP_FILE_REASON} (seuls /index.php, /wp-login.php et "
+                "/wp-admin/admin-ajax.php sans paramètre sont admis)"
+            )
         if "method" not in probe:
             problems.append(f"{place} : « method » manquant")
         elif not (isinstance(probe["method"], str) and probe["method"] in PROBE_METHODS):

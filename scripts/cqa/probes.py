@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin, urlsplit
 
-from cqa.findings import validate_document
+from cqa.findings import PHP_FILE_REASON, requests_php_file, validate_document
 from cqa.target import validate_url
 
 _PROD_PHASES = ("J0", "J+7")
@@ -141,8 +141,9 @@ def followup_probes(run_dir: Path) -> dict:
     The result is {"base_url", "probes", "lots", "discarded"}. probes follows the toolbox format
     and is deduplicated by method and path; lots lists the lots with at least one pending probe;
     discarded lists {lot, ref, url, reason} for each URL kept out because it is not on the origin
-    of the target (a probe must never leave it), or is unusable. Only the valid findings of
-    findings/<lot>.json are read, never the follow-up files.
+    of the target (a probe must never leave it), runs a PHP file outside the application routes
+    (validate already refuses it, this is a second barrier), or is unusable. Only the valid
+    findings of findings/<lot>.json are read, never the follow-up files.
     """
     run_dir = Path(run_dir)
     context = _read_json(run_dir / "context.json", "le diagnostic")
@@ -291,6 +292,8 @@ def _followup_path(url: str, origin) -> tuple:
     path = _target_path(url, origin)
     if path is None:
         return None, "URL hors de l'origine de la cible"
+    if requests_php_file(url):
+        return None, PHP_FILE_REASON
     return path, None
 
 
