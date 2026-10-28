@@ -642,6 +642,46 @@ class SkillTest(unittest.TestCase):
             with self.subTest(file=path.parent.name + "/" + path.name):
                 self.assertNotIn(EM_DASH, _text(path))
 
+    def test_multisite_questions_come_before_the_audit(self):
+        context = _text(REFERENCES / "context.md")
+        for needle in (
+            "Autres domaines du projet en préprod ?",
+            "Back-office commun ou propre à ce site ?",
+            "Connexion par SSO ?",
+            "wp site list --field=url",
+            "cqa_ssh_ro.py",
+            "CLAUDE.md",
+            '"sites"',
+            "10 at most",
+            "-name wp-load.php",
+            "Connexion par SSO ? » once for the preprod site",
+            "the guard is not widened",
+            "never asked after the audit starts",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, context)
+        skill = _text(SKILL)
+        self.assertLess(skill.index("Other sites"), skill.index("Mode and Notion consent"))
+
+    def test_multisite_domains_homes_and_login_tabs(self):
+        browser = _text(REFERENCES / "browser.md")
+        agent = _text(BROWSER)
+        for label, text in (("browser.md", browser), ("cqa-browser.md", agent)):
+            with self.subTest(file=label):
+                self.assertIn("`sites`", text)
+                self.assertIn("domain", text)
+        for needle in (
+            "one tab per back-office of its own",
+            "SSO",
+            "connexion par SSO, à faire vous-même",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, browser)
+        self.assertIn("home", agent)
+        self.assertIn("in addition to the 10 key pages", _text(REFERENCES / "context.md"))
+        self.assertIn("site list --field=url", _text(REFERENCES / "server.md"))
+        self.assertIn("site list --field=url", _text(AUDITOR))
+
 
 class AliasTest(unittest.TestCase):
     def test_alias_frontmatter(self):
@@ -802,43 +842,6 @@ class AgentsTest(unittest.TestCase):
             for cited in _PLUGIN_PATH.findall(_text(path)):
                 with self.subTest(file=path.name, cited=cited):
                     self.assertTrue((ROOT / cited.rstrip(".,:;")).exists())
-
-    def test_multisite_questions_come_before_the_audit(self):
-        context = _text(REFERENCES / "context.md")
-        for needle in (
-            "Autres domaines du projet en préprod ?",
-            "Back-office commun ou propre à ce site ?",
-            "Connexion par SSO ?",
-            "wp site list --field=url",
-            "cqa_ssh_ro.py",
-            "CLAUDE.md",
-            '"sites"',
-            "10 at most",
-            "never asked after the audit starts",
-        ):
-            with self.subTest(needle=needle):
-                self.assertIn(needle, context)
-        skill = _text(SKILL)
-        self.assertLess(skill.index("Other sites"), skill.index("Mode and Notion consent"))
-
-    def test_multisite_domains_homes_and_login_tabs(self):
-        browser = _text(REFERENCES / "browser.md")
-        agent = _text(BROWSER)
-        for label, text in (("browser.md", browser), ("cqa-browser.md", agent)):
-            with self.subTest(file=label):
-                self.assertIn("`sites`", text)
-                self.assertIn("domain", text)
-        for needle in (
-            "one tab per back-office of its own",
-            "SSO",
-            "connexion par SSO, à faire vous-même",
-        ):
-            with self.subTest(needle=needle):
-                self.assertIn(needle, browser)
-        self.assertIn("home", agent)
-        self.assertIn("in addition to the 10 key pages", _text(REFERENCES / "context.md"))
-        self.assertIn("site list --field=url", _text(REFERENCES / "server.md"))
-        self.assertIn("site list --field=url", _text(AUDITOR))
 
     def test_no_em_dash(self):
         for path in (AUDITOR, BROWSER, VERDICTS_MD):

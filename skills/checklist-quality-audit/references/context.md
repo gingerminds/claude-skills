@@ -165,11 +165,25 @@ A project can serve several sites. The back-office is usually shared by all of t
 
 Detection of the other domains, in this order:
 
-1. WordPress with an SSH alias: `python3 "$S/cqa_ssh_ro.py" <alias> -- wp site list --field=url --path=<dossier>` through the guard (the only `wp site` command it allows; a guard refusal is not worked around). One URL per line. `<dossier>` is the WordPress folder on the server; when it is not known yet (`ssh.app_dirs` is filled by the diagnostic), go to step 2.
+1. WordPress with an SSH alias: first locate the folder through the guard, then list the sites through it:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+python3 "$S/cqa_ssh_ro.py" <alias> -- find /var/www /srv -maxdepth 3 -name wp-load.php
+```
+
+Then, with the folder:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+python3 "$S/cqa_ssh_ro.py" <alias> -- wp site list --field=url --path=<dossier>
+```
+
+   The folder is the one holding `wp-load.php` (`wp-config.php` is refused by the guard as a secret carrier) (`ssh.app_dirs`, when already known, is reused); several candidates or none: ask « Dossier de WordPress sur le serveur (ou saisir le chemin dans « Autre ») ? » with the candidates and « Je ne sais pas ». `wp site list --field=url` is the only `wp site` command the guard allows, and a guard refusal is never worked around (the guard is not widened). One URL per line. Any failure (no alias, no folder found, not a multisite, wp error) falls through to step 2, keeping the domains already found.
 2. Otherwise the domains listed in the `CLAUDE.md` or `PROJECT.md` of the project.
 3. Otherwise ask « Autres domaines du projet en préprod ? » with « Aucun, un seul site » and « Saisir les domaines » (hosts in « Autre », separated by commas).
 
-No other domain: no `sites` key, the project is a single site. Otherwise show the domains and ask, for each one that is not the host of `target.preprod_url` (that one is the first site), one question at a time:
+Show the domains found as a proposal for the lead to confirm or correct. No other domain: ask « Connexion par SSO ? » once for the preprod site (its `backoffice` is `commun`), then write `sites` only if it is `true`; otherwise no `sites` key, the project is a single site. With other domains: the preprod site (the host of `target.preprod_url`) is the first entry, always `"backoffice": "commun"`, and gets « Connexion par SSO ? » once, like the others. For each other domain, one question at a time:
 
 - « Back-office commun ou propre à ce site ? » with « Commun » and « Propre à ce site ».
 - « Connexion par SSO ? » with « Oui » and « Non ».
