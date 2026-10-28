@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import urljoin, urlsplit
 
+import cqa_plan as cqa_plan_module
 from cqa import probes, report
 from cqa.notion_write import apply_plan, validate_plan
 from cqa.plan import operation_key
@@ -2084,11 +2085,22 @@ class RerunValidateAndSnapshotTest(AuditCase):
 
     def test_snapshot_without_notion_folder_and_twice(self):
         run_dir = self.make_run()
-        first = Path(self.run_main(["snapshot", run_dir])[1].strip())
+        code, out, err = self.run_main(["snapshot", run_dir])
+        self.assertEqual(code, 0, err)
+        first = Path(out.strip())
         self.assertTrue((first / "findings").is_dir())
         self.assertFalse((first / "notion").exists())
-        second = Path(self.run_main(["snapshot", run_dir])[1].strip())
-        self.assertNotEqual(first, second)
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 1, 2, 3, 4, 5)
+
+        with mock.patch.object(cqa_plan_module, "datetime", FrozenDatetime):
+            codes = [self.run_main(["snapshot", run_dir]) for _ in range(2)]
+        self.assertEqual([item[0] for item in codes], [0, 0], codes)
+        same_second = [Path(item[1].strip()) for item in codes]
+        self.assertNotEqual(same_second[0], same_second[1])
+        self.assertTrue(all((path / "findings").is_dir() for path in same_second))
         self.assertTrue((first / "findings").is_dir())
 
     def test_snapshot_without_findings_is_a_usage_error(self):
@@ -2143,6 +2155,115 @@ class RerunValidateAndSnapshotTest(AuditCase):
             code, out, err = self.run_main(["validate", run_dir, "code-performance", *argv])
             self.assertEqual(code, 2, argv)
 
+    def test_validate_rerun_rows_option_refuses_other_refs(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101, 102)
+        code, out, err = self.run_main(
+            ["validate", run_dir, "code-performance", "--rerun", "1", "--rows", "CQ-101,102"]
+        )
+        self.assertEqual(code, 0, out + err)
+        code, out, err = self.run_main(
+            ["validate", run_dir, "code-performance", "--rerun", "1", "--rows", "CQ-101"]
+        )
+        self.assertEqual(code, 6)
+        errors = json.loads(out)["errors"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("CQ-102", errors[0])
+        code, out, err = self.run_main(
+            ["validate", run_dir, "code-performance", "--rows", "CQ-101"]
+        )
+        self.assertEqual(code, 2)
+
+    def start(self, run_dir):
+        code, out, err = self.run_main(["rerun-start", run_dir])
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_rerun_start_numbers_from_one_and_snapshots(self):
+        run_dir = self.make_run()
+        result = self.start(run_dir)
+        self.assertEqual(result["rerun"], "01")
+        self.assertEqual(result["abandoned"], [])
+        self.assertTrue((Path(result["snapshot"]) / "findings" / "code-performance.json").is_file())
+
+    def test_rerun_start_moves_an_interrupted_rerun_away(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101)
+        result = self.start(run_dir)
+        self.assertEqual(result["rerun"], "02")
+        self.assertEqual(result["abandoned"], ["code-performance-rerun-01.json"])
+        snapshot = Path(result["snapshot"])
+        self.assertTrue((snapshot / "abandoned" / "code-performance-rerun-01.json").is_file())
+        self.assertFalse((snapshot / "findings" / "code-performance-rerun-01.json").exists())
+        self.assertFalse((run_dir / "findings" / "code-performance-rerun-01.json").exists())
+
+    def test_rerun_start_keeps_a_closed_rerun_and_goes_on_numbering(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101)
+        code, out, err = self.run_main(["rerun-close", run_dir, "1"])
+        self.assertEqual(code, 0, err)
+        result = self.start(run_dir)
+        self.assertEqual(result["rerun"], "02")
+        self.assertEqual(result["abandoned"], [])
+        self.assertTrue(
+            (Path(result["snapshot"]) / "findings" / "code-performance-rerun-01.json").is_file()
+        )
+
+    def test_rerun_start_never_reuses_a_number_of_the_history(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101)
+        first = self.start(run_dir)
+        self.write_rerun(run_dir, "02", 101)
+        second = self.start(run_dir)
+        self.assertEqual(first["rerun"], "02")
+        self.assertEqual(second["rerun"], "03")
+        self.assertNotEqual(first["snapshot"], second["snapshot"])
+
+    def test_rerun_start_refuses_a_hundredth_rerun(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "99", 101)
+        code, out, err = self.run_main(["rerun-start", run_dir])
+        self.assertEqual(code, 2)
+        self.assertIn("99", err)
+
+    def test_rerun_close_discards_an_invalid_file_and_records_the_number(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101)
+        self.write_rerun(run_dir, "01", 103, 104, lot="code-securite")
+        code, out, err = self.run_main(["rerun-close", run_dir, "01"])
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result["closed"], "01")
+        self.assertEqual(result["discarded"], ["code-securite-rerun-01.json"])
+        self.assertEqual(self.read(run_dir, "reruns.json"), {"closed": ["01"]})
+        self.assertTrue((run_dir / "findings" / "code-performance-rerun-01.json").is_file())
+        self.assertFalse((run_dir / "findings" / "code-securite-rerun-01.json").exists())
+        moved = list((run_dir / "history").glob("*-rerun-01-invalid/code-securite-rerun-01.json"))
+        self.assertEqual(len(moved), 1)
+
+    def test_rerun_close_twice_keeps_one_entry_and_a_discarded_file_is_not_read(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 103, 104, lot="code-securite")
+        self.edit(
+            run_dir,
+            "findings/code-securite-rerun-01.json",
+            lambda doc: doc["findings"][0].update(verdict="ok"),
+        )
+        self.run_main(["rerun-close", run_dir, "1"])
+        self.run_main(["rerun-close", run_dir, "1"])
+        self.assertEqual(self.read(run_dir, "reruns.json"), {"closed": ["01"]})
+        from cqa.rerun import latest_findings
+
+        lots = self.read(run_dir, "lots.json")["lots"]
+        latest = latest_findings(run_dir, lots)
+        self.assertEqual(latest[103]["verdict"], "partial")
+
+    def test_rerun_close_with_nothing_to_close_is_a_usage_error(self):
+        run_dir = self.make_run()
+        code, out, err = self.run_main(["rerun-close", run_dir, "1"])
+        self.assertEqual(code, 2)
+        self.assertIn("rerun-01", err)
+
     def test_plan_reads_the_rerun_file_after_validation(self):
         run_dir = self.make_run()
         self.write_rerun(run_dir, "01", 101)
@@ -2169,6 +2290,8 @@ class RegistrationTest(AuditCase):
             "assign-plan",
             "rerun-candidates",
             "snapshot",
+            "rerun-start",
+            "rerun-close",
         ):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)

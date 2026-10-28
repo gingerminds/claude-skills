@@ -63,6 +63,7 @@ _SPEC_NAME = re.compile(r"(?:openapi|swagger).*\.(?:ya?ml|json)")
 _SPEC_SKIPPED_DIRS = frozenset({"vendor", "node_modules", ".git"})
 _EXCLUDED_KEYS = ("ref", "page_id", "reason", "verdict", "detail")
 _MISSING_ROW = "constat manquant : "
+_RERUN_FILE = re.compile(r"(.+)-rerun-([0-9]{2})\.json")
 _MAX_COMMENT = 1500
 _EM_DASH = chr(0x2014)
 _RUN_FILES = {
@@ -187,9 +188,24 @@ def _register_audit(commands) -> None:
         metavar="NN",
         help="valide findings/<lot>-rerun-NN.json sur les seules Réf qu'il contient",
     )
+    sub.add_argument(
+        "--rows",
+        default=None,
+        help="avec --rerun : Réf relancées (CQ-3,CQ-12), toute autre Réf écrite est une erreur",
+    )
     _run_command(
         commands, "snapshot", "copie findings/ et notion/ dans history/", _cmd_snapshot
     )
+    _run_command(
+        commands,
+        "rerun-start",
+        "ouvre une relance : écarte les relances non closes, sauvegarde, donne NN",
+        _cmd_rerun_start,
+    )
+    sub = _run_command(
+        commands, "rerun-close", "clôt une relance : écarte les fichiers invalides", _cmd_rerun_close
+    )
+    sub.add_argument("number", type=_rerun_number, help="numéro de la relance (NN)")
     sub = _run_command(commands, "plan", "plan d'écriture Notion (notion/plan.json)", _cmd_plan)
     sub.add_argument(
         "--skip-human-overrides",
@@ -449,23 +465,161 @@ def _rerun_number(text: str) -> int:
     return int(text)
 
 
-def _cmd_snapshot(args, services) -> int:
-    run_dir = args.run_dir.resolve()
-    if not (run_dir / "findings").is_dir():
-        raise UsageError("findings/ est introuvable : il n'y a rien à sauvegarder.")
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
-    target = run_dir / "history" / stamp
-    target.mkdir(parents=True)
+def _new_history_dir(run_dir: Path, suffix: str = "") -> Path:
+    """Create history/<stamp><suffix>, adding -2, -3... when the name is taken."""
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S") + suffix
+    (run_dir / "history").mkdir(exist_ok=True)
+    for index in range(1, 1000):
+        target = run_dir / "history" / (stamp if index == 1 else f"{stamp}-{index}")
+        try:
+            target.mkdir()
+        except FileExistsError:
+            continue
+        return target
+    raise UsageError("history/ : impossible de créer un dossier de sauvegarde.")
+
+
+def _copy_state(run_dir: Path, target: Path) -> None:
     for name in ("findings", "notion"):
         if (run_dir / name).is_dir():
             shutil.copytree(run_dir / name, target / name)
+
+
+def _require_findings(run_dir: Path) -> None:
+    if not (run_dir / "findings").is_dir():
+        raise UsageError("findings/ est introuvable : il n'y a rien à sauvegarder.")
+
+
+def _cmd_snapshot(args, services) -> int:
+    run_dir = args.run_dir.resolve()
+    _require_findings(run_dir)
+    target = _new_history_dir(run_dir)
+    _copy_state(run_dir, target)
     print(target)
     return EXIT_OK
+
+
+def _rerun_files(run_dir: Path, number: Optional[str] = None) -> list:
+    """Return the findings/<lot>-rerun-NN.json files, sorted, of one rerun or of all."""
+    folder = run_dir / "findings"
+    if not folder.is_dir():
+        return []
+    found = []
+    for path in sorted(folder.iterdir()):
+        match = _RERUN_FILE.fullmatch(path.name)
+        if match and (number is None or match.group(2) == number):
+            found.append(path)
+    return found
+
+
+def _closed_reruns(run_dir: Path) -> set:
+    document = _read_json_object(run_dir / "reruns.json")
+    closed = document.get("closed")
+    return {item for item in closed if isinstance(item, str)} if isinstance(closed, list) else set()
+
+
+def _read_json_object(path: Path) -> dict:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def _highest_rerun(run_dir: Path) -> int:
+    numbers = [int(_RERUN_FILE.fullmatch(path.name).group(2)) for path in _rerun_files(run_dir)]
+    numbers += [int(item) for item in _closed_reruns(run_dir) if item.isdigit()]
+    history = run_dir / "history"
+    if history.is_dir():
+        for path in history.rglob("*-rerun-*.json"):
+            match = _RERUN_FILE.fullmatch(path.name)
+            if match:
+                numbers.append(int(match.group(2)))
+    return max(numbers, default=0)
+
+
+def _cmd_rerun_start(args, services) -> int:
+    run_dir = args.run_dir.resolve()
+    _require_findings(run_dir)
+    number = _highest_rerun(run_dir) + 1
+    if number > 99:
+        raise UsageError("Il y a déjà 99 relances dans ce run : lancer un nouveau run.")
+    target = _new_history_dir(run_dir)
+    closed = _closed_reruns(run_dir)
+    abandoned = []
+    for path in _rerun_files(run_dir):
+        if _RERUN_FILE.fullmatch(path.name).group(2) in closed:
+            continue
+        (target / "abandoned").mkdir(exist_ok=True)
+        shutil.move(str(path), str(target / "abandoned" / path.name))
+        abandoned.append(path.name)
+    _copy_state(run_dir, target)
+    _emit({"snapshot": str(target), "rerun": f"{number:02d}", "abandoned": abandoned})
+    return EXIT_OK
+
+
+def _cmd_rerun_close(args, services) -> int:
+    run_dir = args.run_dir.resolve()
+    number = f"{args.number:02d}"
+    files = _rerun_files(run_dir, number)
+    if not files:
+        raise UsageError(
+            f"Aucun fichier findings/<lot>-rerun-{number}.json à clore : "
+            "lancer d'abord rerun-start."
+        )
+    context = _checked_context(run_dir)
+    lots = {item["id"]: item for item in _read_lots(run_dir)["lots"]}
+    discarded = []
+    for path in files:
+        lot = lots.get(_RERUN_FILE.fullmatch(path.name).group(1))
+        if lot is None or _rerun_errors(run_dir, context, lot, path.name, None):
+            folder = _new_history_dir(run_dir, f"-rerun-{number}-invalid")
+            shutil.move(str(path), str(folder / path.name))
+            discarded.append(path.name)
+    closed = sorted(_closed_reruns(run_dir) | {number})
+    write_json(run_dir / "reruns.json", {"closed": closed})
+    _emit({"closed": number, "discarded": discarded})
+    return EXIT_OK
+
+
+def _parse_rows(text: str) -> set:
+    refs = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        found = re.fullmatch(r"(?:CQ-)?([0-9]+)", part, re.IGNORECASE)
+        if not found:
+            raise UsageError(f"« {part} » n'est pas une Réf (attendu : CQ-12 ou 12).")
+        refs.add(int(found.group(1)))
+    return refs
+
+
+def _rerun_errors(run_dir, context, lot, name, rows) -> list:
+    """Return the errors of a rerun file: only the rows it holds count, none is required."""
+    found = _read_findings_file(run_dir, context, lot, name)
+    if found is None:
+        return [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
+    errors = [error for error in found[1] if not error.startswith(_MISSING_ROW)]
+    if rows is not None:
+        document = _read_json_object(run_dir / "findings" / name)
+        items = document.get("findings")
+        for item in items if isinstance(items, list) else []:
+            ref = item.get("ref") if isinstance(item, dict) else None
+            if isinstance(ref, int) and not isinstance(ref, bool) and ref not in rows:
+                errors.append(
+                    f"constat {ref_label(ref)} : Réf absente de la liste des lignes relancées"
+                )
+    if not found[0] and not errors:
+        errors = [f"findings/{name} ne contient aucun constat."]
+    return errors
 
 
 def _cmd_validate(args, services) -> int:
     if args.rerun is not None and args.followup:
         raise UsageError("--rerun et --followup ne se combinent pas.")
+    if args.rows is not None and args.rerun is None:
+        raise UsageError("--rows ne s'utilise qu'avec --rerun.")
     context = _checked_context(args.run_dir)
     lots = _read_lots(args.run_dir)["lots"]
     lot = next((item for item in lots if item["id"] == args.lot_id), None)
@@ -474,17 +628,15 @@ def _cmd_validate(args, services) -> int:
         raise UsageError(f"Le lot « {args.lot_id} » est absent de lots.json (lots : {known}).")
     if args.rerun is not None:
         name = f"{lot['id']}-rerun-{args.rerun:02d}.json"
+        rows = _parse_rows(args.rows) if args.rows is not None else None
+        errors = _rerun_errors(args.run_dir, context, lot, name, rows)
     else:
         name = _findings_name(lot["id"], args.followup)
-    found = _read_findings_file(args.run_dir, context, lot, name)
-    if found is None:
-        errors = [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
-    elif args.rerun is not None:
-        errors = [error for error in found[1] if not error.startswith(_MISSING_ROW)]
-        if not found[0] and not errors:
-            errors = [f"findings/{name} ne contient aucun constat."]
-    else:
-        errors = found[1]
+        found = _read_findings_file(args.run_dir, context, lot, name)
+        if found is None:
+            errors = [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
+        else:
+            errors = found[1]
     _emit({"ok": not errors, "errors": errors})
     return EXIT_CONTEXT if errors else EXIT_OK
 

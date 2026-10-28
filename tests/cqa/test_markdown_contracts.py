@@ -347,12 +347,14 @@ class SkillTest(unittest.TestCase):
         self.assertIn("- `rerun`:", _section(text, "2. Arguments"))
         section = _section(text, "10. Rerun")
         for needle in (
-            'cqa_plan.py" snapshot "$RUN"',
+            'cqa_plan.py" rerun-start "$RUN"',
+            'cqa_plan.py" rerun-close "$RUN" <NN>',
+            "--rows CQ-3,CQ-12",
             'cqa_plan.py" rerun-candidates "$RUN"',
             "--refs",
             'cqa_notion.py" rows "$RUN"',
             'cqa-toolbox.sh" run "$RUN" <tool>',
-            'cqa_plan.py" validate "$RUN" <lot_id> --rerun <NN>',
+            'cqa_plan.py" validate "$RUN" <lot_id> --rerun <NN> --rows',
             'cqa_plan.py" plan "$RUN"',
             "Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no. Rerun: <NN>. Rows: CQ-3, CQ-12. Follow your instructions.",
             "section 7",
@@ -364,13 +366,27 @@ class SkillTest(unittest.TestCase):
         section = _section(_text(SKILL), "10. Rerun")
         candidates = section.index("rerun-candidates")
         presentation = section.index("« Lancer cette relance ? »")
-        snapshot = section.index("cqa_plan.py\" snapshot")
+        snapshot = section.index("cqa_plan.py\" rerun-start")
         toolbox = section.index("cqa-toolbox.sh")
         dispatch = section.index("Rerun: <NN>")
         self.assertLess(snapshot, candidates)
         self.assertLess(candidates, presentation)
         self.assertLess(presentation, toolbox)
         self.assertLess(presentation, dispatch)
+        validate = section.index("--rerun <NN> --rows")
+        close = section.index("rerun-close")
+        plan = section.index('cqa_plan.py" plan')
+        self.assertLess(dispatch, validate)
+        self.assertLess(validate, close)
+        self.assertLess(close, plan)
+        self.assertNotIn("highest number", section)
+        self.assertIn("which files were discarded", section)
+
+    def test_anything_else_hint_matches_the_argument_hint(self):
+        self.assertIn(
+            "[diagnostic | assign | rerun] [--phase \"MEL J0\"] [--dry-run]` and stop.",
+            _text(SKILL),
+        )
 
     def test_rerun_dispatch_is_documented_in_lots_reference(self):
         text = _text(REFERENCES / "lots.md")
