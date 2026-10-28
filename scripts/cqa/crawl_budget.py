@@ -16,6 +16,7 @@ MAX_SITEMAP_FILES = 50
 MAX_SITEMAP_BYTES = 10 * 1024 * 1024
 MAX_PAGE_BYTES = 2 * 1024 * 1024
 PAGE_PAUSE = 0.5
+CUT = "cut"
 
 _LOC = re.compile(r"<(?:sm:)?loc>([^<]*)</(?:sm:)?loc>", re.IGNORECASE)
 _INDEX = re.compile(r"<(?:\w+:)?sitemapindex[\s>]", re.IGNORECASE)
@@ -67,6 +68,10 @@ def count_sitemap_urls(
             sleep(delay)
         state["requests"] += 1
         status, body, _ = fetch(url)
+        if status == CUT or (
+            status is None and deadline is not None and time.monotonic() >= deadline
+        ):
+            state["truncated"] = True
         if status != 200 or not isinstance(body, (bytes, bytearray)):
             return None
         return bytes(body)
@@ -77,6 +82,8 @@ def count_sitemap_urls(
         if body is None:
             return None
         text = _unpack(body)
+        if text is None:
+            state["truncated"] = True
         if text is not None and (_URLSET.search(text) or _INDEX.search(text)):
             state["answered"] = True
         return text
@@ -92,12 +99,12 @@ def count_sitemap_urls(
     found, seen = set(), set()
     queue = collections.deque((url, 0) for url in seeds)
     while queue:
-        if state["files"] >= MAX_SITEMAP_FILES:
-            state["truncated"] = True
-            break
         url, depth = queue.popleft()
         if url in seen:
             continue
+        if state["files"] >= MAX_SITEMAP_FILES:
+            state["truncated"] = True
+            break
         seen.add(url)
         text = read(url)
         if state["truncated"]:
@@ -137,6 +144,8 @@ def mean_response_time(
             break
         if index:
             sleep(PAGE_PAUSE)
+            if deadline is not None and time.monotonic() >= deadline:
+                break
         status, _, elapsed = fetch(url)
         if isinstance(status, int) and status < 400:
             times.append(elapsed)

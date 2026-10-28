@@ -143,6 +143,43 @@ class SitemapTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2.0)
         self.assertTrue(info["truncated"])
 
+    def test_a_cut_or_oversized_body_flags_truncated(self):
+        info = {}
+        site = lambda url: (budget.CUT, b"", 1.0) if url.endswith("/sitemap.xml") else (404, b"", 0)
+        self.assertIsNone(
+            budget.count_sitemap_urls(ORIGIN, site, None, sleep=lambda _: None, info=info)
+        )
+        self.assertTrue(info["truncated"])
+        info = {}
+        big = b"<urlset>" + b" " * (budget.MAX_SITEMAP_BYTES + 1) + b"</urlset>"
+        self.count({ORIGIN + "/sitemap.xml": big}, info=info)
+        self.assertTrue(info["truncated"])
+        info = {}
+        bomb = gzip.compress(b"<urlset>" + b" " * (budget.MAX_SITEMAP_BYTES + 10) + b"</urlset>")
+        self.count({ORIGIN + "/sitemap.xml": bomb}, info=info)
+        self.assertTrue(info["truncated"])
+
+    def test_duplicates_left_at_the_file_cap_do_not_truncate(self):
+        names = [f"{ORIGIN}/m{number}.xml" for number in range(49)]
+        pages = {ORIGIN + "/sitemap.xml": index(*names, *names)}
+        pages.update({name: urlset(name + "/p") for name in names})
+        info = {}
+        result, _ = self.count(pages, info=info)
+        self.assertEqual(49, result)
+        self.assertFalse(info["truncated"])
+
+    def test_the_deadline_is_checked_again_after_the_pause(self):
+        calls = []
+        def fetch(url):
+            calls.append(url)
+            return 200, b"", 0.1
+        deadline = time.monotonic() + 0.05
+        mean = budget.mean_response_time(
+            ["a", "b", "c"], fetch, sleep=lambda _: time.sleep(0.1), deadline=deadline
+        )
+        self.assertEqual(["a"], calls)
+        self.assertEqual(0.1, mean)
+
     def test_truncated_is_false_for_a_complete_count(self):
         info = {}
         self.count({ORIGIN + "/sitemap.xml": urlset(ORIGIN + "/a")}, info=info)

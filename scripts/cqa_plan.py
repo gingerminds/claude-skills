@@ -697,10 +697,13 @@ def _cmd_crawl_estimate(args, services) -> int:
 
     def fetcher(limit: int):
         def fetch(page_url: str) -> tuple:
+            cut = []
             try:
                 result = fetch_timed(
-                    page_url, auth=auth, opener=opener, max_bytes=limit, deadline=deadline
+                    page_url, auth=auth, opener=opener, max_bytes=limit, deadline=deadline, cut=cut
                 )
+                if cut:
+                    result = (crawl_budget.CUT, b"", result[2])
             except ValueError:
                 if not sent:
                     raise
@@ -719,7 +722,10 @@ def _cmd_crawl_estimate(args, services) -> int:
     ][:MAX_KEY_PAGES - 1]
     timings, info = [], {}
     mean = crawl_budget.mean_response_time(
-        pages, fetcher(crawl_budget.MAX_PAGE_BYTES), deadline=deadline, timed=timings
+        pages,
+        fetcher(crawl_budget.MAX_PAGE_BYTES),
+        deadline=time.monotonic() + KEY_PAGES_DEADLINE / 2,
+        timed=timings,
     )
     sitemap_urls = crawl_budget.count_sitemap_urls(
         origin,

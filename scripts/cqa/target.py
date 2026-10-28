@@ -128,13 +128,14 @@ def fetch_timed(
     timeout: float = 20.0,
     max_bytes: int = 2_097_152,
     deadline: Optional[float] = None,
+    cut: Optional[list] = None,
 ) -> tuple:
     """Return (status, body, elapsed_s) of a GET, under the rules of fetch_page.
 
     body is the raw bytes (max_bytes at most, kept as is for a compressed file); elapsed_s runs
     until the end of the body. status is None when nothing answered, or when the body was not
     complete before the time limit (timeout from the start, and deadline, a time.monotonic
-    value). Raises ValueError as fetch_page does.
+    value); cut, when given, then receives True. Raises ValueError as fetch_page does.
     """
     validate_url(url)
     if auth is not None:
@@ -143,6 +144,8 @@ def fetch_timed(
         opener = build_opener(authenticated=auth is not None)
     request = urllib.request.Request(url, headers=_headers(auth), method="GET")
     started = time.monotonic()
+    if deadline is not None:
+        timeout = min(timeout, max(0.5, deadline - started))
     try:
         with opener.open(request, timeout=timeout) as response:
             status = response.getcode()
@@ -152,6 +155,8 @@ def fetch_timed(
             chunks, size = [], 0
             while size < max_bytes:
                 if time.monotonic() >= limit:
+                    if cut is not None:
+                        cut.append(True)
                     return None, b"", time.monotonic() - started
                 read = getattr(response, "read1", response.read)
                 chunk = read(min(65536, max_bytes - size))

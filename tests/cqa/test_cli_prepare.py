@@ -2329,6 +2329,21 @@ class CrawlEstimateTest(RunDirCase):
         self.assertNotEqual(0, code)
         self.assertNotIn(PASSWORD, out + err)
 
+    def test_key_pages_take_half_of_the_budget_at_most(self):
+        self.serve({"/sitemap.xml": b"<urlset></urlset>", "/": b""})
+        self.write_context(target__preprod_url=self.base, key_pages=[{"template": "A", "url": self.base + "/"}])
+        seen = []
+        real = cqa_plan.crawl_budget.mean_response_time
+
+        def spy(urls, fetch, **kwargs):
+            seen.append(kwargs["deadline"] - time.monotonic())
+            return real(urls, fetch, **kwargs)
+
+        with mock.patch.object(cqa_plan.crawl_budget, "mean_response_time", spy):
+            code, _, err = self.estimate()
+        self.assertEqual(code, 0, err)
+        self.assertLessEqual(seen[0], cqa_plan.KEY_PAGES_DEADLINE / 2)
+
     def test_crawl_estimate_without_a_sitemap(self):
         self.serve({"/": b"home"})
         self.write_context(target__preprod_url=self.base, key_pages=[{"template": "A", "url": self.base + "/"}])
