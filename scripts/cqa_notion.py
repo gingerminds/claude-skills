@@ -28,7 +28,7 @@ from cqa.notion_read import (
 from cqa.notion_write import ReferenceWriteRefused, apply_plan, validate_plan
 from cqa.plan import filter_plan, operation_key
 from cqa.rerun import list_of, recette_candidates, rerun_candidates, skill_last_of
-from cqa.secrets import known_values_from_env
+from cqa.secrets import known_values_from_env, redact
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -202,14 +202,14 @@ def _cmd_recette(args, client) -> int:
     notion = _notion_context(run_dir, "bot_id")
     counts = _read_copy(run_dir, client)
     rows = _read_rows(run_dir)
-    plan = _optional_json(run_dir / "notion" / "plan.json")
-    applied = _optional_json(run_dir / "notion" / "applied.json")
+    plan = _optional_json(run_dir / "notion" / "plan.json", warn=True)
+    applied = _optional_json(run_dir / "notion" / "applied.json", warn=True)
+    known = known_values_from_env()
     chosen = {item["ref"]: item for item in recette_candidates(rows, plan, applied)}
-    changed = [
-        entry["ref"]
-        for entry in rerun_candidates(run_dir, extra_refs=[], git_run=args.git_run)["candidates"]
-        if "code_modifie" in entry["reasons"]
-    ]
+    candidates = rerun_candidates(run_dir, extra_refs=[], git_run=args.git_run)
+    for note in candidates["notes"]:
+        _log(note)
+    changed = [entry["ref"] for entry in candidates["candidates"] if "code_modifie" in entry["reasons"]]
     by_ref = {item["ref"]: item for item in rows if isinstance(item, dict)}
     last_of = skill_last_of(plan, applied)
     for ref in changed:
@@ -237,8 +237,10 @@ def _cmd_recette(args, client) -> int:
     result = []
     for ref in sorted(chosen):
         item = chosen[ref]
-        item["comments"] = human_comments(client.comments(item["page_id"]), notion["bot_id"])
+        texts = human_comments(client.comments(item["page_id"]), notion["bot_id"])
+        item["comments"] = [redact(text, known) for text in texts]
         result.append(item)
+    (run_dir / "notion").mkdir(parents=True, exist_ok=True)
     write_json(run_dir / "notion" / "recette.json", {"rows": result})
     _emit({**counts, "recette": [item["ref"] for item in result], "code_modifie": sorted(changed)})
     return EXIT_OK
@@ -257,10 +259,17 @@ def _parse_refs(text: str) -> list:
     return refs
 
 
-def _optional_json(path: Path):
+def _optional_json(path: Path, warn: bool = False):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        if warn:
+            _log(
+                f"{path.name} est illisible ({error}) : le dernier statut écrit par le skill "
+                "est inconnu pour toutes les lignes."
+            )
         return None
 
 

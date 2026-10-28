@@ -22,7 +22,7 @@ from typing import Callable, NamedTuple, Optional
 from urllib.parse import urlsplit
 
 from cqa import probes, report
-from cqa.checklist import ref_label
+from cqa.checklist import STATUS_IMPLEMENTED, ref_label
 from cqa.findings import apply_guardrails, validate_document
 from cqa.git_tools import (
     alignment,
@@ -214,8 +214,12 @@ def _register_audit(commands) -> None:
     )
     sub.add_argument(
         "--recette",
-        action="store_true",
-        help="les lignes de notion/recette.json peuvent changer de statut posé par un dev",
+        type=_rerun_number,
+        metavar="NN",
+        default=None,
+        help="plan d'une recette : NN est le numéro de la relance qui a jugé les lignes de "
+        "notion/recette.json ; celles qui sont « Mis en place » et jugées peuvent changer "
+        "ce statut posé par un dev",
     )
     _run_command(commands, "manifest", "résultats des outils (tools/manifest.json)", _cmd_manifest)
     _run_command(commands, "synthesis", "synthese.md et commentaire de la page", _cmd_synthesis)
@@ -655,6 +659,9 @@ def _cmd_plan(args, services) -> int:
     findings, followup_done = _collect_findings(run_dir, context, lots["lots"])
     copy_ds_id = context["notion"]["copy_data_source_id"]
     history = load_history(run_dir.parent.parent, run_dir.parent.name, copy_ds_id, run_dir.name)
+    recette = {"refs": frozenset(), "judged": [], "unjudged": []}
+    if args.recette is not None:
+        recette = _recette_scope(run_dir, context, lots["lots"], rows, args.recette)
     plan = build_plan(
         rows=rows,
         findings=findings,
@@ -666,8 +673,11 @@ def _cmd_plan(args, services) -> int:
         plugin_version=context["plugin_version"],
         followup_done=followup_done,
         missing_in_copy=missing,
-        recette_refs=_recette_refs(run_dir) if args.recette else frozenset(),
+        recette_refs=recette["refs"],
     )
+    if args.recette is not None:
+        plan["recette"] = {**recette, "rerun": f"{args.recette:02d}"}
+        plan["recette"]["refs"] = sorted(recette["refs"])
     plan = filter_plan(plan, skip_human_overrides=args.skip_human_overrides)
     (run_dir / "notion").mkdir(exist_ok=True)
     write_json(run_dir / "notion" / "plan.json", plan)
@@ -675,14 +685,29 @@ def _cmd_plan(args, services) -> int:
     return EXIT_OK
 
 
-def _recette_refs(run_dir: Path) -> frozenset:
+def _recette_scope(run_dir: Path, context: dict, lots: list, rows: list, number: int) -> dict:
+    """Return the refs of the recette by what the plan may do with them.
+
+    refs: "Mis en place" in the copy and judged again by the rerun NN (a finding in a kept
+    findings/<lot>-rerun-NN.json): they may replace the status a dev set. judged: every ref
+    of the recette with such a finding. unjudged: the others, left as they are.
+    """
     document = _read_run_json(run_dir, "notion/recette.json", "cqa_notion.py recette")
-    rows = document.get("rows") if isinstance(document, dict) else None
-    if not isinstance(rows, list):
+    listed = document.get("rows") if isinstance(document, dict) else None
+    if not isinstance(listed, list):
         raise UsageError("notion/recette.json : la liste « rows » est absente.")
-    return frozenset(
-        row["ref"] for row in rows if isinstance(row, dict) and _is_ref(row.get("ref"))
-    )
+    wanted = {row["ref"] for row in listed if isinstance(row, dict) and _is_ref(row.get("ref"))}
+    judged = set()
+    for lot in lots:
+        found = _read_findings_file(run_dir, context, lot, f"{lot['id']}-rerun-{number:02d}.json")
+        judged.update(item["ref"] for item in (found[0] if found else []))
+    status = {row["ref"]: row.get("status") for row in rows if row.get("ref") is not None}
+    exempt = {ref for ref in wanted & judged if status.get(ref) == STATUS_IMPLEMENTED}
+    return {
+        "refs": frozenset(exempt),
+        "judged": sorted(wanted & judged),
+        "unjudged": sorted(wanted - judged),
+    }
 
 
 def _cmd_rerun(args, services) -> int:

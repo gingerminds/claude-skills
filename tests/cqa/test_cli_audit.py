@@ -1033,6 +1033,7 @@ class PlanTest(AuditCase):
         self.assertEqual(
             set(plan),
             {
+                "plan_id",
                 "run_id",
                 "copy_data_source_id",
                 "copy_page_id",
@@ -1105,9 +1106,11 @@ class PlanTest(AuditCase):
     def test_plan_is_reproducible(self):
         run_dir = self.make_run()
         self.plan(run_dir)
-        first = (run_dir / "notion" / "plan.json").read_text(encoding="utf-8")
+        first = self.read(run_dir, "notion/plan.json")
         self.plan(run_dir)
-        self.assertEqual((run_dir / "notion" / "plan.json").read_text(encoding="utf-8"), first)
+        second = self.read(run_dir, "notion/plan.json")
+        self.assertNotEqual(first.pop("plan_id"), second.pop("plan_id"))
+        self.assertEqual(second, first)
 
     def test_skip_human_overrides(self):
         run_dir = self.make_run()
@@ -1509,35 +1512,96 @@ class SynthesisTest(AuditCase):
 
 
 class RecetteTest(AuditCase):
-    def make_recette_run(self, refs):
+    LOTS = {101: "code-performance", 102: "code-performance", 103: "code-securite", 104: "code-securite"}
+
+    def make_recette_run(self, refs, judged=(), changes=None):
+        """A run whose recette lists refs; judged refs get a finding in findings/<lot>-rerun-01.json.
+
+        changes maps a judged ref to the fields of its new finding.
+        """
         run_dir = self.make_run()
         rows = [
-            {"ref": ref, "page_id": f"{ref:032x}", "status": "Mis en place", "skill_last": "À traiter",
-             "comments": []}
+            {"ref": ref, "page_id": f"{ref:032x}", "status": "Mis en place",
+             "skill_last": "À traiter", "comments": []}
             for ref in refs
         ]
         self.write(run_dir, "notion/recette.json", {"rows": rows})
+        for ref in refs:
+            self.edit_row(run_dir, ref, status="Mis en place")
+        for ref in judged:
+            lot = self.LOTS[ref]
+            name = f"findings/{lot}-rerun-01.json"
+            path = run_dir / name
+            document = self.read(run_dir, name) if path.exists() else {"lot": lot, "findings": []}
+            source = next(
+                item for item in self.read(run_dir, f"findings/{lot}.json")["findings"]
+                if item["ref"] == ref
+            )
+            document["findings"].append({**source, **(changes or {}).get(ref, {})})
+            self.write(run_dir, name, document)
         return run_dir
 
-    def test_plan_recette_lets_the_rows_override_the_human_status(self):
-        run_dir = self.make_recette_run([102])
-        self.run_json(["plan", run_dir, "--recette", "--skip-human-overrides"])
+    def status_ops(self, run_dir):
         plan = self.read(run_dir, "notion/plan.json")
-        status = [(op["ref"], op["after"]) for op in plan["ops"] if op["kind"] == "status"]
-        self.assertIn((102, "Ok / Recetté"), status)
+        return {op["ref"]: op["after"] for op in plan["ops"] if op["kind"] == "status"}
+
+    def test_plan_recette_lets_a_judged_implemented_row_override_the_human_status(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.assertEqual(self.status_ops(run_dir)[102], "Ok / Recetté")
+        recette = self.read(run_dir, "notion/plan.json")["recette"]
+        self.assertEqual(
+            recette, {"rerun": "01", "refs": [102], "judged": [102], "unjudged": []}
+        )
         self.run_json(["plan", run_dir, "--skip-human-overrides"])
+        self.assertNotIn(102, self.status_ops(run_dir))
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+
+    def test_recette_ref_without_a_new_finding_stays_protected(self):
+        run_dir = self.make_recette_run([102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
         plan = self.read(run_dir, "notion/plan.json")
         self.assertNotIn(102, [op["ref"] for op in plan["ops"]])
+        self.assertEqual(plan["recette"]["unjudged"], [102])
+        self.assertEqual(plan["recette"]["refs"], [])
 
-    def test_plan_recette_without_recette_json(self):
+    def test_recette_ref_judged_in_another_rerun_stays_protected(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        source = run_dir / "findings" / "code-performance-rerun-01.json"
+        source.rename(run_dir / "findings" / "code-performance-rerun-02.json")
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.assertNotIn(102, self.status_ops(run_dir))
+
+    def test_status_nobody_set_is_not_overwritten_by_a_recette(self):
+        run_dir = self.make_recette_run(
+            [102], judged=[102], changes={102: {"verdict": "ok_human", "human_check": "Voir la page."}}
+        )
+        self.edit_row(run_dir, 102, status="Ok / Recetté")
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.assertNotIn(102, self.status_ops(run_dir))
+
+    def test_implemented_row_judged_ko_is_overwritten(self):
+        run_dir = self.make_recette_run(
+            [102], judged=[102], changes={102: {"verdict": "ko", "todo": "Convertir les images."}}
+        )
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.assertEqual(self.status_ops(run_dir)[102], "À traiter")
+
+    def test_plan_recette_needs_its_rerun_number_and_the_file(self):
         run_dir = self.make_run()
         code, out, err = self.run_main(["plan", run_dir, "--recette"])
+        self.assertEqual(code, 2)
+        code, out, err = self.run_main(["plan", run_dir, "--recette", "01"])
         self.assertEqual(code, 2)
         self.assertIn("recette.json", err)
 
     def test_recette_section_in_synthesis(self):
-        run_dir = self.make_recette_run([102, 103, 101])
-        self.run_json(["plan", run_dir, "--recette"])
+        run_dir = self.make_recette_run(
+            [102, 103, 101],
+            judged=[102, 103, 101],
+            changes={103: {"verdict": "partial", "todo": "Terminer."}},
+        )
+        self.run_json(["plan", run_dir, "--recette", "01"])
         text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
         section = text.split("## Recette")[1].split("\n## ")[0]
         validated = section.split("### Validées")[1].split("###")[0]
@@ -1551,16 +1615,29 @@ class RecetteTest(AuditCase):
         self.assertIn("CQ-101", blocking)
         self.assertNotIn(EM_DASH, text)
 
-    def test_recette_unknown_outcome_is_not_a_human_validation(self):
-        run_dir = self.make_recette_run([102, 104])
-        self.run_json(["plan", run_dir, "--recette"])
-        self.edit(run_dir, "notion/plan.json", lambda plan: plan["summary"]["unknown"].append(104))
+    def test_recette_unjudged_row_is_not_a_human_validation(self):
+        run_dir = self.make_recette_run([102, 104], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01"])
         text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
         section = text.split("## Recette")[1].split("\n## ")[0]
         unknown = section.split("### Non évaluées")[1].split("###")[0]
         waiting = section.split("### Restées en validation humaine")[1].split("###")[0]
         self.assertIn("CQ-104", unknown)
         self.assertNotIn("CQ-104", waiting)
+
+    def test_recette_unknown_outcome_goes_to_not_evaluated(self):
+        run_dir = self.make_recette_run([102, 104], judged=[102, 104])
+        self.run_json(["plan", run_dir, "--recette", "01"])
+        self.edit(run_dir, "notion/plan.json", lambda plan: plan["summary"]["unknown"].append(104))
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+        section = text.split("## Recette")[1].split("\n## ")[0]
+        self.assertIn("CQ-104", section.split("### Non évaluées")[1].split("###")[0])
+
+    def test_synthesis_ignores_recette_json_without_a_recette_plan(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir])
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+        self.assertNotIn("## Recette", text)
 
     def test_synthesis_without_recette_has_no_section(self):
         run_dir = self.make_run()

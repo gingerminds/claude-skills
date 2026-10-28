@@ -617,6 +617,39 @@ class OrderTest(ApplyTestCase):
         )
 
 
+class PlanScopedJournalTest(ApplyTestCase):
+    def planned(self, plan_id):
+        plan = make_plan(status_op(PAGE_1, 1, after="Mise en place partielle", before="À traiter"))
+        if plan_id is not None:
+            plan["plan_id"] = plan_id
+        return plan
+
+    def test_same_target_status_is_written_again_by_a_later_plan(self):
+        first = self.apply(plan=self.planned("aaa"))
+        self.assertEqual(first, apply_report(1, 0))
+        second = self.apply(plan=self.planned("bbb"))
+        self.assertEqual(second, apply_report(1, 0))
+        self.assertEqual([label for label, _, _ in self.notion.writes], ["status", "status"])
+        self.assertEqual([entry["plan_id"] for entry in self.applied()], ["aaa", "bbb"])
+
+    def test_resuming_the_same_plan_still_skips(self):
+        self.apply(plan=self.planned("aaa"))
+        again = self.apply(plan=self.planned("aaa"))
+        self.assertEqual(again, apply_report(0, 1))
+        self.assertEqual(len(self.notion.writes), 1)
+
+    def test_legacy_plan_and_legacy_journal_still_skip(self):
+        self.apply(plan=self.planned(None))
+        self.assertNotIn("plan_id", self.applied()[0])
+        again = self.apply(plan=self.planned(None))
+        self.assertEqual(again, apply_report(0, 1))
+
+    def test_legacy_entry_does_not_match_a_plan_with_an_id(self):
+        self.apply(plan=self.planned(None))
+        again = self.apply(plan=self.planned("aaa"))
+        self.assertEqual(again, apply_report(1, 0))
+
+
 class JournalTest(ApplyTestCase):
     def test_journal_entries(self):
         first, second = status_op(PAGE_1, 1), comment_op(PAGE_1, 1)

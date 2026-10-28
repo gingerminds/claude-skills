@@ -538,6 +538,7 @@ class OperationShapeTest(unittest.TestCase):
         self.assertEqual(
             set(plan),
             {
+                "plan_id",
                 "run_id",
                 "copy_data_source_id",
                 "copy_page_id",

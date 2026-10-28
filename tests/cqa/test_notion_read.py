@@ -821,7 +821,7 @@ class RecetteCommandTest(CliTestCase):
             ]
         }
         code, out, err, transport = self.run_recette(comments)
-        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(code, 0, err)
         document = self.read_json("notion/recette.json")
         self.assertEqual(list(document), ["rows"])
         [item] = document["rows"]
@@ -840,6 +840,9 @@ class RecetteCommandTest(CliTestCase):
         )
         self.assertEqual(json.loads(out)["recette"], [79])
         self.assertEqual(len(self.read_json("rows.json")["rows"]), 4)
+        posts = [call for call in transport.calls if call.method == "POST"]
+        self.assertTrue(posts)
+        self.assertTrue(all(call.url.split("?")[0].endswith("/query") for call in posts))
         self.assertEqual({call.method for call in transport.calls}, {"GET", "POST"})
 
     def test_recette_command_is_registered(self):
@@ -870,6 +873,33 @@ class RecetteCommandTest(CliTestCase):
         [item] = self.read_json("notion/recette.json")["rows"][:1]
         self.assertEqual((item["ref"], item["skill_last"]), (79, "À traiter"))
 
+    def test_recette_masks_secrets_in_the_comments(self):
+        self.write_audit()
+        secret = "DB_PASSWORD=Adm1nP4ss2024"
+        self.run_recette({"c1": [dated_comment(f"Config : {secret}", "2026-10-02T10:00:00.000Z")]})
+        text = (self.run_dir / "notion" / "recette.json").read_text(encoding="utf-8")
+        self.assertNotIn("Adm1nP4ss2024", text)
+        self.assertIn("Config", text)
+
+    def test_recette_prints_the_notes_of_the_candidate_search(self):
+        self.write_audit()
+        code, _, err, _ = self.run_recette()
+        self.assertIn("lots.json", err)
+
+    def test_recette_warns_about_an_unreadable_journal(self):
+        self.write_audit()
+        (self.run_dir / "notion" / "applied.json").write_text("{", encoding="utf-8")
+        code, _, err, _ = self.run_recette()
+        self.assertEqual(code, 0)
+        self.assertIn("applied.json est illisible", err)
+        self.assertNotIn("plan.json est illisible", err)
+
+    def test_recette_creates_the_notion_folder(self):
+        (self.run_dir / "notion").rmdir()
+        code, _, err, _ = self.run_recette()
+        self.assertEqual(code, 0, err)
+        self.assertTrue((self.run_dir / "notion" / "recette.json").is_file())
+
     def test_recette_keeps_five_comments_at_most(self):
         self.write_audit()
         many = [dated_comment(f"avis {n}", f"2026-10-{n:02d}T10:00:00.000Z") for n in range(1, 8)]
@@ -882,13 +912,13 @@ class RecetteCommandTest(CliTestCase):
         entry = {"key": "comment:c1:abc", "kind": "comment", "ref": 79, "verdict": "ko"}
         self.write_json("notion/applied.json", {"applied": [entry]})
         code, _, err, _ = self.run_recette({"c1": [dated_comment("ok", "2026-10-02T10:00:00.000Z")]})
-        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(code, 0, err)
         refs = [item["ref"] for item in self.read_json("notion/recette.json")["rows"]]
         self.assertEqual(refs, [79, 80])
 
     def test_recette_without_any_journal(self):
         code, _, err, _ = self.run_recette()
-        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(code, 0, err)
         refs = [item["ref"] for item in self.read_json("notion/recette.json")["rows"]]
         self.assertEqual(refs, [79, 80])
 

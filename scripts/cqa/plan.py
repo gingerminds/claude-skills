@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import uuid
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -119,7 +120,7 @@ def build_plan(
 
     Operations come by ref. Besides the keys of the exchange format the plan carries "rows",
     the status of every row before and after the run, which filter_plan needs to recompute
-    the summary. missing_in_copy is the list of rows of the model absent from the copy.
+    the summary, and "plan_id", which scopes the journal of the writes to this plan. missing_in_copy is the list of rows of the model absent from the copy.
     """
     notion = context["notion"]
     common = {
@@ -154,6 +155,7 @@ def build_plan(
         ops.extend(row_ops)
     states = _row_states(rows, ops)
     return {
+        "plan_id": uuid.uuid4().hex,
         "run_id": context["run_id"],
         "copy_data_source_id": notion["copy_data_source_id"],
         "copy_page_id": notion["copy_page_id"],

@@ -60,7 +60,9 @@ def apply_plan(
     notion/applied.json in run_dir lists what was written and is rewritten after each success
     (entries accumulate across applies; a "status" entry carries "value", the status written,
     and a "comment" entry "comment_id" and "mode"; older journals have neither):
-    its keys are skipped on a rerun. A comment is also skipped when the page already shows a
+    its keys are skipped on a rerun of the same plan: an entry carries the "plan_id" of the plan
+    that wrote it and only matches a plan with the same plan_id (an entry without plan_id, from
+    an older run, matches only a plan without one). A comment is also skipped when the page already shows a
     comment with the same text (from bot_id, or from anyone when it is None), as Notion may
     have stored one whose answer was lost. A network error, an authentication failure, a 429
     or a 5xx stops the plan; any other Notion error only fails its operation and the later
@@ -78,7 +80,8 @@ def apply_plan(
     entries = _load_journal(journal)
     options = _live_options(client, plan, ops)
     journal.parent.mkdir(parents=True, exist_ok=True)
-    recorded = {entry["key"] for entry in entries}
+    plan_id = plan.get("plan_id")
+    recorded = {entry["key"] for entry in entries if entry.get("plan_id") == plan_id}
     result = {"done": 0, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []}
     failed_pages = set()
     for item in sorted(ops, key=_order):
@@ -110,7 +113,7 @@ def apply_plan(
             failed_pages.add(item["page_id"])
             continue
         recorded.add(key)
-        entries.append(_entry(item, sent))
+        entries.append(_entry(item, sent, plan_id))
         write_json(journal, {"applied": entries})
         for reason in sent.get("failed", []):
             result["replace_failed"].append({"key": key, "ref": item.get("ref"), "reason": reason})
@@ -315,7 +318,7 @@ def _load_journal(path: Path) -> list:
     return entries
 
 
-def _entry(item: dict, sent: dict) -> dict:
+def _entry(item: dict, sent: dict, plan_id=None) -> dict:
     entry = {
         "key": item["key"],
         "kind": item["kind"],
@@ -323,6 +326,8 @@ def _entry(item: dict, sent: dict) -> dict:
         "verdict": item.get("verdict"),
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if plan_id is not None:
+        entry["plan_id"] = plan_id
     if item["kind"] == "status":
         entry["value"] = item["after"]
     if "comment_id" in sent:
