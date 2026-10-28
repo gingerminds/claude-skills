@@ -25,6 +25,7 @@ SCOPE = [
     "scripts/cqa_plan.py",
     "scripts/cqa_ssh_ro.py",
     "scripts/cqa-toolbox.sh",
+    "scripts/cqa-keepawake.sh",
     "tests/cqa",
     "README.md",
 ]

@@ -63,6 +63,14 @@ A run is complete once its final scan has run: section 8 then writes `done.json`
    - `lots` true and `plan` false: section 6. A lot whose `cqa_plan.py validate` passes is not dispatched again. Toolbox: no `tools/` folder, launch it again; `tools/` without `tools/manifest.json`, rebuild the manifest with `cqa_plan.py manifest "$RUN"` and relaunch only the missing or failed tools (`references/lots.md`).
    - `plan` true: section 7. `apply` skips the writes already listed in `notion/applied.json`.
 
+The inhibitor of an interrupted run is gone with it. When the run restarts at section 7, start it again as at the beginning of section 6 (section 6 does it itself):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+bash "$S/cqa-keepawake.sh" start "$RUN"
+```
+
 New run (also for `diagnostic`):
 
 ```bash
@@ -141,6 +149,18 @@ Show the table of checks, the coverage and the gains as `references/diagnostic.m
 
 Read `references/lots.md`, then `references/browser.md` and `references/server.md` when their lots come.
 
+Before step 1, keep the workstation awake (best effort: without an inhibitor the script only warns and exits 0):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+bash "$S/cqa-keepawake.sh" start "$RUN"
+```
+
+Then tell the lead, word for word: « Le poste ne se mettra pas en veille pendant l'audit. Gardez l'écran ouvert : sur un Mac, rabattre l'écran le met en veille malgré tout. » If the script warned that no inhibitor exists, show its warning too.
+
+From here to the end of section 8, run `stop` (below) on every path that ends the audit: the end of section 8, and every other stop of the audit (section 7 abandoned, exit codes 2, 3 and 8 of section 8, an error that ends the run).
+
 1. Prepare, one call each, in this order: the fiches of the template, the verdicts already in the comments, the lots, the probes (outputs and errors in `references/lots.md`).
 
 ```bash
@@ -205,6 +225,14 @@ python3 "$S/cqa_plan.py" plan "$RUN"
    - « Sans toucher aux statuts posés par un humain »: keep the list of those statuses, rebuild the plan so that the synthesis matches what is written, then section 8, step 1, with `--skip-human-overrides`.
    - « Ne rien écrire »: as with `--dry-run`, section 8, step 2.
 
+If the lead abandons the audit at this point, release the workstation first:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+bash "$S/cqa-keepawake.sh" stop "$RUN"
+```
+
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
@@ -227,9 +255,9 @@ Then, by exit code (words for the lead in `references/verdicts.md`):
 
 - 0: everything written. Go on.
 - 7: some operations blocked (`blocked[].labels`), the others written. Show each blocked operation (ref, kind, reason, never its text), keep the list for « Remarques », go on.
-- 3: stopped on a network or Notion API error, or an operation refused by Notion (wins over 7). Show the message. Once the cause is fixed (network, token, connection of the page), run the same command once more: it resumes where it stopped. Still 3: stop. Say « Écriture interrompue : le run reste reprenable, relancez la commande plus tard. » No synthesis: the run stays incomplete and resumable at section 7.
-- 8: the copy is the reference template. Nothing was written: stop, and say « Écriture refusée : la copie est le modèle de référence. Lancez un nouveau run avec l'URL de la copie du projet. »
-- 2: show the message and stop.
+- 3: stopped on a network or Notion API error, or an operation refused by Notion (wins over 7). Show the message. Once the cause is fixed (network, token, connection of the page), run the same command once more: it resumes where it stopped. Still 3: stop. Say « Écriture interrompue : le run reste reprenable, relancez la commande plus tard. » No synthesis: the run stays incomplete and resumable at section 7. Release the workstation first (`cqa-keepawake.sh stop "$RUN"`, as at the end of this section).
+- 8: the copy is the reference template. Nothing was written: release the workstation (`cqa-keepawake.sh stop "$RUN"`), stop, and say « Écriture refusée : la copie est le modèle de référence. Lancez un nouveau run avec l'URL de la copie du projet. »
+- 2: show the message, release the workstation (`cqa-keepawake.sh stop "$RUN"`) and stop.
 
 **2. Synthesis**, on every path that reaches this step (written, `--dry-run`, « Ne rien écrire »):
 
@@ -269,7 +297,15 @@ Anti-secret check of the run directory. Exit 7: give the lead the files and labe
 
 **6. Completion.** Write `done.json` in the run directory with Write: `{"run_id": "<run_id>", "scan_ok": <true or false>}`. The run is now complete (section 3).
 
-**7. End.** Show `synthese.md`. After a write, end with « Relisez les statuts et les commentaires dans Notion, puis lancez /gm:checklist-quality-audit assign pour répartir les lignes restantes. »
+**7. Release the workstation.** The audit is over:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+bash "$S/cqa-keepawake.sh" stop "$RUN"
+```
+
+**8. End.** Show `synthese.md`. After a write, end with « Relisez les statuts et les commentaires dans Notion, puis lancez /gm:checklist-quality-audit assign pour répartir les lignes restantes. »
 
 ## 9. Assignment
 
@@ -318,4 +354,5 @@ Exit codes as in section 8, step 1 (prefix `GM_AUDIT_AUTH_PASS` the same way). E
 | `cqa_notion.py` | 0 success; 2 environment or usage; 3 Notion API or network (token refused, page not shared with the integration); 6 schema of the copy not v2; 7 at least one write blocked; 8 write refused on the template |
 | `cqa_plan.py` | 0 success; 2 usage or missing file (the message names the command to run first); 6 invalid `context.json` or findings; 7 secret found by `scan` |
 | `cqa_ssh_ro.py` | 0 success; 1 remote failure (command or file missing on the server); 2 usage; 4 refused, to be confirmed by the lead |
+| `cqa-keepawake.sh` | 0 success, also without any inhibitor on the workstation (warning only); 2 usage |
 | `cqa-toolbox.sh` | 0 success; 1 at least one tool failed (the manifest is written); 2 usage or environment; `run` returns the code of the tool (3: target unreachable or 401) |

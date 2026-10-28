@@ -249,6 +249,26 @@ class SkillTest(unittest.TestCase):
         writing = _section(skill, "8. Writing and synthesis")
         self.assertLess(writing.index('cqa_plan.py" scan'), writing.index("Write `done.json`"))
 
+    def test_audit_keeps_the_workstation_awake(self):
+        skill = _text(SKILL)
+        start = 'cqa-keepawake.sh" start "$RUN"'
+        stop = 'cqa-keepawake.sh" stop "$RUN"'
+        audit = _section(skill, "6. Audit")
+        self.assertIn(start, audit)
+        self.assertLess(audit.index(start), audit.index("1. Prepare"))
+        self.assertIn(
+            "Le poste ne se mettra pas en veille pendant l'audit. Gardez l'écran ouvert : "
+            "sur un Mac, rabattre l'écran le met en veille malgré tout.",
+            audit,
+        )
+        self.assertIn(start, _section(skill, "3. Resume"))
+        writing = _section(skill, "8. Writing and synthesis")
+        self.assertIn(stop, writing)
+        self.assertLess(writing.index("**6. Completion.**"), writing.index(stop))
+        self.assertIn(stop, _section(skill, "7. Plan and confirmation"))
+        self.assertIn("every other stop of the audit", skill)
+        self.assertGreaterEqual(len(re.findall(r"cqa-keepawake\.sh\"? stop \"\$RUN\"", skill)), 5)
+
     def test_toolbox_credentials_come_from_the_session(self):
         for path in _skill_files():
             text = _text(path)
