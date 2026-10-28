@@ -49,7 +49,7 @@ Read, in this order:
 | Required tool | Where to look |
 |---|---|
 | Code | Read, Grep and Glob in each repo (`repos[].path`). The folders listed in `repos[].third_party_paths` of `context.json` are third-party code (plugins): they are outside the scope of stylelint and deps (CQ-40, CQ-66, CQ-113), so do not judge them (assets and gitleaks still read them); say so in `summary` when it matters (for example « plugins tiers exclus »). |
-| CLI local | For the Composer and npm audits: `tools/deps` (audited commit) first, and your own command only when `deps` is missing, failed or skipped. Other read-only commands through the project runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`) when it is already up, such as `composer audit --locked`, `npm audit --omit=dev`, linters in check mode. Runner not up: the same audits on the host, against the lockfile; otherwise `unknown`. |
+| CLI local | For the Composer and npm audits: `tools/deps` (audited commit) first, and your own command only when `deps` is missing, failed, skipped or stale in a rerun (see Dependencies). Other read-only commands through the project runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`) when it is already up, such as `composer audit --locked`, `npm audit --omit=dev`, linters in check mode. Runner not up: the same audits on the host, against the lockfile; otherwise `unknown`. |
 | HTTP | `tools/http/summary.json`. Missing answer: your own GET or HEAD (see "HTTP"), else `needs_probes`. |
 | Audit web | `tools/lighthouse`, `lighthouse-desktop`, `a11y`, `nu`, `yellowlab`, `yellowlab-desktop`, `viewport`, `stylelint`, `deps`, `assets`, `testssl`, `gitleaks`, `redocly`, `schemathesis`. |
 | Crawler | `tools/crawl`. |

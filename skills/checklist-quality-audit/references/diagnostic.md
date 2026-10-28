@@ -165,7 +165,7 @@ In autonomous mode, do not ask: no download (as « Non »), record `cqa_plan.py 
 
 ### Crawl duration (when "Crawler" is available)
 
-In a rerun or a recette, run `crawl-estimate` and ask the question only when `crawl` is among the tools to relaunch; otherwise skip this whole section. The crawl stops at a maximum duration and a maximum number of URLs, both read from `context.json` by `cqa-toolbox.sh`. Propose them from the size of the site. Authenticated with `--auth-env` (and the credentials set in the same line, as for `key-pages-check`) when the session holds them:
+In a rerun or a recette, skip this section: a relaunched crawl keeps the `crawl_minutes` of the audit. The crawl stops at a maximum duration and a maximum number of URLs, both read from `context.json` by `cqa-toolbox.sh`. Propose them from the size of the site. Authenticated with `--auth-env` (and the credentials set in the same line, as for `key-pages-check`) when the session holds them:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
