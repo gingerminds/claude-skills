@@ -53,7 +53,7 @@ RUN="<run_dir>"
 GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' bash "$S/cqa-toolbox.sh" all "$RUN"
 ```
 
-- It runs `http`, `gitleaks`, `assets`, `lighthouse`, `a11y`, `nu`, `yellowlab`, `testssl`, `redocly`, `schemathesis` and `crawl`, one after the other, then writes `tools/manifest.json`.
+- It runs `http`, `gitleaks`, `assets`, `stylelint`, `deps`, `lighthouse`, `lighthouse-desktop`, `a11y`, `viewport`, `nu`, `yellowlab`, `yellowlab-desktop`, `testssl`, `redocly`, `schemathesis` and `crawl`, one after the other, then writes `tools/manifest.json`. With a toolbox older than 1.2.0, `stylelint`, `deps`, `lighthouse-desktop`, `viewport` and `yellowlab-desktop` are skipped with a reason asking for `cqa-toolbox.sh pull`.
 - The launcher reads `cqa_plan.py toolbox-env`, `repos-tsv` and `openapi-specs` itself: never call them by hand.
 - Exit 0: all done. Exit 1: at least one tool failed; the manifest says which, with its reason. Exit 2: usage or environment (Docker, `context.json`).
 - When the background task ends, read `tools/manifest.json` and tell the lead the tools that failed or were skipped, with their reason. Then add one separate line naming the `not_applicable` tools (nothing to examine, for example no OpenAPI spec) and their reason; ask nothing about them.
@@ -84,7 +84,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" skip "$RUN" lighthouse "boîte à outils indisponible sur le poste"
 ```
 
-Do it for `http`, `gitleaks`, `assets`, `lighthouse`, `a11y`, `nu`, `yellowlab`, `testssl`, `redocly`, `schemathesis` and `crawl`.
+Do it for `http`, `gitleaks`, `assets`, `stylelint`, `deps`, `lighthouse`, `lighthouse-desktop`, `a11y`, `viewport`, `nu`, `yellowlab`, `yellowlab-desktop`, `testssl`, `redocly`, `schemathesis` and `crawl`.
 
 ## 3. Dispatch
 

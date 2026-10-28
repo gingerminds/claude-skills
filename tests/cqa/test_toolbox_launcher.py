@@ -25,10 +25,15 @@ ALL_ORDER = [
     ("gitleaks", "git /repos/nuxt"),
     ("agence", "summarize gitleaks"),
     ("agence", "assets --repos"),
-    ("agence", "lighthouse --pages"),
+    ("agence", "stylelint --repos"),
+    ("agence", "deps --repos"),
+    ("agence", "lighthouse --pages /in/context.json"),
+    ("agence", "lighthouse --pages /in/context.json --form-factor desktop"),
     ("agence", "a11y --pages"),
+    ("agence", "viewport --pages"),
     ("agence", "nu --pages"),
-    ("agence", "yellowlab --pages"),
+    ("agence", "yellowlab --pages /in/context.json"),
+    ("agence", "yellowlab --pages /in/context.json --device desktop"),
     ("testssl", "--quiet --color"),
     ("agence", "summarize testssl"),
     ("redocly", "lint /repos/laravel/docs/swagger v2.json"),
@@ -280,6 +285,50 @@ class ToolCommandsTest(LauncherCase):
             [[tool, "--pages", "/in/context.json"] for tool in ("lighthouse", "a11y", "yellowlab")],
             [args for _, args in self.runs_of("agence")],
         )
+
+    def test_new_tools_commands(self):
+        web = [
+            "GM_AUDIT_TARGET",
+            "GM_AUDIT_RATE",
+            "GM_AUDIT_USER_AGENT",
+            "GM_AUDIT_ROBOTS",
+            "GM_AUDIT_AUTH_USER",
+            "GM_AUDIT_AUTH_PASS",
+        ]
+        cases = (
+            (
+                "lighthouse-desktop",
+                ["lighthouse", "--pages", "/in/context.json", "--form-factor", "desktop",
+                 "--name", "lighthouse-desktop"],
+                True,
+            ),
+            (
+                "yellowlab-desktop",
+                ["yellowlab", "--pages", "/in/context.json", "--device", "desktop",
+                 "--name", "yellowlab-desktop"],
+                True,
+            ),
+            ("viewport", ["viewport", "--pages", "/in/context.json"], True),
+            ("stylelint", ["stylelint", "--repos", "/repos", "--context", "/in/context.json"], False),
+            ("deps", ["deps", "--repos", "/repos", "--context", "/in/context.json"], False),
+        )
+        for tool, expected, uses_web in cases:
+            with self.subTest(tool=tool):
+                if self.log.exists():
+                    self.log.unlink()
+                result = self.run_tool(tool, **SECRETS)
+                self.assertEqual(0, result.returncode, result.stderr)
+                (options, args), = self.runs_of("agence")
+                self.assertEqual(expected, args)
+                if uses_web:
+                    self.assertEqual(
+                        sorted(["HOME=/tmp"] + web),
+                        sorted(env_args(options)),
+                    )
+                else:
+                    # Project JavaScript configs are executed: no GM_AUDIT_* variable.
+                    self.assertEqual(["HOME=/tmp"], env_args(options))
+                self.assertTrue((self.run_dir / "tools" / tool / "raw").is_dir())
 
     def test_assets(self):
         self.run_tool("assets")
@@ -612,6 +661,25 @@ class AllTest(LauncherCase):
         result = self.launch("all", str(self.run_dir))
         json.loads(result.stdout)
 
+    def test_toolbox_older_than_1_2_skips_the_new_tools(self):
+        result = self.launch("all", str(self.run_dir), CQA_STUB_VERSION="1.1.0")
+        self.assertEqual(0, result.returncode, result.stderr)
+        new_tools = ("stylelint", "deps", "lighthouse-desktop", "viewport", "yellowlab-desktop")
+        for tool in new_tools:
+            with self.subTest(tool=tool):
+                found = self.read_json(f"tools/{tool}/result.json")
+                self.assertEqual("skipped", found["status"])
+                self.assertEqual(
+                    "boîte à outils 1.2 requise : lancez cqa-toolbox.sh pull", found["reason"]
+                )
+        runs = [args for _, _, args in self.tool_runs()]
+        for args in runs:
+            self.assertNotIn(args[0], ("viewport", "stylelint", "deps"), args)
+            self.assertNotIn("--form-factor", args)
+            self.assertNotIn("--device", args)
+        self.assertIn(["lighthouse", "--pages", "/in/context.json"], runs)
+        self.assertIn(["yellowlab", "--pages", "/in/context.json"], runs)
+
     def test_all_skips_schemathesis_with_auth(self):
         result = self.launch("all", str(self.run_dir), **SECRETS)
         self.assertEqual(0, result.returncode, result.stderr)
@@ -708,13 +776,14 @@ class DoctorTest(LauncherCase):
     def test_report_without_run_directory(self):
         report = self.doctor()
         self.assertEqual(
-            {"docker", "docker_version", "registry_login", "images", "agence_crawl", "arch"},
+            {"docker", "docker_version", "registry_login", "images", "agence_crawl", "agence_1_2", "arch"},
             set(report),
         )
         self.assertIs(True, report["docker"])
         self.assertEqual("27.0.1", report["docker_version"])
         self.assertIs(True, report["registry_login"])
         self.assertIs(True, report["agence_crawl"])
+        self.assertIs(True, report["agence_1_2"])
         self.assertIn(report["arch"], ("amd64", "arm64"))
         self.assertEqual(IMAGES, list(report["images"]))
         self.assertEqual({"1.2.3"}, set(report["images"].values()))
@@ -745,6 +814,13 @@ class DoctorTest(LauncherCase):
                 self.assertIs(expected, self.doctor(CQA_STUB_VERSION=version)["agence_crawl"])
         self.assertIs(False, self.doctor(CQA_STUB_MISSING="agence")["agence_crawl"])
 
+    def test_agence_1_2_needs_toolbox_1_2(self):
+        cases = {"1.2.0": True, "1.2.3": True, "2.0.0": True, "1.1.0": False, "0.0.0-dev": False}
+        for version, expected in cases.items():
+            with self.subTest(version=version):
+                self.assertIs(expected, self.doctor(CQA_STUB_VERSION=version)["agence_1_2"])
+        self.assertIs(False, self.doctor(CQA_STUB_MISSING="agence")["agence_1_2"])
+
     def test_registry_and_tag_overrides(self):
         self.doctor(GM_CQA_REGISTRY="registry.example.org/team", GM_CQA_TOOLBOX_TAG="3")
         self.assertIn(["manifest", "inspect", "registry.example.org/team/agence:3"], self.calls())
@@ -760,6 +836,7 @@ class DoctorTest(LauncherCase):
         self.assertIs(False, report["registry_login"])
         self.assertEqual({None}, set(report["images"].values()))
         self.assertIs(False, report["agence_crawl"])
+        self.assertIs(False, report["agence_1_2"])
 
 
 class PullTest(LauncherCase):

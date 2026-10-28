@@ -97,7 +97,7 @@ grep -E '^[A-Za-z0-9_-]+:' "<chemin du repo>/Makefile"
 docker compose --project-directory "<chemin du repo>" ps --status running --services
 ```
 
-- "CLI local" is available when the runner of each repo is up, or, failing that, when the host has `composer` (repo with `composer.lock`) and `npm` (repo with `package-lock.json`) for the read-only audits.
+- "CLI local" is available when the runner of each repo is up, or, failing that, when the host has `composer` (repo with `composer.lock`) and `npm` (repo with `package-lock.json`) for the read-only audits, or when `agence_1_2` is true (section 6): `stylelint` and `deps` run these checks in the toolbox.
 - Runner down: « Le runner du repo <name> n'est pas démarré. » with « Je le démarre, revérifier » and « Continuer sans ». Never start it yourself.
 - In autonomous mode, do not ask: record `cqa_plan.py defer "$RUN" --kind gap --detail "Le runner du repo <name> n'est pas démarré."` and go on as with « Continuer sans » ("CLI local" as the fallback above allows); never start it.
 
@@ -132,7 +132,7 @@ S="${CLAUDE_SKILL_DIR}/../../scripts"
 bash "$S/cqa-toolbox.sh" doctor
 ```
 
-It prints `{"docker", "docker_version", "registry_login", "images": {"<image>": "<version>" or null}, "agence_crawl", "arch"}`. `agence_crawl` is true when the `agence` image is version 1.1.0 or later.
+It prints `{"docker", "docker_version", "registry_login", "images": {"<image>": "<version>" or null}, "agence_crawl", "agence_1_2", "arch"}`. `agence_crawl` is true when the `agence` image is version 1.1.0 or later, `agence_1_2` when it is version 1.2.0 or later.
 
 | Fact | Meaning | What the lead does |
 |---|---|---|
@@ -141,6 +141,7 @@ It prints `{"docker", "docker_version", "registry_login", "images": {"<image>": 
 | `registry_login` false and images null | no access to the registry | `docker login registry.gitlab.gingerminds.fr` with a GitLab token that can read the registry |
 | `registry_login` true, an image null | images not pulled | accept the download (below) |
 | `agence_crawl` false | `agence` image older than 1.1.0, crawl unavailable | accept the download again (below) |
+| `agence_1_2` false | image `agence` antérieure à 1.2.0 : affichage, Stylelint, dépendances et passages desktop seront ignorés | accepter un nouveau téléchargement |
 | `arch` `arm64` | Apple Silicon | nothing; an image without arm64 runs emulated, more slowly |
 
 Download, only after « Télécharger les images de la boîte à outils (plus de 2 Go) ? » (« Oui », « Non »), with Bash `run_in_background`:
@@ -152,7 +153,7 @@ bash "$S/cqa-toolbox.sh" pull
 
 Exit 1: an image failed, usually the registry login. Then run `doctor` again.
 
-In autonomous mode, do not ask: no download (as « Non »), record `cqa_plan.py defer "$RUN" --kind gap --detail "Images de la boîte à outils à télécharger (plus de 2 Go)."`; the tools that need the missing images stay unavailable ("Audit web" without the `agence` image, "Crawler" without `agence_crawl`).
+In autonomous mode, do not ask: no download (as « Non »), record `cqa_plan.py defer "$RUN" --kind gap --detail "Images de la boîte à outils à télécharger (plus de 2 Go)."`; the tools that need the missing images stay unavailable ("Audit web" without the `agence` image, "Crawler" without `agence_crawl`; `stylelint`, `deps`, `viewport` and the desktop passes without `agence_1_2`).
 
 - The toolbox is **ready** when `docker_version` is set and `images.agence` is not null.
 - "Audit web": toolbox ready, and the target reachable from the workstation (`access` `open`, or `basic_auth` with accepted credentials).

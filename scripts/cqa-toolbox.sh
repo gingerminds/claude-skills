@@ -17,7 +17,10 @@ S="$(cd "$(dirname "$0")" && pwd)"
 
 DEFAULT_REGISTRY="registry.gitlab.gingerminds.fr/gm/tools/checklist-qualite-outillage-audit"
 IMAGES=(agence nu testssl gitleaks redocly schemathesis)
-ALL_TOOLS=(http gitleaks assets lighthouse a11y nu yellowlab testssl redocly schemathesis crawl)
+ALL_TOOLS=(http gitleaks assets stylelint deps lighthouse lighthouse-desktop a11y viewport nu yellowlab yellowlab-desktop testssl redocly schemathesis crawl)
+NEEDS_1_2_REASON="boîte à outils 1.2 requise : lancez cqa-toolbox.sh pull"
+# Version gate: "unset" until read, then 0 or 1 (once per launcher call).
+AGENCE_1_2="unset"
 # Schemathesis probes undeclared methods (TRACE, PUT, ...) despite --include-method, and
 # --exclude-checks only hides their verdict: this filter is what stops the requests.
 UNSAFE_METHODS_REGEX='^(?!(GET|HEAD|OPTIONS)$)'
@@ -210,6 +213,48 @@ tool_pages() {
   docker_tool agence web -- "$1" --pages /in/context.json
 }
 
+# True when the local agence image is toolbox 1.2.0 or later.
+agence_supports_1_2() {
+  local label
+  if [ "$AGENCE_1_2" = "unset" ]; then
+    AGENCE_1_2=0
+    if label="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$(image_ref agence)" 2>/dev/null </dev/null)"; then
+      if printf '%s' "$label" | grep -Eq '^([2-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$|^1\.([2-9]|[1-9][0-9]+)\.[0-9]+$'; then
+        AGENCE_1_2=1
+      fi
+    fi
+  fi
+  [ "$AGENCE_1_2" = "1" ]
+}
+
+# tool_desktop <name> <subcommand> <flag> <value>
+tool_desktop() {
+  if ! agence_supports_1_2; then
+    skip_tool "$1" "$NEEDS_1_2_REASON"
+    return
+  fi
+  prepare_tool "$1" || return 1
+  docker_tool agence web -- "$2" --pages /in/context.json "$3" "$4" --name "$1"
+}
+
+tool_viewport() {
+  if ! agence_supports_1_2; then
+    skip_tool viewport "$NEEDS_1_2_REASON"
+    return
+  fi
+  prepare_tool viewport || return 1
+  docker_tool agence web -- viewport --pages /in/context.json
+}
+
+tool_repos_1_2() {
+  if ! agence_supports_1_2; then
+    skip_tool "$1" "$NEEDS_1_2_REASON"
+    return
+  fi
+  prepare_tool "$1" || return 1
+  docker_tool agence none -- "$1" --repos /repos --context /in/context.json
+}
+
 tool_assets() {
   prepare_tool assets || return 1
   docker_tool agence none -- assets --repos /repos
@@ -337,6 +382,10 @@ run_tool() {
   case "$1" in
     http) tool_http "$2" ;;
     lighthouse | a11y | yellowlab) tool_pages "$1" ;;
+    lighthouse-desktop) tool_desktop lighthouse-desktop lighthouse --form-factor desktop ;;
+    yellowlab-desktop) tool_desktop yellowlab-desktop yellowlab --device desktop ;;
+    viewport) tool_viewport ;;
+    stylelint | deps) tool_repos_1_2 "$1" ;;
     assets) tool_assets ;;
     nu) tool_nu ;;
     testssl) tool_testssl ;;
@@ -472,6 +521,7 @@ report = {
     "registry_login": login == "1",
     "images": images,
     "agence_crawl": bool(match) and (int(match[1]), int(match[2])) >= (1, 1),
+    "agence_1_2": bool(match) and (int(match[1]), int(match[2])) >= (1, 2),
     "arch": arch,
 }
 print(json.dumps(report, indent=2, ensure_ascii=False))

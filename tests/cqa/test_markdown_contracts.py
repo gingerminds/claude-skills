@@ -440,6 +440,19 @@ class SkillTest(unittest.TestCase):
         self.assertIn("`--recette <that NN>`", _section(text, "3. Resume"))
         self.assertIn("Statut humain conservé", _section(text, "11. Recette"))
 
+    def test_toolbox_1_2_gate_is_documented(self):
+        diagnostic = _text(REFERENCES / "diagnostic.md")
+        toolbox = _section(diagnostic, "6. Toolbox (tools \"Audit web\" and \"Crawler\")")
+        runner = _section(diagnostic, "3. Runner (tool \"CLI local\")")
+        self.assertIn("`agence_1_2`", toolbox)
+        self.assertIn("antérieure à 1.2.0", toolbox)
+        self.assertIn("`agence_1_2`", runner)
+        self.assertIn("`stylelint` and `deps`", runner)
+        lots = _text(REFERENCES / "lots.md")
+        for tool in ("stylelint", "deps", "lighthouse-desktop", "viewport", "yellowlab-desktop"):
+            with self.subTest(tool=tool):
+                self.assertGreaterEqual(lots.count(f"`{tool}`"), 2)
+
     def test_each_diagnostic_question_has_its_autonomous_default(self):
         diagnostic = _text(REFERENCES / "diagnostic.md")
         repos = _section(diagnostic, "1. Repos (tool \"Code\")")
