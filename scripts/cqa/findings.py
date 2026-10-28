@@ -31,9 +31,17 @@ MAX_SUMMARY_LENGTH = 600
 MAX_FIELD_LENGTH = 400
 PHP_FILE_REASON = "fichier PHP hors des routes de l'application"
 
-_PHP_FILE = re.compile(r"\.(?:php\d?|phtml|phar)(?:$|/|\?)", re.IGNORECASE)
+# A PHP extension the server may run: not followed by a letter, digit, "_", "-" or "~", so
+# x.php.jpg, x.php%20 or x.php;.jpg count, unless a backup suffix ends the path (x.php.bak).
+_PHP_FILE = re.compile(
+    r"\.(?:php\d*|pht|phtml|phar)(?![\w~-])"
+    r"(?!\.(?:bak|old|orig|save|swp|swo|tmp|dist|backup)$)",
+    re.IGNORECASE,
+)
 _PHP_ENTRY_POINTS = ("/index.php", "/wp-login.php")
 _PHP_AJAX = "/wp-admin/admin-ajax.php"
+_FRONT_CONTROLLER = "/index.php/"
+_DOT_SEGMENT = re.compile(r"(?:^|/)\.\.?(?:/|$)")
 
 _HUMAN_TOOL = "Intervention humaine"
 _OPTIONAL_TEXTS = ("todo", "human_check", "divergence")
@@ -51,8 +59,13 @@ def worst(verdicts: Iterable[str]) -> str:
     return min(verdicts, key=_RANK.__getitem__)
 
 
-def validate_document(doc: dict, lot_refs: set[int]) -> tuple[list[dict], list[str]]:
+def validate_document(
+    doc: dict, lot_refs: set[int], *, app_path: str = ""
+) -> tuple[list[dict], list[str]]:
     """Return (valid findings, errors in French) for a findings/<lot>.json document.
+
+    app_path is the path the application is served under, for the PHP rule of needs_probes
+    (see requests_php_file).
 
     Every problem of the document is reported in one pass, because the sub-agent gets to fix
     its file once. A finding is returned (as a deep copy) only when it has no problem. A ref
@@ -85,7 +98,7 @@ def validate_document(doc: dict, lot_refs: set[int]) -> tuple[list[dict], list[s
         ref = item.get("ref")
         in_lot = _is_int(ref) and ref in lot_refs
         label = ref_label(ref) if _is_int(ref) else f"n° {index}"
-        problems = _finding_problems(item)
+        problems = _finding_problems(item, app_path)
         if _is_int(ref) and not in_lot:
             problems.insert(0, "Réf hors du lot")
         errors.extend(f"constat {label} : {problem}" for problem in problems)
@@ -145,22 +158,38 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     return result
 
 
-def requests_php_file(url: str) -> bool:
+def requests_php_file(url: str, app_path: str = "") -> bool:
     """Whether a GET of url would run a PHP file other than a public entry point.
 
-    The path is percent-decoded first. Allowed: /index.php and /wp-login.php, with or without a
-    query, and /wp-admin/admin-ajax.php without one. A backup name such as x.php.bak is not a
-    PHP file. A URL that cannot be parsed is left to the other checks.
+    The path is percent-decoded first. app_path is the path the application is served under
+    ("" or "/" at the root, "/blog" for https://example.org/blog/). Allowed under it: /index.php,
+    also followed by a route (/index.php/node/1), and /wp-login.php, with or without a query,
+    and /wp-admin/admin-ajax.php without one; never through a "." or ".." segment. A backup
+    name such as x.php.bak is not a PHP file. A URL that cannot be parsed is left to the other
+    checks.
     """
     try:
         parts = urlsplit(url)
     except ValueError:
         return False
     path = unquote(parts.path)
-    folded = path.casefold()
-    if folded in _PHP_ENTRY_POINTS or (folded == _PHP_AJAX and not parts.query):
+    if _is_entry_point(path.casefold(), _app_prefix(app_path).casefold(), bool(parts.query)):
         return False
     return bool(_PHP_FILE.search(path))
+
+
+def _app_prefix(app_path: str) -> str:
+    return unquote(app_path or "").rstrip("/")
+
+
+def _is_entry_point(path: str, prefix: str, query: bool) -> bool:
+    if not path.startswith(f"{prefix}/") or _DOT_SEGMENT.search(path):
+        return False
+    local = path[len(prefix):]
+    if local in _PHP_ENTRY_POINTS or (local == _PHP_AJAX and not query):
+        return True
+    route = local[len(_FRONT_CONTROLLER):]
+    return local.startswith(_FRONT_CONTROLLER) and not _PHP_FILE.search(route)
 
 
 def _is_int(value) -> bool:
@@ -180,7 +209,7 @@ def _show(value) -> str:
     return text if len(text) <= 60 else text[:59] + "…"
 
 
-def _finding_problems(item: dict) -> list[str]:
+def _finding_problems(item: dict, app_path: str) -> list[str]:
     problems = []
     missing = [key for key in REQUIRED_FINDING_KEYS if key not in item]
     if missing:
@@ -207,7 +236,7 @@ def _finding_problems(item: dict) -> list[str]:
     if "evidence" in item:
         problems.extend(_evidence_problems(item["evidence"]))
     if "needs_probes" in item:
-        problems.extend(_probe_problems(item["needs_probes"]))
+        problems.extend(_probe_problems(item["needs_probes"], app_path))
     return problems
 
 
@@ -264,7 +293,7 @@ def _evidence_extras(place: str, kind: str, item: dict) -> list[str]:
     return []
 
 
-def _probe_problems(probes) -> list[str]:
+def _probe_problems(probes, app_path: str) -> list[str]:
     if not isinstance(probes, list):
         return ["« needs_probes » doit être une liste"]
     problems = []
@@ -274,10 +303,12 @@ def _probe_problems(probes) -> list[str]:
             problems.append(f"{place} : doit être un objet")
             continue
         problems.extend(_required_text_problems(place, probe, ("url",)))
-        if _is_text(probe.get("url")) and requests_php_file(probe["url"]):
+        if _is_text(probe.get("url")) and requests_php_file(probe["url"], app_path):
+            prefix = _app_prefix(app_path)
             problems.append(
-                f"{place} : {PHP_FILE_REASON} (seuls /index.php, /wp-login.php et "
-                "/wp-admin/admin-ajax.php sans paramètre sont admis)"
+                f"{place} : {PHP_FILE_REASON} (seuls {prefix}/index.php et ses routes, "
+                f"{prefix}/wp-login.php et {prefix}/wp-admin/admin-ajax.php sans paramètre "
+                "sont admis)"
             )
         if "method" not in probe:
             problems.append(f"{place} : « method » manquant")

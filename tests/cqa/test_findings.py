@@ -13,6 +13,7 @@ from cqa.findings import (
     REQUIRED_FINDING_KEYS,
     VERDICTS,
     apply_guardrails,
+    requests_php_file,
     validate_document,
     worst,
 )
@@ -39,6 +40,10 @@ PHP_FILE_PATHS = [
     "/x.%70hp",
     "/blog/index.php",
     "/wp-admin/admin-ajax.php?action=heartbeat",
+    "/x.php.jpg",
+    "/x.pht",
+    "/x.php%20",
+    "/x.php%00",
 ]
 PHP_ALLOWED_PATHS = [
     "/index.php",
@@ -49,6 +54,24 @@ PHP_ALLOWED_PATHS = [
     "/wp-config.php.bak",
 ]
 PHP_FILE_ERROR = "fichier PHP hors des routes de l'application"
+# The entry points sit under the path the application is served from (context.json target).
+APP_PATH = "/blog"
+PHP_ALLOWED_UNDER_APP = [
+    "/blog/index.php",
+    "/blog/index.php?p=12",
+    "/blog/index.php/node/1",
+    "/blog/wp-login.php",
+    "/blog/wp-admin/admin-ajax.php",
+]
+PHP_REFUSED_UNDER_APP = [
+    "/index.php",
+    "/wp-login.php",
+    "/blogger/index.php",
+    "/blog/x.php",
+    "/blog/../index.php",
+    "/blog/index.php/../x.php",
+    "/blog/wp-admin/admin-ajax.php?action=heartbeat",
+]
 
 
 def make_finding(**overrides):
@@ -461,6 +484,22 @@ class ValidateDocumentTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(valid), 2)
 
+    def test_needs_probes_follow_the_path_of_the_application(self):
+        def errors_for(paths, app_path):
+            base = "https://preprod.example.org"
+            probes = [{"url": f"{base}{path}", "method": "GET"} for path in paths]
+            document = make_document(make_finding(needs_probes=probes), make_finding(ref=80))
+            return validate_document(document, LOT_REFS, app_path=app_path)[1]
+
+        self.assertEqual(errors_for(PHP_ALLOWED_UNDER_APP, APP_PATH), [])
+        self.assertEqual(errors_for(PHP_ALLOWED_UNDER_APP, f"{APP_PATH}/"), [])
+        for path in PHP_REFUSED_UNDER_APP:
+            with self.subTest(path=path):
+                errors = errors_for([path], APP_PATH)
+                self.assertEqual(len(errors), 1)
+                self.assertIn(PHP_FILE_ERROR, errors[0])
+                self.assertIn("/blog/index.php", errors[0])
+
     def test_extra_keys_are_tolerated(self):
         valid, errors = validate(make_finding(notes="x"), make_finding(ref=80))
         self.assertEqual(errors, [])
@@ -508,6 +547,65 @@ class ValidateDocumentTest(unittest.TestCase):
         self.assertGreater(len(errors), 5)
         for message in errors:
             self.assertNotIn(EM_DASH, message)
+
+
+class RequestsPhpFileTest(unittest.TestCase):
+    def test_entry_points_under_the_application_path(self):
+        for app_path in (APP_PATH, f"{APP_PATH}/", "/Blog"):
+            for path in PHP_ALLOWED_UNDER_APP:
+                with self.subTest(app_path=app_path, path=path):
+                    url = f"https://preprod.example.org{path}"
+                    self.assertFalse(requests_php_file(url, app_path))
+        for path in PHP_REFUSED_UNDER_APP:
+            with self.subTest(path=path):
+                self.assertTrue(requests_php_file(f"https://preprod.example.org{path}", APP_PATH))
+
+    def test_front_controller_routes_at_the_root(self):
+        for app_path in ("", "/"):
+            for path in ("/index.php/node/1", "/index.php/", "/INDEX.PHP/node/1?page=2"):
+                with self.subTest(app_path=app_path, path=path):
+                    url = f"https://preprod.example.org{path}"
+                    self.assertFalse(requests_php_file(url, app_path))
+        for path in (
+            "/index.php/../x.php",
+            "/index.php/./node",
+            "/index.php%2F..%2Fx.php",
+            "/index.php/uploads/x.php",
+            "/wp-login.php/x",
+            "/wp-admin/admin-ajax.php/x",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(requests_php_file(f"https://preprod.example.org{path}"))
+
+    def test_disguised_php_files_are_refused(self):
+        for path in (
+            "/x.php.jpg",
+            "/uploads/x.PHP.png",
+            "/x.pht",
+            "/x.php%20",
+            "/x.php%00",
+            "/x.php%2500",
+            "/x.php.",
+            "/x.php;.jpg",
+            "/x.php::$DATA",
+            "/x.php.bak/y",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(requests_php_file(f"https://preprod.example.org{path}"))
+
+    def test_backups_and_other_extensions_are_not_php_files(self):
+        for path in (
+            "/wp-config.php.bak",
+            "/wp-config.php.old",
+            "/wp-config.php.orig",
+            "/wp-config.php.save",
+            "/wp-config.php~",
+            "/x.phpx",
+            "/x.php_old",
+            "/composer.json",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(requests_php_file(f"https://preprod.example.org{path}"))
 
 
 class GuardrailsTest(unittest.TestCase):

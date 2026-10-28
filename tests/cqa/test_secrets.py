@@ -167,6 +167,21 @@ class NonSecretTest(unittest.TestCase):
         "$token = $this->token;",
         "'token' => $request->bearerToken(),",
         "password: $password,",
+        "$token = $this->jwtManager->create($user);",
+        "'password' => $hasher->hashPassword($user, $plainPassword),",
+        "'password' => $encoder->encodePassword($user, $plain),",
+        "$password = $this->hash($password);",
+        "$token = $jwt->encode($payload);",
+        "'password' => $this->hasher->make($data['password']),",
+        "$token = $request->get($field);",
+        "$token = $this->em->getRepository(Token::class)->find($id);",
+        "DB_PASSWORD=$(cat /run/secrets/db_password)",
+        "password: ${MYSQL_PASSWORD:?required}",
+        "token = f'Bearer {token}'",
+        "TOKEN=$(openssl rand -hex 32)",
+        'DB_PASSWORD="$(cat /run/secrets/db_password)"',
+        "password: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}",
+        "'token': f'{settings.API_TOKEN}'",
     ]
     # (line, its secret literal): masking must remove that literal, not only the first token.
     SECRETS = [
@@ -213,6 +228,18 @@ class NonSecretTest(unittest.TestCase):
         ("password=type=text&token=abcd1234efgh5678", "abcd1234efgh5678"),
         ("SECRET_KEY = b'RealSecretKey123'", "RealSecretKey123"),
         ("password = r'Adm1nP@ss2024'", "Adm1nP@ss2024"),
+        ("$token = $jwt->encode($payload, 'my-signing-secret-123');", "my-signing-secret-123"),
+        ("'password' => $hasher->hashPassword($user, 'Adm1nP@ss2024'),", "Adm1nP@ss2024"),
+        ("DB_PASSWORD=$(echo Adm1nP@ss2024)", "Adm1nP@ss2024"),
+        ("DB_PASSWORD=$(echo 'Adm1nP@ss2024' | base64)", "Adm1nP@ss2024"),
+        ("PASSWORD=$(htpasswd -nbB admin Adm1nP@ss2024)", "Adm1nP@ss2024"),
+        ('DB_PASSWORD="$(printf Adm1nP@ss2024)"', "Adm1nP@ss2024"),
+        ("MYSQL_PASSWORD: ${MYSQL_PASSWORD:=S3cretDefault}", "S3cretDefault"),
+        ("MYSQL_PASSWORD: ${MYSQL_PASSWORD:+S3cretDefault}", "S3cretDefault"),
+        ("token = f'Adm1nP@ss{suffix}'", "Adm1nP@ss"),
+        ("token = f'{prefix}Adm1nP@ss2024'", "Adm1nP@ss2024"),
+        ("token = f'Bearer abcd1234efgh5678'", "abcd1234efgh5678"),
+        ("password = f'{19800101}'", "19800101"),
     ]
 
     def test_form_field_descriptions_are_not_secrets(self):

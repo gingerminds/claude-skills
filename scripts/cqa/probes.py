@@ -90,6 +90,15 @@ def target_url(context: dict) -> str:
     return _checked_base(url, f"target.{key}")
 
 
+def app_path(context: dict) -> str:
+    """Return the path the application is served under: the path of target_url (context.json
+    target), "" when it cannot be read (the PHP entry points are then those of the root)."""
+    try:
+        return urlsplit(target_url(context)).path
+    except ValueError:
+        return ""
+
+
 def build_probes(
     *,
     base_url: str,
@@ -98,17 +107,33 @@ def build_probes(
     fiches_dir: Path,
     key_pages: list[dict],
 ) -> dict:
-    """Return the probes.json document: the fixed set, then the key pages and the fiche citations.
+    """Return {"base_url", "probes", "discarded"}: probes is the probes.json list, the fixed set
+    then the key pages and the fiche citations.
 
     Order: content probes (body kept), sensitive probes (never any body), probes of each project
     techno, key pages (headers only), then the paths and target URLs that the fiches of the rows
     asking for HTTP quote between backticks. Every path is relative to the origin of base_url
     and resolves to it (the one absolute form is the http:// version of the same host), and a
     probe that repeats an earlier one is left out. All probes are GET.
+
+    A key page or a fiche path that runs a PHP file outside the routes of the application (see
+    requests_php_file, under the path of base_url) is never probed: discarded lists it as
+    {"source": "page"|"fiche", "ref" (fiche only), "path", "reason"}.
     """
     base = _checked_base(base_url, "base_url")
-    origin = _origin(urlsplit(base))
+    parts = urlsplit(base)
+    origin = _origin(parts)
     collected = _Collected(origin)
+    discarded = []
+
+    def cited(source: dict, name: str, path: str, **rule) -> bool:
+        if collected.repeats(path):
+            return False
+        if requests_php_file(path, parts.path):
+            discarded.append({**source, "path": path, "reason": PHP_FILE_REASON})
+            return False
+        return collected.add(name, path, **rule)
+
     for name, path in _CONTENT_PROBES:
         collected.add(name, path, body="keep")
     collected.add("not-found", f"/cqa-404-{uuid.uuid4().hex[:8]}", body="keep")
@@ -123,16 +148,21 @@ def build_probes(
     pages = 0
     for page in key_pages:
         path = _target_path(page.get("url") if isinstance(page, dict) else None, origin)
-        if path and collected.add(
-            f"page-{pages + 1}", path, body="none", sensitive=_is_sensitive(path)
+        if path and cited(
+            {"source": "page"},
+            f"page-{pages + 1}",
+            path,
+            body="none",
+            sensitive=_is_sensitive(path),
         ):
             pages += 1
     for row in sorted((row for row in rows if _asks_http(row)), key=lambda row: row["ref"]):
-        cited = 0
+        count = 0
+        source = {"source": "fiche", "ref": row["ref"]}
         for path in _fiche_paths(row, Path(fiches_dir), origin):
-            if collected.add(f"fiche-{row['ref']}-{cited + 1}", path, **_content_rule(path)):
-                cited += 1
-    return {"base_url": base, "probes": collected.probes}
+            if cited(source, f"fiche-{row['ref']}-{count + 1}", path, **_content_rule(path)):
+                count += 1
+    return {"base_url": base, "probes": collected.probes, "discarded": discarded}
 
 
 def followup_probes(run_dir: Path) -> dict:
@@ -150,13 +180,14 @@ def followup_probes(run_dir: Path) -> dict:
     if not isinstance(context, dict):
         raise ValueError("context.json : un objet JSON est attendu.")
     base = target_url(context)
-    origin = _origin(urlsplit(base))
+    parts = urlsplit(base)
+    origin = _origin(parts)
     lots = _lot_entries(_read_json(run_dir / "lots.json", "cqa_plan.py lots"))
     collected = _Collected(origin)
     discarded = []
-    pending = list(_pending(run_dir, lots))
+    pending = list(_pending(run_dir, lots, parts.path))
     for lot_id, ref, probe in pending:
-        path, reason = _followup_path(probe["url"], origin)
+        path, reason = _followup_path(probe["url"], origin, parts.path)
         if path is None:
             shown = _public_url(probe["url"])
             discarded.append({"lot": lot_id, "ref": ref, "url": shown, "reason": reason})
@@ -175,20 +206,25 @@ def followup_probes(run_dir: Path) -> dict:
     }
 
 
-def pending_lots(run_dir: Path, lots: list) -> list:
+def pending_lots(run_dir: Path, lots: list, app_path: str = "") -> list:
     """Return the ids of the lots whose valid first-round findings still ask for probes.
 
-    The target is not needed: a lot is pending whatever becomes of its URLs.
+    Only the path of the application (app_path) matters, for the validity of the findings: a
+    lot is pending whatever becomes of its URLs.
     """
-    pending = _pending(Path(run_dir), _lot_entries({"lots": lots}))
+    pending = _pending(Path(run_dir), _lot_entries({"lots": lots}), app_path)
     return list(dict.fromkeys(lot_id for lot_id, _, _ in pending))
 
 
-def _pending(run_dir: Path, lots: list):
+def _pending(run_dir: Path, lots: list, app_path: str):
     """Yield (lot id, ref, probe) for each needs_probes entry of the valid first-round findings."""
     for lot in lots:
         document = _first_round(run_dir, lot["id"])
-        valid, _ = validate_document(document, set(lot["refs"])) if document else ([], [])
+        valid, _ = (
+            validate_document(document, set(lot["refs"]), app_path=app_path)
+            if document
+            else ([], [])
+        )
         for item in valid:
             for probe in item["needs_probes"]:
                 yield lot["id"], item["ref"], probe
@@ -205,6 +241,10 @@ class _Collected:
         self.probes = []
         self._origin = origin
         self._seen = set()
+
+    def repeats(self, path, method="GET") -> bool:
+        """Whether a probe with this method and path is already collected."""
+        return (method, path) in self._seen
 
     def add(self, name, path, *, body, sensitive=False, method="GET", absolute=False) -> bool:
         """Add a probe and return True, unless it repeats an earlier one or leaves the origin."""
@@ -284,7 +324,7 @@ def _stays_on_origin(path: str, origin: tuple) -> bool:
         return False
 
 
-def _followup_path(url: str, origin) -> tuple:
+def _followup_path(url: str, origin, app_path: str) -> tuple:
     try:
         validate_url(url)
     except ValueError as error:
@@ -292,7 +332,7 @@ def _followup_path(url: str, origin) -> tuple:
     path = _target_path(url, origin)
     if path is None:
         return None, "URL hors de l'origine de la cible"
-    if requests_php_file(url):
+    if requests_php_file(url, app_path):
         return None, PHP_FILE_REASON
     return path, None
 

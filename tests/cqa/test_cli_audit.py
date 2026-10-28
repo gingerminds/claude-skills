@@ -12,7 +12,14 @@ from cqa import probes, report
 from cqa.notion_write import apply_plan, validate_plan
 from cqa.plan import operation_key
 from tests.cqa import test_cli_prepare as prepare
-from tests.cqa.test_findings import PHP_ALLOWED_PATHS, PHP_FILE_ERROR, PHP_FILE_PATHS
+from tests.cqa.test_findings import (
+    APP_PATH,
+    PHP_ALLOWED_PATHS,
+    PHP_ALLOWED_UNDER_APP,
+    PHP_FILE_ERROR,
+    PHP_FILE_PATHS,
+    PHP_REFUSED_UNDER_APP,
+)
 
 FIXTURE_RUN = Path(__file__).resolve().parent / "fixtures" / "run"
 RUN_ID = "2026-10-20-1430"
@@ -202,7 +209,8 @@ class BuildProbesTest(unittest.TestCase):
 
     def test_contract_shape(self):
         document = self.build()
-        self.assertEqual(set(document), {"base_url", "probes"})
+        self.assertEqual(set(document), {"base_url", "probes", "discarded"})
+        self.assertEqual(document["discarded"], [])
         self.assertEqual(document["base_url"], BASE)
         ids = [probe["id"] for probe in document["probes"]]
         self.assertEqual(len(ids), len(set(ids)))
@@ -397,10 +405,13 @@ class BuildProbesTest(unittest.TestCase):
         cited = EXPOSURE_PATHS + ["/wp-json/wp/v2/users?per_page=1", "/changelog.txt"]
         text = " ".join(f"`{item}`" for item in cited) + " `/accueil`"
         pages = [{"template": "Login", "url": f"{BASE}/user/login"}]
-        found = self.by_path(
-            self.build(technos=(), rows=[row], fiches={"CQ-101.md": text}, key_pages=pages)
-        )
+        document = self.build(technos=(), rows=[row], fiches={"CQ-101.md": text}, key_pages=pages)
+        found = self.by_path(document)
+        # Cited by a fiche, a PHP file other than an entry point is never probed.
+        self.assertEqual([item["path"] for item in document["discarded"]], ["/xmlrpc.php"])
         for path in cited:
+            if path == "/xmlrpc.php":
+                continue
             self.assertEqual((found[path]["body"], found[path]["sensitive"]), ("none", True), path)
         plain = found["/accueil"]
         self.assertEqual((plain["body"], plain["sensitive"]), ("keep", False))
@@ -409,8 +420,13 @@ class BuildProbesTest(unittest.TestCase):
         row = {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}
         cited = [f"{path}?x=1" for path in SENSITIVE_PATHS]
         text = " ".join(f"`{path}`" for path in cited)
-        found = self.by_path(self.build(technos=(), rows=[row], fiches={"CQ-101.md": text}))
+        document = self.build(technos=(), rows=[row], fiches={"CQ-101.md": text})
+        found = self.by_path(document)
+        # Cited by a fiche, a PHP file other than an entry point is never probed.
+        self.assertEqual([item["path"] for item in document["discarded"]], ["/phpinfo.php?x=1"])
         for path in cited:
+            if path == "/phpinfo.php?x=1":
+                continue
             self.assertEqual((found[path]["body"], found[path]["sensitive"]), ("none", True), path)
 
     def test_sensitive_fiche_paths_never_keep_the_body(self):
@@ -440,6 +456,57 @@ class BuildProbesTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.build(base_url=base)
 
+    def test_php_files_cited_by_fiches_or_key_pages_are_never_probed(self):
+        row = {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}
+        cited = ["/wp-cron.php", f"{BASE}/wp-content/uploads/x.php", "/x.php.jpg", "/x.pht"]
+        text = " ".join(f"`{item}`" for item in cited) + " `/index.php?q=a` `/accueil`"
+        pages = [
+            {"template": "Cron", "url": f"{BASE}/wp-cron.php"},
+            {"template": "Legacy", "url": f"{BASE}/legacy.php?id=1"},
+            {"template": "Accueil", "url": f"{BASE}/index.php/accueil"},
+        ]
+        document = self.build(
+            technos=(), rows=[row], fiches={"CQ-101.md": text}, key_pages=pages
+        )
+        paths = [probe["path"] for probe in document["probes"]]
+        self.assertFalse([path for path in paths if path in ("/wp-cron.php", "/legacy.php?id=1")])
+        for path in ("/wp-content/uploads/x.php", "/x.php.jpg", "/x.pht"):
+            self.assertNotIn(path, paths)
+        self.assertIn("/index.php?q=a", paths)
+        self.assertIn("/index.php/accueil", paths)
+        self.assertIn("/accueil", paths)
+        self.assertEqual(
+            [(item["source"], item.get("ref"), item["path"]) for item in document["discarded"]],
+            [
+                ("page", None, "/wp-cron.php"),
+                ("page", None, "/legacy.php?id=1"),
+                ("fiche", 101, "/wp-cron.php"),
+                ("fiche", 101, "/wp-content/uploads/x.php"),
+                ("fiche", 101, "/x.php.jpg"),
+                ("fiche", 101, "/x.pht"),
+            ],
+        )
+        self.assertEqual({item["reason"] for item in document["discarded"]}, {PHP_FILE_ERROR})
+
+    def test_fixed_probes_are_not_reported_as_discarded_when_a_fiche_repeats_them(self):
+        row = {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}
+        text = "`/phpinfo.php` `/xmlrpc.php` `/wp-login.php`"
+        document = self.build(technos=("WordPress",), rows=[row], fiches={"CQ-101.md": text})
+        paths = [probe["path"] for probe in document["probes"]]
+        for path in ("/phpinfo.php", "/xmlrpc.php", "/wp-login.php"):
+            self.assertEqual(paths.count(path), 1, path)
+        self.assertEqual(document["discarded"], [])
+
+    def test_php_entry_points_follow_the_application_path(self):
+        base = f"{BASE}{APP_PATH}/"
+        row = {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}
+        text = " ".join(f"`{path}`" for path in PHP_ALLOWED_UNDER_APP + PHP_REFUSED_UNDER_APP)
+        document = self.build(technos=(), rows=[row], fiches={"CQ-101.md": text}, base_url=base)
+        cited = [probe["path"] for probe in document["probes"] if probe["id"].startswith("fiche-")]
+        self.assertEqual(cited, PHP_ALLOWED_UNDER_APP)
+        refused = [path for path in PHP_REFUSED_UNDER_APP if "/../" not in path]
+        self.assertEqual([item["path"] for item in document["discarded"]], refused)
+
     def test_every_probe_is_a_safe_method(self):
         rows = [{"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}]
         document = self.build(
@@ -464,6 +531,20 @@ class ProbesCommandTest(AuditCase):
         self.assertNotIn("/not-for-http", found)
         self.assertEqual(result["file"], "probes.json")
         self.assertEqual(result["count"], len(document["probes"]))
+        self.assertEqual(result["from_fiches"], 2)
+
+    def test_probes_report_the_php_files_they_leave_out(self):
+        run_dir = self.make_run()
+        fiche = run_dir / "fiches" / "CQ-101.md"
+        fiche.write_text(fiche.read_text(encoding="utf-8") + "\nCron : `/wp-cron.php`.\n", "utf-8")
+        result = self.run_json(["probes", run_dir])
+        document = self.read(run_dir, "probes.json")
+        self.assertEqual(set(document), {"base_url", "probes"})
+        self.assertNotIn("/wp-cron.php", [probe["path"] for probe in document["probes"]])
+        self.assertEqual(
+            result["discarded"],
+            [{"source": "fiche", "ref": 101, "path": "/wp-cron.php", "reason": PHP_FILE_ERROR}],
+        )
         self.assertEqual(result["from_fiches"], 2)
 
     def test_probes_sensitive_body_none(self):
@@ -614,7 +695,7 @@ class FollowupProbesTest(AuditCase):
         forbidden = [{"url": f"{BASE}{path}", "method": "GET"} for path in PHP_FILE_PATHS]
         self.edit_finding(run_dir, "code-performance", 101, needs_probes=forbidden)
 
-        def held_valid(document, refs):
+        def held_valid(document, refs, **_):
             return [item for item in document["findings"] if item["ref"] == 101], []
 
         with mock.patch.object(probes, "validate_document", held_valid):
@@ -622,6 +703,25 @@ class FollowupProbesTest(AuditCase):
         self.assertEqual(document["probes"], [])
         self.assertEqual([item["url"] for item in document["discarded"]], [p["url"] for p in forbidden])
         self.assertEqual({item["reason"] for item in document["discarded"]}, {PHP_FILE_ERROR})
+
+    def test_followup_follows_the_path_of_the_application(self):
+        run_dir = self.make_run()
+        self.edit(
+            run_dir,
+            "context.json",
+            lambda context: context["target"].update(preprod_url=f"{BASE}{APP_PATH}/"),
+        )
+        allowed = [{"url": f"{BASE}{path}", "method": "GET"} for path in PHP_ALLOWED_UNDER_APP]
+        refused = [{"url": f"{BASE}{path}", "method": "GET"} for path in PHP_REFUSED_UNDER_APP]
+        self.edit_finding(run_dir, "code-performance", 101, needs_probes=allowed)
+        self.edit_finding(run_dir, "code-securite", 103, needs_probes=refused)
+        self.assertEqual(self.validate_errors(run_dir, "code-performance"), [])
+        errors = self.validate_errors(run_dir, "code-securite")
+        php_errors = [error for error in errors if PHP_FILE_ERROR in error]
+        self.assertEqual(len(php_errors), len(PHP_REFUSED_UNDER_APP))
+        document = probes.followup_probes(run_dir)
+        self.assertEqual([probe["path"] for probe in document["probes"]], PHP_ALLOWED_UNDER_APP)
+        self.assertEqual(document["lots"], ["code-performance"])
 
     def test_followup_sensitive_paths_never_keep_the_body(self):
         run_dir = self.make_run()

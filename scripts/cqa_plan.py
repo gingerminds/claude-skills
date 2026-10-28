@@ -403,13 +403,14 @@ def _cmd_probes(args, services) -> int:
         )
         return EXIT_OK
     context, kept, _ = _selection(run_dir)
-    document = probes.build_probes(
+    result = probes.build_probes(
         base_url=probes.target_url(context),
         technos=context["technos"],
         rows=kept,
         fiches_dir=run_dir / "fiches",
         key_pages=context["key_pages"],
     )
+    document = {"base_url": result["base_url"], "probes": result["probes"]}
     write_json(run_dir / "probes.json", document)
     from_fiches = sum(1 for probe in document["probes"] if probe["id"].startswith("fiche-"))
     _emit(
@@ -418,6 +419,7 @@ def _cmd_probes(args, services) -> int:
             "base_url": document["base_url"],
             "count": len(document["probes"]),
             "from_fiches": from_fiches,
+            "discarded": result["discarded"],
         }
     )
     return EXIT_OK
@@ -1121,7 +1123,9 @@ def _read_findings(run_dir: Path, context: dict, lot: dict, *, followup: bool) -
         return None
     except (OSError, ValueError) as error:
         return [], [f"findings/{name} est illisible : {error}"]
-    valid, errors = validate_document(document, set(lot["refs"]))
+    valid, errors = validate_document(
+        document, set(lot["refs"]), app_path=probes.app_path(context)
+    )
     roots = {repo["name"]: Path(repo["path"]) for repo in context["repos"]}
     grounded = []
     for item in valid:
@@ -1144,7 +1148,7 @@ def _collect_findings(run_dir: Path, context: dict, lots: list) -> tuple:
     findings, followup_done = {}, set()
     requested = set()
     if (run_dir / "probes-followup.json").is_file():
-        requested = set(probes.pending_lots(run_dir, lots))
+        requested = set(probes.pending_lots(run_dir, lots, probes.app_path(context)))
     for lot in lots:
         first = _read_findings(run_dir, context, lot, followup=False)
         second = _read_findings(run_dir, context, lot, followup=True)

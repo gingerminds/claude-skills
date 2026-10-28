@@ -37,7 +37,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" probes "$RUN"
 ```
 
-Writes `probes.json`, the HTTP probes of the toolbox (fixed base, key pages, URLs and paths cited by the fiches of the rows that need HTTP), and prints `{"file", "base_url", "count", "from_fiches"}`. Exit 2 when the target URL is missing: no toolbox web tool can run then.
+Writes `probes.json`, the HTTP probes of the toolbox (fixed base, key pages, URLs and paths cited by the fiches of the rows that need HTTP), and prints `{"file", "base_url", "count", "from_fiches", "discarded"}`. `discarded`: the PHP files a key page or a fiche cites outside the routes of the application, never probed (a GET runs the script); tell the lead how many. Exit 2 when the target URL is missing: no toolbox web tool can run then.
 
 Exit codes of the four: 2 for a missing file or variable (the message names the command to run first), 3 for Notion, 6 for an invalid `context.json` (fix it, then `context --check`).
 
@@ -133,7 +133,7 @@ python3 "$S/cqa_plan.py" probes "$RUN" --followup
 ```
 
 - Writes `probes-followup.json` and prints `{"file", "base_url", "count", "lots", "discarded"}`.
-- `discarded`: URLs dropped because they leave the origin of the target; tell the lead how many.
+- `discarded`: URLs dropped because they leave the origin of the target or run a PHP file outside the routes of the application; tell the lead how many.
 - `count` 0: no follow-up.
 
 Otherwise, when the toolbox is ready (foreground, with the credentials inline only when the session holds the Basic Auth credentials):

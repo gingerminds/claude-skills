@@ -19,7 +19,7 @@ _GITHUB = re.compile(r"\b(?:gh[pousr]_[0-9A-Za-z]{36,}|github_pat_[0-9A-Za-z_]{2
 _NOTION = re.compile(r"\b(?:ntn|secret)_[0-9A-Za-z]{40,}")
 _JWT = re.compile(r"\beyJ[0-9A-Za-z_\-]{10,}\.eyJ[0-9A-Za-z_\-]{10,}\.[0-9A-Za-z_\-]{10,}")
 
-# redact keeps "pre" and masks "val". "q" is an opening quote, maybe after a string prefix
+# redact keeps "pre" and masks "val". "q" is an opening quote, maybe after a string prefix "sp"
 # (b'', r'', f''...): a quoted value runs to its closing quote, a bare one to the next space or
 # quote. The lookahead skips masked values. The bounded name suffix keeps scans linear on long
 # runs of keywords.
@@ -28,7 +28,7 @@ _CREDENTIAL = re.compile(
     (?P<pre>
         (?P<kw>password|passwd|pwd|secret|token|api[_-]?key)[\w\-]{0,64}
         \\?["']?[ \t]*(?:=>|[:=])[ \t]*
-        (?:[bBrRuUfF]{1,2}(?=\\?["']))?
+        (?:(?P<sp>[bBrRuUfF]{1,2})(?=\\?["']))?
         (?:\\?(?P<q>["']))?
     )
     (?!\[secret\ masqué\])
@@ -53,16 +53,39 @@ _AUTH_HEADER = re.compile(
 # keyword only. Another "=" or a "&" means a following pair, which may hold a secret.
 _FORM_KEYWORDS = ("password", "passwd", "pwd")
 _FORM_ATTRIBUTE = re.compile(r"(?:type|autocomplete|name|id)=[^=&]*", re.IGNORECASE)
-_ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_]\w*\}")
+# ${NAME}, or ${NAME:?message} whose message is an error text, never a value (unlike :- or :=).
+_ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_]\w*(?::?\?[^{}\n]*)?\}")
+# A command that reads its value ($(cat /run/secrets/x), $(openssl rand -hex 32)): lowercase
+# words, paths, options and $VARS only, so a literal argument (Adm1nP@ss) or echo/printf is not.
+_COMMAND_SUBSTITUTION = re.compile(
+    r"""
+    \$\([ \t]*(?!(?:echo|printf)\b)
+    [a-z][a-z0-9_.-]*
+    (?:[ \t]+(?:[a-z0-9_.~-]+|[\w.~-]*/[\w./~-]*|\$\{?[A-Za-z_]\w*\}?|\|))*
+    [ \t]*\)
+    """,
+    re.VERBOSE,
+)
 # A whole bare value that is a variable reference ($password, ${DB_PASSWORD}, $x->y(, $_ENV[,
-# $a[0]), ended by punctuation. $$ (compose escape), $2y$ (hash) or $X&token=... are not.
+# $a[0]), ended by punctuation. A call takes one $variable or Name::class argument at most.
+# $$ (compose escape), $2y$ (hash) or $X&token=... are not.
 _VARIABLE_REFERENCE = re.compile(
     r"""
     \$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)
-    (?:(?:\??->|::|\.)[A-Za-z_]\w*|\(\)?|\[[\w$]*\]?)*
+    (?:(?:\??->|::|\.)[A-Za-z_]\w*|\((?:\$[A-Za-z_]\w*|[A-Za-z_]\w*::class)?\)?|\[[\w$]*\]?)*
     [.,;)\]]*
     """,
     re.VERBOSE,
+)
+# An f-string that only formats names: placeholders that start with a name and hold no quote,
+# joined by separators, maybe after an auth scheme (f'Bearer {token}'). Any other literal text
+# may be the secret.
+_SEPARATORS = r"[\s:/@.,;=_-]*"
+_PLACEHOLDER = r"\{[A-Za-z_][^{}'\"\\\n]*\}"
+_F_TEMPLATE = re.compile(
+    rf"(?:(?:basic|bearer|digest|token)[ \t]+)?{_SEPARATORS}{_PLACEHOLDER}"
+    rf"(?:{_SEPARATORS}{_PLACEHOLDER})*{_SEPARATORS}",
+    re.IGNORECASE,
 )
 _CODE_PREFIX = re.compile(r"[A-Za-z_][\w\\]*(?:::|->)")
 _CODE_CALL = re.compile(r"[A-Za-z_][\w.\\]*\(.*\)", re.DOTALL)
@@ -81,22 +104,31 @@ def _is_non_secret(match: re.Match) -> bool:
     """True when a credential match is a form field description or a pure code expression."""
     value = match.group("val")
     if match.group("q"):
-        return bool(_ENV_REFERENCE.fullmatch(value))
+        f_string = "f" in (match.group("sp") or "").lower()
+        return _is_reference(value) or (f_string and bool(_F_TEMPLATE.fullmatch(value)))
     if match.group("kw").lower() in _FORM_KEYWORDS and _FORM_ATTRIBUTE.fullmatch(value):
         return True
     text = match.string
     end = text.find("\n", match.end("val"))
     rest = text[match.start("val"):None if end < 0 else end]
+    expression = rest.rstrip().rstrip(",;]").rstrip()
+    if _is_reference(expression):
+        return True
     is_code = (
         bool(_VARIABLE_REFERENCE.fullmatch(value))
         or bool(_CODE_PREFIX.match(value))
-        or bool(_CODE_CALL.fullmatch(rest.rstrip().rstrip(",;]").rstrip()))
+        or bool(_CODE_CALL.fullmatch(expression))
         or (value.startswith(":") and text[match.start("val") - 1:match.start("val")] == ":")
     )
     if not is_code or ":-" in rest:
         return False
     literals = list(_QUOTED_LITERAL.finditer(rest)) + list(_N_LITERAL.finditer(rest))
     return all(_is_harmless_literal(rest, literal) for literal in literals)
+
+
+def _is_reference(text: str) -> bool:
+    """True when text is a whole environment reference or a command substitution that reads it."""
+    return bool(_ENV_REFERENCE.fullmatch(text) or _COMMAND_SUBSTITUTION.fullmatch(text))
 
 
 def _is_harmless_literal(line: str, literal: re.Match) -> bool:
