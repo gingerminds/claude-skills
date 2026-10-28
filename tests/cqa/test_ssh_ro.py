@@ -1176,6 +1176,105 @@ class CheckCommandTest(unittest.TestCase):
                 self.assertIn(needle, reason)
 
 
+class SessionFilesTest(unittest.TestCase):
+    """Session ids live in file names: no file command reaches a sessions folder (F2)."""
+
+    REFUSED = [
+        ["cat", "/var/lib/php/sessions/sess_abc123"],
+        ["cat", "/var/www/app/storage/framework/sessions/Zx9abc"],
+        ["head", "-n", "1", "/var/lib/php/sessions/sess_abc123"],
+        ["tail", "-n", "1", "/tmp/sess_0a1b2c3d"],
+        ["grep", "-c", "uid", "/var/lib/php/sessions/sess_abc123"],
+        ["grep", "-l", "x", "/srv/app/var/sessions/prod/sess_x1"],
+        ["ls", "/var/www/app/storage/framework/sessions"],
+        ["ls", "-la", "/var/lib/php/sessions"],
+        ["ls", "-la", "/var/lib/php/sessions/"],
+        ["find", "/var/www/app/storage/framework/sessions", "-type", "f"],
+        ["find", "/var/www", "-name", "sess_*"],
+        ["find", "/var/www", "-name", "sessions"],
+        ["du", "-a", "/var/www/app/storage/framework/sessions"],
+        ["stat", "/var/lib/php/sessions"],
+        ["docker", "exec", "app", "ls", "/var/lib/php/sessions"],
+        ["docker", "compose", "exec", "-T", "app", "cat", "/app/storage/framework/sessions/x"],
+        ["cat", "/var/lib/php/SESSIONS/sess_abc"],
+        # Temporary folders hold the PHP sessions of the default save path.
+        ["ls", "/tmp"],
+        ["ls", "-la", "/tmp/"],
+        ["ls", "//tmp"],
+        ["ls", "/tmp/."],
+        ["ls", "/var//tmp"],
+        ["ls", "/var/tmp"],
+        ["ls", "/dev/shm"],
+        ["ls", "/tmp/systemd-private-x/tmp"],
+        ["find", "/tmp", "-maxdepth", "1"],
+        ["find", "-L", "/var/tmp", "-type", "f"],
+        ["find", "/var/www", "/tmp", "-name", "x"],
+        ["du", "-a", "/dev/shm"],
+        ["stat", "/tmp"],
+        ["docker", "exec", "app", "find", "/tmp", "-type", "f"],
+        # Kubernetes client credentials.
+        ["cat", "/root/.kube/config"],
+        ["head", "/home/deploy/.kube/config"],
+    ]
+    ALLOWED = [
+        ["ls", "/var/lib/php"],
+        ["ls", "-la", "/var/www/app/storage/framework"],
+        ["cat", "/etc/php/8.3/fpm/php.ini"],
+        ["grep", "-n", "session.save_path", "/etc/php/8.3/fpm/php.ini"],
+        ["find", "/var/www", "/srv", "/app", "/opt", "-maxdepth", "3", "-name", "wp-load.php"],
+        ["find", "/var/www", "-maxdepth", "3", "-name", "artisan"],
+        ["ls", "-la", "/var/www/tmpfiles"],
+        ["ls", "/var/www/app/tmp"],
+        ["df", "-h", "/tmp"],
+        ["cat", "/var/www/app/.kube-notes.txt"],
+        ["ls", "/root/.kube"],
+    ]
+
+    def test_session_folders_files_and_temporary_roots_are_refused(self):
+        for argv in self.REFUSED:
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertFalse(allowed, reason)
+                self.assertNotIn(chr(0x2014), reason)
+
+    def test_other_reads_stay_allowed(self):
+        for argv in self.ALLOWED:
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertTrue(allowed, reason)
+
+    def test_reasons_name_the_session_or_the_temporary_folder(self):
+        self.assertIn("session", check_command(["ls", "/var/lib/php/sessions"])[1])
+        self.assertIn("session", check_command(["cat", "/tmp/sess_abc"])[1])
+        reason = check_command(["ls", "/tmp"])[1]
+        self.assertIn("/tmp", reason)
+        self.assertIn("temporaire", reason)
+        self.assertIn(".kube", check_command(["cat", "/root/.kube/config"])[1])
+
+    def test_listing_output_masks_session_ids(self):
+        laravel = "Zx9abcDEF0123456789abcdef0123456789abcde"
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        output = "\n".join([
+            "sess_k9f8e7d6c5b4a3928171615141312v",
+            "-rw------- 1 www-data www-data 0 Oct 28 12:00 sess_m0a1b2c3d4e5f60718293a4b5c6d7r",
+            "/var/www/app/storage/framework/sessions/" + laravel,
+            "/srv/app/var/sessions/" + "q" * 26,
+            laravel,
+            "commit " + sha,
+            "/var/www/app/storage/framework/sessions:",
+        ])
+        runner = FakeRunner(output + "\n")
+        with clean_env():
+            _, masked = run(ALIAS, "find /var/www -type f", runner=runner)
+        for value in ("k9f8e7d6c5b4a3928", "m0a1b2c3d4e5f6071", laravel, "q" * 26):
+            with self.subTest(value=value):
+                self.assertNotIn(value, masked)
+        self.assertIn("sess_[secret masqué]", masked)
+        self.assertIn("/sessions/[secret masqué]", masked)
+        self.assertIn("commit " + sha, masked)
+        self.assertIn("/var/www/app/storage/framework/sessions:", masked)
+
+
 class CheckSqlTest(unittest.TestCase):
     def test_allowed(self):
         for query in SQL_OK:

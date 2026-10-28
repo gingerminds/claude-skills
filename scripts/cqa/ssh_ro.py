@@ -9,7 +9,7 @@ import shlex
 import subprocess
 from typing import NamedTuple, Optional
 
-from cqa.secrets import known_values_from_env, redact
+from cqa.secrets import MASK, known_values_from_env, redact
 
 TIMEOUT = 120
 ALLOWED = "commande de lecture autorisée"
@@ -48,8 +48,15 @@ _SECRET_NAMES = frozenset(
     {"shadow", "gshadow", ".my.cnf", "debian.cnf", ".pgpass", ".netrc", ".git-credentials"}
 )
 _SECRET_PAIRS = frozenset(
-    {(".git", "config"), (".docker", "config.json"), (".aws", "credentials")}
+    {(".git", "config"), (".docker", "config.json"), (".aws", "credentials"), (".kube", "config")}
 )
+# Session ids are file names: a "sessions" folder or a PHP "sess_<id>" file is never listed,
+# searched or read, whatever the command.
+_SESSION_DIR = "sessions"
+_SESSION_FILE_PREFIX = "sess_"
+# The default PHP session folders: no listing starts there (ls, find, du, stat).
+_TEMPORARY_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
+_LISTINGS = ("ls", "du", "stat")
 
 
 def validate_alias(alias: str) -> None:
@@ -93,6 +100,24 @@ def _check_token(token, *, secrets: bool = True) -> None:
             raise Refused(
                 f"fichier porteur de secrets refusé (« {components[index]} ») : "
                 "lire les clés utiles avec --env-keys"
+            )
+        if part == _SESSION_DIR or part.startswith(_SESSION_FILE_PREFIX):
+            raise Refused(
+                f"dossier ou fichier de sessions refusé (« {components[index]} ») : les noms "
+                "des fichiers de session sont les identifiants de session"
+            )
+
+
+def _check_listing_root(command: str, path: str) -> None:
+    """Refuse a listing that starts in a temporary folder, where PHP keeps its sessions."""
+    if not path.startswith("/"):
+        return
+    normalized = posixpath.normpath("/" + path.lstrip("/"))
+    for root in _TEMPORARY_ROOTS:
+        if normalized == root or normalized.startswith(root + "/"):
+            raise Refused(
+                f"{command} : dossier temporaire refusé (« {path} », sous {root}) : il porte les "
+                "fichiers de session de PHP et les fichiers des autres utilisateurs"
             )
 
 
@@ -501,6 +526,8 @@ def _simple(name: str, args: list) -> None:
         return
     for path in operands:
         _check_path(path)
+        if name in _LISTINGS:
+            _check_listing_root(name, path)
 
 
 def _content_paths(command: str, paths: list) -> None:
@@ -526,6 +553,7 @@ def _find(args: list) -> None:
     # Starting points end at the first word beginning with "-", or "(", ")", "!" (GNU find).
     while index < len(args) and not args[index].startswith(("-", "(", ")", "!")):
         _check_path(args[index])
+        _check_listing_root("find", args[index])
         index += 1
     while index < len(args):
         token = args[index]
@@ -1213,7 +1241,27 @@ def run(
     build_* function): run does not validate it. stderr is merged into the output.
     """
     code, output = _ssh(alias, remote, stdin=stdin, runner=runner)
-    return code, redact(output, known_values_from_env())
+    return code, mask_session_ids(redact(output, known_values_from_env()))
+
+
+# A listing that reaches a sessions folder anyway (find /var/www -type f, ls -R) prints the ids:
+# PHP "sess_<id>", any file of a "sessions" folder, and Laravel's 40 mixed-case characters (a
+# git SHA, lowercase hexadecimal, is kept).
+_SESSION_ID_PATTERNS = (
+    re.compile(r"(?P<pre>\bsess_)[A-Za-z0-9,-]{8,}"),
+    re.compile(r"(?P<pre>/sessions/)[A-Za-z0-9,_-]{8,}"),
+    re.compile(
+        r"(?P<pre>)(?<![A-Za-z0-9])(?=[a-z0-9]{0,39}[A-Z])(?=[A-Z0-9]{0,39}[a-z])"
+        r"[A-Za-z0-9]{40}(?![A-Za-z0-9])"
+    ),
+)
+
+
+def mask_session_ids(text: str) -> str:
+    """Replace the session ids a file listing can print by MASK, keeping their prefix."""
+    for pattern in _SESSION_ID_PATTERNS:
+        text = pattern.sub(lambda match: match.group("pre") + MASK, text)
+    return text
 
 
 def _ssh(alias: str, remote: str, *, stdin: Optional[str], runner) -> tuple:

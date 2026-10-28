@@ -280,7 +280,9 @@ class NonSecretTest(unittest.TestCase):
         for text, literal in self.SECRETS:
             with self.subTest(text=text):
                 self.assertIn(literal, text)
-                self.assertEqual(scan_text(text, []), ["credential_assignment"])
+                labels = scan_text(text, [])
+                self.assertEqual(labels[0], "credential_assignment")
+                self.assertTrue(set(labels[1:]) <= {"mysql_password_option"}, labels)
                 masked = redact(text, [])
                 self.assertIn("[secret masqué]", masked)
                 self.assertNotIn(literal, masked)
@@ -295,6 +297,50 @@ class NonSecretTest(unittest.TestCase):
         text = "password : type=password\nDB_PASSWORD=Pa55word2024"
         self.assertEqual(scan_text(text, []), ["credential_assignment"])
         self.assertEqual(redact(text, []), "password : type=password\nDB_PASSWORD=[secret masqué]")
+
+
+class ProcessAndKubeSecretsTest(unittest.TestCase):
+    """A database password on a command line (ps auxww) and a kubeconfig key (F2, F16)."""
+
+    def test_password_option_of_database_clients_is_masked(self):
+        for line, kept in (
+            ("mysql -uroot -phunter2 db", "mysql -uroot -p"),
+            ("root 4242 0.0 0.1 mysqldump -h db -u app -pS3cr3t! shop", "mysqldump -h db -u app -p"),
+            ("mariadb -u app -p'two words' shop", "mariadb -u app -p"),
+            ("/usr/bin/mariadb-dump --single-transaction -pAbc123 shop", "--single-transaction -p"),
+            ("mysqladmin -u root -proot status", "mysqladmin -u root -p"),
+        ):
+            with self.subTest(line=line):
+                masked = redact(line, [])
+                self.assertIn(kept + "[secret masqué]", masked)
+                self.assertNotIn("hunter2", masked)
+                self.assertNotIn("S3cr3t", masked)
+                self.assertNotIn("two words", masked)
+                self.assertNotIn("Abc123", masked)
+                self.assertEqual(scan_text(line, []), ["mysql_password_option"])
+                self.assertEqual(scan_text(masked, []), [])
+                self.assertEqual(redact(masked, []), masked)
+
+    def test_database_command_lines_without_a_password_value_stay(self):
+        for line in (
+            "mysql -u root -p shop",
+            "mysql -h db -P 3306 shop",
+            "/usr/sbin/mysqld --pid-file=/run/mysqld/mysqld.pid",
+            "mysql --protocol=tcp shop",
+            "Le client mysql demande le mot de passe avec -p seul.",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(redact(line, []), line)
+                self.assertEqual(scan_text(line, []), [])
+
+    def test_kubeconfig_client_key_is_masked(self):
+        line = "    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo="
+        masked = redact(line, [])
+        self.assertEqual(masked, "    client-key-data: [secret masqué]")
+        self.assertEqual(scan_text(line, []), ["kube_client_key"])
+        self.assertEqual(scan_text(masked, []), [])
+        certificate = "    client-certificate-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCg=="
+        self.assertEqual(redact(certificate, []), certificate)
 
 
 class RedactTest(unittest.TestCase):

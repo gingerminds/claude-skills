@@ -857,6 +857,25 @@ class SkillTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, context)
 
+    def test_session_files_and_temporary_folders_are_documented_as_refused(self):
+        server = _text(REFERENCES / "server.md")
+        auditor = _text(AUDITOR)
+        for label, text in (("server.md", server), ("cqa-auditor.md", auditor)):
+            for needle in ("`sessions` folder", "`sess_*` file", "`/tmp`", "`/var/tmp`",
+                           "`/dev/shm`"):
+                with self.subTest(file=label, needle=needle):
+                    self.assertIn(needle, text)
+        for needle in ("`.kube/config`", "`-p<mot de passe>`", "`client-key-data`",
+                       "with the ids masked"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, server)
+        for argv in (["ls", "/var/lib/php/sessions"], ["find", "/tmp", "-type", "f"],
+                     ["cat", "/root/.kube/config"]):
+            with self.subTest(argv=argv):
+                self.assertFalse(cqa_ssh_ro.check_command(argv)[0])
+        self.assertTrue(cqa_ssh_ro.check_command(
+            ["grep", "-n", "session.save_path", "/etc/php/8.3/fpm/php.ini"])[0])
+
     def test_the_guard_allows_only_the_post_list_form_the_skill_uses(self):
         for argv, allowed in (
             (["wp", "post", "list", "--post_type=page", "--s=gravityform",

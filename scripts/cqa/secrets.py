@@ -18,6 +18,14 @@ _GITLAB = re.compile(r"\bgl(?:pat|dt|rt|ptt|cbt|oas|ft|imt|agent|soat)-[0-9A-Za-
 _GITHUB = re.compile(r"\b(?:gh[pousr]_[0-9A-Za-z]{36,}|github_pat_[0-9A-Za-z_]{22,})")
 _NOTION = re.compile(r"\b(?:ntn|secret)_[0-9A-Za-z]{40,}")
 _JWT = re.compile(r"\beyJ[0-9A-Za-z_\-]{10,}\.eyJ[0-9A-Za-z_\-]{10,}\.[0-9A-Za-z_\-]{10,}")
+# The password glued to -p on the command line of a MySQL or MariaDB client (ps auxww). The
+# scan of a line stops at the next client name, which keeps it linear.
+_MYSQL_PASSWORD = re.compile(
+    r"(?P<pre>\b(?:mysql|mariadb)[\w-]*\b(?:(?!\b(?:mysql|mariadb))[^\n])*?[ \t]-p)"
+    r"(?!\[secret masqué\])(?P<val>'[^'\n]*'|\"[^\"\n]*\"|\S+)"
+)
+# The private key of a kubeconfig user (base64).
+_KUBE_CLIENT_KEY = re.compile(r"(?P<pre>\bclient-key-data:[ \t]*)(?P<val>[A-Za-z0-9+/=]{8,})")
 
 # redact keeps "pre" and masks "val". "q" is an opening quote, maybe after a string prefix "sp"
 # (b'', r'', f''...): a quoted value runs to its closing quote, a bare one to the next space or
@@ -171,6 +179,8 @@ _PATTERNS = (
     ("jwt", _JWT),
     ("credential_assignment", _CREDENTIAL),
     ("authorization_header", _AUTH_HEADER),
+    ("mysql_password_option", _MYSQL_PASSWORD),
+    ("kube_client_key", _KUBE_CLIENT_KEY),
 )
 
 
