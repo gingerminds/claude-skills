@@ -946,6 +946,34 @@ class SkillTest(unittest.TestCase):
         self.assertNotIn("--kind login --detail \"La ligne", diagnostic)
         self.assertNotIn("gravityform", diagnostic)
 
+    def test_crawl_duration_is_proposed_at_diagnostic(self):
+        diagnostic = _text(REFERENCES / "diagnostic.md")
+        start = diagnostic.index("### Crawl duration")
+        section = diagnostic[start : diagnostic.index("\n## ", start)]
+        for needle in (
+            "cqa_plan.py\" crawl-estimate",
+            "--auth-env",
+            "Durée maximale du crawl ?",
+            "<proposed_minutes> min (proposé)",
+            "30, 60 and 120",
+            "<sitemap_urls> URLs dans le sitemap, <mean_response_s> s par page : "
+            "<proposed_minutes> min, <max_urls> URLs au plus",
+            "Pas de sitemap : 30 min proposées",
+            "`crawl_minutes`",
+            "Autonomous mode: do not ask",
+            "never copies `crawl_minutes`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        context = _text(REFERENCES / "context.md")
+        self.assertIn("`crawl_minutes` (optional", context)
+        auditor = _text(AUDITOR)
+        start = auditor.index("\n### Crawl\n")
+        crawl = auditor[start : auditor.index("\n#", start + 5)]
+        for counter in ("http_5xx", "http_503", "http_401", "timeouts", "slowdowns"):
+            with self.subTest(counter=counter):
+                self.assertIn(f"`{counter}`", crawl)
+
     def test_app_folder_lookup_covers_the_four_roots(self):
         roots = "find /var/www /srv /app /opt -maxdepth"
         for path in (REFERENCES / "context.md", REFERENCES / "diagnostic.md",

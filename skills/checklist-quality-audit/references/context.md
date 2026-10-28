@@ -251,6 +251,7 @@ Write `$RUN/context.json` with Write. Example (values to replace):
 - `notion`: `copy_page_id` from the resolve of the copy (`null` for a database URL), `copy_data_source_id`, `reference_data_source_id` and `reference_page_id` (`null` for a database URL) from the resolve of `GM_CQA_REFERENCE`: the writes refuse this page and this data source (exit 8), `bot_id` from `whoami`, `assignee_options` from `schema.json`.
 - `available_tools`: `[]` until the diagnostic. `phase_filter`: the value of `--phase`, else `null`. `dry_run`: true with `--dry-run`.
 - `mode` (optional, default `interactif`): `"autonome"` or `"interactif"`, the answer to « Mode 100 % autonome ? » (SKILL.md, section 4). `notion_write` (optional): `"all"`, `"keep_human"` or `"none"`, the answer to « Écrire dans la copie Notion à la fin de l'audit ? », `null` while not asked (section 7 then asks it, as before). A run without these keys behaves as an interactive run that asks at section 7. Any other value is refused by `context --check`.
+- `crawl_minutes` (optional, integer from 5 to 240, default 30): the maximum duration of the crawl, answered at the diagnostic (`references/diagnostic.md`, section 6, « Durée maximale du crawl ? »; in autonomous mode the proposed duration). It is not reused from an earlier run. `toolbox-env` derives the URL cap from it. Any other value is refused by `context --check`.
 - Never a secret: no credential, no token.
 
 ```bash

@@ -40,7 +40,8 @@ from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_
 from cqa.rerun import latest_findings, read_grounded_findings, rerun_candidates
 from cqa.project import parse_project_md, project_slug, sibling_repos
 from cqa.secrets import known_values_from_env, scan_tree
-from cqa.target import build_opener, fetch_page, probe_target, validate_url
+from cqa import crawl_budget
+from cqa.target import build_opener, fetch_page, fetch_timed, probe_target, validate_url
 from cqa.version import plugin_version
 
 EXIT_OK = 0
@@ -156,6 +157,13 @@ def _register_preparation(commands) -> None:
         help="envoie GM_AUDIT_AUTH_USER et GM_AUDIT_AUTH_PASS en Basic Auth",
     )
     sub = _command(commands, "key-pages-check", "pages clés et liens de l'accueil", _cmd_key_pages)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument(
+        "--auth-env",
+        action="store_true",
+        help="envoie GM_AUDIT_AUTH_USER et GM_AUDIT_AUTH_PASS en Basic Auth",
+    )
+    sub = _command(commands, "crawl-estimate", "durée proposée pour le crawl", _cmd_crawl_estimate)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument(
         "--auth-env",
@@ -636,26 +644,86 @@ def _prod_origin(url) -> Optional[str]:
     return f"{parts.scheme}://{parts.netloc}"
 
 
-def _cmd_toolbox_env(args, services) -> int:
-    context = _load_context(args.run_dir)
+def _toolbox_target(context: dict) -> tuple:
+    """Return (url, robots mode) of the target the toolbox audits."""
     target = context.get("target")
     if not isinstance(target, dict):
         raise ContextError("context.json : « target » est absent.")
     if probes.is_prod_run(context):
-        url, robots = _target_url(target, "prod_url"), "respect"
-    else:
-        url, robots = _target_url(target, "preprod_url"), "ignore"
+        return _target_url(target, "prod_url"), "respect"
+    return _target_url(target, "preprod_url"), "ignore"
+
+
+def _cmd_toolbox_env(args, services) -> int:
+    context = _load_context(args.run_dir)
+    url, robots = _toolbox_target(context)
+    minutes = _crawl_minutes(context)
     lines = [
         f"GM_AUDIT_TARGET={url}",
         f"GM_AUDIT_ROBOTS={robots}",
         f"GM_AUDIT_RATE={TOOLBOX_RATE}",
         f"GM_AUDIT_USER_AGENT=GingermindsAudit/{plugin_version()}",
+        f"GM_CQA_CRAWL_MINUTES={minutes}",
+        f"GM_CQA_CRAWL_MAX_URLS={crawl_budget.crawl_max_urls(minutes)}",
     ]
     if robots == "ignore":
-        origin = _prod_origin(target.get("prod_url"))
+        origin = _prod_origin(context["target"].get("prod_url"))
         if origin:
             lines.append(f"GM_AUDIT_PROD_ORIGIN={origin}")
     _emit_lines(lines)
+    return EXIT_OK
+
+
+def _crawl_minutes(context: dict) -> int:
+    value = context.get("crawl_minutes")
+    if isinstance(value, int) and not isinstance(value, bool) and 5 <= value <= 240:
+        return value
+    return crawl_budget.DEFAULT_MINUTES
+
+
+def _cmd_crawl_estimate(args, services) -> int:
+    context = _load_context(args.run_dir)
+    url, robots = _toolbox_target(context)
+    origin = "{0.scheme}://{0.netloc}".format(urlsplit(url))
+    prod_origin = _prod_origin(context["target"].get("prod_url")) if robots == "ignore" else None
+    rate = _request_rate()
+    auth = _auth_from_env() if args.auth_env else None
+    opener = services.opener
+    if opener is None:
+        opener = build_opener(authenticated=auth is not None)
+    deadline = time.monotonic() + KEY_PAGES_DEADLINE
+
+    def fetcher(limit: int):
+        return lambda page_url: fetch_timed(page_url, auth=auth, opener=opener, max_bytes=limit)
+
+    pages = [
+        mapped
+        for template, page_url in _key_page_entries(context.get("key_pages"))
+        if template != "404"
+        for mapped in [crawl_budget.on_target(page_url, origin, prod_origin)]
+        if mapped
+    ]
+    sitemap_urls = crawl_budget.count_sitemap_urls(
+        origin,
+        fetcher(crawl_budget.MAX_SITEMAP_BYTES + 1),
+        prod_origin,
+        delay=1 / rate,
+        deadline=deadline,
+    )
+    timings = []
+    mean = crawl_budget.mean_response_time(
+        pages, fetcher(crawl_budget.MAX_PAGE_BYTES), deadline=deadline, timed=timings
+    )
+    minutes = crawl_budget.propose_crawl_minutes(sitemap_urls, mean, rate)
+    _emit(
+        {
+            "sitemap_urls": sitemap_urls,
+            "mean_response_s": None if mean is None else round(mean, 3),
+            "pages_timed": len(timings),
+            "proposed_minutes": minutes,
+            "max_urls": crawl_budget.crawl_max_urls(minutes),
+        }
+    )
     return EXIT_OK
 
 
@@ -1613,6 +1681,12 @@ def _choice_or_null(*allowed):
     return check
 
 
+def _crawl_minutes_value(value) -> Optional[str]:
+    if isinstance(value, int) and not isinstance(value, bool) and 5 <= value <= 240:
+        return None
+    return "doit être un entier de minutes entre 5 et 240"
+
+
 def _boolean(value) -> Optional[str]:
     return None if isinstance(value, bool) else "doit être un booléen"
 
@@ -1698,6 +1772,7 @@ _TOP_FIELDS = {
 _OPTIONAL_TOP_FIELDS = {
     "mode": _choice("autonome", "interactif"),
     "notion_write": _choice_or_null("all", "keep_human", "none"),
+    "crawl_minutes": _crawl_minutes_value,
 }
 _SECTIONS = {
     "project": {"slug": _text, "name": _text, "protection": _text_or_null},

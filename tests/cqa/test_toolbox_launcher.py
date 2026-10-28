@@ -212,7 +212,7 @@ class CommonOptionsTest(LauncherCase):
         self.log.unlink()
         self.launch("run", str(self.run_dir), "crawl", **SECRETS)
         (options, args), = self.runs_of("agence")
-        self.assertEqual(["crawl"], args)
+        self.assertEqual(["crawl", "--max-minutes", "30", "--max-urls", "2000"], args)
         for name in (
             "GM_AUDIT_TARGET",
             "GM_AUDIT_ROBOTS",
@@ -605,7 +605,20 @@ class ToolCommandsTest(LauncherCase):
     def test_crawl(self):
         result = self.run_tool("crawl", **SECRETS)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual([["crawl"]], [args for _, args in self.runs_of("agence")])
+        self.assertEqual(
+            [["crawl", "--max-minutes", "30", "--max-urls", "2000"]],
+            [args for _, args in self.runs_of("agence")],
+        )
+
+    def test_crawl_passes_the_duration_and_the_url_cap(self):
+        context = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))
+        context["crawl_minutes"] = 60
+        (self.run_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
+        result = self.run_tool("crawl", **SECRETS)
+        self.assertEqual(0, result.returncode, result.stderr)
+        (options, args), = self.runs_of("agence")
+        self.assertEqual(["crawl", "--max-minutes", "60", "--max-urls", "4000"], args)
+        self.assertFalse(any("GM_CQA" in item for item in options))
 
     def test_crawl_failure_is_tolerated(self):
         result = self.run_tool("crawl", CQA_STUB_FAIL="agence:1 crawl", CQA_STUB_FAIL_CODE="2")

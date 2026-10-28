@@ -89,12 +89,16 @@ load_run() {
   [ -f "$RUN_DIR/context.json" ] || die "context.json est introuvable dans $RUN_DIR."
   UID_GID="$(id -u):$(id -g)"
 
+  CRAWL_MINUTES=30
+  CRAWL_MAX_URLS=2000
   env_lines="$(python3 "$S/cqa_plan.py" toolbox-env "$RUN_DIR")" || exit 2
   while IFS='=' read -r key value; do
     case "$key" in
       GM_AUDIT_TARGET | GM_AUDIT_ROBOTS | GM_AUDIT_RATE | GM_AUDIT_USER_AGENT | GM_AUDIT_PROD_ORIGIN)
         export "$key=$value"
         ;;
+      GM_CQA_CRAWL_MINUTES) CRAWL_MINUTES="$value" ;;
+      GM_CQA_CRAWL_MAX_URLS) CRAWL_MAX_URLS="$value" ;;
       "") ;;
       *) die "toolbox-env a renvoyé une variable inattendue : $key" ;;
     esac
@@ -375,7 +379,7 @@ tool_schemathesis() {
 
 tool_crawl() {
   prepare_tool crawl || return 1
-  tolerate crawl docker_tool agence crawl -- crawl
+  tolerate crawl docker_tool agence crawl -- crawl --max-minutes "$CRAWL_MINUTES" --max-urls "$CRAWL_MAX_URLS"
 }
 
 run_tool() {

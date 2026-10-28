@@ -64,6 +64,8 @@ A tool that is missing, failed or skipped makes the parts that depend on it `unk
 
 `tools/crawl/summary.json` has the findings: per rule, the pages found (at most 20 per rule, the first message gives the total). `tools/crawl/result.json` has the status, the reason and the counts (`urls` requested, `pages` analysed); `raw/` has the raw outputs. Severities: `red` blocking, `orange` to fix, `info` to look at.
 
+The counts also hold the requests that went wrong: `http_5xx`, `http_503`, `http_401`, `timeouts` and `slowdowns` (`raw/site.json` lists the slowdowns). Several 503 or a slowdown mean the preprod saturated under the crawl: say so in `summary` (with the counts), and read the crawl findings with reserve.
+
 | Rule | Rows | Severity | Meaning |
 |---|---|---|---|
 | `http-4xx` | CQ-3, CQ-36 | orange | internal URL answering 4xx; `value` is a page that links to it |

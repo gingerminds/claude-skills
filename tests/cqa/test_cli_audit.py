@@ -2736,6 +2736,7 @@ class RegistrationTest(AuditCase):
             "defer",
             "deferred",
             "key-pages-check",
+            "crawl-estimate",
             "reuse-context",
         ):
             code, out, err = self.run_main([name, "--help"])

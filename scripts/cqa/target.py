@@ -2,6 +2,7 @@
 import base64
 import http.client
 import ipaddress
+import time
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -117,6 +118,39 @@ def fetch_page(
         return {"status": error.code, "url": url, "body": ""}
     except (urllib.error.URLError, http.client.HTTPException, OSError, UnicodeError):
         return {"status": None, "url": url, "body": ""}
+
+
+def fetch_timed(
+    url: str,
+    *,
+    auth: Optional[tuple] = None,
+    opener=None,
+    timeout: float = 20.0,
+    max_bytes: int = 2_097_152,
+) -> tuple:
+    """Return (status, body, elapsed_s) of a GET, under the rules of fetch_page.
+
+    body is the raw bytes (max_bytes at most, kept as is for a compressed file); elapsed_s runs
+    until the end of the body. status is None when nothing answered. Raises ValueError as
+    fetch_page does.
+    """
+    validate_url(url)
+    if auth is not None:
+        _require_encryption(url)
+    if opener is None:
+        opener = build_opener(authenticated=auth is not None)
+    request = urllib.request.Request(url, headers=_headers(auth), method="GET")
+    started = time.monotonic()
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = response.getcode()
+            body = response.read(max_bytes) if 200 <= status < 300 else b""
+            return status, body, time.monotonic() - started
+    except urllib.error.HTTPError as error:
+        error.close()
+        return error.code, b"", time.monotonic() - started
+    except (urllib.error.URLError, http.client.HTTPException, OSError, UnicodeError):
+        return None, b"", time.monotonic() - started
 
 
 def _headers(auth: Optional[tuple]) -> dict:

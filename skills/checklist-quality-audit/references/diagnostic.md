@@ -162,6 +162,22 @@ In autonomous mode, do not ask: no download (as « Non »), record `cqa_plan.py 
 - "Audit web": toolbox ready, and the target reachable from the workstation (`access` `open`, or `basic_auth` with accepted credentials).
 - "Crawler": "Audit web", `agence_crawl` true.
 
+### Crawl duration (when "Crawler" is available)
+
+The crawl stops at a maximum duration and a maximum number of URLs, both read from `context.json` by `cqa-toolbox.sh`. Propose them from the size of the site. Authenticated with `--auth-env` (and the credentials set in the same line, as for `key-pages-check`) when the session holds them:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" crawl-estimate "$RUN"
+```
+
+- It counts the URLs of the sitemaps (`sitemap.xml` and the `Sitemap:` lines of `robots.txt`, indexes followed, prod addresses read on the target) and times the key pages (the `404` template excluded), in 80 seconds at most, and prints `{"sitemap_urls", "mean_response_s", "pages_timed", "proposed_minutes", "max_urls"}`. `sitemap_urls` is `null` without a sitemap. No credential is printed.
+- Ask « Durée maximale du crawl ? » with « <proposed_minutes> min (proposé) » first, then two values among 30, 60 and 120 that differ from the proposal, and any other duration in « Autre » (5 to 240 minutes). The text of the question gives the basis: « <sitemap_urls> URLs dans le sitemap, <mean_response_s> s par page : <proposed_minutes> min, <max_urls> URLs au plus », or « Pas de sitemap : 30 min proposées » when `sitemap_urls` is `null`.
+- Write the answer in `context.json` as `crawl_minutes` (integer, 5 to 240). The URL cap follows the duration (`toolbox-env`). A slowdown of the preprod during the crawl is not anticipated: the crawl lowers its own rate and stops at its duration.
+- Autonomous mode: do not ask. Use `proposed_minutes` and write it in `crawl_minutes`. No `defer`: nothing is left open.
+- `reuse-context` never copies `crawl_minutes`: it depends on the response time measured on this run.
+
 ## 7. SSH (tool "SSH serveur")
 
 Only with `ssh.alias`. The connection test, outside the guard because it runs nothing:

@@ -1,6 +1,7 @@
 import base64
 import contextlib
 import copy
+import gzip
 import http.client
 import io
 import json
@@ -723,6 +724,23 @@ class ContextCheckTest(RunDirCase):
         context = valid_context()
         context["notion_write"] = "tout"
         self.assertIn("keep_human", self.check(context)[1]["errors"][0])
+
+    def test_crawl_minutes_is_optional_and_checked(self):
+        for value in (60, 5, 240):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["crawl_minutes"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report["errors"]), (0, []))
+        for value in (4, 241, "60", 60.5, True, None):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["crawl_minutes"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                self.assertIn("« crawl_minutes »", report["errors"][0])
+                self.assertIn("entier de minutes entre 5 et 240", report["errors"][0])
 
     def _site(self, domain_name="shop.example.org", **changes):
         domain = domain_name
@@ -1612,7 +1630,19 @@ class ToolboxEnvTest(RunDirCase):
                 "GM_AUDIT_ROBOTS=ignore",
                 "GM_AUDIT_RATE=2",
                 f"GM_AUDIT_USER_AGENT=GingermindsAudit/{plugin_version()}",
+                "GM_CQA_CRAWL_MINUTES=30",
+                "GM_CQA_CRAWL_MAX_URLS=2000",
             ],
+        )
+
+    def test_toolbox_env_gives_the_crawl_limits(self):
+        self.assertEqual(
+            self.env_lines(crawl_minutes=60)[4:6],
+            ["GM_CQA_CRAWL_MINUTES=60", "GM_CQA_CRAWL_MAX_URLS=4000"],
+        )
+        self.assertEqual(
+            self.env_lines(crawl_minutes=240)[4:6],
+            ["GM_CQA_CRAWL_MINUTES=240", "GM_CQA_CRAWL_MAX_URLS=8000"],
         )
 
     def test_toolbox_env_passes_the_prod_origin_on_preprod(self):
@@ -1670,7 +1700,14 @@ class ToolboxEnvTest(RunDirCase):
             self.assertNotIn(secret, out + err)
         self.assertEqual(
             [line.partition("=")[0] for line in out.splitlines()],
-            ["GM_AUDIT_TARGET", "GM_AUDIT_ROBOTS", "GM_AUDIT_RATE", "GM_AUDIT_USER_AGENT"],
+            [
+                "GM_AUDIT_TARGET",
+                "GM_AUDIT_ROBOTS",
+                "GM_AUDIT_RATE",
+                "GM_AUDIT_USER_AGENT",
+                "GM_CQA_CRAWL_MINUTES",
+                "GM_CQA_CRAWL_MAX_URLS",
+            ],
         )
 
     def test_invalid_target_is_a_context_error(self):
@@ -2189,6 +2226,118 @@ class KeyPagesCheckTest(RunDirCase):
         )
         self.assertEqual(code, 0, err)
         self.assertEqual(opener.urls, [prod])
+
+
+class _SiteHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.requests.append((self.path, dict(self.headers)))
+        status, body = self.server.pages.get(self.path, (404, b""))
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class CrawlEstimateTest(RunDirCase):
+    def setUp(self):
+        super().setUp()
+        self.fast = {"GM_AUDIT_RATE": "1000"}
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _SiteHandler)
+        self.server.requests = []
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def serve(self, pages):
+        self.server.pages = {path: (200, body) for path, body in pages.items()}
+
+    def estimate(self, extra=None, env=None, **changes):
+        sleeping = mock.patch.object(cqa_plan.crawl_budget.time, "sleep")
+        with sleeping:
+            return self.run_main(
+                ["crawl-estimate", self.run_dir, *(extra or [])],
+                env={**self.fast, **(env or {})},
+            )
+
+    def test_crawl_estimate_counts_the_sitemap_and_times_the_key_pages(self):
+        prod = "https://www.example.org"
+        index = (
+            f"<sitemapindex><sitemap><loc>{prod}/s1.xml</loc></sitemap>"
+            f"<sitemap><loc>{self.base}/s2.xml.gz</loc></sitemap></sitemapindex>"
+        ).encode()
+        first = (
+            f"<urlset><url><loc>{prod}/a</loc></url><url><loc>{prod}/b?x=1</loc></url>"
+            "<url><loc>https://other.example.net/c</loc></url></urlset>"
+        ).encode()
+        second = gzip.compress(
+            f"<urlset><url><loc>{self.base}/a</loc></url><url><loc>{prod}/d</loc></url></urlset>".encode()
+        )
+        self.serve(
+            {
+                "/sitemap.xml": index,
+                "/robots.txt": f"User-agent: *\nSitemap: {prod}/sitemap.xml\n".encode(),
+                "/s1.xml": first,
+                "/s2.xml.gz": second,
+                "/": b"home",
+                "/liste": b"list",
+                "/fiche": b"card",
+            }
+        )
+        self.write_context(
+            target__preprod_url=self.base,
+            target__prod_url=prod,
+            key_pages=[
+                {"template": "Accueil", "url": self.base + "/"},
+                {"template": "Liste", "url": prod + "/liste"},
+                {"template": "Fiche", "url": self.base + "/fiche"},
+                {"template": "404", "url": self.base + "/nope"},
+            ],
+        )
+        code, out, err = self.estimate(
+            ["--auth-env"], {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        )
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(3, result["sitemap_urls"])
+        self.assertEqual(3, result["pages_timed"])
+        self.assertEqual(30, result["proposed_minutes"])
+        self.assertEqual(2000, result["max_urls"])
+        self.assertIsInstance(result["mean_response_s"], float)
+        paths = [path for path, _ in self.server.requests]
+        self.assertNotIn("/nope", paths)
+        self.assertIn("/liste", paths)
+        for path, headers in self.server.requests:
+            self.assertEqual(BASIC, headers.get("Authorization"), path)
+        self.assertNotIn(PASSWORD, out + err)
+        self.assertNotIn(USER, out + err)
+
+    def test_crawl_estimate_without_a_sitemap(self):
+        self.serve({"/": b"home"})
+        self.write_context(target__preprod_url=self.base, key_pages=[{"template": "A", "url": self.base + "/"}])
+        code, out, err = self.estimate()
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertIsNone(result["sitemap_urls"])
+        self.assertEqual((30, 2000), (result["proposed_minutes"], result["max_urls"]))
+        self.assertEqual(1, result["pages_timed"])
+
+    def test_crawl_estimate_without_credentials_sends_no_header(self):
+        self.serve({"/sitemap.xml": b"<urlset></urlset>", "/": b""})
+        self.write_context(target__preprod_url=self.base, key_pages=[{"template": "A", "url": self.base + "/"}])
+        code, out, err = self.estimate()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(0, json.loads(out)["sitemap_urls"])
+        for _, headers in self.server.requests:
+            self.assertNotIn("Authorization", headers)
+
+    def test_crawl_estimate_needs_the_credentials_with_auth_env(self):
+        self.write_context(target__preprod_url=self.base)
+        code, _, _ = self.estimate(["--auth-env"])
+        self.assertEqual(2, code)
 
 
 class ReuseContextTest(RunDirCase):
