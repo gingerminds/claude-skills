@@ -55,14 +55,19 @@ _FORM_KEYWORDS = ("password", "passwd", "pwd")
 _FORM_ATTRIBUTE = re.compile(r"(?:type|autocomplete|name|id)=[^=&]*", re.IGNORECASE)
 # ${NAME}, or ${NAME:?message} whose message is an error text, never a value (unlike :- or :=).
 _ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_]\w*(?::?\?[^{}\n]*)?\}")
-# A command that reads its value ($(cat /run/secrets/x), $(openssl rand -hex 32)): lowercase
-# words, paths, options and $VARS only, so a literal argument (Adm1nP@ss) or echo/printf is not.
-_COMMAND_SUBSTITUTION = re.compile(
+# A command substitution that reads its value ($(cat /run/secrets/x), $(openssl rand -hex 32)).
+# In each piped command, beyond its name: one lowercase word at most (a subcommand), then only
+# numbers, options (never -p<value> nor a credential name), lowercase absolute paths and $VARS.
+_COMMAND_SUBSTITUTION = re.compile(r"\$\(([^()\n]*)\)")
+_PRINTING_COMMANDS = frozenset({"echo", "printf", "command", "builtin", "exec"})
+_COMMAND_WORD = re.compile(r"[a-z][a-z0-9_.-]*")
+_SAFE_ARGUMENT = re.compile(
     r"""
-    \$\([ \t]*(?!(?:echo|printf)\b)
-    [a-z][a-z0-9_.-]*
-    (?:[ \t]+(?:[a-z0-9_.~-]+|[\w.~-]*/[\w./~-]*|\$\{?[A-Za-z_]\w*\}?|\|))*
-    [ \t]*\)
+    \d+
+    | -(?!p.)[a-z0-9][a-z0-9-]*
+    | --(?![a-z0-9-]*(?:pass|pwd|secret|token|key))[a-z][a-z0-9-]*(?:=(?:\d+|[a-z][a-z0-9_-]*))?
+    | /[a-z0-9/._-]*
+    | (?P<dq>"?)\$(?:\{[A-Za-z_]\w*\}|[A-Za-z_]\w*)(?P=dq)
     """,
     re.VERBOSE,
 )
@@ -128,7 +133,21 @@ def _is_non_secret(match: re.Match) -> bool:
 
 def _is_reference(text: str) -> bool:
     """True when text is a whole environment reference or a command substitution that reads it."""
-    return bool(_ENV_REFERENCE.fullmatch(text) or _COMMAND_SUBSTITUTION.fullmatch(text))
+    return bool(_ENV_REFERENCE.fullmatch(text)) or _reads_its_value(text)
+
+
+def _reads_its_value(text: str) -> bool:
+    substitution = _COMMAND_SUBSTITUTION.fullmatch(text)
+    if not substitution:
+        return False
+    for command in substitution.group(1).split("|"):
+        name, *arguments = command.split() or [""]
+        if name in _PRINTING_COMMANDS or not _COMMAND_WORD.fullmatch(name):
+            return False
+        words = [item for item in arguments if not _SAFE_ARGUMENT.fullmatch(item)]
+        if len(words) > 1 or not all(_COMMAND_WORD.fullmatch(word) for word in words):
+            return False
+    return True
 
 
 def _is_harmless_literal(line: str, literal: re.Match) -> bool:

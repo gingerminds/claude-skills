@@ -191,6 +191,7 @@ class NonSecretTest(unittest.TestCase):
         'DB_PASSWORD="$(cat /run/secrets/db_password)"',
         "password: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}",
         "'token': f'{settings.API_TOKEN}'",
+        "SECRET_KEY=$(head -c 32 /dev/urandom | base64)",
     ]
     # (line, its secret literal): masking must remove that literal, not only the first token.
     SECRETS = [
@@ -249,6 +250,18 @@ class NonSecretTest(unittest.TestCase):
         ("token = f'{prefix}Adm1nP@ss2024'", "Adm1nP@ss2024"),
         ("token = f'Bearer abcd1234efgh5678'", "abcd1234efgh5678"),
         ("password = f'{19800101}'", "19800101"),
+        ("HTPASSWD=$(htpasswd -nb admin changeme)", "changeme"),
+        ("ADMIN_PASSWORD_HASH=$(openssl passwd -6 changeme)", "changeme"),
+        ("PASSWORD=$(mkpasswd -m sha-512 changeme)", "changeme"),
+        ("PASSWORD=$(openssl enc -d -aes-256-cbc -k changeme -in /x)", "changeme"),
+        ("DB_PASSWORD=$(mysql -uroot -prootpass app)", "rootpass"),
+        ("X_PASSWORD=$(command echo Adm1nP4ss)", "Adm1nP4ss"),
+        ("X_PASSWORD=$(builtin printf Adm1nP4ss)", "Adm1nP4ss"),
+        ("X_PASSWORD=$(cat /x | echo Adm1nP4ss)", "Adm1nP4ss"),
+        ("SECRET=$(decrypt Adm1n/P4ss)", "Adm1n/P4ss"),
+        ("DB_PASSWORD=$(mysql --password=changeme app)", "changeme"),
+        ("DB_PASSWORD=$(mysql --password changeme)", "changeme"),
+        ("X_PASSWORD=$(exec cat /x | env echo changeme)", "changeme"),
     ]
 
     def test_form_field_descriptions_are_not_secrets(self):
