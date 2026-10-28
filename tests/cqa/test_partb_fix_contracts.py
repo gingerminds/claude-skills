@@ -43,5 +43,20 @@ class StaleToolsContract(unittest.TestCase):
         self.assertNotIn("relaunch the tools of `tools` that the lead kept", sec10)
 
 
+
+
+
+
+class FirstContextContract(unittest.TestCase):
+    def test_wp_plugins_needs_a_first_context_written_before_step_8(self):
+        step6 = SKILL[SKILL.index("6. Key pages:"):SKILL.index("7. Mode and Notion consent")]
+        self.assertIn("first write a minimal `$RUN/context.json` holding `repos` (from `project`), `target` and `sites`", step6)
+        self.assertIn("step 8, which completes and checks it", step6)
+        ref = (REFS / "context.md").read_text(encoding="utf-8")
+        body = section(ref, "## 6.1.1")
+        self.assertIn("write a first `context.json` holding `repos` (from `project`), `target` and `sites`", body)
+        self.assertIn("step 8 of the skill completes and checks it", body)
+
+
 if __name__ == "__main__":
     unittest.main()

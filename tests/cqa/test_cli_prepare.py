@@ -2724,6 +2724,15 @@ class WpPluginsTest(RunDirCase):
         self.assertTrue(all(command[0] == "git" for command in calls))
         self.assertTrue(all("ls-tree" in command or "show" in command for command in calls))
 
+    def test_wp_plugins_runs_on_the_minimal_first_context(self):
+        repo = self.make_wordpress({"plugins/own/own.php": "<?php\n"})
+        self.write_context({
+            "repos": [{"name": "wordpress", "path": str(repo), "stack": "wordpress"}],
+            "target": {"preprod_url": "https://preprod.example.org"},
+            "sites": [],
+        })
+        self.assertEqual(set(self.plugins()), {"plugins/own"})
+
     def test_unreadable_repo_is_reported_not_fatal(self):
         self.context_for(self.tmp_dir() / "missing")
         result = self.run_json(["wp-plugins", self.run_dir])
