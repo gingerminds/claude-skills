@@ -57,7 +57,9 @@ def apply_plan(
     no longer has (Notion would create it). Operations go by ref, then status, assign and
     comment, the page_comment ones last.
 
-    notion/applied.json in run_dir lists what was written and is rewritten after each success:
+    notion/applied.json in run_dir lists what was written and is rewritten after each success
+    (entries accumulate across applies; a "status" entry carries "value", the status written,
+    and a "comment" entry "comment_id" and "mode"; older journals have neither):
     its keys are skipped on a rerun. A comment is also skipped when the page already shows a
     comment with the same text (from bot_id, or from anyone when it is None), as Notion may
     have stored one whose answer was lost. A network error, an authentication failure, a 429
@@ -321,6 +323,8 @@ def _entry(item: dict, sent: dict) -> dict:
         "verdict": item.get("verdict"),
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if item["kind"] == "status":
+        entry["value"] = item["after"]
     if "comment_id" in sent:
         entry["comment_id"] = sent["comment_id"]
         entry["mode"] = sent["mode"]

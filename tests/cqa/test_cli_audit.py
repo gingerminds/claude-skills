@@ -1551,6 +1551,17 @@ class RecetteTest(AuditCase):
         self.assertIn("CQ-101", blocking)
         self.assertNotIn(EM_DASH, text)
 
+    def test_recette_unknown_outcome_is_not_a_human_validation(self):
+        run_dir = self.make_recette_run([102, 104])
+        self.run_json(["plan", run_dir, "--recette"])
+        self.edit(run_dir, "notion/plan.json", lambda plan: plan["summary"]["unknown"].append(104))
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+        section = text.split("## Recette")[1].split("\n## ")[0]
+        unknown = section.split("### Non évaluées")[1].split("###")[0]
+        waiting = section.split("### Restées en validation humaine")[1].split("###")[0]
+        self.assertIn("CQ-104", unknown)
+        self.assertNotIn("CQ-104", waiting)
+
     def test_synthesis_without_recette_has_no_section(self):
         run_dir = self.make_run()
         self.run_json(["plan", run_dir])

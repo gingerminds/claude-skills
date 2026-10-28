@@ -629,7 +629,7 @@ class JournalTest(ApplyTestCase):
         )
         base = {"key", "kind", "ref", "verdict", "at"}
         for entry in entries:
-            extra = {"comment_id", "mode"} if entry["kind"] == "comment" else set()
+            extra = {"comment_id", "mode"} if entry["kind"] == "comment" else {"value"}
             self.assertEqual(set(entry), base | extra)
             self.assertIsNotNone(datetime.fromisoformat(entry["at"]).tzinfo)
 
@@ -1131,6 +1131,12 @@ class ApplyCommandTest(CliTestCase):
         )
         self.assertEqual(len(self.read_json("notion/applied.json")["applied"]), 3)
         self.assertIn("CQ-1", err)
+
+    def test_status_entries_carry_the_value_written(self):
+        self.write_plan(status_op(PAGE_1, 1, after="À traiter", before="Mis en place"))
+        self.run_main(["apply", self.run_dir])
+        [entry] = self.read_json("notion/applied.json")["applied"]
+        self.assertEqual(entry["value"], "À traiter")
 
     def test_comment_replacement_refused_still_exits_zero(self):
         self.notion.add_comment(PAGE_1, verdict_text("À traiter"))

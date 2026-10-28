@@ -159,10 +159,12 @@ def _recette(run_dir: Path) -> Optional[list]:
 
 
 def _recette_lines(refs: list, summary: dict, titles: dict, after: dict) -> list:
-    validated, waiting, refused, other = [], [], [], []
+    validated, waiting, refused, other, unknown = [], [], [], [], []
     for ref in sorted(refs):
         status = after.get(ref)
-        if status == STATUS_OK:
+        if ref in summary["unknown"]:
+            unknown.append(_ref_line(ref, titles))
+        elif status == STATUS_OK:
             validated.append(_ref_line(ref, titles))
         elif status == STATUS_IMPLEMENTED:
             waiting.append(_ref_line(ref, titles))
@@ -175,6 +177,7 @@ def _recette_lines(refs: list, summary: dict, titles: dict, after: dict) -> list
         (f"Validées ({STATUS_OK})", validated),
         ("Restées en validation humaine", waiting),
         ("Refusées", refused),
+        ("Non évaluées", unknown),
         ("Bloquantes restantes", blocking),
     ]
     if other:

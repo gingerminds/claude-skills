@@ -454,7 +454,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_notion.py" recette "$RUN"
 ```
 
-It writes `notion/recette.json`, `{"rows": [{"ref", "page_id", "status", "skill_last", "comments"}]}`, and prints the refs (`recette`) and those added for a code change (`code_modifie`). Exit codes as in section 8, step 1. A row without a known status of the skill is a candidate: the lead may drop it.
+It writes `notion/recette.json`, `{"rows": [{"ref", "page_id", "status", "skill_last", "comments"}]}`, and prints the refs (`recette`) and those added for a code change (`code_modifie`). Exit codes as in section 8, step 1. A row without a known status of the skill is a candidate: the lead may drop it. The last status the skill wrote comes from the `value` of the status entries of `notion/applied.json`.
 
 3. Run the diagnostic of section 5 for the tools only, and update `available_tools` in `context.json`. Then open the rerun and list the lots of the candidate rows, as in section 10, steps 4 and 5, with the refs of `notion/recette.json`:
 
@@ -470,7 +470,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" rerun-candidates "$RUN" --refs CQ-3,CQ-12
 ```
 
-4. Present before anything is dispatched, in French: for each row, ref, title, the status the skill had written (`skill_last`) and the devs' comments (with the merge request link), then the lots, the tools and the estimated time. Rows with a code change get a reminder that the preprod must run that code (the check of section 5). Ask « Lancer cette recette ? » with « Lancer », « Modifier la liste » and « Annuler », and handle the answers as in section 10, step 6. The rows the lead drops are removed from `notion/recette.json` too (edit the file), so that the plan does not treat them as fixes. « Annuler »: stop, nothing is written to Notion.
+4. Present before anything is dispatched, in French: for each row, ref, title, the status the skill had written (`skill_last`) and the devs' comments (with the merge request link), then the lots, the tools and the estimated time. Rows with a code change get a reminder that the preprod must run that code (the check of section 5). Ask « Lancer cette recette ? » with « Lancer », « Modifier la liste » and « Annuler », and handle the answers as in section 10, step 6. To drop or add rows, run the command of step 2 again with `--without CQ-3,CQ-12` (drops rows) and `--refs CQ-40` (adds rows the lead names, even if they are not candidates): it re-reads the copy and rewrites `notion/recette.json`, so the plan treats exactly the kept rows as fixes; then present again. « Annuler »: stop, nothing is written to Notion.
 5. Relaunch the tools the lead kept and dispatch the lots as in section 10, steps 7 and 8, with the line, exactly (the kept rows of that lot only):
 
 ```
@@ -503,7 +503,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" plan "$RUN" --recette
 ```
 
-The verdicts give: `ok` becomes « Ok / Recetté »; `ok_human` leaves the row « Mis en place » and assigns it to the lead (human judgement needed); `ko` becomes « À traiter » and `partial` « Mise en place partielle », the comment saying what is missing. The synthesis gets a `## Recette` section: validated rows, rows left to human validation, refused rows (with their Réf), blocking rows still open.
+The verdicts give: `ok` becomes « Ok / Recetté »; `ok_human` leaves the row « Mis en place » and assigns it to the lead (human judgement needed); `ko` becomes « À traiter » and `partial` « Mise en place partielle », the comment saying what is missing. The synthesis gets a `## Recette` section: validated rows, rows left to human validation, refused rows (with their Réf), rows not evaluated (`unknown`), blocking rows still open.
 
 8. End, in French, with the validated rows, the rows left to the lead, the refused rows with what is missing, and the blocking rows still open.
 

@@ -404,6 +404,30 @@ class RecetteCandidatesTest(unittest.TestCase):
             with self.subTest(plan=plan):
                 self.assertEqual(self.refs(rows, plan, applied), [7])
 
+    def test_journal_value_survives_a_later_plan_that_leaves_the_row_alone(self):
+        rows = [recette_row(2)]
+        plan = recette_plan((2, "Mis en place", "Mis en place", False))
+        applied = {"applied": [{"key": "old", "kind": "status", "ref": 2, "value": "À traiter"}]}
+        [item] = rerun.recette_candidates(rows, plan, applied)
+        self.assertEqual(item["skill_last"], "À traiter")
+
+    def test_skill_written_implemented_value_is_not_a_fix(self):
+        applied = {
+            "applied": [
+                {"key": "a", "kind": "status", "ref": 2, "value": "À traiter"},
+                {"key": "b", "kind": "status", "ref": 2, "value": "Mis en place"},
+            ]
+        }
+        self.assertEqual(self.refs([recette_row(2)], None, applied), [])
+
+    def test_entries_without_value_fall_back_to_the_plan(self):
+        rows = [recette_row(2), recette_row(3)]
+        plan = recette_plan(
+            (2, "À traiter", "Mis en place", True), (3, "À traiter", "À traiter", False)
+        )
+        applied = {"applied": [{"key": "status:2", "kind": "status", "ref": 2}]}
+        self.assertEqual(self.refs(rows, plan, applied), [3])
+
     def test_damaged_documents_do_not_raise(self):
         rows = [recette_row(7)]
         self.assertEqual(self.refs(rows, {"rows": "x", "ops": 3}, {"applied": 4}), [7])

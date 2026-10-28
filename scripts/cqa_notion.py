@@ -7,6 +7,7 @@ Exit codes: 0 success, 2 environment or usage, 3 Notion API error, 6 invalid sch
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +27,7 @@ from cqa.notion_read import (
 )
 from cqa.notion_write import ReferenceWriteRefused, apply_plan, validate_plan
 from cqa.plan import filter_plan, operation_key
-from cqa.rerun import list_of, recette_candidates, rerun_candidates
+from cqa.rerun import list_of, recette_candidates, rerun_candidates, skill_last_of
 from cqa.secrets import known_values_from_env
 
 EXIT_OK = 0
@@ -85,11 +86,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ("rows", "lit la copie et la rapproche du modèle (rows.json)", _cmd_rows),
         ("fiches", "met en cache les fiches du modèle (fiches/)", _cmd_fiches),
         ("comments", "lit les verdicts des commentaires de l'intégration", _cmd_comments),
-        ("recette", "relit la copie et liste les lignes à recetter (recette.json)", _cmd_recette),
     ):
         sub = commands.add_parser(name, help=help_text)
         sub.add_argument("run_dir", type=Path, help="dossier du run")
         sub.set_defaults(handler=handler)
+    sub = commands.add_parser(
+        "recette", help="relit la copie et liste les lignes à recetter (recette.json)"
+    )
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("--without", default="", help="Réf à retirer de la liste (CQ-3,CQ-12)")
+    sub.add_argument("--refs", default="", help="Réf à ajouter, même non candidates (CQ-40)")
+    sub.set_defaults(handler=_cmd_recette)
     sub = commands.add_parser("apply", help="écrit un plan dans la copie (reprise possible)")
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument(
@@ -204,21 +211,29 @@ def _cmd_recette(args, client) -> int:
         if "code_modifie" in entry["reasons"]
     ]
     by_ref = {item["ref"]: item for item in rows if isinstance(item, dict)}
-    plan_rows = {
-        state.get("ref"): state
-        for state in list_of(plan, "rows")
-        if isinstance(state, dict)
-    }
+    last_of = skill_last_of(plan, applied)
     for ref in changed:
         row = by_ref.get(ref)
         if row is not None and ref not in chosen:
-            state = plan_rows.get(ref) or {}
             chosen[ref] = {
                 "ref": ref,
                 "page_id": row["page_id"],
                 "status": row["status"],
-                "skill_last": state.get("before"),
+                "skill_last": last_of(ref),
             }
+    for ref in _parse_refs(args.refs):
+        row = by_ref.get(ref)
+        if row is None:
+            _log(f"CQ-{ref} ne figure pas dans la copie : ignorée.")
+        elif ref not in chosen:
+            chosen[ref] = {
+                "ref": ref,
+                "page_id": row["page_id"],
+                "status": row["status"],
+                "skill_last": last_of(ref),
+            }
+    for ref in _parse_refs(args.without):
+        chosen.pop(ref, None)
     result = []
     for ref in sorted(chosen):
         item = chosen[ref]
@@ -227,6 +242,19 @@ def _cmd_recette(args, client) -> int:
     write_json(run_dir / "notion" / "recette.json", {"rows": result})
     _emit({**counts, "recette": [item["ref"] for item in result], "code_modifie": sorted(changed)})
     return EXIT_OK
+
+
+def _parse_refs(text: str) -> list:
+    refs = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        found = re.fullmatch(r"(?:CQ-)?([0-9]+)", part, re.IGNORECASE)
+        if not found:
+            raise UsageError(f"« {part} » n'est pas une Réf (attendu : CQ-12 ou 12).")
+        refs.append(int(found.group(1)))
+    return refs
 
 
 def _optional_json(path: Path):

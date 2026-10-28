@@ -794,13 +794,13 @@ class RecetteCommandTest(CliTestCase):
         entry = {"key": "status:c2", "kind": "status", "ref": 80, "verdict": "ok_human"}
         self.write_json("notion/applied.json", {"applied": [entry] if journal else []})
 
-    def run_recette(self, comments=None, git_run=None):
+    def run_recette(self, comments=None, git_run=None, options=()):
         client, transport = routed_client(self.routes(comments))
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, self.ENV, clear=True):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = cqa_notion.main(
-                    ["recette", str(self.run_dir)], client=client, git_run=git_run
+                    ["recette", str(self.run_dir), *options], client=client, git_run=git_run
                 )
         return code, out.getvalue(), err.getvalue(), transport
 
@@ -845,6 +845,30 @@ class RecetteCommandTest(CliTestCase):
     def test_recette_command_is_registered(self):
         code, _, _ = self.run_main(["recette", "--help"], None, {})
         self.assertEqual(code, 0)
+
+    def test_recette_without_and_refs_options(self):
+        self.write_audit()
+        code, out, err, _ = self.run_recette(options=["--without", "CQ-79", "--refs", "CQ-81,CQ-999"])
+        self.assertEqual(code, 0, err)
+        found = {item["ref"]: item for item in self.read_json("notion/recette.json")["rows"]}
+        self.assertEqual(sorted(found), [81])
+        self.assertEqual(found[81]["status"], "À traiter")
+        self.assertIn("CQ-999", err)
+        code, _, _, _ = self.run_recette(options=[])
+        refs = [item["ref"] for item in self.read_json("notion/recette.json")["rows"]]
+        self.assertEqual(refs, [79])
+        code, _, err, _ = self.run_recette(options=["--refs", "abc"])
+        self.assertEqual(code, 2)
+
+    def test_recette_still_a_candidate_after_a_later_plan(self):
+        self.write_json("notion/plan.json", {"rows": [
+            {"page_id": "c1", "ref": 79, "blocking": False, "before": "Mis en place",
+             "after": "Mis en place"}], "ops": []})
+        entry = {"key": "old", "kind": "status", "ref": 79, "value": "À traiter"}
+        self.write_json("notion/applied.json", {"applied": [entry]})
+        self.run_recette()
+        [item] = self.read_json("notion/recette.json")["rows"][:1]
+        self.assertEqual((item["ref"], item["skill_last"]), (79, "À traiter"))
 
     def test_recette_keeps_five_comments_at_most(self):
         self.write_audit()

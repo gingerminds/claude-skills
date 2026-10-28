@@ -173,11 +173,32 @@ def rerun_candidates(
 def recette_candidates(rows: list, plan: Optional[dict], applied: Optional[dict]) -> list:
     """Return the rows the devs fixed: "Mis en place" in the copy, but not set so by the skill.
 
-    The last status the skill wrote is the "after" of the row in the plan when the status
-    operation of that ref is in the journal, its "before" otherwise. A row the skill knows no
+    The last status the skill wrote is the "value" of the last status entry of the ref in the
+    journal. Journal entries without a value (older runs) fall back to the plan: the "after" of
+    the row when the status operation of that ref is in the journal, its "before" otherwise. A row the skill knows no
     status for (no plan, no journal, row absent from the plan) is a candidate: the lead may drop
     it. Each item is {"ref", "page_id", "status", "skill_last"}. Nothing here raises on a
     damaged document.
+    """
+    last_of = skill_last_of(plan, applied)
+    found = []
+    for row in rows:
+        ref = row.get("ref")
+        if not isinstance(ref, int) or row.get("status") != STATUS_IMPLEMENTED:
+            continue
+        last = last_of(ref)
+        if last == STATUS_IMPLEMENTED:
+            continue
+        found.append(
+            {"ref": ref, "page_id": row.get("page_id"), "status": row["status"], "skill_last": last}
+        )
+    return found
+
+
+def skill_last_of(plan: Optional[dict], applied: Optional[dict]) -> Callable:
+    """Return ref -> the last status the skill wrote for the row, None when unknown.
+
+    See recette_candidates for the rule.
     """
     plan_rows = {
         state["ref"]: state
@@ -189,26 +210,28 @@ def recette_candidates(rows: list, plan: Optional[dict], applied: Optional[dict]
         for entry in list_of(applied, "applied")
         if isinstance(entry, dict)
     }
+    values: dict = {}
+    for entry in list_of(applied, "applied"):
+        if (
+            isinstance(entry, dict)
+            and entry.get("kind") == "status"
+            and isinstance(entry.get("value"), str)
+        ):
+            values[entry.get("ref")] = entry["value"]
     planned = {
         op.get("ref")
         for op in list_of(plan, "ops")
         if isinstance(op, dict) and op.get("kind") == "status" and op.get("key") in written
     }
-    found = []
-    for row in rows:
-        ref = row.get("ref")
-        if not isinstance(ref, int) or row.get("status") != STATUS_IMPLEMENTED:
-            continue
+
+    def last_of(ref):
+        last = values.get(ref)
         state = plan_rows.get(ref)
-        last = None
-        if state is not None:
+        if last is None and state is not None:
             last = state.get("after") if ref in planned else state.get("before")
-        if last == STATUS_IMPLEMENTED:
-            continue
-        found.append(
-            {"ref": ref, "page_id": row.get("page_id"), "status": row["status"], "skill_last": last}
-        )
-    return found
+        return last
+
+    return last_of
 
 
 def list_of(document, key: str) -> list:
