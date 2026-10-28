@@ -691,10 +691,6 @@ class LotOrderTest(unittest.TestCase):
                 self.assertLessEqual(len(lot["refs"]), 8)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SessionLotsTest(unittest.TestCase):
     def test_session_rows_get_their_own_browser_lot(self):
         rows = [
@@ -755,3 +751,19 @@ class SessionLotsTest(unittest.TestCase):
         entries = _lot_entries(old)
         self.assertEqual([lot_needs_session(lot) for lot in entries], [False])
         self.assertTrue(lot_needs_session({"needs_session": True}))
+
+    def test_hint_matches_tool_names_not_substrings(self):
+        for hint in ("syntaxe PHP", "taxe", "relaxe", "axes de recherche", "menu html"):
+            with self.subTest(hint=hint):
+                built = build_lots([make_row(1, tooling_hint=hint)])
+                self.assertEqual(lot_ids(built), ["code-qualite"])
+        for hint in (
+            "axe-core", "axe DevTools", "Nu HTML Checker", "Yellow Lab", "yellowlab", "crawler"
+        ):
+            with self.subTest(hint=hint):
+                built = build_lots([make_row(1, tooling_hint=hint)])
+                self.assertEqual(lot_ids(built), ["code-qualite-outils"])
+
+
+if __name__ == "__main__":
+    unittest.main()

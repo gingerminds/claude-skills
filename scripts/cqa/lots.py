@@ -43,8 +43,10 @@ _BUCKETS = {"standby": "standby", "techno": "na", "phase": "deferred", "no_tools
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
 _TEST_ACCOUNTS = "Comptes de test"
 _BACKOFFICE_SECTION = re.compile(r"^(back|bo$)", re.IGNORECASE)
+# Matches tool names, not substrings ("syntaxe", "taxe").
 _TOOLBOX_HINT = re.compile(
-    r"gitleaks|testssl|lighthouse|axe|validateur nu|nu html|yellow ?lab|redocly|schemathesis|crawl",
+    r"gitleaks|testssl|lighthouse|\baxe\b|validateur nu|\bnu html|yellow ?lab|redocly"
+    r"|schemathesis|\bcrawl",
     re.IGNORECASE,
 )
 
@@ -220,7 +222,9 @@ def _needs_toolbox(row):
 def _needs_session(row):
     if _TEST_ACCOUNTS in (row.get("tools") or []):
         return True
-    return any(_BACKOFFICE_SECTION.match((section or "").strip()) for section in row.get("sections") or [])
+    return any(
+        _BACKOFFICE_SECTION.match((section or "").strip()) for section in row.get("sections") or []
+    )
 
 
 def _lot(lot_id, kind, rows, needs_toolbox):
