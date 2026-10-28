@@ -431,6 +431,21 @@ class ValidateDocumentTest(unittest.TestCase):
         valid, errors = validate(make_finding(tool_dates=dates), make_finding(ref=80))
         self.assertEqual(errors, [])
         self.assertEqual(valid[0]["tool_dates"], dates)
+        valid, errors = validate(make_finding(tool_dates={}), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(valid[0]["tool_dates"], {})
+        for bad in (
+            "2026-10-27T21:15:05+00:00",
+            "2026-10-27T21:15:05",
+            "",
+            123,
+            "٢٠٢٦-١٠-٢٧T٢١:١٥:٠٥Z",
+        ):
+            with self.subTest(date=bad):
+                valid, errors = validate(make_finding(tool_dates={"crawl": bad}), make_finding(ref=80))
+                self.assertEqual([item["ref"] for item in valid], [80])
+                self.assertEqual(len(errors), 1)
+                self.assertIn("invalide pour l'outil « crawl »", errors[0])
         cases = {
             "Crawl": ("2026-10-27T21:15:05Z", "nom d'outil « Crawl » invalide"),
             "crawl": ("hier", "date « hier » invalide pour l'outil « crawl »"),
@@ -443,6 +458,7 @@ class ValidateDocumentTest(unittest.TestCase):
         for value in (["crawl"], "2026-10-27T21:15:05Z", None):
             with self.subTest(value=value):
                 valid, errors = validate(make_finding(tool_dates=value), make_finding(ref=80))
+                self.assertEqual([item["ref"] for item in valid], [80])
                 self.assertEqual(
                     errors, ["constat CQ-79 : « tool_dates » doit être un objet {outil: date}"]
                 )

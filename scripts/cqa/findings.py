@@ -44,7 +44,7 @@ _FRONT_CONTROLLER = "/index.php/"
 _DOT_SEGMENT = re.compile(r"(?:^|/)\.\.?(?:/|$)")
 
 _TOOL_NAME = re.compile(r"[a-z0-9-]+")
-_TOOL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
+_TOOL_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z")
 
 _HUMAN_TOOL = "Intervention humaine"
 _OPTIONAL_TEXTS = ("todo", "human_check", "divergence")

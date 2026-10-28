@@ -427,6 +427,8 @@ class AgentsTest(unittest.TestCase):
             with self.subTest(agent=path.name):
                 self.assertIn("tool_dates", text)
                 self.assertIn("`started_at` of its `result.json`", text)
+                self.assertIn("keep their `tool_dates`", text)
+                self.assertIn("add `http-followup` to `tool_dates`", text)
 
     def test_followup_writes_a_complete_lot_document(self):
         for path in (AUDITOR, BROWSER):

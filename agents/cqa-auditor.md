@@ -187,7 +187,7 @@ With `Follow-up: yes`:
 1. Read your first-round file `findings/<lot>.json`. If it is missing, evaluate the whole lot.
 2. Read `tools/http-followup/result.json` and `summary.json`. Find the answer of each probe by method and path; read `tools/http-followup/raw/` only when the summary is not enough.
 3. For each finding with `needs_probes`, judge again with the answers. Remove the answered probes; keep the unanswered ones. Cite the answers as `{"type": "tool", "tool": "http-followup", "ref": "summary.json#..."}`.
-4. Copy unchanged the findings that asked for no probe. Ask for no new probe: there is no second follow-up.
+4. Copy unchanged the findings that asked for no probe. They keep their `tool_dates`; for a finding you judge again, add `http-followup` to `tool_dates` with the `started_at` of `tools/http-followup/result.json`. Ask for no new probe: there is no second follow-up.
 5. Write `findings/<lot>-followup.json`: a complete lot document, with one finding for every row of the lot. Never modify `findings/<lot>.json`.
 
 ## Output
