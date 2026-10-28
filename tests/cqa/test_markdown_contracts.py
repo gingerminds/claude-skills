@@ -147,7 +147,10 @@ class SkillTest(unittest.TestCase):
         for needle in ("Before each new wave of lots", "steps 4, 5, 6 and 8",
                        "cqa_plan.py probe-target", "ssh -o BatchMode=yes -o ConnectTimeout=10 <alias> true",
                        "context.json", "« Reprendre »", "« Continuer quand même »",
-                       "remarques de la synthèse"):
+                       "remarques de la synthèse",
+                       "without credentials, and compare its `access` with the one in `context.json`",
+                       "once more with `--auth-env`: any answer other than `open`",
+                       "« La préprod refuse maintenant les identifiants Basic Auth »"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, section)
 
@@ -300,11 +303,27 @@ class SkillTest(unittest.TestCase):
             "sur un Mac, rabattre l'écran le met en veille malgré tout.",
             audit,
         )
-        self.assertIn(start, _section(skill, "3. Resume"))
+        self.assertIn(
+            "« Si cette session s'arrête avant la fin de l'audit, libérez le poste avec : "
+            'bash "<scripts>/cqa-keepawake.sh" stop "<run_dir>" »',
+            audit,
+        )
+        resume = _section(skill, "3. Resume")
+        self.assertIn(start, resume)
+        self.assertNotIn("is gone with it", resume)
+        self.assertIn("may have left its inhibitor running", resume)
+        self.assertIn("`start` reuses a live one", resume)
         writing = _section(skill, "8. Writing and synthesis")
         self.assertIn(stop, writing)
         self.assertLess(writing.index("**6. Completion.**"), writing.index(stop))
-        self.assertIn(stop, _section(skill, "7. Plan and confirmation"))
+        plan = _section(skill, "7. Plan and confirmation")
+        option = plan.index("   - « Sans toucher aux statuts posés par un humain »:")
+        rebuild = plan.index('plan "$RUN" --skip-human-overrides')
+        abandon = plan.index("If the lead abandons the audit")
+        self.assertLess(option, rebuild)
+        self.assertNotIn("   - «", plan[option + 1:rebuild])
+        self.assertLess(rebuild, abandon)
+        self.assertLess(abandon, plan.index(stop))
         self.assertIn("every other stop of the audit", skill)
         self.assertGreaterEqual(len(re.findall(r"cqa-keepawake\.sh\"? stop \"\$RUN\"", skill)), 5)
 

@@ -63,7 +63,7 @@ A run is complete once its final scan has run: section 8 then writes `done.json`
    - `lots` true and `plan` false: section 6. A lot whose `cqa_plan.py validate` passes is not dispatched again. Toolbox: no `tools/` folder, launch it again; `tools/` without `tools/manifest.json`, rebuild the manifest with `cqa_plan.py manifest "$RUN"` and relaunch only the missing or failed tools (`references/lots.md`).
    - `plan` true: section 7. `apply` skips the writes already listed in `notion/applied.json`.
 
-The inhibitor of an interrupted run is gone with it. When the run restarts at section 7, start it again as at the beginning of section 6 (section 6 does it itself):
+An interrupted run may have left its inhibitor running: it runs in its own session and outlives the Claude session. `start` reuses a live one instead of launching another. When the run restarts at section 7, run `start` as at the beginning of section 6 (section 6 does it itself): it keeps the inhibitor still running or launches a new one.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -157,7 +157,7 @@ RUN="<run_dir>"
 bash "$S/cqa-keepawake.sh" start "$RUN"
 ```
 
-Then tell the lead, word for word: « Le poste ne se mettra pas en veille pendant l'audit. Gardez l'écran ouvert : sur un Mac, rabattre l'écran le met en veille malgré tout. » If the script warned that no inhibitor exists, show its warning too.
+Then tell the lead, word for word: « Le poste ne se mettra pas en veille pendant l'audit. Gardez l'écran ouvert : sur un Mac, rabattre l'écran le met en veille malgré tout. » If the script warned that no inhibitor exists, show its warning too. Otherwise also tell the lead how to release the workstation by hand if this session ends before the audit does (the inhibitor outlives it), with `<scripts>` and `<run_dir>` replaced by their absolute paths: « Si cette session s'arrête avant la fin de l'audit, libérez le poste avec : bash "<scripts>/cqa-keepawake.sh" stop "<run_dir>" »
 
 From here to the end of section 8, run `stop` (below) on every path that ends the audit: the end of section 8, and every other stop of the audit (section 7 abandoned, exit codes 2, 3 and 8 of section 8, an error that ends the run).
 
@@ -203,10 +203,11 @@ GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' bash "$S/
 8. Follow-up: `cqa_plan.py probes "$RUN" --followup`. With probes, `cqa-toolbox.sh run "$RUN" http --followup`, then relaunch once each lot it lists with `Follow-up: yes`, and validate with `cqa_plan.py validate "$RUN" <lot> --followup`.
 
 Before each new wave of lots (steps 4, 5, 6 and 8), recheck the access, because the workstation may have slept or changed network:
-- run `cqa_plan.py probe-target` on the target (`references/context.md`, section 3; the prod URL for a prod run), with `--auth-env` when the session holds the Basic Auth credentials;
+- run `cqa_plan.py probe-target` on the target (`references/context.md`, section 3; the prod URL for a prod run) without credentials, and compare its `access` with the one in `context.json` (also the answer without credentials: `basic_auth` for a preprod behind Basic Auth);
+- when the session holds the Basic Auth credentials, run it once more with `--auth-env`: any answer other than `open` means the credentials no longer pass;
 - when "SSH serveur" is available, run `ssh -o BatchMode=yes -o ConnectTimeout=10 <alias> true` (`references/diagnostic.md`, section 7).
 
-If the `access` differs from the one in `context.json`, or the SSH test fails, launch no new lot. Tell the lead in French what changed (« La préprod répond maintenant <access> au lieu de <access du contexte> » or « Connexion SSH impossible avec <alias> »), then ask with « Reprendre » (after the lead restored the access: recheck) and « Continuer quand même » (launch the wave; note it in the « remarques de la synthèse »: the rows concerned may end `unknown`).
+If the `access` without credentials differs from the one in `context.json`, the check with credentials is not `open`, or the SSH test fails, launch no new lot. Tell the lead in French what changed (« La préprod répond maintenant <access> au lieu de <access du contexte> », « La préprod refuse maintenant les identifiants Basic Auth » or « Connexion SSH impossible avec <alias> »), then ask with « Reprendre » (after the lead restored the access: recheck) and « Continuer quand même » (launch the wave; note it in the « remarques de la synthèse »: the rows concerned may end `unknown`).
 
 Before each browser lot (steps 3 and 5), call `tabs_context_mcp`. If it fails, ask the lead to reconnect Claude in Chrome before going on (`references/browser.md`).
 
@@ -230,8 +231,14 @@ python3 "$S/cqa_plan.py" plan "$RUN"
 2. With `--dry-run`: no question, no Notion write. Go to section 8, step 2.
 3. Otherwise ask « Écrire le plan dans la copie Notion ? » with « Tout écrire », « Sans toucher aux statuts posés par un humain » (only when there are some) and « Ne rien écrire ».
    - « Tout écrire »: section 8, step 1.
-   - « Sans toucher aux statuts posés par un humain »: keep the list of those statuses, rebuild the plan so that the synthesis matches what is written, then section 8, step 1, with `--skip-human-overrides`.
    - « Ne rien écrire »: as with `--dry-run`, section 8, step 2.
+   - « Sans toucher aux statuts posés par un humain »: keep the list of those statuses, rebuild the plan with the command below so that the synthesis matches what is written, then section 8, step 1, with `--skip-human-overrides`.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
+```
 
 If the lead abandons the audit at this point, release the workstation first:
 
@@ -239,12 +246,6 @@ If the lead abandons the audit at this point, release the workstation first:
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
 bash "$S/cqa-keepawake.sh" stop "$RUN"
-```
-
-```bash
-S="${CLAUDE_SKILL_DIR}/../../scripts"
-RUN="<run_dir>"
-python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
 ```
 
 ## 8. Writing and synthesis
