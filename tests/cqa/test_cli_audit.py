@@ -1430,8 +1430,25 @@ class SynthesisTest(AuditCase):
         unknown = text.split("## Lignes non évaluées")[1].split("##")[0]
         self.assertIn("CQ-104", unknown)
         self.assertIn("constat invalide ou absent", unknown)
+        self.assertNotIn("Réf CQ-", unknown)
+        self.assertNotIn("gm:checklist-quality-audit", unknown)
         self.assertIn("CQ-106", unknown)
         self.assertIn("outils indisponibles : Navigateur", unknown)
+
+    def test_gap_lines_tell_a_late_preprod_from_an_unconfirmed_one(self):
+        repos = [
+            {"name": "front", "aligned": False, "deployed_sha": "1111111aaa", "audited_sha": "2222222bbb"},
+            {"name": "back", "aligned": False, "deployed_sha": None, "audited_sha": "3333333ccc"},
+            {"name": "api", "aligned": True, "deployed_sha": "4444444ddd", "audited_sha": "4444444ddd"},
+        ]
+        lines = report._gap_lines({"repos": repos})
+        self.assertEqual(
+            lines,
+            [
+                "- Préprod en retard sur develop pour le repo « front » (déployé : 1111111, audité : 2222222).",
+                "- Alignement de la préprod non confirmé pour le repo « back » (audité : 3333333).",
+            ],
+        )
 
     def test_unknown_row_whose_comment_is_already_in_notion(self):
         run_dir = self.make_run()

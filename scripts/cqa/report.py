@@ -359,7 +359,8 @@ def _constat(text: str) -> Optional[str]:
             return inline
         block = []
         for following in lines[index + 1 :]:
-            if not following.strip():
+            # The footer follows the last block with no blank line.
+            if not following.strip() or following.startswith("Réf "):
                 break
             block.append(following.strip())
         return " ".join(block) or None
@@ -371,11 +372,17 @@ def _gap_lines(context: dict) -> list:
     for repo in context["repos"]:
         if repo.get("aligned") is False:
             deployed = (repo.get("deployed_sha") or "")[:7]
-            seen = f"déployé : {deployed}" if deployed else "commit déployé inconnu"
-            lines.append(
-                f"- Préprod en retard sur develop pour le repo « {repo['name']} » "
-                f"({seen}, audité : {repo['audited_sha'][:7]})."
-            )
+            audited = repo["audited_sha"][:7]
+            if deployed:
+                lines.append(
+                    f"- Préprod en retard sur develop pour le repo « {repo['name']} » "
+                    f"(déployé : {deployed}, audité : {audited})."
+                )
+            else:
+                lines.append(
+                    f"- Alignement de la préprod non confirmé pour le repo « {repo['name']} » "
+                    f"(audité : {audited})."
+                )
     return lines
 
 
