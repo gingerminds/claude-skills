@@ -639,6 +639,16 @@ SQL_SECRET_COLUMNS_REFUSED = {
         "SELECT COUNT(*) FROM wp_users u WHERE u.ID IN "
         "(SELECT user_id FROM wp_usermeta WHERE meta_value LIKE 'a%')",
     ],
+    "WooCommerce order keys": [
+        "SELECT meta_value FROM wp_postmeta WHERE meta_key = '_order_key'",
+        "SELECT meta_value FROM wp_postmeta WHERE meta_key = '_ORDER_KEY' LIMIT 1",
+        "SELECT meta_value FROM wp_2_postmeta WHERE post_id = 12 AND meta_key = '_order_key'",
+        "SELECT COUNT(*) FROM wp_postmeta WHERE meta_key = '_order_key' "
+        "AND meta_value LIKE 'wc_order_a%'",
+        "SELECT meta_value FROM wp_postmeta WHERE meta_key LIKE '%order_key%'",
+        "SELECT order_key FROM wp_wc_order_operational_data LIMIT 1",
+        "SELECT COUNT(*) FROM wp_wc_order_operational_data WHERE order_key LIKE 'wc_order_a%'",
+    ],
     "Drupal and Laravel stores": [
         "SELECT data FROM config WHERE name = 'smtp.settings'",
         "SELECT COUNT(*) FROM config WHERE name = 'smtp.settings' AND data LIKE '%a%'",
@@ -684,6 +694,7 @@ SQL_STILL_OK = [
     "SELECT COUNT(*) FROM wp_options WHERE autoload = 'yes'",
     "SELECT COUNT(*) FROM wp_usermeta WHERE meta_key = 'wp_capabilities' LIMIT 1",
     "SELECT meta_value FROM wp_postmeta WHERE meta_key = '_wp_page_template' LIMIT 5",
+    "SELECT COUNT(*) FROM wp_postmeta WHERE meta_key = '_billing_country' LIMIT 1",
     "SELECT name FROM config WHERE name LIKE 'system.%' LIMIT 20",
     "SELECT COUNT(*) FROM key_value WHERE collection = 'state'",
     "SELECT COUNT(*) FROM failed_jobs LIMIT 1",
@@ -1019,6 +1030,64 @@ class CheckCommandTest(unittest.TestCase):
                 self.assertFalse(allowed)
                 self.assertIn("wp option get", reason)
                 self.assertIn("blog_public", reason)
+
+    def test_wp_user_list_only_counts_a_role(self):
+        for argv in (
+            ["wp", "user", "list", "--role=administrator", "--format=count"],
+            ["wp", "user", "list", "--format=count", "--role=editor", "--path=/var/www/html",
+             "--url=example.org"],
+            ["wp", "user", "list", "--role=shop_manager", "--format=count", "--allow-root",
+             "--skip-plugins", "--skip-themes"],
+            ["docker", "exec", "app", "wp", "user", "list", "--role=administrator",
+             "--format=count"],
+        ):
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertTrue(allowed, reason)
+        for argv in (
+            ["wp", "user", "list"],
+            ["wp", "user", "list", "--role=administrator"],
+            ["wp", "user", "list", "--format=count"],
+            ["wp", "user", "list", "--role=administrator", "--format=json"],
+            ["wp", "user", "list", "--role=administrator", "--format=csv"],
+            ["wp", "user", "list", "--role=administrator", "--format=count", "--format=json"],
+            ["wp", "user", "list", "--role=administrator", "--format=count",
+             "--fields=user_login"],
+            ["wp", "user", "list", "--fields=user_login", "--format=count",
+             "--role=administrator"],
+            ["wp", "user", "list", "--role=administrator", "--field=user_email"],
+            ["wp", "user", "list", "--role=administrator", "--format=count",
+             "--field=user_email"],
+            ["wp", "user", "list", "--role=administrator", "--format=count", "--search=admin"],
+            ["wp", "user", "list", "--role=administrator", "--format=count", "--status=x"],
+            ["wp", "user", "list", "--role=administrator", "--format=count", "--extra"],
+            ["wp", "user", "list", "--role=administrator", "--format=count", "--network"],
+            ["wp", "user", "list", "--role=administrator", "--role=editor", "--format=count"],
+            ["wp", "user", "list", "--role__in=administrator", "--format=count"],
+            ["wp", "user", "list", "--role=Administrator", "--format=count"],
+            ["wp", "user", "list", "--role=", "--format=count"],
+            ["wp", "user", "list", "--role", "--format=count"],
+            ["wp", "user", "list", "--role", "administrator", "--format=count"],
+            ["wp", "user", "list", "--role=" + "a" * 41, "--format=count"],
+            ["wp", "user", "list", "--role=admin-x", "--format=count"],
+            ["wp", "user", "get", "1"],
+            ["wp", "user", "get", "admin", "--field=user_email"],
+            ["wp", "user", "meta", "list", "1"],
+            ["wp", "user", "session", "list", "1"],
+            ["wp", "user", "application-password", "list", "1"],
+            ["wp", "user", "list-caps", "1"],
+            ["wp", "user", "create", "x", "x@example.org"],
+            ["wp", "user", "update", "1", "--display_name=x"],
+            ["wp", "user", "reset-password", "1"],
+            ["wp", "user", "delete", "2", "--yes"],
+            ["wp", "user"],
+        ):
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertFalse(allowed)
+                self.assertTrue(reason.startswith("wp"), reason)
+        reason = check_command(["wp", "user", "list", "--role=administrator"])[1]
+        self.assertIn("--role=<rôle> --format=count", reason)
 
     def test_wp_fields_that_carry_secrets_are_refused(self):
         for argv in (

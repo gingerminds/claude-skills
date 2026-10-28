@@ -834,6 +834,12 @@ class SkillTest(unittest.TestCase):
                 self.assertIn(f"`{name}`", server)
         self.assertIn("CHAR_LENGTH(user_pass) = 32", server)
         self.assertIn("unsalted", server)
+        count = "wp user list --role=administrator --format=count"
+        for label, text in (("server.md", server), ("cqa-auditor.md", auditor)):
+            for needle in (count, "_order_key"):
+                with self.subTest(file=label, needle=needle):
+                    self.assertIn(needle, text)
+        self.assertTrue(cqa_ssh_ro.check_command(count.split())[0])
         context = _text(REFERENCES / "context.md")
         for needle in ("`null`", "`host` is optional", "`warnings`"):
             with self.subTest(needle=needle):

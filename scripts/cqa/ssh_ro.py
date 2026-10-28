@@ -390,6 +390,14 @@ _WP_VALUED = {
 _WP_SEARCH = re.compile(r"[A-Za-z0-9_-]{1,40}")
 _WP_POST_FIELDS = frozenset({"ID", "post_title", "post_name", "post_status", "guid", "url"})
 _WP_FLAGS = frozenset({"--skip-plugins", "--skip-themes", "--allow-root", "--extra"})
+_WP_GLOBAL_VALUED = {"--path": "path", "--url": _URI}
+_WP_GLOBAL_FLAGS = frozenset({"--skip-plugins", "--skip-themes", "--allow-root"})
+_WP_ROLE = re.compile(r"[a-z_]{1,40}")
+_WP_USER_COUNT = (
+    "wp user list : seule la forme --role=<rôle> --format=count est autorisée "
+    "(nombre d'utilisateurs d'un rôle), avec --path, --url, --skip-plugins, --skip-themes "
+    "ou --allow-root"
+)
 
 _ARTISAN_COMMANDS = ("about", "route:list", "schedule:list")
 _ARTISAN_FLAGS = frozenset({"--json", "--no-ansi"})
@@ -636,12 +644,33 @@ def _wp(args: list) -> None:
             raise Refused("wp site list : seule la forme --field=url est autorisée")
     elif words == ("post", "list"):
         options = _wp_post_list(options)
+    elif words == ("user", "list"):
+        _wp_user_count(options)
+        return
     elif words not in _WP_COMMANDS:
         raise Refused(
             "wp : seuls core version, plugin list, theme list, cron event list, option get, "
-            "site list --field=url, post list --post_type=page et --version sont autorisés"
+            "site list --field=url, post list --post_type=page, "
+            "user list --role=<rôle> --format=count et --version sont autorisés"
         )
     _check_app_options("wp", options, _WP_VALUED, _WP_FLAGS)
+
+
+def _wp_user_count(options: list) -> None:
+    """Check the one form of wp user list: the number of users of one role, nothing else."""
+    roles = [option for option in options if option.partition("=")[0] == "--role"]
+    formats = [option for option in options if option.partition("=")[0] == "--format"]
+    if (
+        len(roles) != 1
+        or not _WP_ROLE.fullmatch(roles[0].partition("=")[2])
+        or formats != ["--format=count"]
+    ):
+        raise Refused(_WP_USER_COUNT)
+    rest = [option for option in options if option not in roles + formats]
+    try:
+        _check_app_options("wp user list", rest, _WP_GLOBAL_VALUED, _WP_GLOBAL_FLAGS)
+    except Refused as refusal:
+        raise Refused(f"{refusal} ; {_WP_USER_COUNT}") from None
 
 
 def _wp_post_list(options: list) -> list:
@@ -790,7 +819,7 @@ _SQL_WRITE = re.compile(
 )
 _SQL_CREDENTIAL = re.compile(
     r"pass|pwd|secret|token|salt|authentication_string|api_?key|activation_key|recovery_code"
-    r"|consumer_key|licen[cs]e_?key|private_key|cron_key|totp|\bCREATE\s+USER\b",
+    r"|consumer_key|licen[cs]e_?key|private_key|cron_key|totp|order_key|\bCREATE\s+USER\b",
     re.I,
 )
 # Columns that hold secrets under a common name, refused when their table is named anywhere.
