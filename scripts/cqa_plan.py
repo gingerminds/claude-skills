@@ -34,6 +34,7 @@ from cqa.lots import TOOLS, build_lots, coverage, select_rows
 from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
 from cqa.plan import build_plan, filter_plan, load_history, operation_key
+from cqa.rerun import latest_findings, rerun_candidates
 from cqa.project import parse_project_md, project_slug, sibling_repos
 from cqa.secrets import known_values_from_env, scan_tree
 from cqa.target import probe_target, validate_url
@@ -194,6 +195,12 @@ def _register_audit(commands) -> None:
     sub = _run_command(commands, "assign", "propose une répartition des lignes", _cmd_assign)
     sub.add_argument(
         "--include-unknown", action="store_true", help="ajoute les lignes non évaluées"
+    )
+    sub = _run_command(
+        commands, "rerun-candidates", "lignes à réévaluer lors d'une relance ciblée", _cmd_rerun
+    )
+    sub.add_argument(
+        "--refs", default="", help="Réf à ajouter, séparées par des virgules (CQ-12,CQ-40)"
     )
     _run_command(commands, "assign-plan", "plan d'assignation (assign-plan.json)", _cmd_assign_plan)
 
@@ -467,6 +474,29 @@ def _cmd_plan(args, services) -> int:
     (run_dir / "notion").mkdir(exist_ok=True)
     write_json(run_dir / "notion" / "plan.json", plan)
     _emit(plan["summary"])
+    return EXIT_OK
+
+
+def _cmd_rerun(args, services) -> int:
+    refs = []
+    for part in args.refs.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        found = re.fullmatch(r"(?:CQ-)?([0-9]+)", part, re.IGNORECASE)
+        if not found:
+            raise UsageError(f"« {part} » n'est pas une Réf (attendu : CQ-12 ou 12).")
+        refs.append(int(found.group(1)))
+    run_dir = args.run_dir.resolve()
+    context = _checked_context(run_dir)
+    _emit(
+        rerun_candidates(
+            run_dir,
+            extra_refs=refs,
+            git_run=services.run,
+            read=lambda lot, name: _read_findings_file(run_dir, context, lot, name),
+        )
+    )
     return EXIT_OK
 
 
@@ -1112,11 +1142,15 @@ def _findings_name(lot_id: str, followup: bool) -> str:
 
 
 def _read_findings(run_dir: Path, context: dict, lot: dict, *, followup: bool) -> Optional[tuple]:
-    """Return (valid findings, errors) of a lot file, None when the file does not exist.
+    """Return (valid findings, errors) of a lot file, None when the file does not exist."""
+    return _read_findings_file(run_dir, context, lot, _findings_name(lot["id"], followup))
+
+
+def _read_findings_file(run_dir: Path, context: dict, lot: dict, name: str) -> Optional[tuple]:
+    """Return (valid findings, errors) of a findings file, None when it does not exist.
 
     The valid findings are those of validate_document whose evidence also holds against the run.
     """
-    name = _findings_name(lot["id"], followup)
     try:
         document = json.loads((run_dir / "findings" / name).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -1139,23 +1173,23 @@ def _read_findings(run_dir: Path, context: dict, lot: dict, *, followup: bool) -
 def _collect_findings(run_dir: Path, context: dict, lots: list) -> tuple:
     """Return ({ref: finding}, refs of the lots that went through the follow-up of the probes).
 
-    A finding of the follow-up file replaces the one of the first round; a ref the follow-up
-    file does not give (or gives invalid) keeps its first-round finding. A lot went through the
-    follow-up when it has a follow-up file, or when probes-followup.json exists and the lot
-    still asked for probes: if every URL was discarded no relaunch has any use, but what the lot
-    waited for will not come either.
+    The latest finding of a row prevails: first round, follow-up, then the reruns in order (see
+    latest_findings); a ref a later file does not give (or gives invalid) keeps its previous
+    finding. A lot went through the follow-up when it has a follow-up file, or when
+    probes-followup.json exists and the lot still asked for probes: if every URL was discarded
+    no relaunch has any use, but what the lot waited for will not come either.
     """
-    findings, followup_done = {}, set()
+    findings = latest_findings(
+        run_dir, lots, lambda lot, name: _read_findings_file(run_dir, context, lot, name)
+    )
+    followup_done = set()
     requested = set()
     if (run_dir / "probes-followup.json").is_file():
         requested = set(probes.pending_lots(run_dir, lots, probes.app_path(context)))
     for lot in lots:
-        first = _read_findings(run_dir, context, lot, followup=False)
-        second = _read_findings(run_dir, context, lot, followup=True)
-        for found in (first, second):
-            for item in found[0] if found else []:
-                findings[item["ref"]] = item
-        if second is not None or lot["id"] in requested:
+        if (run_dir / "findings" / _findings_name(lot["id"], True)).exists() or lot[
+            "id"
+        ] in requested:
             followup_done.update(lot["refs"])
     return findings, followup_done
 
