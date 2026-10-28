@@ -729,6 +729,9 @@ class SkillTest(unittest.TestCase):
                 "`prod_live`",
                 "one message, recap the reused values",
                 "(`references/context.md`, section 6.2)",
+                "run step 4 now (page comment), then go to step 6",
+                "handled last",
+                "rerun of their own",
             )),
             ("context.md", context, (
                 "wp post list --post_type=page --s=gravityform --fields=ID,post_title,post_status,url",
@@ -749,6 +752,8 @@ class SkillTest(unittest.TestCase):
                 "`checked` true",
                 "--kind gap --detail \"<url> répond <status>\"",
                 "ask nothing",
+                "dead home links are not deferred",
+                "never one by one",
                 "--kind question --detail \"La ligne CQ-<n>",
                 "CQ-115",
                 "compte à rôle restreint",
@@ -768,7 +773,7 @@ class SkillTest(unittest.TestCase):
     def test_the_guard_allows_only_the_post_list_form_the_skill_uses(self):
         for argv, allowed in (
             (["wp", "post", "list", "--post_type=page", "--s=gravityform",
-              "--fields=ID,post_title,url"], True),
+              "--fields=ID,post_title,post_status,url", "--path=/var/www/html"], True),
             (["wp", "post", "list", "--post_type=page", "--fields=ID,post_content"], False),
             (["wp", "post", "delete", "1"], False),
         ):

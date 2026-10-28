@@ -51,7 +51,7 @@ EXIT_SECRET = 7
 MAX_KEY_PAGES = 10
 MAX_SITES = 10
 MAX_KEY_PAGE_REQUESTS = 50
-KEY_PAGES_DEADLINE = 100
+KEY_PAGES_DEADLINE = 80
 TOOLBOX_RATE = "2"
 
 _SEPARATOR = " - "
@@ -384,6 +384,8 @@ def _cmd_key_pages(args, services) -> int:
         pages.append(_page_entry(url, template, status, checked, key=True))
     dead = []
     for url in links:
+        if time.monotonic() >= checker.deadline:
+            break
         if url in templates or len(checker.requests) >= MAX_KEY_PAGE_REQUESTS:
             continue
         result = checker.get(url)

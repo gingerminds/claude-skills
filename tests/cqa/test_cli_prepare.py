@@ -2001,6 +2001,15 @@ class KeyPagesCheckTest(RunDirCase):
         self.assertEqual(opener.urls, [HOME])
         self.assertEqual(json.loads(out)["pages"][1], page(HOME + "liste", "T1", None, False))
 
+    def test_no_more_links_are_listed_after_the_deadline(self):
+        links = "".join(f'<a href="/p{number}">x</a>' for number in range(40))
+        opener = SiteOpener({HOME: (200, links)})
+        with mock.patch.object(cqa_plan, "KEY_PAGES_DEADLINE", -1):
+            code, out, err = self.check_pages([HOME], opener)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(opener.urls, [HOME])
+        self.assertEqual(len(json.loads(out)["pages"]), 1)
+
     def test_home_links_follow_an_allowed_https_upgrade(self):
         http_home = "http://preprod.example.org/"
         opener = SiteOpener(

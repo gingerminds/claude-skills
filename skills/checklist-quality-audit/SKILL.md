@@ -365,6 +365,8 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" rerun-candidates "$RUN" --refs CQ-3,CQ-12
 ```
 
+When no row is left to rerun (the lead answered « Passer » to everything, or no answered row has a lot), run step 4 now (page comment), then go to step 6. Restricted-role `question` entries (the `question` bullet above) are handled last: ask them after every other entry, and rerun their rows in a rerun of their own, after the rerun of the other answered entries is closed, so that back-office rows never run under the restricted session.
+
 1. Open the rerun, relaunch the tools that need it (section 10, step 7):
 
 ```bash

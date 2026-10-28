@@ -111,7 +111,8 @@ python3 "$S/cqa_plan.py" key-pages-check "$RUN"
 - It requests every key page and the internal links of the home page (50 requests at most, at the toolbox rate, 100 seconds at most, on the origin of the target only) and prints `{"pages": [{"url", "template", "status", "checked", "gap"}], "home_links_404": [<urls>]}`. A page with `checked` false was not requested (another origin, or the time limit): it is not a gap.
 - Count only the pages with `checked` true. `gap` is true for a key page that does not answer 2xx or 3xx and for a dead link of the home page. A checked page with `status` `null` is « <url> ne répond pas »; a `status` 404 is « <url> répond 404 ». The page of the template « 404 » that answers 404 is expected: no gap, no replacement asked.
 - Interactive mode: each gap goes in the table of checks and in `diagnostic.json`, and a key page with a gap is not audited as it is: ask the lead for a replacement (section 6.3 of `references/context.md`).
-- Autonomous mode: ask nothing. Record each gap with `cqa_plan.py defer "$RUN" --kind gap --detail "<url> répond <status>"` (« ne répond pas » when `status` is `null`); the page stays as the lead validated it.
+- The gaps go in the table of checks and in `diagnostic.json`, in both modes. Dead home links go there as one combined mention at most (« <n> liens de l'accueil répondent 404 »), never one by one.
+- Autonomous mode: ask nothing. Record each key page with a gap with `cqa_plan.py defer "$RUN" --kind gap --detail "<url> répond <status>"` (« ne répond pas » when `status` is `null`); dead home links are not deferred; the page stays as the lead validated it.
 
 ## 5. Claude in Chrome (tool "Navigateur")
 
