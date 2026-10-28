@@ -421,6 +421,13 @@ class AgentsTest(unittest.TestCase):
             with self.subTest(server=needle):
                 self.assertIn(needle, server)
 
+    def test_agents_date_the_tool_evidence(self):
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            with self.subTest(agent=path.name):
+                self.assertIn("tool_dates", text)
+                self.assertIn("`started_at` of its `result.json`", text)
+
     def test_followup_writes_a_complete_lot_document(self):
         for path in (AUDITOR, BROWSER):
             with self.subTest(agent=path.name):

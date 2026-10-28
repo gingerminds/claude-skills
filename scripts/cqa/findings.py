@@ -43,6 +43,9 @@ _PHP_AJAX = "/wp-admin/admin-ajax.php"
 _FRONT_CONTROLLER = "/index.php/"
 _DOT_SEGMENT = re.compile(r"(?:^|/)\.\.?(?:/|$)")
 
+_TOOL_NAME = re.compile(r"[a-z0-9-]+")
+_TOOL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
+
 _HUMAN_TOOL = "Intervention humaine"
 _OPTIONAL_TEXTS = ("todo", "human_check", "divergence")
 _RANK = {verdict: index for index, verdict in enumerate(VERDICTS)}
@@ -237,6 +240,22 @@ def _finding_problems(item: dict, app_path: str) -> list[str]:
         problems.extend(_evidence_problems(item["evidence"]))
     if "needs_probes" in item:
         problems.extend(_probe_problems(item["needs_probes"], app_path))
+    if "tool_dates" in item:
+        problems.extend(_tool_dates_problems(item["tool_dates"]))
+    return problems
+
+
+def _tool_dates_problems(value) -> list[str]:
+    if not isinstance(value, dict):
+        return ["« tool_dates » doit être un objet {outil: date}"]
+    problems = []
+    for name, date in value.items():
+        if not _TOOL_NAME.fullmatch(name):
+            problems.append(f"« tool_dates » : nom d'outil {_show(name)} invalide")
+        elif not (isinstance(date, str) and _TOOL_DATE.fullmatch(date)):
+            problems.append(
+                f"« tool_dates » : date {_show(date)} invalide pour l'outil {_show(name)}"
+            )
     return problems
 
 

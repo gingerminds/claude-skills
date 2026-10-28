@@ -81,6 +81,15 @@
           "type": "array",
           "items": {"$ref": "#/$defs/probe"},
           "description": "HTTP responses missing from the tool collection. Ask for them here instead of concluding; they are run once, then the lot is re-run. [] when none is needed. A finding that still waits for probes after the follow-up is capped at unknown: ko and partial are kept, ok_human, ok and na become unknown."
+        },
+        "tool_dates": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z0-9-]+$"},
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+          },
+          "description": "Optional. For each tool whose tools/<tool>/result.json or summary.json was read, the started_at of that result.json (ISO 8601 UTC, for example 2026-10-27T21:15:05Z or 2026-10-27T21:15:05.068Z). It lets a later run tell which rows rest on a tool that was rerun since."
         }
       },
       "examples": [

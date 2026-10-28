@@ -39,7 +39,7 @@ Read, in this order:
 2. `rows.json`: the rows whose `ref` is in `refs`. Use `title`, `category`, `subcategory`, `sections` (Front, Back), `technos`, `tools` (required tools), `tooling_hint` and `fiche_path`.
 3. The fiche of each row (`fiche_path`). "Comment tester" is the test to run, "À faire" the requirement, "Par techno" the techno part. `fiches/index.json` flags truncated fiches: say so in `summary` when the missing part could matter.
 4. `context.json`: `repos` (`name`, `path`, `stack`, `techno`, `audited_sha`, `deployed_sha`, `aligned`), `target`, `ssh`, `test_accounts`, `key_pages`, `available_tools`, `phase_filter`, `plugin_version`.
-5. `tools/<tool>/summary.json` for the tools your rows need (table below). Read `tools/<tool>/result.json` first: a tool without `result.json` has not finished; a `status` other than `ok` comes with its `reason`.
+5. `tools/<tool>/summary.json` for the tools your rows need (table below). Read `tools/<tool>/result.json` first: a tool without `result.json` has not finished; a `status` other than `ok` comes with its `reason`. Note the `started_at` of each `result.json` you read.
 6. `facts/server.json`, if it exists.
 7. `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/references/verdicts.md`: the verdict rules. Follow them exactly.
 8. For each repo whose `stack` is set: `${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md`, then what it gives for the review and security natures. In these files, read `${CLAUDE_SKILL_DIR}/../..` as `${CLAUDE_PLUGIN_ROOT}`. A repo with `stack: null` has no stack resource: stay generic.
@@ -192,6 +192,6 @@ With `Follow-up: yes`:
 
 ## Output
 
-1. Write `findings/<lot>.json` (or `findings/<lot>-followup.json` in a follow-up), with one finding for every row of the lot. The format is `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/schemas/finding.schema.json`; the rules for `divergence`, `needs_probes` and the verdicts are in `verdicts.md`.
+1. Write `findings/<lot>.json` (or `findings/<lot>-followup.json` in a follow-up), with one finding for every row of the lot. The format is `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/schemas/finding.schema.json`; the rules for `divergence`, `needs_probes` and the verdicts are in `verdicts.md`. In every finding, fill `tool_dates` with one entry per tool whose `result.json` or `summary.json` you read: `{"<tool>": "<started_at>"}`, where the date is the `started_at` of its `result.json`, copied as is (for example `{"crawl": "2026-10-27T21:15:05.068Z"}`). Use `{}` when you read no tool.
 2. Check it: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cqa_plan.py" validate "<run dir>" "<lot>"`, with `--followup` for the follow-up file. It prints `{"ok": ..., "errors": [...]}`. Fix every error and check again, twice at most.
 3. Return at most 10 lines, in French: the file written, the count per verdict, the rows still waiting for probes, the commands refused by the guard, the tools missing or failed, the validation errors left. Never a secret.

@@ -424,6 +424,29 @@ class ValidateDocumentTest(unittest.TestCase):
         )
         self.assertEqual(errors, ["constat CQ-79 : preuve n° 2 (file) : « path » manquant"])
 
+    def test_tool_dates_are_optional_and_checked(self):
+        valid, errors = validate(make_finding(), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        dates = {"crawl": "2026-10-27T21:15:05.068Z", "a11y": "2026-10-27T21:15:05Z"}
+        valid, errors = validate(make_finding(tool_dates=dates), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(valid[0]["tool_dates"], dates)
+        cases = {
+            "Crawl": ("2026-10-27T21:15:05Z", "nom d'outil « Crawl » invalide"),
+            "crawl": ("hier", "date « hier » invalide pour l'outil « crawl »"),
+        }
+        for name, (value, message) in cases.items():
+            with self.subTest(name=name):
+                valid, errors = validate(make_finding(tool_dates={name: value}), make_finding(ref=80))
+                self.assertEqual([item["ref"] for item in valid], [80])
+                self.assertEqual(errors, [f"constat CQ-79 : « tool_dates » : {message}"])
+        for value in (["crawl"], "2026-10-27T21:15:05Z", None):
+            with self.subTest(value=value):
+                valid, errors = validate(make_finding(tool_dates=value), make_finding(ref=80))
+                self.assertEqual(
+                    errors, ["constat CQ-79 : « tool_dates » doit être un objet {outil: date}"]
+                )
+
     def test_needs_probes(self):
         probes = [
             {"url": "https://preprod.example.org/robots.txt", "method": "GET"},
@@ -865,7 +888,9 @@ class SchemaTest(unittest.TestCase):
         self.assertEqual(self.schema["properties"]["findings"]["items"], {"$ref": "#/$defs/finding"})
 
     def test_every_property_of_the_finding_is_described(self):
-        self.assertEqual(set(self.finding["properties"]), set(REQUIRED_FINDING_KEYS))
+        self.assertEqual(
+            set(self.finding["properties"]), set(REQUIRED_FINDING_KEYS) | {"tool_dates"}
+        )
         for name, definition in self.finding["properties"].items():
             with self.subTest(name=name):
                 self.assertTrue(definition.get("description"))

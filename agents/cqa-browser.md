@@ -54,7 +54,7 @@ Read, in this order:
 2. `rows.json`: the rows whose `ref` is in `refs`. Use `title`, `category`, `sections`, `tools`, `tooling_hint` and `fiche_path`.
 3. The fiche of each row (`fiche_path`). "Comment tester" is the test to run, "À faire" the requirement, "Par techno" the techno part.
 4. `context.json`: `target`, `key_pages` (`template`, `url`), `test_accounts` (`front`, `backoffice`: whether the lead has test accounts to log in with), `repos`, `available_tools`, `phase_filter`.
-5. `tools/<tool>/summary.json` of the tools your rows need (`a11y`, `lighthouse`, `nu`, `http`...). Read `tools/<tool>/result.json` first: a tool without `result.json` has not finished, do not wait for it; a `status` other than `ok` comes with its `reason`.
+5. `tools/<tool>/summary.json` of the tools your rows need (`a11y`, `lighthouse`, `nu`, `http`...). Read `tools/<tool>/result.json` first: a tool without `result.json` has not finished, do not wait for it; a `status` other than `ok` comes with its `reason`. Note the `started_at` of each `result.json` you read.
 6. `facts/server.json` when `needs_server_facts` is true: the server part of the mixed rows. A fact that is missing makes that part `unknown`.
 7. `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/references/verdicts.md`: the verdict rules. Follow them exactly.
 
@@ -102,6 +102,6 @@ With `Follow-up: yes`:
 
 ## Output
 
-1. Write `findings/<lot>.json` (or `findings/<lot>-followup.json` in a follow-up), with one finding for every row of the lot. The format is `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/schemas/finding.schema.json`; the rules for `divergence`, `needs_probes` and the verdicts are in `verdicts.md`.
+1. Write `findings/<lot>.json` (or `findings/<lot>-followup.json` in a follow-up), with one finding for every row of the lot. The format is `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/schemas/finding.schema.json`; the rules for `divergence`, `needs_probes` and the verdicts are in `verdicts.md`. In every finding, fill `tool_dates` with one entry per tool whose `result.json` or `summary.json` you read: `{"<tool>": "<started_at>"}`, where the date is the `started_at` of its `result.json`, copied as is (for example `{"crawl": "2026-10-27T21:15:05.068Z"}`). Use `{}` when you read no tool.
 2. You cannot run the validator: the orchestrator does. Check yourself that the JSON is valid, that every ref of the lot appears once, that every finding has its nine keys, and that the texts stay within their lengths.
 3. Return at most 10 lines, in French: the file written, the count per verdict, the rows still waiting for probes, the pages that could not be reached, the logins missing. Never a secret.
