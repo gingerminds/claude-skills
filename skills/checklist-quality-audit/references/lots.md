@@ -26,9 +26,11 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" lots "$RUN"
 ```
 
-- Writes `lots.json` and prints the lots (`id`, `kind`, `needs_toolbox`, `needs_server_facts`, `rows`), the rows excluded by reason and the coverage.
+- Writes `lots.json` and prints the lots (`id`, `kind`, `needs_toolbox`, `needs_server_facts`, `needs_session`, `rows`), the rows excluded by reason and the coverage.
 - Excluded before any evaluation: `standby` (never touched), `no_fiche`, `techno` (« Non applicable » with its reason), `phase` (J0 / J+7, left as they are), `no_tools` (not evaluable, with the missing tools).
-- Order of the lots: `server`, the `code-*` lots, the `browser-*` lots, then their `-outils` siblings (rows that need "Audit web" or "Crawler").
+- Order of the lots: `server`, the `code-*` lots, the `browser-*` lots without a session, the `browser-*-session` lots, then the `-outils` siblings (rows that need "Audit web" or "Crawler", or whose `tooling_hint` names a toolbox tool such as gitleaks, testssl, lighthouse, axe, Nu validator, Yellow Lab, redocly, schemathesis or a crawl).
+- A browser row needs a session when its tools include "Comptes de test" or one of its sections starts with "Back" or is "BO". Those rows go to `browser-accessibilite-session` and `browser-autres-session`, with `needs_session: true`; every other lot has `needs_session: false`. The other browser rows are evaluated without any login.
+- Lots are frozen per run: a `lots.json` written by an older version has no `needs_session`, which is read as `false`. An old run keeps its lots (no `-session` split); only a new run, or a run that runs `cqa_plan.py lots` again, gets the split.
 - Show the lead one line: « <n> lots : server (<rows> lignes), code-securite (<rows>), ... ».
 
 ```bash
@@ -105,10 +107,10 @@ A sub-agent returns 10 lines at most: relay to the lead one short French line pe
 
 ## 4. Order and limits
 
-1. `server` first when there is one (always `gm:cqa-auditor`), with the `code-*` lots whose `needs_toolbox` is false: 4 sub-agents at most at once. Dispatch this first batch, then do the login pause (`references/browser.md`) while it runs.
-2. The `browser-*` lots, one at a time, once the `server` lot is done (its `facts/server.json` serves the mixed rows): `gm:cqa-browser`, or the fallback of `references/browser.md`. A browser lot may run beside code lots, within the limit of 4.
-3. The `-outils` lots once the toolbox has finished (its background task notified you), whatever its exit code. Toolbox not ready: dispatch them with the others; they read the skipped results and give `unknown` for those parts. `browser-*-outils` lots follow the browser rules.
-4. In autonomous mode (`mode` is `autonome`) the lots that need a session (back-office, test accounts) are held: not dispatched during the run, with no login pause. They are dispatched at the end of the audit as normal first-round lots, once the lead has logged in or declined (`references/browser.md`, SKILL.md section 8, step 5). A refusal of the guard (also one a sub-agent reports in its return: one `defer --kind ssh_refused --refs <its refs> --detail "<commande> Impact : <impact>"` each), a deviation, a disconnected Chrome or any question never stops the run: `cqa_plan.py defer` sets it aside and the rows stay `unknown` (SKILL.md, section 6), then the lead settles it at the end (section 8, step 5).
+1. `server` first when there is one (always `gm:cqa-auditor`), with the `code-*` lots whose `needs_toolbox` is false: 4 sub-agents at most at once. Dispatch this first batch.
+2. The `browser-*` lots whose `needs_session` is false, one at a time, once the `server` lot is done (its `facts/server.json` serves the mixed rows): `gm:cqa-browser`, or the fallback of `references/browser.md`. A browser lot may run beside code lots, within the limit of 4. Then the login pause (`references/browser.md`), then the `browser-*-session` lots (`needs_session: true`), one at a time. Only the `-session` lots wait for the login.
+3. The `-outils` lots once the toolbox has finished (its background task notified you), whatever its exit code. Toolbox not ready: dispatch them with the others; they read the skipped results and give `unknown` for those parts. `browser-*-outils` lots follow the browser rules, and those whose `needs_session` is true run after the login pause.
+4. In autonomous mode (`mode` is `autonome`) the lots whose `needs_session` is true (back-office, test accounts) are held: not dispatched during the run, with no login pause. They are dispatched at the end of the audit as normal first-round lots, once the lead has logged in or declined (`references/browser.md`, SKILL.md section 8, step 5). A refusal of the guard (also one a sub-agent reports in its return: one `defer --kind ssh_refused --refs <its refs> --detail "<commande> Impact : <impact>"` each), a deviation, a disconnected Chrome or any question never stops the run: `cqa_plan.py defer` sets it aside and the rows stay `unknown` (SKILL.md, section 6), then the lead settles it at the end (section 8, step 5).
 5. Before each wave, recheck the target and SSH, and before each browser lot call `tabs_context_mcp` (SKILL.md, section 6).
 6. When resuming, skip every lot whose first-round file already passes `validate`.
 

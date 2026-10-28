@@ -28,15 +28,15 @@ The Chrome tools may be deferred. Load them in one ToolSearch call:
 
 ## Login pause
 
-Only when "Navigateur" is available, after the first batch of lots is dispatched (`references/lots.md`):
+Only when "Navigateur" is available, after the browser lots whose `needs_session` is false have run (the front lots, evaluated without a session), and before the `browser-*-session` lots (`references/lots.md`). A `lots.json` without `needs_session` (older run) reads as false for every lot: there is no `-session` lot and no login is held back:
 
 1. Create a tab on `target.preprod_url` (on the prod URL for a prod run) and, with `test_accounts.backoffice`, one on the key page « Back-office ».
    With `sites`, open one tab per back-office of its own (`backoffice` is `propre`): its `home` host, or its login page when the lead gave it. A `commun` back-office needs no tab of its own. For a site with `sso` true, do not open a login tab: tell the lead « <domaine> : connexion par SSO, à faire vous-même ».
 2. Ask « Connectez-vous dans Chrome, dans les onglets ouverts : Basic Auth de la préprod si elle le demande, puis vos comptes de test. N'utilisez pas cette fenêtre Chrome pendant les lots navigateur. » with « C'est fait » and « Continuer sans connexion ».
 3. Without login, the rows that need a session end `unknown`, with the steps in `human_check`.
-4. After the last browser lot, close these tabs with `tabs_close_mcp`.
+4. After the last `-session` lot, close these tabs with `tabs_close_mcp`.
 
-In autonomous mode (`mode` is `autonome`) there is no pause at this point: the lead is away and the audit never waits. The browser lots that need no session run first; the lots that need one (back-office, test accounts) are held, not dispatched. The login pause happens last, at the end of the audit (SKILL.md, section 8, step 5), and the held lots are dispatched then, as normal first-round lots; if the lead declines or cannot log in, they are dispatched without a session and the agents write `unknown` with the reason. Record it once, with the refs of the held lots:
+In autonomous mode (`mode` is `autonome`) there is no pause at this point: the lead is away and the audit never waits. The browser lots whose `needs_session` is false run first; the lots whose `needs_session` is true (back-office, test accounts) are held, not dispatched. The login pause happens last, at the end of the audit (SKILL.md, section 8, step 5), and the held lots are dispatched then, as normal first-round lots; if the lead declines or cannot log in, they are dispatched without a session and the agents write `unknown` with the reason. Record it once, with the refs of the held lots:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

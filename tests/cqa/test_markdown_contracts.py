@@ -497,6 +497,38 @@ class SkillTest(unittest.TestCase):
             with self.subTest(context=needle):
                 self.assertIn(needle, context)
 
+    def test_front_lots_run_before_login_then_session_lots(self):
+        audit = _section(_text(SKILL), "6. Audit")
+        step3 = audit[audit.index("3. Dispatch the first lots") : audit.index("4. The `server` lot")]
+        self.assertIn("without a session", step3)
+        self.assertIn("`needs_session`", step3)
+        self.assertLess(step3.index("without a session"), step3.index("login pause"))
+        self.assertIn("`-session` lots", step3)
+        step5 = audit[audit.index("5. The browser lots") : audit.index("6. Once the toolbox")]
+        self.assertIn("`-session` lots", step5)
+        self.assertLess(step5.index("`needs_session` false"), step5.index("`-session` lots"))
+        self.assertIn("`tooling_hint`", audit[audit.index("6. Once the toolbox") :])
+        lots = _text(REFERENCES / "lots.md")
+        for needle in (
+            "browser-autres-session",
+            "`needs_session: true`",
+            "Comptes de test",
+            "no `needs_session`",
+            "read as `false`",
+            "gitleaks",
+        ):
+            with self.subTest(lots=needle):
+                self.assertIn(needle, lots)
+        order = lots[lots.index("## 4. Order and limits") :]
+        self.assertLess(order.index("`needs_session` is false"), order.index("login pause"))
+        self.assertLess(order.index("login pause"), order.index("`browser-*-session` lots"))
+        browser = _text(REFERENCES / "browser.md")
+        self.assertIn("`needs_session` is false", browser)
+        self.assertIn("one tab per back-office", browser)
+        self.assertIn("SSO", browser)
+        self.assertNotIn("lots that need a session", browser + lots + _text(SKILL))
+        self.assertIn("`needs_session`", _text(BROWSER))
+
     def test_autonomous_mode_defers_and_resumes(self):
         skill = _text(SKILL)
         audit = _section(skill, "6. Audit")

@@ -50,7 +50,7 @@ Allowed actions:
 
 Read, in this order:
 
-1. `lots.json`: the entry whose `id` is your lot (`needs_toolbox`, `needs_server_facts`, `refs`).
+1. `lots.json`: the entry whose `id` is your lot (`needs_toolbox`, `needs_server_facts`, `needs_session`, `refs`).
 2. `rows.json`: the rows whose `ref` is in `refs`. Use `title`, `category`, `sections`, `tools`, `tooling_hint` and `fiche_path`.
 3. The fiche of each row (`fiche_path`). "Comment tester" is the test to run, "À faire" the requirement, "Par techno" the techno part.
 4. `context.json`: `target`, `key_pages` (`template`, `url`), `sites` when present (`domain`, `backoffice`, `sso`, `home`: visit each `home` after the key pages, in addition to them), `test_accounts` (`front`, `backoffice`: whether the lead has test accounts to log in with), `repos`, `available_tools`, `phase_filter`.
