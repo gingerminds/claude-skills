@@ -57,7 +57,7 @@ A run is complete once its final scan has run: section 8 then writes `done.json`
 
 1. `RUN` is its `path`.
 2. The current invocation wins over what the run stored. A `--phase` other than its `phase_filter` cannot reuse its lots and findings: say « Ce run a été lancé pour une autre phase : nouveau run. » and start a new run. Otherwise write the current `dry_run` in `context.json`. `mode` and `notion_write` are those of the invocation being resumed and are reused as stored, without asking again (a new invocation asks both questions again: section 4, section 10 step 6, section 11 step 4; a run without them is interactive and section 7 asks the consent); `deferred.json` keeps its open entries, which section 8, step 5 handles.
-3. Run `cqa_plan.py context "$RUN" --check`. On errors, ask « Le contexte du run <run_id> est invalide (<erreurs>). » with « Lancer un nouveau run » and « Arrêter ».
+3. Run `cqa_plan.py context "$RUN" --check`. On errors, ask « Le contexte du run <run_id> est invalide (<erreurs>). » with « Lancer un nouveau run » and « Arrêter ». `warnings` (a relative `ssh.app_dirs` folder left by an older run) do not block: say them to the lead in one line and ask that folder again before any server command.
 4. If `target.access` is `basic_auth`, ask the Basic Auth credentials again (they are never stored) and check them with `probe-target --auth-env`, as in section 4.
 5. Restart at the first stage it lacks:
    - `context` false: section 4, in this folder.

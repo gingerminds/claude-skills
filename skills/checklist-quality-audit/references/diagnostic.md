@@ -33,7 +33,7 @@ python3 "$S/cqa_ssh_ro.py" <alias> -- find /var/www /srv /app /opt -maxdepth 3 -
 
 A root missing on the server makes `find` exit 1: keep the paths it printed (the lines starting with `find:` are the missing roots). For an application in a container (Docker deployments often sit under `/app` or `/opt`), also find the folder inside the container with the same `find` after `-- docker exec <conteneur>` (or `-- docker compose -f <dossier sur l'hôte>/docker-compose.yml exec -T <service>`).
 
-Record it in `ssh.app_dirs`: `{"<repo name>": "<dossier>"}`, or for an application in a container `{"<repo name>": {"host": "<dossier sur l'hôte>", "container": "<dossier dans le conteneur>"}}`. Use `container` for `--app-dir` of the SQL queries in a container, `host` otherwise (the commands below run on the server). Then:
+Record it in `ssh.app_dirs`: `{"<repo name>": "<dossier>"}`, or for an application in a container `{"<repo name>": {"host": "<dossier sur l'hôte>", "container": "<dossier dans le conteneur>"}}`. Use `container` for `--app-dir` of the SQL queries in a container, `host` otherwise (the commands below run on the server; without `host`, when the code exists only in the image, run them through `docker exec <conteneur>` with `container`). « Je ne sais pas »: record `null`. Then:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

@@ -116,13 +116,17 @@ def _check_path(path: str, *, content: bool = False) -> None:
 # --- Option parsing ---------------------------------------------------------------------
 
 class _Options(NamedTuple):
-    """Allowed options of a command. A value pattern of None accepts any value."""
+    """Allowed options of a command. A value pattern of None accepts any value.
+
+    optional holds the short options whose value is optional and attached only (-I, -Iseconds).
+    """
 
     flags: str = ""
     valued: dict = {}
     long_flags: frozenset = frozenset()
     long_valued: dict = {}
     forbidden: dict = {}
+    optional: dict = {}
 
 
 def _parse(command: str, args: list, spec: _Options) -> tuple:
@@ -157,6 +161,12 @@ def _parse(command: str, args: list, spec: _Options) -> tuple:
             if char in spec.flags:
                 options.append((name, None))
                 continue
+            if char in spec.optional:
+                value = cluster[position + 1:]
+                if value:
+                    _check_value(command, name, value, spec.optional[char])
+                options.append((name, value or None))
+                break
             if char not in spec.valued:
                 raise Refused(f"{command} : option non autorisée « {name} »")
             value = cluster[position + 1:]
@@ -221,10 +231,17 @@ _URI = re.compile(r"[A-Za-z0-9:/._-]+")
 _FORMAT = re.compile(r"table|json|yaml|csv|tsv|list|count")
 _FIELDS = re.compile(r"[a-z_,-]+")
 _WORD = re.compile(r"[a-z-]+")
-_OPTION_NAME = re.compile(r"[A-Za-z0-9_.-]+")
-_WP_SECRET_OPTION = re.compile(
-    r"pass|pwd|secret|token|key|salt|auth|nonce|licen[cs]e|credential|private|api", re.I
+# Core options without secrets. Plugin options are refused: their arrays often hold API keys.
+WP_READABLE_OPTIONS = (
+    "siteurl", "home", "blogname", "blogdescription", "blog_public", "WPLANG", "template",
+    "stylesheet", "active_plugins", "permalink_structure", "users_can_register", "default_role",
+    "timezone_string", "date_format", "time_format", "show_on_front", "page_on_front",
+    "page_for_posts", "posts_per_page", "default_comment_status", "comment_registration",
+    "comment_moderation", "close_comments_for_old_posts", "uploads_use_yearmonth_folders",
+    "wp_page_for_privacy_policy", "db_version", "auto_update_plugins", "auto_update_themes",
 )
+# Cron arguments and package URLs (license keys of premium plugins) can carry secrets.
+_WP_SECRET_FIELDS = frozenset({"args", "update_package"})
 _TIME_STYLE = re.compile(r"(?:posix-)?(?:full-iso|long-iso|iso|locale)|\+.+")
 
 _FOLLOW = "suivi continu refusé (-f, --follow) : la commande ne se terminerait pas"
@@ -302,18 +319,27 @@ _FIND_VALUED = frozenset({
 _FIND_PATH_VALUED = frozenset({"-newer", "-anewer", "-cnewer", "-samefile"})
 _FIND_FORBIDDEN = ("-exec", "-ok", "-delete", "-fprint", "-fls")
 
+
+def _abbreviations(*words) -> re.Pattern:
+    """Match a word or any of its prefixes, as GNU tools accept for an option value."""
+    return re.compile("|".join(sorted({word[:end] for word in words
+                                       for end in range(1, len(word) + 1)})))
+
+
+_ISO_FORMAT = _abbreviations("date", "hours", "minutes", "seconds", "ns")
 _CLOCK = "date : réglage de l'horloge refusé (-s, --set ou une date en argument)"
 _DATE_FILE = "date : -f refusé, il lit un fichier dont les lignes s'affichent dans les erreurs"
 _DATE = _Options(
-    flags="uRI",
+    flags="uR",
     valued={"d": None},
     long_flags=frozenset({"--utc", "--universal", "--rfc-email", "--iso-8601"}),
     long_valued={
         "--date": None,
-        "--iso-8601": re.compile(r"date|hours|minutes|seconds|ns"),
-        "--rfc-3339": re.compile(r"date|seconds|ns"),
+        "--iso-8601": _ISO_FORMAT,
+        "--rfc-3339": _abbreviations("date", "seconds", "ns"),
     },
     forbidden={"-s": _CLOCK, "--set": _CLOCK, "-f": _DATE_FILE, "--file": _DATE_FILE},
+    optional={"I": _ISO_FORMAT},
 )
 
 _PS = _Options(
@@ -587,10 +613,21 @@ def _wp(args: list) -> None:
     if not words and options == ["--version"]:
         return
     words = tuple(words)
+    for option in options:
+        name, _, value = option.partition("=")
+        if name == "--fields" and _WP_SECRET_FIELDS & set(value.split(",")):
+            raise Refused(
+                "wp : --fields refuse args et update_package (arguments des tâches cron, "
+                "URL de paquet avec clé de licence)"
+            )
     if len(words) == 3 and words[:2] == ("option", "get"):
         name = words[2]
-        if not _OPTION_NAME.fullmatch(name) or _WP_SECRET_OPTION.search(name):
-            raise Refused(f"wp option get : nom d'option refusé (motif de secret) : « {name} »")
+        if name not in WP_READABLE_OPTIONS:
+            raise Refused(
+                f"wp option get : « {name} » est hors de la liste des options sans secret "
+                "(siteurl, home, blogname, blog_public, template, stylesheet, active_plugins, "
+                "permalink_structure... : liste complète dans references/server.md)"
+            )
     elif words == ("site", "list"):
         if "--field=url" not in options:
             raise Refused("wp site list : seule la forme --field=url est autorisée")
@@ -752,7 +789,25 @@ _SQL_WRITE = re.compile(
     re.I,
 )
 _SQL_CREDENTIAL = re.compile(
-    r"pass|pwd|secret|token|salt|authentication_string|api_?key|\bCREATE\s+USER\b", re.I
+    r"pass|pwd|secret|token|salt|authentication_string|api_?key|activation_key|recovery_code"
+    r"|consumer_key|licen[cs]e_?key|private_key|cron_key|totp|\bCREATE\s+USER\b",
+    re.I,
+)
+# Columns that hold secrets under a common name, refused when their table is named anywhere.
+_SQL_SECRET_COLUMNS = (
+    (lambda table: table == "sessions" or table.endswith("_sessions"),
+     frozenset({"id", "sid", "ssid", "session", "payload", "session_key", "session_value"})),
+    (lambda table: table.endswith(("usermeta", "sitemeta")), frozenset({"meta_value"})),
+    (lambda table: table in ("config", "cache", "users_data")
+     or table.endswith(("_config", "_cache", "_users_data"))
+     or table.startswith("cache_") or "_cache_" in table or "key_value" in table,
+     frozenset({"data", "value"})),
+    (lambda table: table in ("jobs", "failed_jobs", "job_batches") or table.endswith("_jobs"),
+     frozenset({"payload"})),
+)
+# The text of the statements of other sessions (it can quote a session id or a token).
+_SQL_HISTORY = frozenset(
+    {"processlist", "performance_schema", "general_log", "slow_log", "binlog", "relaylog"}
 )
 _SQL_SECRET = (
     "requête refusée : elle vise des mots de passe, jetons ou secrets ; seul le comptage par "
@@ -816,8 +871,10 @@ def _sql_body(query) -> str:
     if write:
         raise Refused(f"mot-clé d'écriture ou de verrou refusé : « {write.group(1).upper()} »")
     tokens = _sql_tokens(body)
+    _check_statement_history(tokens)
     if _SQL_CREDENTIAL.search(body):
         _check_hash_count(tokens)
+    _check_secret_columns(tokens)
     _check_select_lists(tokens)
     return body
 
@@ -829,6 +886,44 @@ def _sql_tokens(body: str) -> list:
         if token in ("'", '"', "`"):
             raise Refused(f"guillemet « {token} » non fermé dans la requête")
     return tokens
+
+
+def _check_statement_history(tokens: list) -> None:
+    """Refuse a read of the statements of other sessions: process list, logs, binlog."""
+    names = [_sql_name(token).lower() for token in tokens]
+    for index, name in enumerate(names):
+        after = names[index + 1:index + 3]
+        if (
+            name in _SQL_HISTORY
+            or (name == "sys" and after[:1] == ["."])
+            or (name == "information_schema" and len(after) == 2 and after[0] == "."
+                and after[1].startswith("innodb_"))
+            or (name == "show" and after[:1] == ["engine"])
+        ):
+            raise Refused(
+                "requête refusée : elle lit le texte des requêtes d'autres sessions "
+                "(PROCESSLIST, performance_schema, sys, INNODB_*, journaux, binlog), "
+                "qui peut contenir des secrets"
+            )
+
+
+def _check_secret_columns(tokens: list) -> None:
+    """Refuse any mention of a secret column: no value, no condition, no function on it."""
+    names = [_sql_name(token).lower() for token in tokens]
+    if "option_value" in names:
+        raise Refused(
+            "colonne « option_value » refusée : les options portent des clés d'API et des "
+            "mots de passe ; lire une option sans secret avec wp option get <nom>"
+        )
+    for is_table, columns in _SQL_SECRET_COLUMNS:
+        table = next((name for name in names if is_table(name)), None)
+        column = next((name for name in names if name in columns), None)
+        if table is not None and column is not None:
+            raise Refused(
+                f"colonne « {column} » de la table « {table} » refusée : elle porte des secrets "
+                "(session, réglages, cache, file de tâches) ; aucune lecture, condition ni "
+                "fonction n'est permise sur elle, compter les lignes par une autre colonne"
+            )
 
 
 class _Cursor:

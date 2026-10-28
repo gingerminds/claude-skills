@@ -576,6 +576,129 @@ SQL_HASH_COUNTS = [
     "SELECT COUNT(*) total FROM wp_users WHERE ID = 1 AND LEFT(user_pass, 4) = '$wp$'",
 ]
 
+# Secret columns other than the password hashes are never named: no value, no oracle (L-B25).
+SQL_SECRET_COLUMNS_REFUSED = {
+    "reset keys, recovery codes, API keys, private and cron keys": [
+        "SELECT COUNT(*) FROM wp_users WHERE user_activation_key LIKE 'a%'",
+        "SELECT COUNT(*) FROM wp_users WHERE user_activation_key = ''",
+        "SELECT COUNT(*) FROM wp_users WHERE user_activation_key <> ''",
+        "SELECT COUNT(*) FROM wp_users WHERE user_activation_key IS NULL",
+        "SELECT COUNT(*) FROM wp_users WHERE `user_activation_key` BETWEEN 'a' AND 'b'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_activation_key, 4) = '1700'",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_activation_key) = 45",
+        "SELECT user_activation_key FROM wp_users",
+        "SELECT COUNT(*) FROM wp_users ORDER BY user_activation_key",
+        "SELECT COUNT(*) FROM users WHERE two_factor_recovery_codes LIKE 'e%'",
+        "SELECT COUNT(*) FROM users WHERE two_factor_secret IS NOT NULL",
+        "SELECT COUNT(*) FROM wc_keys WHERE consumer_key LIKE 'a%'",
+        "SELECT consumer_key FROM wc_keys",
+        "SELECT COUNT(*) FROM wc_keys WHERE consumer_secret > 'cs_m'",
+        "SELECT COUNT(*) FROM wp_edd_licenses WHERE license_key LIKE 'a%'",
+        "SELECT COUNT(*) FROM key_value WHERE name = 'system.private_key'",
+        "SELECT COUNT(*) FROM state WHERE name = 'system.cron_key'",
+        "SELECT COUNT(*) FROM wp_usermeta WHERE meta_key = '_two_factor_totp_key'",
+    ],
+    "session tables": [
+        "SELECT COUNT(*) FROM sessions WHERE sid LIKE 'a%'",
+        "SELECT COUNT(*) FROM sessions WHERE ssid > 'm'",
+        "SELECT COUNT(*) FROM sessions WHERE session LIKE '%uid%'",
+        "SELECT COUNT(*) FROM sessions WHERE id LIKE 'a%'",
+        "SELECT COUNT(*) FROM sessions WHERE id = 'abc'",
+        "SELECT COUNT(*) FROM sessions s WHERE s.id IN ('a', 'b')",
+        "SELECT COUNT(*) FROM sessions WHERE LEFT(id, 1) = 'a'",
+        "SELECT COUNT(*) FROM sessions WHERE CHAR_LENGTH(payload) > 100",
+        "SELECT COUNT(*) FROM sessions WHERE payload REGEXP '^a'",
+        "SELECT COUNT(*) FROM sessions WHERE `sid` RLIKE '^a'",
+        "SELECT COUNT(*) FROM `sessions` WHERE \"sid\" < 'm'",
+        "SELECT COUNT(*) FROM app.sessions WHERE SOUNDEX(payload) = 'A000'",
+        "SELECT COUNT(*) FROM SESSIONS WHERE ID LIKE 'a%'",
+        "SELECT COUNT(*) FROM laravel_sessions WHERE id LIKE 'a%'",
+        "SELECT COUNT(*) FROM sessions ORDER BY id",
+        "SELECT COUNT(*) FROM sessions GROUP BY sid HAVING sid > 'a'",
+        "SELECT COUNT(*) FROM users u JOIN sessions s ON s.user_id = u.uid AND s.id LIKE 'a%'",
+        "SELECT COUNT(id) FROM sessions",
+        "SELECT COUNT(*) FROM node WHERE nid IN (SELECT uid FROM sessions WHERE sid LIKE 'a%')",
+        "SELECT COUNT(*) FROM wp_woocommerce_sessions WHERE session_key LIKE '1%'",
+        "SELECT session_value FROM wp_woocommerce_sessions",
+        "SELECT COUNT(*) FROM wp_woocommerce_sessions WHERE session_value LIKE '%email%'",
+    ],
+    "WordPress options and user or network meta": [
+        "SELECT option_value FROM wp_options WHERE option_name = 'woocommerce_stripe_settings'",
+        "SELECT option_value FROM wp_options WHERE option_name = 'blog_public'",
+        "SELECT COUNT(*) FROM wp_options WHERE option_value LIKE 'sk_live%'",
+        "SELECT COUNT(*) FROM wpx_options WHERE option_name = 'mailgun' "
+        "AND option_value LIKE '%key-%'",
+        "SELECT LENGTH(option_value) FROM wp_options",
+        "SELECT COUNT(*) FROM wp_options WHERE `OPTION_VALUE` > 'a'",
+        "SELECT meta_value FROM wp_usermeta WHERE meta_key = 'wp_capabilities'",
+        "SELECT COUNT(*) FROM wp_usermeta WHERE meta_value LIKE '%administrator%'",
+        "SELECT COUNT(*) FROM wp_usermeta WHERE meta_key = 'session_tokens'",
+        "SELECT COUNT(*) FROM wp_usermeta WHERE umeta_id = 1 AND meta_value > 'a'",
+        "SELECT meta_value FROM wp_2_usermeta",
+        "SELECT meta_value FROM wp_sitemeta WHERE meta_key = 'mailgun'",
+        "SELECT COUNT(*) FROM wp_users u WHERE u.ID IN "
+        "(SELECT user_id FROM wp_usermeta WHERE meta_value LIKE 'a%')",
+    ],
+    "Drupal and Laravel stores": [
+        "SELECT data FROM config WHERE name = 'smtp.settings'",
+        "SELECT COUNT(*) FROM config WHERE name = 'smtp.settings' AND data LIKE '%a%'",
+        "SELECT data FROM d8_config WHERE name = 'recaptcha.settings'",
+        "SELECT value FROM key_value WHERE collection = 'state'",
+        "SELECT value FROM key_value_expire WHERE collection = 'tempstore'",
+        "SELECT data FROM cache_config WHERE cid = 'smtp.settings'",
+        "SELECT COUNT(*) FROM cache_default WHERE data LIKE '%a%'",
+        "SELECT data FROM d8_cache_config WHERE cid = 'smtp.settings'",
+        "SELECT value FROM users_data WHERE module = 'tfa'",
+        "SELECT value FROM cache WHERE `key` = 'laravel_cache:x'",
+        "SELECT payload FROM jobs",
+        "SELECT payload FROM failed_jobs",
+        "SELECT COUNT(*) FROM failed_jobs WHERE payload LIKE '%Notification%'",
+    ],
+    "statement text of other sessions": [
+        "SHOW PROCESSLIST",
+        "SHOW FULL PROCESSLIST",
+        "SELECT info FROM information_schema.processlist",
+        "SELECT `INFO` FROM `information_schema`.`PROCESSLIST`",
+        "SELECT trx_query FROM information_schema.innodb_trx",
+        "SELECT lock_data FROM INFORMATION_SCHEMA.INNODB_LOCKS",
+        "SELECT sql_text FROM performance_schema.events_statements_history",
+        "SELECT COUNT(*) FROM performance_schema.threads",
+        "SELECT current_statement FROM sys.session",
+        "SELECT query FROM `sys`.statement_analysis",
+        "SELECT argument FROM mysql.general_log",
+        "SELECT sql_text FROM mysql.slow_log",
+        "SHOW ENGINE INNODB STATUS",
+        "SHOW BINLOG EVENTS",
+        "SHOW RELAYLOG EVENTS",
+    ],
+}
+
+# Read-only queries the guard keeps allowing next to these secret columns.
+SQL_STILL_OK = [
+    "SELECT COUNT(*) FROM sessions LIMIT 1",
+    "SELECT COUNT(*) FROM sessions WHERE user_id = 1 LIMIT 1",
+    "SELECT COUNT(*) FROM sessions WHERE last_activity > 1700000000",
+    "SELECT COUNT(*) FROM sessions WHERE timestamp > 1700000000",
+    "SELECT COUNT(*) FROM wp_woocommerce_sessions WHERE session_expiry < 1700000000",
+    "SELECT option_name FROM wp_options WHERE autoload = 'yes' LIMIT 20",
+    "SELECT COUNT(*) FROM wp_options WHERE autoload = 'yes'",
+    "SELECT COUNT(*) FROM wp_usermeta WHERE meta_key = 'wp_capabilities' LIMIT 1",
+    "SELECT meta_value FROM wp_postmeta WHERE meta_key = '_wp_page_template' LIMIT 5",
+    "SELECT name FROM config WHERE name LIKE 'system.%' LIMIT 20",
+    "SELECT COUNT(*) FROM key_value WHERE collection = 'state'",
+    "SELECT COUNT(*) FROM failed_jobs LIMIT 1",
+    "SELECT COUNT(*) FROM jobs WHERE queue = 'default'",
+    "SELECT id, title FROM node LIMIT 1",
+    "SELECT COUNT(*) FROM node_field_data WHERE type = 'session'",
+    "SELECT COUNT(*) FROM wp_posts WHERE post_status = 'private'",
+    "SELECT table_name, data_length FROM information_schema.tables "
+    "WHERE table_schema = DATABASE() LIMIT 20",
+    "SHOW ENGINES",
+    "SHOW VARIABLES LIKE 'slow_query_log'",
+    "SHOW STATUS LIKE 'Threads_connected'",
+    "SELECT COUNT(*) FROM watchdog WHERE severity <= 3 LIMIT 1",
+]
+
 # Every way around the count of hash formats, grouped by shape.
 SQL_HASH_REFUSED = {
     "value or secret column outside a length or prefix function": [
@@ -835,6 +958,7 @@ class CheckCommandTest(unittest.TestCase):
             (["date", "--set=2026-01-01"], "horloge"),
             (["date", "--set", "2026-01-01"], "horloge"),
             (["date", "-us", "2026-01-01"], "horloge"),
+            (["date", "-u", "-s", "2026-01-01"], "horloge"),
             (["date", "010100002026"], "horloge"),
             (["date", "-u", "0101000026"], "horloge"),
             (["date", "+%F", "010100002026"], "horloge"),
@@ -850,6 +974,71 @@ class CheckCommandTest(unittest.TestCase):
                 allowed, reason = check_command(argv)
                 self.assertFalse(allowed)
                 self.assertIn(needle, reason)
+
+    def test_date_iso_format_option_is_allowed(self):
+        for argv in (
+            ["date", "-Iseconds"],
+            ["date", "-Is"],
+            ["date", "-Ih"],
+            ["date", "-Idate"],
+            ["date", "-Ins"],
+            ["date", "-Iminutes"],
+            ["date", "-uIseconds"],
+            ["date", "-RI"],
+            ["date", "--iso-8601=s"],
+            ["date", "--iso-8601=min"],
+            ["date", "--rfc-3339=s"],
+        ):
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertTrue(allowed, reason)
+        for argv, needle in (
+            (["date", "-Ix"], "valeur non autorisée pour -I"),
+            (["date", "-Isfoo"], "valeur non autorisée pour -I"),
+            (["date", "--iso-8601=x"], "--iso-8601"),
+            (["date", "-sI"], "horloge"),
+            (["date", "-Is", "0101000026"], "horloge"),
+        ):
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertFalse(allowed)
+                self.assertIn(needle, reason)
+
+    def test_wp_option_get_only_reads_listed_options(self):
+        for name in ("blog_public", "siteurl", "home", "blogname", "template", "stylesheet",
+                     "active_plugins", "permalink_structure", "users_can_register",
+                     "default_role", "WPLANG", "timezone_string"):
+            with self.subTest(name=name):
+                allowed, reason = check_command(["wp", "option", "get", name, "--format=json"])
+                self.assertTrue(allowed, reason)
+        for name in ("woocommerce_stripe_settings", "wp_mail_smtp", "mailgun", "gglcptch_options",
+                     "sendgrid_settings", "admin_email", "cron", "widget_text", "BLOG_PUBLIC",
+                     "blog_public_x", "auth_key", "mailserver_pass", "my_api_token"):
+            with self.subTest(name=name):
+                allowed, reason = check_command(["wp", "option", "get", name])
+                self.assertFalse(allowed)
+                self.assertIn("wp option get", reason)
+                self.assertIn("blog_public", reason)
+
+    def test_wp_fields_that_carry_secrets_are_refused(self):
+        for argv in (
+            ["wp", "cron", "event", "list", "--fields=hook,args"],
+            ["wp", "cron", "event", "list", "--fields=args"],
+            ["wp", "plugin", "list", "--fields=name,update_package"],
+            ["wp", "theme", "list", "--fields=name,update_package", "--format=json"],
+            ["docker", "exec", "app", "wp", "plugin", "list", "--fields=update_package"],
+        ):
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertFalse(allowed)
+                self.assertIn("--fields", reason)
+        for argv in (
+            ["wp", "cron", "event", "list", "--fields=hook,next_run_relative,recurrence"],
+            ["wp", "plugin", "list", "--fields=name,status,version,update,update_version"],
+        ):
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertTrue(allowed, reason)
 
     def test_ls_time_style_value_is_checked(self):
         for argv in (
@@ -939,6 +1128,32 @@ class CheckSqlTest(unittest.TestCase):
                     self.assertFalse(allowed)
                     self.assertTrue(reason)
                     self.assertNotIn(chr(0x2014), reason)
+
+    def test_secret_columns_are_never_named(self):
+        for shape, queries in SQL_SECRET_COLUMNS_REFUSED.items():
+            for query in queries:
+                with self.subTest(shape=shape, query=query):
+                    allowed, reason = check_sql(query)
+                    self.assertFalse(allowed)
+                    self.assertTrue(reason)
+                    self.assertNotIn(chr(0x2014), reason)
+
+    def test_secret_column_reasons(self):
+        reason = check_sql("SELECT COUNT(*) FROM sessions WHERE id LIKE 'a%'")[1]
+        self.assertIn("« id »", reason)
+        self.assertIn("« sessions »", reason)
+        self.assertIn("secrets", reason)
+        reason = check_sql("SELECT option_value FROM wp_options WHERE option_name = 'home'")[1]
+        self.assertIn("« option_value »", reason)
+        self.assertIn("wp option get", reason)
+        reason = check_sql("SHOW FULL PROCESSLIST")[1]
+        self.assertIn("autres sessions", reason)
+
+    def test_queries_next_to_secret_columns_stay_allowed(self):
+        for query in SQL_STILL_OK + SQL_HASH_COUNTS:
+            with self.subTest(query=query):
+                allowed, reason = check_sql(query)
+                self.assertTrue(allowed, reason)
 
     def test_hash_count_refusal_names_the_allowed_form(self):
         reason = check_sql("SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 5) = 'x'")[1]

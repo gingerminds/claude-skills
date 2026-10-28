@@ -900,28 +900,46 @@ class ContextCheckTest(RunDirCase):
                 self.assertIn(dotted.replace(".0.", "[0]."), report["errors"][0])
 
     def test_app_dirs_take_a_host_path_or_host_and_container(self):
+        for app_dirs in (
+            {"laravel": "/srv/app", "nuxt-3": {"host": "/opt/shop/front", "container": "/app"}},
+            {"laravel": {"container": "/var/www/html"}},
+            {"laravel": {"host": None, "container": "/var/www/html"}},
+            {"laravel": None},
+        ):
+            with self.subTest(app_dirs=app_dirs):
+                context = valid_context()
+                context["ssh"]["app_dirs"] = app_dirs
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report), (0, {"ok": True, "errors": []}))
+
+    def test_legacy_app_dirs_are_tolerated_with_a_warning(self):
         context = valid_context()
-        context["ssh"]["app_dirs"] = {
-            "laravel": "/srv/app",
-            "nuxt-3": {"host": "/opt/shop/front", "container": "/app"},
-        }
+        context["ssh"]["app_dirs"] = {"laravel": None, "nuxt-3": "www/front", "api": ""}
         code, report, _ = self.check(context)
-        self.assertEqual((code, report["errors"]), (0, []))
+        self.assertEqual((code, report["ok"], report["errors"]), (0, True, []))
+        self.assertEqual(len(report["warnings"]), 2, report["warnings"])
+        for warning, name in zip(report["warnings"], ("nuxt-3", "api")):
+            self.assertIn(f"« ssh.app_dirs.{name} »", warning)
+            self.assertIn("ancien run", warning)
+            self.assertIn("redemander", warning)
+            self.assertNotIn(chr(0x2014), warning)
 
     def test_app_dirs_invalid_forms_are_reported(self):
         for value, path, needle in (
-            ("", "ssh.app_dirs.laravel", "chemin absolu"),
-            ("srv/app", "ssh.app_dirs.laravel", "chemin absolu"),
             ("/srv/app\n", "ssh.app_dirs.laravel", "retour à la ligne"),
+            ("srv\tapp", "ssh.app_dirs.laravel", "tabulation"),
             (3, "ssh.app_dirs.laravel", '{"host"'),
-            (None, "ssh.app_dirs.laravel", '{"host"'),
+            (True, "ssh.app_dirs.laravel", '{"host"'),
             (["/srv/app"], "ssh.app_dirs.laravel", '{"host"'),
             ({"host": "/srv/app"}, "ssh.app_dirs.laravel.container", "absent"),
-            ({"container": "/app"}, "ssh.app_dirs.laravel.host", "absent"),
+            ({}, "ssh.app_dirs.laravel.container", "absent"),
+            ({"host": "/srv/app", "container": None}, "ssh.app_dirs.laravel.container",
+             "chemin absolu"),
             ({"host": "/srv/app", "container": "app"}, "ssh.app_dirs.laravel.container",
              "chemin absolu"),
             ({"host": "", "container": "/app"}, "ssh.app_dirs.laravel.host", "chemin absolu"),
-            ({"host": None, "container": "/app"}, "ssh.app_dirs.laravel.host", "chemin absolu"),
+            ({"host": "srv/app", "container": "/app"}, "ssh.app_dirs.laravel.host",
+             "chemin absolu"),
             ({"host": "/srv/app", "container": "/app", "service": "php"},
              "ssh.app_dirs.laravel", "« service »"),
         ):

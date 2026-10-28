@@ -8,6 +8,7 @@ from pathlib import Path
 import cqa_notion
 import cqa_plan
 import cqa_ssh_ro
+from cqa import ssh_ro
 from cqa.findings import VERDICTS, apply_guardrails, validate_document
 from cqa.plan import STATUS_FOR_VERDICT
 
@@ -819,6 +820,24 @@ class SkillTest(unittest.TestCase):
         for needle in ("`date`", "`--set`", "`--time-style=<format>`"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, server)
+
+    def test_secret_columns_and_readable_options_are_documented(self):
+        server = _text(REFERENCES / "server.md")
+        auditor = _text(AUDITOR)
+        for label, text in (("server.md", server), ("cqa-auditor.md", auditor)):
+            for needle in ("user_activation_key", "meta_value", "option_value", "`sessions`",
+                           "PROCESSLIST", "wp option get"):
+                with self.subTest(file=label, needle=needle):
+                    self.assertIn(needle, text)
+        for name in ssh_ro.WP_READABLE_OPTIONS:
+            with self.subTest(option=name):
+                self.assertIn(f"`{name}`", server)
+        self.assertIn("CHAR_LENGTH(user_pass) = 32", server)
+        self.assertIn("unsalted", server)
+        context = _text(REFERENCES / "context.md")
+        for needle in ("`null`", "`host` is optional", "`warnings`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, context)
 
     def test_the_guard_allows_only_the_post_list_form_the_skill_uses(self):
         for argv, allowed in (

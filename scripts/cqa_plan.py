@@ -563,10 +563,14 @@ def _reuse_repos(old: dict, new: dict) -> bool:
 
 def _cmd_context(args, services) -> int:
     try:
-        errors = validate_context(_load_context(args.run_dir))
+        context = _load_context(args.run_dir)
+        errors, warnings = validate_context(context), context_warnings(context)
     except ContextError as error:
-        errors = [str(error)]
-    _emit({"ok": not errors, "errors": errors})
+        errors, warnings = [str(error)], []
+    report = {"ok": not errors, "errors": errors}
+    if warnings:
+        report["warnings"] = warnings
+    _emit(report)
     return EXIT_CONTEXT if errors else EXIT_OK
 
 
@@ -1343,7 +1347,7 @@ def validate_context(context: dict) -> list:
     _check_list(errors, "repos", context, _REPO_FIELDS, minimum=1)
     _check_list(errors, "key_pages", context, _PAGE_FIELDS, maximum=MAX_KEY_PAGES)
     _check_repo_names(errors, context.get("repos"))
-    _check_app_dirs(errors, context.get("ssh"))
+    _check_app_dirs(errors, context)
     if "sites" in context:
         _check_list(errors, "sites", context, _SITE_FIELDS, maximum=MAX_SITES)
         _check_sites(errors, context["sites"])
@@ -1408,13 +1412,22 @@ def _check_repo_names(errors: list, repos) -> None:
 _APP_DIR_KEYS = ("host", "container")
 
 
-def _check_app_dirs(errors: list, ssh) -> None:
-    """Check each folder of ssh.app_dirs: a host path, or {"host": ..., "container": ...}."""
+def _app_dirs(context) -> dict:
+    ssh = context.get("ssh") if isinstance(context, dict) else None
     app_dirs = ssh.get("app_dirs") if isinstance(ssh, dict) else None
-    if not isinstance(app_dirs, dict):
-        return
-    for name, value in app_dirs.items():
+    return app_dirs if isinstance(app_dirs, dict) else {}
+
+
+def _check_app_dirs(errors: list, context) -> None:
+    """Check each folder of ssh.app_dirs: a host path, or {"host": ..., "container": ...}.
+
+    null (folder not known) and a relative path left by a run before 0.12 are tolerated:
+    context_warnings reports the second.
+    """
+    for name, value in _app_dirs(context).items():
         label = f"ssh.app_dirs.{name}"
+        if value is None or _legacy_app_dir(value):
+            continue
         if isinstance(value, str):
             problem = _absolute_path(value)
             if problem:
@@ -1427,12 +1440,35 @@ def _check_app_dirs(errors: list, ssh) -> None:
                     + ", ".join(f"« {key} »" for key in unknown)
                     + " (seules « host » et « container » sont permises)"
                 )))
-            _check_fields(errors, label, value, {key: _absolute_path for key in _APP_DIR_KEYS})
+            fields = {"container": _absolute_path}
+            if value.get("host") is not None:
+                fields["host"] = _absolute_path
+            _check_fields(errors, label, value, fields)
         else:
             errors.append(_invalid(label, (
-                'doit être un chemin absolu sur le serveur, ou un objet {"host": "<chemin>", '
-                '"container": "<chemin>"} pour une application en conteneur'
+                'doit être un chemin absolu sur le serveur, null, ou un objet {"host": '
+                '"<chemin>", "container": "<chemin>"} pour une application en conteneur'
             )))
+
+
+def _legacy_app_dir(value) -> bool:
+    """True for a relative folder, which runs before 0.12 could record."""
+    return (
+        isinstance(value, str)
+        and not value.startswith("/")
+        and not any(char in value for char in "\t\r\n")
+    )
+
+
+def context_warnings(context) -> list:
+    """Return the French warnings of a context.json document; they never block the run."""
+    return [
+        f"context.json : « ssh.app_dirs.{name} » n'est pas un chemin absolu (« {value} », "
+        "laissé par un ancien run) : il est ignoré, redemander le dossier au lead avant toute "
+        "commande sur le serveur."
+        for name, value in _app_dirs(context).items()
+        if _legacy_app_dir(value)
+    ]
 
 
 def _absolute_path(value) -> Optional[str]:
