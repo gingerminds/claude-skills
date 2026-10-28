@@ -51,9 +51,11 @@ def select(
             notes.append(f"{ref_label(ref)} ne figure pas dans la copie : ignorée.")
         elif by_ref[ref].get("status") not in OPEN_STATUSES:
             notes.append(f"{ref_label(ref)} a le statut « {by_ref[ref].get('status')} » : ignorée.")
+        elif reasons.get(ref) in SILENT_EXCLUSIONS:
+            notes.append(f"{ref_label(ref)} exclue de ce run ({reasons[ref]}) : ignorée.")
         else:
             forced.add(ref)
-    keys, left = {}, []
+    keys, orders, left = {}, {}, []
     for index, row in enumerate(rows):
         ref = row.get("ref")
         if not isinstance(ref, int) or row.get("status") not in OPEN_STATUSES:
@@ -69,23 +71,25 @@ def select(
         targets, every_repo = _targets(finding, repo_names)
         category = row.get("category") or _NO_CATEGORY
         slug = fix_names.category_slug(category)
-        first_cause = None
+        first_cause, placed = None, False
         for name in targets:
             cause = _blocked(name, status_of, flights, ref, slug, lead)
             if cause:
                 first_cause = first_cause or cause
                 continue
-            key = keys.setdefault((name, slug), {
-                "key": f"{name}/{slug}", "repo": name, "category": category, "slug": slug,
-                "push_ready": status_of[name] == "ok", "rows": [],
-                "_order": (not slug.startswith("securite"), index, repo_names.index(name)),
-            })
-            key["rows"].append(_row(row, finding, lead, every_repo, run_dir))
-        if first_cause and not any(ref == item["ref"] for key in keys.values() for item in key["rows"]):
+            if (name, slug) not in keys:
+                keys[(name, slug)] = {
+                    "key": f"{name}/{slug}", "repo": name, "category": category, "slug": slug,
+                    "push_ready": status_of[name] == "ok", "rows": [],
+                }
+                orders[(name, slug)] = (
+                    not slug.startswith("securite"), index, repo_names.index(name)
+                )
+            keys[(name, slug)]["rows"].append(_row(row, finding, lead, every_repo, run_dir))
+            placed = True
+        if first_cause and not placed:
             left.append(_left(row, first_cause[0], first_cause[1]))
-    ordered = sorted(keys.values(), key=lambda key: key["_order"])
-    for key in ordered:
-        del key["_order"]
+    ordered = [keys[ident] for ident in sorted(keys, key=orders.__getitem__)]
     count = sum(len(key["rows"]) for key in ordered)
     return {
         "keys": ordered,
@@ -141,8 +145,6 @@ def _blocked(name: str, status_of: dict, flights: dict, ref: int, slug: str, lea
     """Return (reason, url) when the row cannot go in this repo, else None."""
     if status_of[name] == _UNAVAILABLE:
         return "repo hors GitLab", None
-    if lead:
-        return None
     flight = flights.get(name) or {}
     for mr in flight.get("open") or []:
         if mr.get("refs") is None and fix_names.branch_matches(
@@ -154,7 +156,7 @@ def _blocked(name: str, status_of: dict, flights: dict, ref: int, slug: str, lea
     for mr in flight.get("merged") or []:
         if ref in (mr.get("refs") or []):
             return f"MR !{mr.get('iid')} déjà fusionnée", mr.get("url")
-    for mr in flight.get("closed") or []:
+    for mr in [] if lead else flight.get("closed") or []:
         if ref in (mr.get("refs") or []):
             return f"MR !{mr.get('iid')} fermée sans fusion", mr.get("url")
     for branch in flight.get("branches") or []:

@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 from cqa import fix_rows
 
@@ -109,6 +111,28 @@ class SelectTest(unittest.TestCase):
         forced = [item for key in result["keys"] for item in key["rows"] if item["ref"] == 40]
         self.assertTrue(forced[0]["lead"])
 
+    def test_lead_refs_never_bypass_open_merged_or_branch_checks(self):
+        branch = "feature/checklist-qa-fix-securite"
+        cases = {
+            "open": (flight(open=[{"iid": 12, "url": "u", "branch": branch, "refs": [107]}]),
+                     "déjà dans la MR !12"),
+            "r3": (flight(open=[{"iid": 14, "url": "u", "branch": branch, "refs": None}]),
+                   "MR !14 ouverte, Réf illisibles"),
+            "merged": (flight(merged=[{"iid": 7, "url": "u", "branch": branch, "refs": [107]}]),
+                       "MR !7 déjà fusionnée"),
+            "branch": (flight(branches=[{"branch": branch, "where": "local", "refs": [107]}]),
+                       f"déjà sur la branche {branch}"),
+        }
+        for name, (case, reason) in cases.items():
+            result = select([row(107)], {107: finding(107)}, flights={"front": case}, refs=(107,))
+            self.assertEqual(kept_refs(result), [], name)
+            self.assertEqual(left_reasons(result), {107: reason}, name)
+
+    def test_lead_ref_excluded_from_the_run_is_noted(self):
+        result = select([row(1)], {1: finding(1)}, [{"ref": 1, "reason": "phase"}], refs=(1,))
+        self.assertEqual(kept_refs(result), [])
+        self.assertIn("CQ-1 exclue de ce run (phase) : ignorée.", result["notes"])
+
     def test_open_mr_with_unreadable_refs_blocks_its_category(self):
         flights = {"front": flight(
             open=[{"iid": 14, "url": "u14", "branch": "feature/checklist-qa-fix-securite-2",
@@ -189,8 +213,6 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(result["estimate_min"], 3 * 4 + 2 * 10)
 
     def test_fiche_path_only_when_the_file_exists(self):
-        import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "fiches").mkdir()
             (Path(tmp) / "fiches" / "CQ-001.md").write_text("x", encoding="utf-8")
