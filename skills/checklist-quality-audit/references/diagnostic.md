@@ -244,4 +244,4 @@ After `rows.json` is read and the coverage is computed, before « Lancer l'audit
 3. The gains, one line each: « <action> : +<rows> lignes (<tool>) ».
 4. The gaps found: repo not on `develop` up to date, preprod behind, `PROJECT.md` that cites another repo.
 
-With `diagnostic`, stop here: « Diagnostic terminé, rien n'a été écrit dans Notion. Dossier du run : <run_dir>. » Otherwise ask « Que faire ? » with « Lancer l'audit » and « Compléter mon poste d'abord ». The second stops the skill: a later launch the same day offers to resume this run, and redoes the diagnostic.
+With `diagnostic`, stop here: « Diagnostic terminé, rien n'a été écrit dans Notion. Dossier du run : <run_dir>. » Otherwise ask « Que faire ? » with « Lancer l'audit » and « Compléter mon poste d'abord ». The second stops the skill: a later launch offers to resume this run (SKILL.md, section 3), and redoes the diagnostic.

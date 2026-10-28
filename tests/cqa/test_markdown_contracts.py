@@ -468,6 +468,48 @@ class SkillTest(unittest.TestCase):
         self.assertIn("`aligned` false", _section(_text(SKILL), "5. Diagnostic"))
         self.assertIn("never deploy", deployed)
 
+    def test_rerun_and_recette_stay_interactive_until_their_launch_questions(self):
+        skill = _text(SKILL)
+        for heading, step in (("10. Rerun", "6"), ("11. Recette", "4")):
+            section = _section(skill, heading)
+            with self.subTest(section=heading):
+                self.assertIn(f"Until the questions of step {step}, this invocation is "
+                              "interactive", section)
+                self.assertIn("`--dry-run`", section)
+                self.assertIn("write `dry_run` in `context.json`", section)
+                self.assertIn("the consent question is not asked", section)
+
+    def test_recette_keeps_only_its_own_rows(self):
+        recette = _section(_text(SKILL), "11. Recette")
+        step3 = recette.split("\n3. ")[1].split("\n4. ")[0]
+        self.assertIn("keep only the candidates whose reasons include `lead`", step3)
+        step4 = recette.split("\n4. ")[1].split("\n5. ")[0]
+        self.assertIn("keep only the candidates whose reasons include `lead`", step4)
+
+    def test_rerun_and_recette_never_replace_human_statuses_unasked(self):
+        plan = _section(_text(SKILL), "7. Plan and confirmation")
+        step1 = plan.split("\n1. ")[1].split("\n2. ")[0]
+        for needle in (
+            "In a rerun or a recette",
+            "« <n> statuts posés par un humain seront remplacés (liste ci-dessus). Continuer ? »",
+            "« Continuer »", "« Sans toucher aux statuts posés par un humain »", "« Annuler »",
+            "`keep_human`", "`--skip-human-overrides`", "`--recette <NN>`",
+            "never writes a status set by a human",
+            "« Statut humain conservé »",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, step1)
+
+    def test_resume_is_offered_for_an_incomplete_run_of_any_date(self):
+        skill = _text(SKILL)
+        resume = _section(skill, "3. Resume")
+        self.assertIn("whatever its date", resume)
+        self.assertIn("« Le run <run_id> n'est pas terminé. »", resume)
+        self.assertNotIn("du jour n'est pas terminé", resume)
+        self.assertIn("first, as the recommended option, only when", resume)
+        self.assertNotIn("a later launch the same day", skill)
+        self.assertNotIn("a later launch the same day", _text(REFERENCES / "diagnostic.md"))
+
     def _end_block(self):
         writing = _section(_text(SKILL), "8. Writing and synthesis")
         return writing[writing.index("**5. Deferred") : writing.index("**6. Final scan**")]
