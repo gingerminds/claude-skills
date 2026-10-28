@@ -440,6 +440,12 @@ class SkillTest(unittest.TestCase):
         self.assertIn("`--recette <that NN>`", _section(text, "3. Resume"))
         self.assertIn("Statut humain conservé", _section(text, "11. Recette"))
 
+    def test_recette_plan_keeps_its_own_rerun_and_counts_later_closed_reruns(self):
+        section = _section(_text(SKILL), "11. Recette")
+        self.assertNotIn("must be the last rerun closed", section)
+        self.assertIn("`<NN>` is the rerun of this recette", section)
+        self.assertIn("a later closed rerun (the deferred rerun of section 8, step 5)", section)
+
     def test_recette_reads_the_copy_and_presents_before_any_dispatch(self):
         section = _section(_text(SKILL), "11. Recette")
         read = section.index('cqa_notion.py" recette')

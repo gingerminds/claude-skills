@@ -1706,13 +1706,44 @@ class RecetteTest(AuditCase):
         self.assertEqual(code, 2)
         self.assertIn("recette.json", err)
 
-    def test_plan_recette_must_name_the_last_closed_rerun(self):
+    def test_plan_recette_must_name_a_closed_rerun(self):
         run_dir = self.make_recette_run([102], judged=[102])
-        for closed in ([], ["01", "02"]):
-            self.write(run_dir, "reruns.json", {"closed": closed})
-            code, out, err = self.run_main(["plan", run_dir, "--recette", "01"])
-            self.assertEqual(code, 2)
-            self.assertIn("dernière relance close", err)
+        for closed, number in (([], "01"), (["02"], "01"), (["01"], "02"), (["01", "02"], "03")):
+            with self.subTest(closed=closed, number=number):
+                self.write(run_dir, "reruns.json", {"closed": closed})
+                code, out, err = self.run_main(["plan", run_dir, "--recette", number])
+                self.assertEqual(code, 2)
+                self.assertIn("relance close", err)
+        self.write(run_dir, "reruns.json", {"closed": ["01", "02"]})
+        self.run_json(["plan", run_dir, "--recette", "01"])
+        self.assertEqual(self.read(run_dir, "notion/plan.json")["recette"]["rerun"], "01")
+
+    def test_recette_counts_the_rows_judged_by_a_later_closed_rerun(self):
+        run_dir = self.make_recette_run([102, 103], judged=[102])
+        later = self.read(run_dir, "findings/code-securite.json")["findings"]
+        self.write(
+            run_dir,
+            "findings/code-securite-rerun-02.json",
+            {"lot": "code-securite", "findings": [item for item in later if item["ref"] == 103]},
+        )
+        self.write(run_dir, "reruns.json", {"closed": ["01", "02"]})
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        recette = self.read(run_dir, "notion/plan.json")["recette"]
+        self.assertEqual(recette["judged"], [102, 103])
+        self.assertEqual(recette["refs"], [102, 103])
+        self.assertEqual(recette["unjudged"], [])
+
+    def test_recette_ignores_reruns_before_it_and_reruns_not_closed(self):
+        run_dir = self.make_recette_run([102, 103], judged=[102])
+        later = self.read(run_dir, "findings/code-securite.json")["findings"]
+        only_103 = {"lot": "code-securite", "findings": [i for i in later if i["ref"] == 103]}
+        self.write(run_dir, "findings/code-securite-rerun-03.json", only_103)
+        self.write(run_dir, "reruns.json", {"closed": ["01", "02"]})
+        self.run_json(["plan", run_dir, "--recette", "02", "--skip-human-overrides"])
+        recette = self.read(run_dir, "notion/plan.json")["recette"]
+        self.assertEqual(recette["judged"], [])
+        self.assertEqual(recette["unjudged"], [102, 103])
+        self.assertNotIn(102, self.status_ops(run_dir))
 
     def test_judged_rows_keeping_a_human_status_have_their_own_line(self):
         for status, change in (

@@ -915,7 +915,7 @@ def _cmd_plan(args, services) -> int:
             "--recette 01) : celle que rerun-close vient de clore."
         )
     if args.recette is not None:
-        _check_last_closed(run_dir, args.recette)
+        _check_closed(run_dir, args.recette)
         recette = _recette_scope(run_dir, context, lots["lots"], rows, args.recette)
     plan = build_plan(
         rows=rows,
@@ -944,13 +944,19 @@ def _cmd_plan(args, services) -> int:
     return EXIT_OK
 
 
-def _check_last_closed(run_dir: Path, number: int) -> None:
+def _check_closed(run_dir: Path, number: int) -> None:
+    """Refuse a recette NN that reruns.json does not list as closed.
+
+    A closed NN older than the last one is accepted: the deferred rerun of the end block
+    (SKILL.md section 8, step 5) closes NN+1 inside the recette NN.
+    """
     closed = sorted(int(item) for item in _closed_reruns(run_dir) if item.isdigit())
-    if not closed or closed[-1] != number:
-        last = f"{closed[-1]:02d}" if closed else "aucune"
+    if number not in closed:
+        listed = ", ".join(f"{item:02d}" for item in closed) or "aucune"
         raise UsageError(
-            f"--recette {number:02d} : la recette doit porter sur la dernière relance close "
-            f"({last} dans reruns.json). Clore la relance avec rerun-close d'abord."
+            f"--recette {number:02d} : la recette doit porter sur une relance close "
+            f"(relances closes dans reruns.json : {listed}). Clore la relance avec "
+            "rerun-close d'abord."
         )
 
 
@@ -972,9 +978,10 @@ def _kept_human_statuses(built: dict, filtered: dict) -> list:
 def _recette_scope(run_dir: Path, context: dict, lots: list, rows: list, number: int) -> dict:
     """Return the refs of the recette by what the plan may do with them.
 
-    refs: "Mis en place" in the copy and judged again by the rerun NN (a finding in a kept
-    findings/<lot>-rerun-NN.json): they may replace the status a dev set. judged: every ref
-    of the recette with such a finding. unjudged: the others, left as they are.
+    refs: "Mis en place" in the copy and judged again by the rerun NN of the recette or a closed
+    rerun after it (a finding in a kept findings/<lot>-rerun-MM.json, MM >= NN, as the deferred
+    rerun of the end block of a recette): they may replace the status a dev set. judged: every
+    ref of the recette with such a finding. unjudged: the others, left as they are.
     """
     document = _read_run_json(run_dir, "notion/recette.json", "cqa_notion.py recette")
     listed = document.get("rows") if isinstance(document, dict) else None
@@ -982,9 +989,12 @@ def _recette_scope(run_dir: Path, context: dict, lots: list, rows: list, number:
         raise UsageError("notion/recette.json : la liste « rows » est absente.")
     wanted = {row["ref"] for row in listed if isinstance(row, dict) and _is_ref(row.get("ref"))}
     judged = set()
-    for lot in lots:
-        found = _read_findings_file(run_dir, context, lot, f"{lot['id']}-rerun-{number:02d}.json")
-        judged.update(item["ref"] for item in (found[0] if found else []))
+    later = sorted(int(item) for item in _closed_reruns(run_dir) if item.isdigit())
+    for rerun in (item for item in later if item >= number):
+        for lot in lots:
+            name = f"{lot['id']}-rerun-{rerun:02d}.json"
+            found = _read_findings_file(run_dir, context, lot, name)
+            judged.update(item["ref"] for item in (found[0] if found else []))
     status = {row["ref"]: row.get("status") for row in rows if row.get("ref") is not None}
     exempt = {ref for ref in wanted & judged if status.get(ref) == STATUS_IMPLEMENTED}
     return {
