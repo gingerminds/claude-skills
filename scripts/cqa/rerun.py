@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from cqa.checklist import ref_label
+from cqa.checklist import STATUS_IMPLEMENTED, ref_label
 from cqa.findings import validate_document
 from cqa.lots import build_lots
 
@@ -168,6 +168,52 @@ def rerun_candidates(
         "estimate_min": sum(_MINUTES.get(lot.get("kind"), 5) for lot in chosen),
         "notes": notes,
     }
+
+
+def recette_candidates(rows: list, plan: Optional[dict], applied: Optional[dict]) -> list:
+    """Return the rows the devs fixed: "Mis en place" in the copy, but not set so by the skill.
+
+    The last status the skill wrote is the "after" of the row in the plan when the status
+    operation of that ref is in the journal, its "before" otherwise. A row the skill knows no
+    status for (no plan, no journal, row absent from the plan) is a candidate: the lead may drop
+    it. Each item is {"ref", "page_id", "status", "skill_last"}. Nothing here raises on a
+    damaged document.
+    """
+    plan_rows = {
+        state["ref"]: state
+        for state in list_of(plan, "rows")
+        if isinstance(state, dict) and isinstance(state.get("ref"), int)
+    }
+    written = {
+        entry.get("key")
+        for entry in list_of(applied, "applied")
+        if isinstance(entry, dict)
+    }
+    planned = {
+        op.get("ref")
+        for op in list_of(plan, "ops")
+        if isinstance(op, dict) and op.get("kind") == "status" and op.get("key") in written
+    }
+    found = []
+    for row in rows:
+        ref = row.get("ref")
+        if not isinstance(ref, int) or row.get("status") != STATUS_IMPLEMENTED:
+            continue
+        state = plan_rows.get(ref)
+        last = None
+        if state is not None:
+            last = state.get("after") if ref in planned else state.get("before")
+        if last == STATUS_IMPLEMENTED:
+            continue
+        found.append(
+            {"ref": ref, "page_id": row.get("page_id"), "status": row["status"], "skill_last": last}
+        )
+    return found
+
+
+def list_of(document, key: str) -> list:
+    value = document.get(key) if isinstance(document, dict) else None
+    return value if isinstance(value, list) else []
 
 
 def _placement(row: Optional[dict], lots: list, rows: dict) -> Optional[str]:

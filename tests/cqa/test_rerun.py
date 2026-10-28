@@ -345,5 +345,69 @@ class CandidatesTest(RerunCase):
         self.assertEqual(len(result["candidates"][0]["details"]), 4)
 
 
+def recette_row(ref, status="Mis en place"):
+    return {"ref": ref, "page_id": f"{ref:032x}", "status": status}
+
+
+def recette_plan(*states):
+    """states: (ref, before, after, status operation planned)."""
+    rows = [
+        {"page_id": f"{ref:032x}", "ref": ref, "blocking": False, "before": before, "after": after}
+        for ref, before, after, _ in states
+    ]
+    ops = [
+        {"key": f"status:{ref}", "kind": "status", "ref": ref, "before": before, "after": after}
+        for ref, before, after, planned in states
+        if planned
+    ]
+    return {"rows": rows, "ops": ops}
+
+
+class RecetteCandidatesTest(unittest.TestCase):
+    def refs(self, rows, plan, applied):
+        return [item["ref"] for item in rerun.recette_candidates(rows, plan, applied)]
+
+    def test_recette_candidates_rules(self):
+        rows = [recette_row(ref) for ref in (1, 2, 3, 4, 5)]
+        rows.append(recette_row(6, "À traiter"))
+        plan = recette_plan(
+            (1, "À traiter", "À traiter", False),
+            (2, "À traiter", "Mis en place", True),
+            (3, "Mise en place partielle", "Mise en place partielle", False),
+            (4, "À traiter", "Mise en place partielle", True),
+            (6, "À traiter", "À traiter", False),
+        )
+        applied = {"applied": [{"key": "status:2", "kind": "status", "ref": 2}]}
+        found = rerun.recette_candidates(rows, plan, applied)
+        by_ref = {item["ref"]: item for item in found}
+        self.assertEqual(sorted(by_ref), [1, 3, 4, 5])
+        self.assertEqual(by_ref[1]["skill_last"], "À traiter")
+        self.assertEqual(by_ref[3]["skill_last"], "Mise en place partielle")
+        self.assertEqual(by_ref[4]["skill_last"], "À traiter")
+        self.assertIsNone(by_ref[5]["skill_last"])
+
+    def test_row_the_skill_set_to_implemented_is_not_a_fix(self):
+        rows = [recette_row(2)]
+        plan = recette_plan((2, "À traiter", "Mis en place", True))
+        applied = {"applied": [{"key": "status:2", "kind": "status", "ref": 2}]}
+        self.assertEqual(self.refs(rows, plan, applied), [])
+        self.assertEqual(self.refs(rows, plan, {"applied": []}), [2])
+
+    def test_row_already_implemented_before_the_run_is_not_a_fix(self):
+        rows = [recette_row(2)]
+        plan = recette_plan((2, "Mis en place", "Mis en place", False))
+        self.assertEqual(self.refs(rows, plan, {"applied": []}), [])
+
+    def test_unknown_skill_status_is_a_candidate(self):
+        rows = [recette_row(7), {"ref": None, "page_id": "x", "status": "Mis en place"}]
+        for plan, applied in ((None, None), ({"rows": []}, {"applied": []}), ({}, {})):
+            with self.subTest(plan=plan):
+                self.assertEqual(self.refs(rows, plan, applied), [7])
+
+    def test_damaged_documents_do_not_raise(self):
+        rows = [recette_row(7)]
+        self.assertEqual(self.refs(rows, {"rows": "x", "ops": 3}, {"applied": 4}), [7])
+
+
 if __name__ == "__main__":
     unittest.main()

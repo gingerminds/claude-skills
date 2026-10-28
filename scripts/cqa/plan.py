@@ -103,6 +103,7 @@ def build_plan(
     plugin_version: str,
     followup_done: set[int],
     missing_in_copy: Optional[list] = None,
+    recette_refs: frozenset = frozenset(),
 ) -> dict:
     """Return the plan.json document: the Notion writes the run proposes, and their summary.
 
@@ -113,7 +114,8 @@ def build_plan(
     earlier runs already carry the verdict. A kept row without finding counts as unknown.
     Excluded rows: techno gets the status "Non applicable" and a comment, no_tools a comment,
     standby, phase and no_fiche nothing. A row without ref never gets an operation. A status
-    operation carries human_override when the status it replaces was set by a person.
+    operation carries human_override when the status it replaces was set by a person, except
+    for the refs of recette_refs: the devs set their status on purpose, the recette may change it.
 
     Operations come by ref. Besides the keys of the exchange format the plan carries "rows",
     the status of every row before and after the run, which filter_plan needs to recompute
@@ -133,7 +135,13 @@ def build_plan(
         row, entry = by_ref[ref], excluded_by_ref.get(ref)
         if entry is None:
             row_ops, verdict = _finding_operations(
-                row, findings.get(ref), common, followup_done, visible_verdicts, history
+                row,
+                findings.get(ref),
+                common,
+                followup_done,
+                visible_verdicts,
+                history,
+                ref in recette_refs,
             )
             if verdict == "unknown":
                 unknown.append(ref)
@@ -178,13 +186,15 @@ def filter_plan(plan: dict, *, skip_human_overrides: bool) -> dict:
     return result
 
 
-def _finding_operations(row, finding, common, followup_done, visible_verdicts, history):
+def _finding_operations(
+    row, finding, common, followup_done, visible_verdicts, history, recette=False
+):
     ref = row["ref"]
     if finding is None:
         finding = _missing_finding(ref)
     finding = apply_guardrails(finding, row, followup_done=ref in followup_done)
     verdict = finding["verdict"]
-    ops = _status_operation(row, verdict, STATUS_FOR_VERDICT[verdict])
+    ops = _status_operation(row, verdict, STATUS_FOR_VERDICT[verdict], recette)
     status_changed = bool(ops)
     assignees = list(row.get("assignees") or [])
     lead = common["lead_option"]
@@ -208,10 +218,10 @@ def _excluded_operations(row, entry, common, visible_verdicts, history):
     return ops
 
 
-def _status_operation(row, verdict, target):
+def _status_operation(row, verdict, target, recette=False):
     if target is None or target == row.get("status"):
         return []
-    override = is_human_set(row)
+    override = is_human_set(row) and not recette
     return [_operation("status", row, verdict, row.get("status"), target, human_override=override)]
 
 

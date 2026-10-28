@@ -1508,6 +1508,56 @@ class SynthesisTest(AuditCase):
         self.assertIn("Aucun.", text.split("## Statuts posés par un humain")[1].split("##")[0])
 
 
+class RecetteTest(AuditCase):
+    def make_recette_run(self, refs):
+        run_dir = self.make_run()
+        rows = [
+            {"ref": ref, "page_id": f"{ref:032x}", "status": "Mis en place", "skill_last": "À traiter",
+             "comments": []}
+            for ref in refs
+        ]
+        self.write(run_dir, "notion/recette.json", {"rows": rows})
+        return run_dir
+
+    def test_plan_recette_lets_the_rows_override_the_human_status(self):
+        run_dir = self.make_recette_run([102])
+        self.run_json(["plan", run_dir, "--recette", "--skip-human-overrides"])
+        plan = self.read(run_dir, "notion/plan.json")
+        status = [(op["ref"], op["after"]) for op in plan["ops"] if op["kind"] == "status"]
+        self.assertIn((102, "Ok / Recetté"), status)
+        self.run_json(["plan", run_dir, "--skip-human-overrides"])
+        plan = self.read(run_dir, "notion/plan.json")
+        self.assertNotIn(102, [op["ref"] for op in plan["ops"]])
+
+    def test_plan_recette_without_recette_json(self):
+        run_dir = self.make_run()
+        code, out, err = self.run_main(["plan", run_dir, "--recette"])
+        self.assertEqual(code, 2)
+        self.assertIn("recette.json", err)
+
+    def test_recette_section_in_synthesis(self):
+        run_dir = self.make_recette_run([102, 103, 101])
+        self.run_json(["plan", run_dir, "--recette"])
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+        section = text.split("## Recette")[1].split("\n## ")[0]
+        validated = section.split("### Validées")[1].split("###")[0]
+        refused = section.split("### Refusées")[1].split("###")[0]
+        waiting = section.split("### Restées en validation humaine")[1].split("###")[0]
+        blocking = section.split("### Bloquantes restantes")[1].split("###")[0]
+        self.assertIn("CQ-102", validated)
+        self.assertIn("CQ-101", refused)
+        self.assertIn("CQ-103", refused)
+        self.assertIn("Aucune.", waiting)
+        self.assertIn("CQ-101", blocking)
+        self.assertNotIn(EM_DASH, text)
+
+    def test_synthesis_without_recette_has_no_section(self):
+        run_dir = self.make_run()
+        self.run_json(["plan", run_dir])
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+        self.assertNotIn("## Recette", text)
+
+
 class ScanTest(AuditCase):
     def test_scan_detects_secret(self):
         run_dir = self.make_run()

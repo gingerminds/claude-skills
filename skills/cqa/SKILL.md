@@ -1,7 +1,7 @@
 ---
 name: cqa
 description: Alias of /gm:checklist-quality-audit (PRE-MEL quality checklist audit).
-argument-hint: "[diagnostic | assign | rerun] [--phase \"MEL J0\"] [--dry-run]"
+argument-hint: "[diagnostic | assign | rerun | recette] [--phase \"MEL J0\"] [--dry-run]"
 disable-model-invocation: true
 ---
 

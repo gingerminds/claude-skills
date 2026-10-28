@@ -212,6 +212,11 @@ def _register_audit(commands) -> None:
         action="store_true",
         help="retire les pages dont le statut a été posé par un humain",
     )
+    sub.add_argument(
+        "--recette",
+        action="store_true",
+        help="les lignes de notion/recette.json peuvent changer de statut posé par un dev",
+    )
     _run_command(commands, "manifest", "résultats des outils (tools/manifest.json)", _cmd_manifest)
     _run_command(commands, "synthesis", "synthese.md et commentaire de la page", _cmd_synthesis)
     _run_command(commands, "scan", "contrôle anti-secret du dossier du run", _cmd_scan)
@@ -661,12 +666,23 @@ def _cmd_plan(args, services) -> int:
         plugin_version=context["plugin_version"],
         followup_done=followup_done,
         missing_in_copy=missing,
+        recette_refs=_recette_refs(run_dir) if args.recette else frozenset(),
     )
     plan = filter_plan(plan, skip_human_overrides=args.skip_human_overrides)
     (run_dir / "notion").mkdir(exist_ok=True)
     write_json(run_dir / "notion" / "plan.json", plan)
     _emit(plan["summary"])
     return EXIT_OK
+
+
+def _recette_refs(run_dir: Path) -> frozenset:
+    document = _read_run_json(run_dir, "notion/recette.json", "cqa_notion.py recette")
+    rows = document.get("rows") if isinstance(document, dict) else None
+    if not isinstance(rows, list):
+        raise UsageError("notion/recette.json : la liste « rows » est absente.")
+    return frozenset(
+        row["ref"] for row in rows if isinstance(row, dict) and _is_ref(row.get("ref"))
+    )
 
 
 def _cmd_rerun(args, services) -> int:

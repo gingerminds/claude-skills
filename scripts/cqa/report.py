@@ -79,7 +79,9 @@ def synthesis(run_dir: Path, *, now: Optional[datetime] = None) -> tuple[str, st
     lots = _read(run_dir, "lots.json", "cqa_plan.py lots")
     rows = _read(run_dir, "rows.json", "cqa_notion.py rows")
     try:
-        text = _synthesis(context, plan, lots, rows, manifest(run_dir), now or datetime.now())
+        text = _synthesis(
+            context, plan, lots, rows, manifest(run_dir), now or datetime.now(), _recette(run_dir)
+        )
         start = run_start(context["run_id"])
         comment = format_page_summary(
             summary=plan["summary"], run_date=start.date(), lead_option=context["lead"]["option"]
@@ -91,7 +93,7 @@ def synthesis(run_dir: Path, *, now: Optional[datetime] = None) -> tuple[str, st
     return text.replace(_EM_DASH, "-"), comment
 
 
-def _synthesis(context, plan, lots, rows, tools, now) -> str:
+def _synthesis(context, plan, lots, rows, tools, now, recette=None) -> str:
     start = run_start(context["run_id"])
     summary = plan["summary"]
     row_list = rows["rows"]
@@ -131,12 +133,58 @@ def _synthesis(context, plan, lots, rows, tools, now) -> str:
         ("Écarts relevés", _gap_lines(context)),
         ("Outils", _tool_lines(tools)),
     ]
+    if recette is not None:
+        position = [title for title, _ in sections].index("Écarts relevés")
+        sections.insert(
+            position, ("Recette", _recette_lines(recette, summary, titles, after))
+        )
     lines = ["# Synthèse de l'audit PRE-MEL", "", *header, ""]
     for title, body in sections:
         lines += [f"## {title}", ""]
         lines += body or [_EMPTY.get(title, "Aucune.")]
         lines.append("")
     return "\n".join(lines)
+
+
+def _recette(run_dir: Path) -> Optional[list]:
+    """Return the refs of notion/recette.json, None when the run has no recette."""
+    try:
+        document = json.loads((run_dir / "notion" / "recette.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    rows = document.get("rows") if isinstance(document, dict) else None
+    if not isinstance(rows, list):
+        return None
+    return [row["ref"] for row in rows if isinstance(row, dict) and isinstance(row.get("ref"), int)]
+
+
+def _recette_lines(refs: list, summary: dict, titles: dict, after: dict) -> list:
+    validated, waiting, refused, other = [], [], [], []
+    for ref in sorted(refs):
+        status = after.get(ref)
+        if status == STATUS_OK:
+            validated.append(_ref_line(ref, titles))
+        elif status == STATUS_IMPLEMENTED:
+            waiting.append(_ref_line(ref, titles))
+        elif status in (STATUS_TODO, STATUS_PARTIAL):
+            refused.append(_ref_line(ref, titles, status))
+        else:
+            other.append(_ref_line(ref, titles, status or _UNKNOWN_STATUS))
+    blocking = [_ref_line(ref, titles, after.get(ref)) for ref in summary["blocking_non_conform"]]
+    groups = [
+        (f"Validées ({STATUS_OK})", validated),
+        ("Restées en validation humaine", waiting),
+        ("Refusées", refused),
+        ("Bloquantes restantes", blocking),
+    ]
+    if other:
+        groups.append(("Autres", other))
+    lines = [f"{len(refs)} ligne(s) recettée(s).", ""]
+    for title, body in groups:
+        lines += [f"### {title}", ""]
+        lines += body or ["Aucune."]
+        lines.append("")
+    return lines[:-1]
 
 
 def _override_detail(item: dict) -> str:

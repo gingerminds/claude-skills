@@ -7,6 +7,7 @@ Exit codes: 0 success, 2 environment or usage, 3 Notion API error, 6 invalid sch
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from cqa.notion_api import NotionClient, NotionError, extract_id
 from cqa.notion_read import (
     assemble_rows,
     assignee_options,
+    human_comments,
     load_rows,
     load_skill_comments,
     resolve,
@@ -24,6 +26,7 @@ from cqa.notion_read import (
 )
 from cqa.notion_write import ReferenceWriteRefused, apply_plan, validate_plan
 from cqa.plan import filter_plan, operation_key
+from cqa.rerun import list_of, recette_candidates, rerun_candidates
 from cqa.secrets import known_values_from_env
 
 EXIT_OK = 0
@@ -38,13 +41,17 @@ class UsageError(Exception):
     """A problem with the environment or the arguments, worded for the lead."""
 
 
-def main(argv, *, client=None) -> int:
-    """Run one command and return its exit code. client is built from NOTION_TOKEN when absent."""
+def main(argv, *, client=None, git_run=subprocess.run) -> int:
+    """Run one command and return its exit code. client is built from NOTION_TOKEN when absent.
+
+    git_run is called like subprocess.run, for the rows of a recette whose code changed.
+    """
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
     except SystemExit as stop:
         return stop.code if isinstance(stop.code, int) else EXIT_USAGE
+    args.git_run = git_run
     try:
         if client is None:
             client = NotionClient(_token())
@@ -78,6 +85,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("rows", "lit la copie et la rapproche du modèle (rows.json)", _cmd_rows),
         ("fiches", "met en cache les fiches du modèle (fiches/)", _cmd_fiches),
         ("comments", "lit les verdicts des commentaires de l'intégration", _cmd_comments),
+        ("recette", "relit la copie et liste les lignes à recetter (recette.json)", _cmd_recette),
     ):
         sub = commands.add_parser(name, help=help_text)
         sub.add_argument("run_dir", type=Path, help="dossier du run")
@@ -130,7 +138,13 @@ def _cmd_schema(args, client) -> int:
 
 
 def _cmd_rows(args, client) -> int:
-    notion = _notion_context(args.run_dir, "copy_data_source_id", "bot_id")
+    _emit(_read_copy(args.run_dir, client))
+    return EXIT_OK
+
+
+def _read_copy(run_dir: Path, client) -> dict:
+    """Read the copy and the template, write rows.json and return the counts."""
+    notion = _notion_context(run_dir, "copy_data_source_id", "bot_id")
     reference = os.environ.get("GM_CQA_REFERENCE", "").strip()
     if not reference:
         raise UsageError("GM_CQA_REFERENCE est absent de l'environnement : URL du modèle.")
@@ -142,19 +156,16 @@ def _cmd_rows(args, client) -> int:
     reference_rows = load_rows(client, reference_ds, notion["bot_id"])
     rows, missing = assemble_rows(copy_rows, reference_rows)
     write_json(
-        args.run_dir / "rows.json",
+        run_dir / "rows.json",
         {"copy_data_source_id": copy_ds, "rows": rows, "missing_in_copy": missing},
     )
     matched = sum(1 for item in rows if item["reference_page_id"] is not None)
-    _emit(
-        {
-            "rows": len(rows),
-            "matched": matched,
-            "unmatched": len(rows) - matched,
-            "missing_in_copy": len(missing),
-        }
-    )
-    return EXIT_OK
+    return {
+        "rows": len(rows),
+        "matched": matched,
+        "unmatched": len(rows) - matched,
+        "missing_in_copy": len(missing),
+    }
 
 
 def _cmd_fiches(args, client) -> int:
@@ -177,6 +188,52 @@ def _cmd_comments(args, client) -> int:
     )
     _emit({"refs_with_verdicts": len(verdicts)})
     return EXIT_OK
+
+
+def _cmd_recette(args, client) -> int:
+    run_dir = args.run_dir
+    notion = _notion_context(run_dir, "bot_id")
+    counts = _read_copy(run_dir, client)
+    rows = _read_rows(run_dir)
+    plan = _optional_json(run_dir / "notion" / "plan.json")
+    applied = _optional_json(run_dir / "notion" / "applied.json")
+    chosen = {item["ref"]: item for item in recette_candidates(rows, plan, applied)}
+    changed = [
+        entry["ref"]
+        for entry in rerun_candidates(run_dir, extra_refs=[], git_run=args.git_run)["candidates"]
+        if "code_modifie" in entry["reasons"]
+    ]
+    by_ref = {item["ref"]: item for item in rows if isinstance(item, dict)}
+    plan_rows = {
+        state.get("ref"): state
+        for state in list_of(plan, "rows")
+        if isinstance(state, dict)
+    }
+    for ref in changed:
+        row = by_ref.get(ref)
+        if row is not None and ref not in chosen:
+            state = plan_rows.get(ref) or {}
+            chosen[ref] = {
+                "ref": ref,
+                "page_id": row["page_id"],
+                "status": row["status"],
+                "skill_last": state.get("before"),
+            }
+    result = []
+    for ref in sorted(chosen):
+        item = chosen[ref]
+        item["comments"] = human_comments(client.comments(item["page_id"]), notion["bot_id"])
+        result.append(item)
+    write_json(run_dir / "notion" / "recette.json", {"rows": result})
+    _emit({**counts, "recette": [item["ref"] for item in result], "code_modifie": sorted(changed)})
+    return EXIT_OK
+
+
+def _optional_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def _cmd_apply(args, client) -> int:

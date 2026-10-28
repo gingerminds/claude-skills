@@ -31,7 +31,7 @@ EXPECTED_REFERENCES = {
     "server.md",
     "assign.md",
 }
-ARGUMENT_HINT = '"[diagnostic | assign | rerun] [--phase \\"MEL J0\\"] [--dry-run]"'
+ARGUMENT_HINT = '"[diagnostic | assign | rerun | recette] [--phase \\"MEL J0\\"] [--dry-run]"'
 MAX_DESCRIPTION = 1536
 SCRIPTS_LINE = 'S="${CLAUDE_SKILL_DIR}/../../scripts"'
 
@@ -384,9 +384,62 @@ class SkillTest(unittest.TestCase):
 
     def test_anything_else_hint_matches_the_argument_hint(self):
         self.assertIn(
-            "[diagnostic | assign | rerun] [--phase \"MEL J0\"] [--dry-run]` and stop.",
+            "[diagnostic | assign | rerun | recette] [--phase \"MEL J0\"] [--dry-run]` and stop.",
             _text(SKILL),
         )
+
+    def test_recette_argument_and_section(self):
+        text = _text(SKILL)
+        self.assertIn("- `recette`:", _section(text, "2. Arguments"))
+        section = _section(text, "11. Recette")
+        for needle in (
+            'cqa_notion.py" recette "$RUN"',
+            'cqa_plan.py" rerun-start "$RUN"',
+            'cqa_plan.py" rerun-candidates "$RUN" --refs',
+            'cqa_plan.py" validate "$RUN" <lot_id> --rerun <NN> --rows',
+            'cqa_plan.py" rerun-close "$RUN" <NN>',
+            'cqa_plan.py" plan "$RUN" --recette',
+            "notion/recette.json",
+            "Rerun: <NN>. Rows: CQ-3, CQ-12. Recette: yes. Follow your instructions.",
+            "section 10",
+            "section 7",
+            "Ok / Recetté",
+            "Mis en place",
+            "À traiter",
+            "Mise en place partielle",
+            "ok_human",
+            "ko",
+            "partial",
+            "## Recette",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+
+    def test_recette_reads_the_copy_and_presents_before_any_dispatch(self):
+        section = _section(_text(SKILL), "11. Recette")
+        read = section.index('cqa_notion.py" recette')
+        start = section.index("rerun-start")
+        present = section.index("« Lancer cette recette ? »")
+        dispatch = section.index("Recette: yes.")
+        validate = section.index("--rerun <NN> --rows")
+        close = section.index("rerun-close")
+        plan = section.index('cqa_plan.py" plan')
+        self.assertLess(read, start)
+        self.assertLess(start, present)
+        self.assertLess(present, dispatch)
+        self.assertLess(dispatch, validate)
+        self.assertLess(validate, close)
+        self.assertLess(close, plan)
+
+    def test_recette_dispatch_is_documented_in_lots_reference_and_agents(self):
+        self.assertIn("Recette: yes.", _text(REFERENCES / "lots.md"))
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            with self.subTest(agent=path.name):
+                self.assertIn("Recette: yes.", text)
+                section = _section(text, "Rerun")
+                self.assertIn("notion/recette.json", section)
+                self.assertIn("merge request", section)
 
     def test_rerun_dispatch_is_documented_in_lots_reference(self):
         text = _text(REFERENCES / "lots.md")

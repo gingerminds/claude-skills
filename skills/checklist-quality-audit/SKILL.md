@@ -1,7 +1,7 @@
 ---
 name: checklist-quality-audit
 description: Runs the agency pre-launch (PRE-MEL) quality checklist audit on a project. Checks the workstation, verifies that the preprod runs the audited code, evaluates every row of the project's Notion checklist copy from the code, the preprod, a Docker toolbox and the browser, then writes statuses and evidence comments to that copy and splits the remaining rows between the devs. Use when the lead dev asks to run the quality checklist or a PRE-MEL audit, or invokes /gm:checklist-quality-audit or /gm:cqa.
-argument-hint: "[diagnostic | assign | rerun] [--phase \"MEL J0\"] [--dry-run]"
+argument-hint: "[diagnostic | assign | rerun | recette] [--phase \"MEL J0\"] [--dry-run]"
 disable-model-invocation: true
 ---
 
@@ -34,9 +34,10 @@ Arguments: `$ARGUMENTS` (through the `/gm:cqa` alias, the alias gives them).
 - `diagnostic`: sections 3 to 5, then stop once the coverage is shown. Nothing is written to Notion.
 - `assign`: go to section 9.
 - `rerun`: go to section 10. Re-evaluates a few rows of an existing run, not the whole audit.
+- `recette`: go to section 11. Checks the rows the devs fixed (set to « Mis en place » in the copy) and closes them if the fix holds.
 - `--phase "<phase>"`: audit only the rows of that phase (`Cadrage`, `Build`, `Recette J-30`, `MEL J0`, `Post-MEL J+7`), stored as `phase_filter`. With `MEL J0` or `Post-MEL J+7`, section 4 asks whether the prod is live: the audit targets the prod only then.
 - `--dry-run`: everything except the Notion writes, stored as `dry_run`. Section 7 asks nothing and section 8 skips its Notion steps (apply, page comment); the synthesis and the final scan still run.
-- Anything else: show `/gm:checklist-quality-audit [diagnostic | assign | rerun] [--phase "MEL J0"] [--dry-run]` and stop.
+- Anything else: show `/gm:checklist-quality-audit [diagnostic | assign | rerun | recette] [--phase "MEL J0"] [--dry-run]` and stop.
 
 ## 3. Resume
 
@@ -220,7 +221,7 @@ Dispatch line, exactly, then the extra sentences of `references/lots.md`:
 Run dir: <run_dir>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your instructions.
 ```
 
-For a rerun (section 10) the line carries the rerun number and the rows instead.
+For a rerun (section 10) the line carries the rerun number and the rows instead; a recette (section 11) adds `Recette: yes.`.
 
 ## 7. Plan and confirmation
 
@@ -439,6 +440,72 @@ python3 "$S/cqa_plan.py" plan "$RUN"
 ```
 
 12. End with the rows whose verdict changed (before, from the snapshot of `rerun-start`, and after) and the rows still unchanged, in French.
+
+## 11. Recette
+
+Checks the corrections after the devs set rows to « Mis en place » in the copy. It reuses the mechanism of the rerun (section 10): same snapshot, same tools, same dispatch, same validation, same closing; only the choice of the rows differs. The imperative rules of section 1 and the recheck before each wave (section 6) hold. One Bash call per step.
+
+1. Pick the run and check the context exactly as in section 10, step 1.
+2. Read the Notion copy again and list the rows to check. A row is a candidate when it is « Mis en place » in the copy and the last status the skill wrote for it was something else (« À traiter », « Mise en place partielle », or no status written); a row the skill itself set to « Mis en place » (human validation) is not a fix and stays with the lead. The rows whose code changed since the audited commit are added. For each row the command keeps the last comments that are not the skill's (the devs' notes, the merge request link), at most 5, most recent first:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_notion.py" recette "$RUN"
+```
+
+It writes `notion/recette.json`, `{"rows": [{"ref", "page_id", "status", "skill_last", "comments"}]}`, and prints the refs (`recette`) and those added for a code change (`code_modifie`). Exit codes as in section 8, step 1. A row without a known status of the skill is a candidate: the lead may drop it.
+
+3. Run the diagnostic of section 5 for the tools only, and update `available_tools` in `context.json`. Then open the rerun and list the lots of the candidate rows, as in section 10, steps 4 and 5, with the refs of `notion/recette.json`:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" rerun-start "$RUN"
+```
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" rerun-candidates "$RUN" --refs CQ-3,CQ-12
+```
+
+4. Present before anything is dispatched, in French: for each row, ref, title, the status the skill had written (`skill_last`) and the devs' comments (with the merge request link), then the lots, the tools and the estimated time. Rows with a code change get a reminder that the preprod must run that code (the check of section 5). Ask « Lancer cette recette ? » with « Lancer », « Modifier la liste » and « Annuler », and handle the answers as in section 10, step 6. The rows the lead drops are removed from `notion/recette.json` too (edit the file), so that the plan does not treat them as fixes. « Annuler »: stop, nothing is written to Notion.
+5. Relaunch the tools the lead kept and dispatch the lots as in section 10, steps 7 and 8, with the line, exactly (the kept rows of that lot only):
+
+```
+Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no. Rerun: <NN>. Rows: CQ-3, CQ-12. Recette: yes. Follow your instructions.
+```
+
+The agent reads `notion/recette.json` (the devs' comments, the merge request link) before judging, then writes `findings/<lot_id>-rerun-<NN>.json` with those rows only.
+
+6. After each lot, validate with the rows dispatched to it, as in section 10, step 9:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" validate "$RUN" <lot_id> --rerun <NN> --rows CQ-3,CQ-12
+```
+
+When every lot is validated or left, close the rerun and tell the lead which files were discarded:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" rerun-close "$RUN" <NN>
+```
+
+7. Build the plan with the recette option, which lets the rows of `notion/recette.json` change a status a dev set, then go through section 7 and section 8 as for an audit (confirmation, writing, synthesis, scan, `done.json`). Every other row follows the write mode the lead chose:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" plan "$RUN" --recette
+```
+
+The verdicts give: `ok` becomes « Ok / Recetté »; `ok_human` leaves the row « Mis en place » and assigns it to the lead (human judgement needed); `ko` becomes « À traiter » and `partial` « Mise en place partielle », the comment saying what is missing. The synthesis gets a `## Recette` section: validated rows, rows left to human validation, refused rows (with their Réf), blocking rows still open.
+
+8. End, in French, with the validated rows, the rows left to the lead, the refused rows with what is missing, and the blocking rows still open.
 
 ## Exit codes
 
