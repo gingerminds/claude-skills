@@ -135,7 +135,7 @@ Read `references/diagnostic.md`. It gives the exact command of each check:
 
 Preprod behind `develop`: list the missing commits and ask « Déployer puis relancer (recommandé) » or « Lancer quand même ». Never deploy. Deployed commit not found: the audit goes on only if the lead confirms the alignment.
 
-In autonomous mode (`mode` is `autonome`) the diagnostic asks nothing: a launch-condition gap (preprod behind `develop`, deployed commit not found) is recorded with `cqa_plan.py defer --kind gap --detail "<texte en français>"` and the audit goes on as with « Lancer quand même » (never deploy); an alignment that would need the lead's confirmation is recorded the same way and treated as not aligned; « Lancer l'audit » is implied. Interactive mode is unchanged.
+In autonomous mode (`mode` is `autonome`) the diagnostic asks nothing: a launch-condition gap (preprod behind `develop`, deployed commit not found) is recorded with `cqa_plan.py defer --kind gap --detail "<texte en français>"` and the audit goes on as with « Lancer quand même » (never deploy); an alignment that would need the lead's confirmation is recorded the same way and treated as not aligned (`aligned` false, never `null`, so that the synthesis reports the gap); every other question of `references/diagnostic.md` takes the non-acting default it gives there, with a gap; « Lancer l'audit » is implied. Interactive mode is unchanged.
 
 Then write `available_tools` and the repo facts in `context.json`, and check it:
 

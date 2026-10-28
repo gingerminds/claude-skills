@@ -440,6 +440,34 @@ class SkillTest(unittest.TestCase):
         self.assertIn("`--recette <that NN>`", _section(text, "3. Resume"))
         self.assertIn("Statut humain conservé", _section(text, "11. Recette"))
 
+    def test_each_diagnostic_question_has_its_autonomous_default(self):
+        diagnostic = _text(REFERENCES / "diagnostic.md")
+        repos = _section(diagnostic, "1. Repos (tool \"Code\")")
+        deployed = _section(diagnostic, "2. Deployed commit and alignment (launch condition)")
+        runner = _section(diagnostic, "3. Runner (tool \"CLI local\")")
+        toolbox = _section(diagnostic, "6. Toolbox (tools \"Audit web\" and \"Crawler\")")
+        for label, text, default in (
+            ("repos", repos, "go on with the current state"),
+            ("folder", deployed, "record `null` unless there is exactly one candidate"),
+            ("pipeline", deployed, "the pipeline SHA stays unconfirmed"),
+            ("lead sha", deployed, "step c is not asked"),
+            ("behind", deployed, "go on as with « Lancer quand même »"),
+            ("not found", deployed, "store `aligned` false"),
+            ("runner", runner, "go on as with « Continuer sans »"),
+            ("toolbox", toolbox, "no download"),
+        ):
+            with self.subTest(question=label):
+                self.assertIn(default, text)
+        for label, text in (("repos", repos), ("deployed", deployed), ("runner", runner),
+                            ("toolbox", toolbox)):
+            with self.subTest(section=label):
+                self.assertIn("In autonomous mode, do not ask", text)
+                self.assertIn('defer "$RUN" --kind gap', text)
+        self.assertGreaterEqual(deployed.count("In autonomous mode, do not ask"), 4)
+        self.assertNotIn("(`aligned` `null`)", diagnostic)
+        self.assertIn("`aligned` false", _section(_text(SKILL), "5. Diagnostic"))
+        self.assertIn("never deploy", deployed)
+
     def _end_block(self):
         writing = _section(_text(SKILL), "8. Writing and synthesis")
         return writing[writing.index("**5. Deferred") : writing.index("**6. Final scan**")]

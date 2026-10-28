@@ -2,6 +2,8 @@
 
 Goal: know what the workstation lets the audit do, check that the preprod runs the audited code, then show the coverage before the lead decides. Every Bash call starts with the `S=` line of SKILL.md (here unexpanded) and `RUN="<run_dir>"`. Nothing here writes to a repo, a server or Notion.
 
+In autonomous mode (`mode` is `autonome`, SKILL.md section 5) no question of this page is asked: each one says its non-acting default, recorded with `defer --kind gap` for the end of the audit, and the diagnostic goes on. The skill never deploys, never starts a runner, never downloads the toolbox images and never stops the audit on its own.
+
 ## 1. Repos (tool "Code")
 
 For each repo of `context.json`:
@@ -18,13 +20,14 @@ python3 "$S/cqa_plan.py" repo-state "<chemin du repo>"
   - Other branch, local changes, local commits not pushed: describe them only.
   - `fetched` false: « Impossible de joindre origin : la comparaison repose sur le dernier fetch. »
 - Ask « Le repo <name> n'est pas sur develop à jour. » with « C'est corrigé, revérifier » and « Continuer avec l'état actuel ». Run `repo-state` again after a fix.
+- In autonomous mode, do not ask: record `cqa_plan.py defer "$RUN" --kind gap --detail "Le repo <name> n'est pas sur develop à jour : <écart>."` and go on with the current state (« Continuer avec l'état actuel »); never touch the repo.
 - `audited_sha` = `head`. "Code" is available when every repo answered.
 
 ## 2. Deployed commit and alignment (launch condition)
 
 For each repo, take the first source that answers.
 
-**a. Server**, only with `ssh.alias`, after the SSH check of step 7. The folder of the application: ask « Dossier de l'application <name> sur le serveur (ou saisir le chemin dans « Autre ») ? », with the candidates (3 at most) and « Je ne sais pas » as options, plus « Arrêter l'audit » when there is no candidate; « Je ne sais pas » skips the server source. The candidates come from the guard (marker per stack in `references/server.md`; `artisan` here):
+**a. Server**, only with `ssh.alias`, after the SSH check of step 7. The folder of the application: ask « Dossier de l'application <name> sur le serveur (ou saisir le chemin dans « Autre ») ? », with the candidates (3 at most) and « Je ne sais pas » as options, plus « Arrêter l'audit » when there is no candidate; « Je ne sais pas » skips the server source. In autonomous mode, do not ask: record `null` unless there is exactly one candidate, which is then taken; with `null` (as « Je ne sais pas »: the server source is skipped), also record `cqa_plan.py defer "$RUN" --kind gap --detail "Dossier de l'application <name> sur le serveur à confirmer (<n> candidats)."`; never stop the audit. The candidates come from the guard (marker per stack in `references/server.md`; `artisan` here):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -59,10 +62,10 @@ S="${CLAUDE_SKILL_DIR}/../../scripts"
 python3 "$S/cqa_plan.py" deployed "<chemin du repo>" --branch <preprod_branch>
 ```
 
-- `{"sha", "source"}`. `source` `environment`: last successful deployment of the preprod environment. `pipeline`: only the last successful pipeline of the branch, a weaker clue: confirm with « D'après GitLab, le dernier pipeline réussi de <branche> est <sha court>. Est-ce bien ce qui tourne en préprod ? » (« Oui », « Je ne sais pas »).
+- `{"sha", "source"}`. `source` `environment`: last successful deployment of the preprod environment. `pipeline`: only the last successful pipeline of the branch, a weaker clue: confirm with « D'après GitLab, le dernier pipeline réussi de <branche> est <sha court>. Est-ce bien ce qui tourne en préprod ? » (« Oui », « Je ne sais pas »). In autonomous mode, do not ask: the pipeline SHA stays unconfirmed, as « Je ne sais pas » (the case « Commit déployé introuvable » below).
 - `{"sha": null}`: nothing found (or glab missing, not logged in).
 
-**c. The lead**: « Quel commit tourne en préprod pour le repo <name> (saisir le SHA, court ou complet, dans « Autre ») ? » with « Je ne sais pas » and « Arrêter l'audit ».
+**c. The lead**: « Quel commit tourne en préprod pour le repo <name> (saisir le SHA, court ou complet, dans « Autre ») ? » with « Je ne sais pas » and « Arrêter l'audit ». In autonomous mode, do not ask: step c is not asked, as « Je ne sais pas » (no sha: the case « Commit déployé introuvable » below).
 
 Then:
 
@@ -77,7 +80,8 @@ It gives `{"aligned", "missing", "reason"}`.
 - `aligned` false: list `missing` (`sha` and `title`, newest first) to the lead, then « La préprod n'a pas les <n> derniers commits de develop pour <name>. » with « Déployer puis relancer (recommandé) » and « Lancer quand même ».
   - Deploy: stop the skill; the lead deploys and relaunches. The skill never deploys.
   - Go on: `aligned` false. The sub-agents fill `divergence` row by row, which caps the verdict at « Mise en place partielle », and the synthesis reports the gap.
-- `aligned` null (`reason` `commit_inconnu`, `base_inconnue` or `base_non_a_jour`), or no sha at all: « Commit déployé introuvable pour <name>. Confirmez-vous que la préprod tourne sur develop à jour ? » with « Je confirme » and « Arrêter ». In autonomous mode (SKILL.md, section 5) do not ask: `defer --kind gap`, treat the repo as not aligned (`aligned` `null`) and go on. Confirmed: `aligned` stays `null`, `deployed_sha` the sha or `null`, and section 8 adds the remark to `remarques.md`. Otherwise stop.
+  - In autonomous mode, do not ask: record `cqa_plan.py defer "$RUN" --kind gap --detail "La préprod n'a pas les <n> derniers commits de develop pour <name>."` and go on as with « Lancer quand même » (`aligned` false); never deploy.
+- `aligned` null (`reason` `commit_inconnu`, `base_inconnue` or `base_non_a_jour`), or no sha at all: « Commit déployé introuvable pour <name>. Confirmez-vous que la préprod tourne sur develop à jour ? » with « Je confirme » and « Arrêter ». Confirmed: `aligned` stays `null`, `deployed_sha` the sha or `null`, and section 8 adds the remark to `remarques.md`. Otherwise stop. In autonomous mode, do not ask (SKILL.md, section 5): record `cqa_plan.py defer "$RUN" --kind gap --detail "Commit déployé introuvable pour <name> : alignement non confirmé."`, store `aligned` false (never `null`, which means the lead confirmed) and `deployed_sha` the sha or `null`, and go on: the repo is treated as not aligned and the synthesis reports the gap.
 
 With `diagnostic`, report the state only: no question about deploying.
 
@@ -95,6 +99,7 @@ docker compose --project-directory "<chemin du repo>" ps --status running --serv
 
 - "CLI local" is available when the runner of each repo is up, or, failing that, when the host has `composer` (repo with `composer.lock`) and `npm` (repo with `package-lock.json`) for the read-only audits.
 - Runner down: « Le runner du repo <name> n'est pas démarré. » with « Je le démarre, revérifier » and « Continuer sans ». Never start it yourself.
+- In autonomous mode, do not ask: record `cqa_plan.py defer "$RUN" --kind gap --detail "Le runner du repo <name> n'est pas démarré."` and go on as with « Continuer sans » ("CLI local" as the fallback above allows); never start it.
 
 ## 4. Preprod reachable (tool "HTTP")
 
@@ -146,6 +151,8 @@ bash "$S/cqa-toolbox.sh" pull
 ```
 
 Exit 1: an image failed, usually the registry login. Then run `doctor` again.
+
+In autonomous mode, do not ask: no download (as « Non »), record `cqa_plan.py defer "$RUN" --kind gap --detail "Images de la boîte à outils à télécharger (plus de 2 Go)."`; the tools that need the missing images stay unavailable ("Audit web" without the `agence` image, "Crawler" without `agence_crawl`).
 
 - The toolbox is **ready** when `docker_version` is set and `images.agence` is not null.
 - "Audit web": toolbox ready, and the target reachable from the workstation (`access` `open`, or `basic_auth` with accepted credentials).
