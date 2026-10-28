@@ -48,25 +48,32 @@ _AUTH_HEADER = re.compile(
 )
 
 _FORM_ATTRIBUTE = re.compile(r"(?:type|autocomplete|name|id)=", re.IGNORECASE)
-_FORM_TOKENS = frozenset(
-    {"password", "current-password", "new-password", "one-time-code", "text", "hidden", "required"}
-)
+_ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_]\w*\}")
 _CODE_PREFIX = re.compile(r"[A-Za-z_][\w\\]*(?:::|->)")
 _CODE_CALL = re.compile(r"[A-Za-z_][\w.\\]*\(.*\)", re.DOTALL)
+_QUOTED_LITERAL = re.compile(r"""(["'])(.*?)\1""")
+_HARMLESS_LITERAL = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+|[A-Z][A-Z0-9_]*")
 
 
 def _is_non_secret(match: re.Match) -> bool:
-    """True when a credential match is a form field description or a code expression."""
+    """True when a credential match is a form field description or a pure code expression."""
     value = match.group("val")
-    if _FORM_ATTRIBUTE.match(value) or value.lower().strip(",;)]") in _FORM_TOKENS:
-        return True
-    if value.startswith(("$", ":")) or _CODE_PREFIX.match(value):
-        return True
     if match.group("q"):
+        return bool(_ENV_REFERENCE.fullmatch(value))
+    if _FORM_ATTRIBUTE.match(value):
+        return True
+    text = match.string
+    end = text.find("\n", match.end("val"))
+    rest = text[match.start("val"):None if end < 0 else end]
+    is_code = (
+        value.startswith("$")
+        or bool(_CODE_PREFIX.match(value))
+        or bool(_CODE_CALL.fullmatch(rest.rstrip().rstrip(",;]").rstrip()))
+        or (value.startswith(":") and text[match.start("val") - 1:match.start("val")] == ":")
+    )
+    if not is_code or ":-" in rest:
         return False
-    end = match.string.find("\n", match.end("val"))
-    rest = match.string[match.start("val"):None if end < 0 else end]
-    return bool(_CODE_CALL.fullmatch(rest.rstrip().rstrip(",;]").rstrip()))
+    return all(_HARMLESS_LITERAL.fullmatch(literal) for _, literal in _QUOTED_LITERAL.findall(rest))
 
 
 _PATTERNS = (
@@ -104,7 +111,10 @@ def redact(text: str, known_values: list[str]) -> str:
     if values:
         text = re.sub("|".join(re.escape(value) for value in values), lambda _: MASK, text)
     for _, pattern in _PATTERNS:
-        text = pattern.sub(lambda m, p=pattern: m.group(0) if _skipped(p, m) else _mask(m), text)
+        if pattern is _CREDENTIAL:
+            text = _redact_credentials(text)
+        else:
+            text = pattern.sub(_mask, text)
     return text
 
 
@@ -130,13 +140,29 @@ def scan_tree(
             path = Path(directory, name)
             if not path.is_file():
                 continue
-            text = path.read_bytes().decode("utf-8", errors="replace")
             relative = path.relative_to(root).as_posix()
             if relative.split("/", 1)[0] in exclude:
                 continue
+            text = path.read_bytes().decode("utf-8", errors="replace")
             found.extend((relative, label) for label in scan_text(text, known_values))
     found.sort(key=lambda pair: pair[0])
     return found
+
+
+def _redact_credentials(text: str) -> str:
+    """Mask credential values; a call or index cut at its quote is masked to the end of line."""
+    out = []
+    position = 0
+    for match in _CREDENTIAL.finditer(text):
+        if match.start() < position or _is_non_secret(match):
+            continue
+        end = match.end("val")
+        if not match.group("q") and match.group("val")[-1] in "([":
+            newline = text.find("\n", end)
+            end = len(text) if newline < 0 else newline
+        out.append(text[position:match.start()] + match.group("pre") + MASK)
+        position = end
+    return "".join(out) + text[position:]
 
 
 def _mask(match: re.Match) -> str:

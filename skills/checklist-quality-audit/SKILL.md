@@ -293,7 +293,7 @@ RUN="<run_dir>"
 GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_plan.py" scan "$RUN"
 ```
 
-Anti-secret check of the run directory. Exit 7: give the lead the files and labels found, never a value.
+Anti-secret check of the run directory (the cached template fiches in `fiches/` are excluded). Exit 7: give the lead the files and labels found, never a value.
 
 **6. Completion.** Write `done.json` in the run directory with Write: `{"run_id": "<run_id>", "scan_ok": <true or false>}`. The run is now complete (section 3).
 

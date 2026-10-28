@@ -146,6 +146,9 @@ class NonSecretTest(unittest.TestCase):
         "$token = bin2hex(random_bytes(32))",
         "'secret' => config('services.turnstile.secret')",
         "password=$PASSWORD",
+        'password="${DB_PASSWORD}"',
+        "Hash::make($request->password)",
+        "$x->password = Hash::make($request->password);",
     ]
     SECRETS = [
         'password: "S3cr3t-Pass!"',
@@ -154,6 +157,21 @@ class NonSecretTest(unittest.TestCase):
         "'password' => 'hunter2hunter2'",
         "api_key=sk_live_51Habcdefghijkl",
         "token: abcd1234efgh5678",
+        "'password' => '$uper-Secret1',",
+        'DB_PASSWORD="$ecretPa55"',
+        '"password": "$2y$10$abcdefghijklmnopqrstuv"',
+        'password: ":Secret123"',
+        '"password": "password"',
+        "'password' => env('DB_PASSWORD', 'RealSecret123'),",
+        "'secret' => env('STRIPE_SECRET', 'sk_live_abcdef123456'),",
+        "'password' => Hash::make('Adm1nP@ss2024'),",
+        "'password' => bcrypt('Adm1nP@ss2024'),",
+        "$user->password = Hash::make('Adm1nP@ss2024');",
+        "'password' => $_ENV['DB_PASSWORD'] ?? 'RealSecret123',",
+        "MYSQL_PASSWORD: ${MYSQL_PASSWORD:-S3cretDefault}",
+        "PASSWORD=${DB_PASSWORD:-S3cretDefault}",
+        "DB_PASSWORD=password",
+        "password=:Secret123",
     ]
 
     def test_form_field_descriptions_are_not_secrets(self):
@@ -172,7 +190,11 @@ class NonSecretTest(unittest.TestCase):
         for text in self.SECRETS:
             with self.subTest(text=text):
                 self.assertEqual(scan_text(text, []), ["credential_assignment"])
-                self.assertIn("[secret masqué]", redact(text, []))
+                masked = redact(text, [])
+                self.assertIn("[secret masqué]", masked)
+                self.assertEqual(scan_text(masked, []), [])
+                for literal in ("RealSecret123", "Adm1nP@ss2024", "S3cretDefault", "sk_live_abcdef123456"):
+                    self.assertNotIn(literal, masked)
 
     def test_secret_after_a_form_description_is_still_masked(self):
         text = "password : type=password\nDB_PASSWORD=Pa55word2024"
