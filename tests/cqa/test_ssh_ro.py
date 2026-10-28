@@ -1260,6 +1260,7 @@ class SessionFilesTest(unittest.TestCase):
             "/var/www/app/storage/framework/sessions/" + laravel,
             "/srv/app/var/sessions/" + "q" * 26,
             laravel,
+            laravel + "Q",
             "commit " + sha,
             "/var/www/app/storage/framework/sessions:",
         ])

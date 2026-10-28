@@ -1252,14 +1252,15 @@ def run(
 
 
 # A listing that reaches a sessions folder anyway (find /var/www -type f, ls -R) prints the ids:
-# PHP "sess_<id>", any file of a "sessions" folder, and Laravel's 40 mixed-case characters (a
-# git SHA, lowercase hexadecimal, is kept).
+# PHP "sess_<id>", any file of a "sessions" folder, and a bare run of 40 to 128 letters and
+# digits in both cases, as Laravel's 40-character ids (a git SHA, lowercase hexadecimal, is
+# kept).
 _SESSION_ID_PATTERNS = (
     re.compile(r"(?P<pre>\bsess_)[A-Za-z0-9,-]{8,}"),
     re.compile(r"(?P<pre>/sessions/)[A-Za-z0-9,_-]{8,}"),
     re.compile(
-        r"(?P<pre>)(?<![A-Za-z0-9])(?=[a-z0-9]{0,39}[A-Z])(?=[A-Z0-9]{0,39}[a-z])"
-        r"[A-Za-z0-9]{40}(?![A-Za-z0-9])"
+        r"(?P<pre>)(?<![A-Za-z0-9])(?=[a-z0-9]{0,127}[A-Z])(?=[A-Z0-9]{0,127}[a-z])"
+        r"[A-Za-z0-9]{40,128}(?![A-Za-z0-9])"
     ),
 )
 
