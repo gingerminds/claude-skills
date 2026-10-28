@@ -40,6 +40,7 @@ python3 "$S/cqa_ssh_ro.py" <alias> --php-ini display_errors expose_php
 - `--`: one command of the allowlist, run over SSH; the output comes back masked.
 - `--check --`: says whether a command would pass, without SSH (`{"allowed", "reason"}`).
 - `--sql drush|wp|artisan --app-dir <dossier>`, plus `--container <conteneur>` or `--compose-service <service>` for an application in a container: one read-only query, sent on standard input through the CLI of the application, which already knows the credentials.
+- `--skip-ssl` (with `--sql drush|wp`, not artisan): skips the TLS check of the database client, for a self-signed certificate. When `ssh.sql_skip_ssl` is `true` in `context.json`, add `--skip-ssl` to every `--sql` query.
 - `--env-keys <fichier> KEY...`: reads a `.env` or `wp-config.php`. Only `APP_ENV`, `APP_DEBUG`, `APP_URL`, `WP_DEBUG`, `WP_ENVIRONMENT_TYPE`, `LOG_LEVEL` and `SESSION_SECURE_COOKIE` show their value; any other key shows only its presence and length.
 - `--php-ini KEY...`: reads `expose_php`, `display_errors`, `memory_limit`, `upload_max_filesize`, `post_max_size`, `max_execution_time`, `session.cookie_secure`, `session.cookie_httponly`, `session.cookie_samesite`, `opcache.enable`. It reads the configuration of the PHP command line, which can differ from PHP-FPM: say so when it matters.
 

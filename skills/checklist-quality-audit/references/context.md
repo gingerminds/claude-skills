@@ -130,7 +130,7 @@ grep -iE '^[[:space:]]*(Host|Include)[[:space:]]' ~/.ssh/config
 
 - Show only alias names (also from the included files), never `HostName`, user or key.
 - Question « Alias SSH » : « Quel alias SSH utiliser pour la préprod (ou saisir l'alias dans « Autre ») ? » with up to 2 aliases whose name contains a word of the project slug, then always « Autre alias » and « Aucun »; another alias in « Autre ». « Autre alias » chosen without a typed value: ask the alias as a plain message.
-- `ssh.alias` is the choice, or `null`. `ssh.app_dirs` (`{"<repo name>": "<folder on the server>"}`) is filled during the diagnostic.
+- `ssh.alias` is the choice, or `null`. `ssh.app_dirs` (`{"<repo name>": "<folder on the server>"}`) is filled during the diagnostic. `ssh.sql_skip_ssl` (optional boolean, default `false`) is set to `true` by the diagnostic when SQL queries only work with `--skip-ssl`.
 
 ## 5. Test accounts
 

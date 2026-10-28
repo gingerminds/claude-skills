@@ -855,15 +855,19 @@ def build_sql_remote(
     *,
     container: Optional[str] = None,
     compose_service: Optional[str] = None,
+    skip_ssl: bool = False,
 ) -> tuple[str, str]:
     """Return (remote command, stdin text) for a validated query; raise ValueError otherwise.
 
     Refused (a ValueError) means the guard refuses the query, the folder or the name.
+    skip_ssl adds the client option that skips TLS verification (self-signed certificate).
     """
     if engine not in SQL_ENGINES:
         raise ValueError(f"moteur SQL inconnu « {engine} » : drush, wp ou artisan")
     if container is not None and compose_service is not None:
         raise ValueError("--container et --compose-service sont exclusifs")
+    if skip_ssl and engine == "artisan":
+        raise ValueError("--skip-ssl n'est pas pris en charge avec artisan")
     body = _sql_body(query)
     _check_token(app_dir)
     if not app_dir.startswith("/"):
@@ -871,9 +875,10 @@ def build_sql_remote(
     _check_path(app_dir)
     directory = shlex.quote(app_dir)
     if engine == "drush":
-        remote = f"cd {directory} && vendor/bin/drush sql:query --file=-"
+        extra = "--extra=--skip-ssl " if skip_ssl else ""
+        remote = f"cd {directory} && vendor/bin/drush sql:query {extra}--file=-"
     elif engine == "wp":
-        remote = "wp db query " + shlex.quote("--path=" + app_dir)
+        remote = "wp db query " + ("--skip-ssl " if skip_ssl else "") + shlex.quote("--path=" + app_dir)
     else:
         remote = f"cd {directory} && php artisan db"
     if container is not None:

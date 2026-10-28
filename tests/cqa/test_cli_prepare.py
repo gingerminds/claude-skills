@@ -669,6 +669,22 @@ class ContextCheckTest(RunDirCase):
                 self.assertEqual(len(report["errors"]), 1, report["errors"])
                 self.assertIn("notion.reference_page_id", report["errors"][0])
 
+    def test_sql_skip_ssl_is_an_optional_boolean(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["ssh"]["sql_skip_ssl"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report["errors"]), (0, []))
+        for value in ("true", None, 1):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["ssh"]["sql_skip_ssl"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertIn("ssh.sql_skip_ssl", report["errors"][0])
+                self.assertIn("booléen", report["errors"][0])
+
     def test_nullable_values_are_accepted(self):
         context = valid_context()
         context["lead"]["option"] = None

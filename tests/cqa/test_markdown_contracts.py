@@ -179,6 +179,17 @@ class SkillTest(unittest.TestCase):
                     self.assertLessEqual(flags, modes)
         self.assertTrue(calls)
 
+    def test_diagnostic_tests_the_database_with_select_1(self):
+        section = _section(_text(REFERENCES / "diagnostic.md"), "8. Application CLI")
+        self.assertIn("--sql <drush|wp|artisan> --app-dir <dossier>", section)
+        self.assertIn('"SELECT 1"', section)
+        self.assertIn("self-signed certificate", section)
+        self.assertIn("--skip-ssl", section)
+        self.assertIn("ssh.sql_skip_ssl: true", section)
+        server = _text(REFERENCES / "server.md")
+        self.assertRegex(server, r"ssh\.sql_skip_ssl.{0,40}true")
+        self.assertIn("--skip-ssl", server)
+
     def test_bash_blocks_set_their_variables(self):
         for path in _skill_files():
             for block in _BASH_BLOCK.findall(_text(path)):

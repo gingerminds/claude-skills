@@ -959,7 +959,10 @@ _SECTIONS = {
         "assignee_options": _texts,
     },
 }
-_OPTIONAL_SECTION_FIELDS = {"notion": {"reference_page_id": _filled_text_or_null}}
+_OPTIONAL_SECTION_FIELDS = {
+    "notion": {"reference_page_id": _filled_text_or_null},
+    "ssh": {"sql_skip_ssl": _boolean},
+}
 _TEAM_FIELDS = {"name": _text, "role": _text_or_null, "option": _text_or_null}
 _REPO_FIELDS = {
     "name": _repo_name,

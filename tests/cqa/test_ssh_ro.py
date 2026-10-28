@@ -671,6 +671,34 @@ class BuildSqlRemoteTest(unittest.TestCase):
             remote, "docker compose exec -T php sh -c 'wp db query --path=/var/www/html'"
         )
 
+    def test_sql_skip_ssl_by_engine(self):
+        remote, stdin = build_sql_remote("wp", "/var/www/html", "SELECT 1", skip_ssl=True)
+        self.assertEqual(remote, "wp db query --skip-ssl --path=/var/www/html")
+        self.assertEqual(stdin, self.STDIN)
+        remote, _ = build_sql_remote("drush", "/var/www/app", "SELECT 1", skip_ssl=True)
+        self.assertEqual(
+            remote,
+            "cd /var/www/app && vendor/bin/drush sql:query --extra=--skip-ssl --file=-",
+        )
+        with self.assertRaises(ValueError) as caught:
+            build_sql_remote("artisan", "/srv/app", "SELECT 1", skip_ssl=True)
+        self.assertIn("--skip-ssl n'est pas pris en charge avec artisan", str(caught.exception))
+        remote, _ = build_sql_remote(
+            "wp", "/var/www/html", "SELECT 1", container="app", skip_ssl=True
+        )
+        self.assertEqual(
+            remote, "docker exec -i app sh -c 'wp db query --skip-ssl --path=/var/www/html'"
+        )
+        remote, _ = build_sql_remote(
+            "drush", "/var/www/html", "SELECT 1", compose_service="php", skip_ssl=True
+        )
+        self.assertEqual(
+            shlex.split(remote)[-1],
+            "cd /var/www/html && vendor/bin/drush sql:query --extra=--skip-ssl --file=-",
+        )
+        remote, _ = build_sql_remote("wp", "/var/www/html", "SELECT 1", skip_ssl=False)
+        self.assertEqual(remote, "wp db query --path=/var/www/html")
+
     def test_paths_are_quoted(self):
         remote, _ = build_sql_remote("drush", "/srv/my app", "SELECT 1")
         self.assertEqual(remote, "cd '/srv/my app' && vendor/bin/drush sql:query --file=-")
@@ -864,6 +892,25 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 4)
         self.assertIn("lead", err)
         self.assertEqual(runner.calls, [])
+
+    def test_cli_sql_skip_ssl_flag(self):
+        runner = FakeRunner()
+        code, _, _ = self.run_main(
+            [ALIAS, "--sql", "wp", "--skip-ssl", "--app-dir", "/app", "SELECT 1"], runner
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("wp db query --skip-ssl --path=/app", runner.calls[0][0][-1])
+        for argv in (
+            [ALIAS, "--sql", "wp", "--skip-ssl", "--skip-ssl", "--app-dir", "/app", "SELECT 1"],
+            [ALIAS, "--sql", "wp", "--skip-ssl", "yes", "--app-dir", "/app", "SELECT 1"],
+            [ALIAS, "--sql", "artisan", "--skip-ssl", "--app-dir", "/app", "SELECT 1"],
+        ):
+            with self.subTest(argv=argv):
+                runner = FakeRunner()
+                code, _, err = self.run_main(argv, runner)
+                self.assertEqual(code, 2)
+                self.assertTrue(err)
+                self.assertEqual(runner.calls, [])
 
     def test_sql_usage_errors(self):
         cases = [
