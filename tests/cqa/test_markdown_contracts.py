@@ -190,6 +190,13 @@ class SkillTest(unittest.TestCase):
         self.assertRegex(server, r"ssh\.sql_skip_ssl.{0,40}true")
         self.assertIn("--skip-ssl", server)
 
+    def test_auditor_passes_skip_ssl_and_compose_file(self):
+        auditor = _text(AUDITOR)
+        self.assertRegex(auditor, r"ssh\.sql_skip_ssl: true.{0,60}--skip-ssl")
+        self.assertIn("--compose-file", auditor)
+        self.assertIn("--compose-file", _text(REFERENCES / "server.md"))
+        self.assertIn("--compose-file", _text(REFERENCES / "diagnostic.md"))
+
     def test_bash_blocks_set_their_variables(self):
         for path in _skill_files():
             for block in _BASH_BLOCK.findall(_text(path)):

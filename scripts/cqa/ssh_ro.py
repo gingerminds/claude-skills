@@ -856,6 +856,7 @@ def build_sql_remote(
     container: Optional[str] = None,
     compose_service: Optional[str] = None,
     skip_ssl: bool = False,
+    compose_file: Optional[str] = None,
 ) -> tuple[str, str]:
     """Return (remote command, stdin text) for a validated query; raise ValueError otherwise.
 
@@ -866,6 +867,8 @@ def build_sql_remote(
         raise ValueError(f"moteur SQL inconnu « {engine} » : drush, wp ou artisan")
     if container is not None and compose_service is not None:
         raise ValueError("--container et --compose-service sont exclusifs")
+    if compose_file is not None and compose_service is None:
+        raise ValueError("--compose-file exige --compose-service")
     if skip_ssl and engine == "artisan":
         raise ValueError("--skip-ssl n'est pas pris en charge avec artisan")
     body = _sql_body(query)
@@ -886,7 +889,16 @@ def build_sql_remote(
         remote = f"docker exec -i {container} sh -c {shlex.quote(remote)}"
     elif compose_service is not None:
         _check_name(compose_service)
-        remote = f"docker compose exec -T {compose_service} sh -c {shlex.quote(remote)}"
+        files = ""
+        if compose_file is not None:
+            _check_token(compose_file)
+            if not compose_file.startswith("/"):
+                raise Refused(
+                    f"le fichier compose doit être un chemin absolu : « {compose_file} »"
+                )
+            _check_path(compose_file)
+            files = f"-f {shlex.quote(compose_file)} "
+        remote = f"docker compose {files}exec -T {compose_service} sh -c {shlex.quote(remote)}"
     return remote, f"{READ_ONLY}{body};\n"
 
 

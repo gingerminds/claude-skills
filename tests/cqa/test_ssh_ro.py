@@ -699,6 +699,25 @@ class BuildSqlRemoteTest(unittest.TestCase):
         remote, _ = build_sql_remote("wp", "/var/www/html", "SELECT 1", skip_ssl=False)
         self.assertEqual(remote, "wp db query --path=/var/www/html")
 
+    def test_compose_file(self):
+        remote, _ = build_sql_remote(
+            "wp", "/var/www/html", "SELECT 1", compose_service="php",
+            compose_file="/srv/my app/docker-compose.yml",
+        )
+        self.assertEqual(
+            remote,
+            "docker compose -f '/srv/my app/docker-compose.yml' exec -T php "
+            "sh -c 'wp db query --path=/var/www/html'",
+        )
+        for options in (
+            {"compose_file": "/srv/docker-compose.yml"},
+            {"compose_service": "php", "compose_file": "docker-compose.yml"},
+            {"compose_service": "php", "compose_file": "/srv/../x.yml"},
+        ):
+            with self.subTest(options=options):
+                with self.assertRaises(ValueError):
+                    build_sql_remote("wp", "/var/www/html", "SELECT 1", **options)
+
     def test_paths_are_quoted(self):
         remote, _ = build_sql_remote("drush", "/srv/my app", "SELECT 1")
         self.assertEqual(remote, "cd '/srv/my app' && vendor/bin/drush sql:query --file=-")
@@ -891,6 +910,21 @@ class CliTest(unittest.TestCase):
         )
         self.assertEqual(code, 4)
         self.assertIn("lead", err)
+        self.assertEqual(runner.calls, [])
+
+    def test_cli_compose_file(self):
+        runner = FakeRunner()
+        code, _, _ = self.run_main(
+            [ALIAS, "--sql", "wp", "--app-dir", "/app", "--compose-service", "php",
+             "--compose-file", "/srv/dc.yml", "SELECT 1"], runner)
+        self.assertEqual(code, 0)
+        self.assertIn("docker compose -f /srv/dc.yml exec -T php", runner.calls[0][0][-1])
+        runner = FakeRunner()
+        code, _, err = self.run_main(
+            [ALIAS, "--sql", "wp", "--app-dir", "/app", "--compose-file", "/srv/dc.yml",
+             "SELECT 1"], runner)
+        self.assertEqual(code, 2)
+        self.assertTrue(err)
         self.assertEqual(runner.calls, [])
 
     def test_cli_sql_skip_ssl_flag(self):

@@ -163,7 +163,7 @@ Exit 0 for each repo concerned: the application CLI is there. That does not prov
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
-python3 "$S/cqa_ssh_ro.py" <alias> --sql <drush|wp|artisan> --app-dir <dossier> [--container <conteneur> | --compose-service <service>] "SELECT 1"
+python3 "$S/cqa_ssh_ro.py" <alias> --sql <drush|wp|artisan> --app-dir <dossier> [--container <conteneur> | --compose-service <service> --compose-file <dossier>/docker-compose.yml] "SELECT 1"
 ```
 
 Exit 0: "BDD" available. On a TLS certificate error in the output (« self-signed certificate », « SSL »), retry the same command with `--skip-ssl` (drush and wp only). If it passes, write `ssh.sql_skip_ssl: true` in `context.json` ("BDD" available). Otherwise, or on exit 1 (CLI missing, shared hosting), "BDD" is unavailable.
