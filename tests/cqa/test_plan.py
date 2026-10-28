@@ -15,6 +15,7 @@ from cqa.plan import (
     is_human_set,
     load_history,
     operation_key,
+    plan_digest,
 )
 
 EM_DASH = chr(0x2014)
@@ -538,6 +539,7 @@ class OperationShapeTest(unittest.TestCase):
         self.assertEqual(
             set(plan),
             {
+                "plan_id",
                 "run_id",
                 "copy_data_source_id",
                 "copy_page_id",
@@ -804,6 +806,55 @@ class FilterPlanTest(unittest.TestCase):
     def test_filtering_twice_is_stable(self):
         once = filter_plan(self.scenario(), skip_human_overrides=True)
         self.assertEqual(filter_plan(once, skip_human_overrides=True), once)
+
+
+class RecetteTest(unittest.TestCase):
+    def scenario(self, recette):
+        rows = [
+            make_row(79, status="Mis en place", last_edited_by_bot=False),
+            make_row(80, status="Mis en place", last_edited_by_bot=False),
+        ]
+        findings = [make_finding(79, "ok", todo=None), make_finding(80, "ko")]
+        return build_plan(
+            rows=rows,
+            findings={item["ref"]: item for item in findings},
+            excluded=[],
+            context=make_context(),
+            visible_verdicts={},
+            history={},
+            run_date=RUN_DATE,
+            plugin_version="0.9.0",
+            followup_done=set(),
+            recette_refs=frozenset(recette),
+        )
+
+    def test_recette_refs_may_override_human_status(self):
+        plan = self.scenario({79})
+        flags = {op["ref"]: op["human_override"] for op in plan["ops"] if op["kind"] == "status"}
+        self.assertEqual(flags, {79: False, 80: True})
+        filtered = filter_plan(plan, skip_human_overrides=True)
+        self.assertEqual({op["ref"] for op in filtered["ops"]}, {79})
+        self.assertEqual(
+            [state["after"] for state in filtered["rows"]], ["Ok / Recetté", "Mis en place"]
+        )
+        self.assertEqual(filtered["summary"]["human_overrides"], [])
+
+    def test_plan_id_is_a_digest_of_the_content(self):
+        first, again = self.scenario({79}), self.scenario({79})
+        self.assertEqual(first["plan_id"], again["plan_id"])
+        self.assertNotEqual(first["plan_id"], self.scenario(set())["plan_id"])
+        changed = copy.deepcopy(first)
+        changed["rows"][0]["before"] = "À traiter"
+        self.assertNotEqual(plan_digest(changed), first["plan_id"])
+        self.assertEqual(filter_plan(first, skip_human_overrides=False)["plan_id"], first["plan_id"])
+        self.assertNotEqual(
+            filter_plan(first, skip_human_overrides=True)["plan_id"], first["plan_id"]
+        )
+
+    def test_without_recette_refs_both_are_protected(self):
+        plan = self.scenario(set())
+        self.assertTrue(all(op["human_override"] for op in plan["ops"] if op["kind"] == "status"))
+        self.assertEqual(filter_plan(plan, skip_human_overrides=True)["ops"], [])
 
 
 class LoadHistoryTest(unittest.TestCase):

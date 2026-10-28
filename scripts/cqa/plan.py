@@ -103,6 +103,8 @@ def build_plan(
     plugin_version: str,
     followup_done: set[int],
     missing_in_copy: Optional[list] = None,
+    recette_refs: frozenset = frozenset(),
+    comment_dates: Optional[dict] = None,
 ) -> dict:
     """Return the plan.json document: the Notion writes the run proposes, and their summary.
 
@@ -113,11 +115,15 @@ def build_plan(
     earlier runs already carry the verdict. A kept row without finding counts as unknown.
     Excluded rows: techno gets the status "Non applicable" and a comment, no_tools a comment,
     standby, phase and no_fiche nothing. A row without ref never gets an operation. A status
-    operation carries human_override when the status it replaces was set by a person.
+    operation carries human_override when the status it replaces was set by a person, except
+    for the refs of recette_refs: the devs set their status on purpose, the recette may change it.
 
     Operations come by ref. Besides the keys of the exchange format the plan carries "rows",
     the status of every row before and after the run, which filter_plan needs to recompute
-    the summary. missing_in_copy is the list of rows of the model absent from the copy.
+    the summary, and "plan_id", a digest of the plan that scopes the journal of the writes to it.
+    missing_in_copy is the list of rows of the model absent from the copy. comment_dates maps
+    the ref of a row judged again in a rerun to the date of that rerun, which its comment
+    gives instead of run_date.
     """
     notion = context["notion"]
     common = {
@@ -132,8 +138,15 @@ def build_plan(
     for ref in sorted(by_ref):
         row, entry = by_ref[ref], excluded_by_ref.get(ref)
         if entry is None:
+            dated = (comment_dates or {}).get(ref)
             row_ops, verdict = _finding_operations(
-                row, findings.get(ref), common, followup_done, visible_verdicts, history
+                row,
+                findings.get(ref),
+                {**common, "run_date": dated} if dated else common,
+                followup_done,
+                visible_verdicts,
+                history,
+                ref in recette_refs,
             )
             if verdict == "unknown":
                 unknown.append(ref)
@@ -145,7 +158,7 @@ def build_plan(
                 deferred.append(ref)
         ops.extend(row_ops)
     states = _row_states(rows, ops)
-    return {
+    plan = {
         "run_id": context["run_id"],
         "copy_data_source_id": notion["copy_data_source_id"],
         "copy_page_id": notion["copy_page_id"],
@@ -154,6 +167,19 @@ def build_plan(
         "summary": _summary(states, ops, unknown, deferred, missing_in_copy or []),
         "rows": states,
     }
+    plan["plan_id"] = plan_digest(plan)
+    return plan
+
+
+def plan_digest(plan: dict) -> str:
+    """Return the plan_id: the sha256 of the canonical JSON of the plan without its plan_id.
+
+    The same plan rebuilt gets the same id (so a resume skips what the journal holds); any
+    change of the rows, operations or recette scope gives another one.
+    """
+    body = {key: value for key, value in plan.items() if key != "plan_id"}
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def filter_plan(plan: dict, *, skip_human_overrides: bool) -> dict:
@@ -175,16 +201,20 @@ def filter_plan(plan: dict, *, skip_human_overrides: bool) -> dict:
     result["summary"] = _summary(
         result["rows"], result["ops"], old["unknown"], old["deferred"], old["missing_in_copy"]
     )
+    if "plan_id" in result:
+        result["plan_id"] = plan_digest(result)
     return result
 
 
-def _finding_operations(row, finding, common, followup_done, visible_verdicts, history):
+def _finding_operations(
+    row, finding, common, followup_done, visible_verdicts, history, recette=False
+):
     ref = row["ref"]
     if finding is None:
         finding = _missing_finding(ref)
     finding = apply_guardrails(finding, row, followup_done=ref in followup_done)
     verdict = finding["verdict"]
-    ops = _status_operation(row, verdict, STATUS_FOR_VERDICT[verdict])
+    ops = _status_operation(row, verdict, STATUS_FOR_VERDICT[verdict], recette)
     status_changed = bool(ops)
     assignees = list(row.get("assignees") or [])
     lead = common["lead_option"]
@@ -208,10 +238,10 @@ def _excluded_operations(row, entry, common, visible_verdicts, history):
     return ops
 
 
-def _status_operation(row, verdict, target):
+def _status_operation(row, verdict, target, recette=False):
     if target is None or target == row.get("status"):
         return []
-    override = is_human_set(row)
+    override = is_human_set(row) and not recette
     return [_operation("status", row, verdict, row.get("status"), target, human_override=override)]
 
 

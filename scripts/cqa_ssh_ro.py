@@ -33,13 +33,14 @@ Garde-fou SSH en lecture seule.
   cqa_ssh_ro.py <alias> -- <commande...>
   cqa_ssh_ro.py --check -- <commande...>
   cqa_ssh_ro.py <alias> --sql <drush|wp|artisan> --app-dir <dossier>
-                [--container <conteneur> | --compose-service <service>] "<requête>"
+                [--container <conteneur> | --compose-service <service> [--compose-file <fichier>]]
+                [--skip-ssl] "<requête>"
   cqa_ssh_ro.py <alias> --env-keys <fichier> CLÉ...
   cqa_ssh_ro.py <alias> --php-ini CLÉ...
 
 Codes de sortie : 0 succès, 1 échec distant, 2 usage, 4 refusé (à confirmer par le lead)."""
 
-_SQL_OPTIONS = ("--app-dir", "--container", "--compose-service")
+_SQL_OPTIONS = ("--app-dir", "--container", "--compose-service", "--compose-file")
 
 
 class UsageError(Exception):
@@ -97,7 +98,7 @@ def _command(alias: str, words: list, runner) -> int:
 def _sql(alias: str, args: list, runner) -> int:
     if not args or args[0] not in SQL_ENGINES:
         raise UsageError("--sql attend drush, wp ou artisan.")
-    engine, values, queries = args[0], {}, []
+    engine, values, queries, skip_ssl = args[0], {}, [], False
     index = 1
     while index < len(args):
         token = args[index]
@@ -107,6 +108,10 @@ def _sql(alias: str, args: list, runner) -> int:
                 raise UsageError(f"{token} : valeur manquante ou option répétée.")
             values[token] = args[index]
             index += 1
+        elif token == "--skip-ssl":
+            if skip_ssl:
+                raise UsageError("--skip-ssl : option répétée.")
+            skip_ssl = True
         elif token.startswith("--"):
             raise UsageError(f"option inconnue « {token} ».")
         else:
@@ -117,6 +122,8 @@ def _sql(alias: str, args: list, runner) -> int:
         raise UsageError("--sql attend une seule requête, entre guillemets.")
     if "--container" in values and "--compose-service" in values:
         raise UsageError("--container et --compose-service sont exclusifs.")
+    if "--compose-file" in values and "--compose-service" not in values:
+        raise UsageError("--compose-file exige --compose-service.")
     allowed, reason = check_sql(queries[0])
     if not allowed:
         return _refuse(reason)
@@ -126,6 +133,8 @@ def _sql(alias: str, args: list, runner) -> int:
         queries[0],
         container=values.get("--container"),
         compose_service=values.get("--compose-service"),
+        skip_ssl=skip_ssl,
+        compose_file=values.get("--compose-file"),
     )
     code, output = run(alias, remote, stdin=stdin, runner=runner)
     return _finish(code, output)

@@ -2,7 +2,7 @@
 import json
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -15,7 +15,9 @@ from cqa.checklist import (
     STATUS_TODO,
     ref_label,
 )
+from cqa import deferred
 from cqa.comments import format_page_summary
+from cqa.secrets import known_values_from_env, redact
 
 _EM_DASH = chr(0x2014)
 _RUN_ID = re.compile(r"(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})")
@@ -27,18 +29,31 @@ _STATUS_ORDER = (
     STATUS_NA,
     STATUS_STANDBY,
 )
-_TOOL_STATUS = {"ok": "ok", "failed": "en échec", "skipped": "ignoré"}
+_TOOL_STATUS = {
+    "ok": "ok",
+    "failed": "en échec",
+    "skipped": "ignoré",
+    "not_applicable": "non applicable",
+}
 _NO_CATEGORY = "Sans catégorie"
 _NO_RESULT = "result.json absent ou illisible"
 _UNKNOWN_STATUS = "statut inconnu"
 _UNKNOWN_WITHOUT_TEXT = "voir le commentaire déjà présent dans Notion"
-_CONSTAT = "Constat : "
+_CONSTAT = "Constat :"
 _HUMAN_SECTION = "Statuts posés par un humain et contredits par l'audit"
+_IDLE_LIMIT = timedelta(minutes=30)
+_DEFERRED_KINDS = {
+    "login": "connexion",
+    "ssh_refused": "commande SSH refusée",
+    "gap": "écart",
+    "question": "question",
+}
 _EMPTY = {
     "Décompte par statut": "Aucun.",
     _HUMAN_SECTION: "Aucun.",
     "Écarts relevés": "Aucun.",
     "Outils": "Aucun outil lancé.",
+    "Outils non applicables": "Aucun.",
 }
 
 
@@ -79,7 +94,9 @@ def synthesis(run_dir: Path, *, now: Optional[datetime] = None) -> tuple[str, st
     lots = _read(run_dir, "lots.json", "cqa_plan.py lots")
     rows = _read(run_dir, "rows.json", "cqa_notion.py rows")
     try:
-        text = _synthesis(context, plan, lots, rows, manifest(run_dir), now or datetime.now())
+        text = _synthesis(
+            context, plan, lots, rows, manifest(run_dir), now or datetime.now(), run_dir
+        )
         start = run_start(context["run_id"])
         comment = format_page_summary(
             summary=plan["summary"], run_date=start.date(), lead_option=context["lead"]["option"]
@@ -91,7 +108,7 @@ def synthesis(run_dir: Path, *, now: Optional[datetime] = None) -> tuple[str, st
     return text.replace(_EM_DASH, "-"), comment
 
 
-def _synthesis(context, plan, lots, rows, tools, now) -> str:
+def _synthesis(context, plan, lots, rows, tools, now, run_dir) -> str:
     start = run_start(context["run_id"])
     summary = plan["summary"]
     row_list = rows["rows"]
@@ -102,7 +119,7 @@ def _synthesis(context, plan, lots, rows, tools, now) -> str:
         f"- Projet : {context['project']['name']}",
         f"- Run : {context['run_id']}, lancé par {context['lead']['option']}",
         _versions(context, tools),
-        f"- Durée de l'audit : {_duration(start, now)}",
+        _duration_line(run_dir, start, now),
     ]
     sections = [
         ("Couverture", _coverage_lines(lots["coverage"])),
@@ -130,13 +147,78 @@ def _synthesis(context, plan, lots, rows, tools, now) -> str:
         ),
         ("Écarts relevés", _gap_lines(context)),
         ("Outils", _tool_lines(tools)),
+        ("Outils non applicables", _not_applicable_lines(tools)),
     ]
+    deferred = _deferred_lines(run_dir)
+    if deferred:
+        sections.append(("Décisions mises de côté", deferred))
+    remarks = _remarks(run_dir)
+    if remarks:
+        sections.append(("Remarques", remarks))
+    recette = plan.get("recette")
+    if isinstance(recette, dict):
+        position = [title for title, _ in sections].index("Écarts relevés")
+        sections.insert(
+            position, ("Recette", _recette_lines(recette, summary, titles, after))
+        )
     lines = ["# Synthèse de l'audit PRE-MEL", "", *header, ""]
     for title, body in sections:
         lines += [f"## {title}", ""]
         lines += body or [_EMPTY.get(title, "Aucune.")]
         lines.append("")
     return "\n".join(lines)
+
+
+def _recette_lines(recette: dict, summary: dict, titles: dict, after: dict) -> list:
+    """Lines of the recette section from the "recette" key of the plan."""
+    judged = [ref for ref in recette.get("judged") or [] if isinstance(ref, int)]
+    unjudged = [ref for ref in recette.get("unjudged") or [] if isinstance(ref, int)]
+    refs = sorted(set(judged) | set(unjudged))
+    validated, waiting, refused, other, unknown, kept = [], [], [], [], [], []
+    held = {
+        item["ref"]: item
+        for item in recette.get("kept") or []
+        if isinstance(item, dict) and isinstance(item.get("ref"), int)
+    }
+    for ref in refs:
+        status = after.get(ref)
+        if ref in unjudged or ref in summary["unknown"]:
+            unknown.append(_ref_line(ref, titles))
+        elif ref in held:
+            item = held[ref]
+            kept.append(
+                _ref_line(
+                    ref,
+                    titles,
+                    f"constat de la recette : {item.get('verdict')}, "
+                    f"statut conservé « {item.get('status')} »",
+                )
+            )
+        elif status == STATUS_OK:
+            validated.append(_ref_line(ref, titles))
+        elif status == STATUS_IMPLEMENTED:
+            waiting.append(_ref_line(ref, titles))
+        elif status in (STATUS_TODO, STATUS_PARTIAL):
+            refused.append(_ref_line(ref, titles, status))
+        else:
+            other.append(_ref_line(ref, titles, status or _UNKNOWN_STATUS))
+    blocking = [_ref_line(ref, titles, after.get(ref)) for ref in summary["blocking_non_conform"]]
+    groups = [
+        (f"Validées ({STATUS_OK})", validated),
+        ("Restées en validation humaine", waiting),
+        ("Refusées", refused),
+        ("Statut humain conservé", kept),
+        ("Non évaluées", unknown),
+        ("Bloquantes restantes", blocking),
+    ]
+    if other:
+        groups.append(("Autres", other))
+    lines = [f"{len(refs)} ligne(s) recettée(s).", ""]
+    for title, body in groups:
+        lines += [f"### {title}", ""]
+        lines += body or ["Aucune."]
+        lines.append("")
+    return lines[:-1]
 
 
 def _override_detail(item: dict) -> str:
@@ -150,10 +232,67 @@ def _versions(context: dict, tools: dict) -> str:
     return line
 
 
-def _duration(start: datetime, end: datetime) -> str:
+def _remarks(run_dir: Path) -> list:
+    """Lines of remarques.md, the remarks the orchestrator writes by hand (empty when none)."""
+    try:
+        text = (run_dir / "remarques.md").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as error:
+        raise ValueError(f"remarques.md est illisible : {error}") from None
+    lines = redact(text, known_values_from_env()).splitlines()
+    return [f"**{line.lstrip('#').strip()}**" if line.lstrip().startswith("#") else line for line in lines]
+
+
+def _deferred_lines(run_dir: Path) -> list:
+    """One bullet per entry of deferred.json, open or resolved."""
+    lines = []
+    for item in deferred.all_items(run_dir):
+        kind = _DEFERRED_KINDS.get(item.get("kind"), item.get("kind") or "décision")
+        refs = ", ".join(f"CQ-{ref}" for ref in item.get("refs") or [] if isinstance(ref, int))
+        outcome = "traitée" if item.get("resolved") else "ouverte"
+        where = f" ({refs})" if refs else ""
+        lines.append(f"- {kind}{where} : {_line(redact(str(item.get('detail')), known_values_from_env()))} ({outcome})")
+    return lines
+
+
+def _duration_line(run_dir: Path, start: datetime, end: datetime) -> str:
+    """Duration line of the header: the active time, or the elapsed time when dates are unusable."""
+    active = _active_duration(run_dir, start, end)
+    if active is not None:
+        return f"- Durée active de l'audit : {_duration_text(active)}"
     if end < start:
-        return "non mesurée"
-    minutes = int((end - start).total_seconds() // 60)
+        return "- Durée de l'audit : non mesurée"
+    elapsed = _duration_text(int((end - start).total_seconds() // 60))
+    return f"- Durée de l'audit : {elapsed} (durée écoulée, dates de fichiers indisponibles)"
+
+
+def _active_duration(run_dir: Path, start: datetime, end: datetime) -> Optional[int]:
+    """Active minutes: the gaps shorter than 30 minutes between file modification dates.
+
+    Returns None when end is before start or no file date lies between start and end.
+    """
+    if end < start:
+        return None
+    dates = []
+    for path in Path(run_dir).rglob("*"):
+        try:
+            if path.is_file():
+                dates.append(datetime.fromtimestamp(path.stat().st_mtime))
+        except OSError:
+            continue
+    dates = sorted(date for date in dates if start <= date <= end)
+    if not dates:
+        return None
+    points = [start, *dates, end]
+    active = sum(
+        (later - earlier for earlier, later in zip(points, points[1:]) if later - earlier < _IDLE_LIMIT),
+        timedelta(),
+    )
+    return int(active.total_seconds() // 60)
+
+
+def _duration_text(minutes: int) -> str:
     if minutes < 1:
         return "moins d'une minute"
     hours, rest = divmod(minutes, 60)
@@ -218,9 +357,20 @@ def _unknown_lines(refs: list, titles: dict, lots: dict, plan: dict) -> list:
 
 
 def _constat(text: str) -> Optional[str]:
-    for line in text.splitlines():
-        if line.startswith(_CONSTAT):
-            return line[len(_CONSTAT) :].strip() or None
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith(_CONSTAT):
+            continue
+        inline = line[len(_CONSTAT) :].strip()
+        if inline:
+            return inline
+        block = []
+        for following in lines[index + 1 :]:
+            # The footer follows the last block with no blank line.
+            if not following.strip() or following.startswith("Réf "):
+                break
+            block.append(following.strip())
+        return " ".join(block) or None
     return None
 
 
@@ -229,11 +379,17 @@ def _gap_lines(context: dict) -> list:
     for repo in context["repos"]:
         if repo.get("aligned") is False:
             deployed = (repo.get("deployed_sha") or "")[:7]
-            seen = f"déployé : {deployed}" if deployed else "commit déployé inconnu"
-            lines.append(
-                f"- Préprod en retard sur develop pour le repo « {repo['name']} » "
-                f"({seen}, audité : {repo['audited_sha'][:7]})."
-            )
+            audited = repo["audited_sha"][:7]
+            if deployed:
+                lines.append(
+                    f"- Préprod en retard sur develop pour le repo « {repo['name']} » "
+                    f"(déployé : {deployed}, audité : {audited})."
+                )
+            else:
+                lines.append(
+                    f"- Alignement de la préprod non confirmé pour le repo « {repo['name']} » "
+                    f"(audité : {audited})."
+                )
     return lines
 
 
@@ -241,10 +397,21 @@ def _tool_lines(tools: dict) -> list:
     lines = []
     for item in tools["tools"]:
         status = item.get("status")
+        if status == "not_applicable":
+            continue
         label = _TOOL_STATUS.get(status, status) if isinstance(status, str) and status else None
         label = label or _UNKNOWN_STATUS
         reason = _line(item.get("reason"))
         lines.append(f"- {item['tool']} : {label}" + (f" ({reason})" if reason else ""))
+    return lines
+
+
+def _not_applicable_lines(tools: dict) -> list:
+    lines = []
+    for item in tools["tools"]:
+        if item.get("status") == "not_applicable":
+            reason = _line(item.get("reason"))
+            lines.append(f"- {item['tool']}" + (f" ({reason})" if reason else ""))
     return lines
 
 

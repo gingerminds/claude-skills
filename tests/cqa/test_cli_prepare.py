@@ -1,16 +1,19 @@
 import base64
 import contextlib
 import copy
+import gzip
 import http.client
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 import urllib.response
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -669,6 +672,150 @@ class ContextCheckTest(RunDirCase):
                 self.assertEqual(len(report["errors"]), 1, report["errors"])
                 self.assertIn("notion.reference_page_id", report["errors"][0])
 
+    def test_sql_skip_ssl_is_an_optional_boolean(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["ssh"]["sql_skip_ssl"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report["errors"]), (0, []))
+        for value in ("true", None, 1):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["ssh"]["sql_skip_ssl"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertIn("ssh.sql_skip_ssl", report["errors"][0])
+                self.assertIn("booléen", report["errors"][0])
+
+    def test_mode_and_notion_write_are_optional_choices(self):
+        for key, values in (
+            ("mode", ("autonome", "interactif")),
+            ("notion_write", ("all", "keep_human", "none", None)),
+        ):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    context = valid_context()
+                    context[key] = value
+                    code, report, _ = self.check(context)
+                    self.assertEqual((code, report["errors"]), (0, []))
+        code, report, _ = self.check(valid_context())
+        self.assertEqual((code, report["errors"]), (0, []))
+
+    def test_mode_and_notion_write_refuse_other_values(self):
+        for key, value in (
+            ("mode", "auto"),
+            ("mode", None),
+            ("mode", True),
+            ("notion_write", "tout"),
+            ("notion_write", ""),
+            ("notion_write", False),
+        ):
+            with self.subTest(key=key, value=value):
+                context = valid_context()
+                context[key] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                self.assertIn(f"« {key} »", report["errors"][0])
+        context = valid_context()
+        context["mode"] = "auto"
+        self.assertIn("autonome", self.check(context)[1]["errors"][0])
+        context = valid_context()
+        context["notion_write"] = "tout"
+        self.assertIn("keep_human", self.check(context)[1]["errors"][0])
+
+    def test_crawl_minutes_is_optional_and_checked(self):
+        for value in (60, 5, 240):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["crawl_minutes"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report["errors"]), (0, []))
+        for value in (4, 241, "60", 60.5, True, None):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["crawl_minutes"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                self.assertIn("« crawl_minutes »", report["errors"][0])
+                self.assertIn("entier de minutes entre 5 et 240", report["errors"][0])
+
+    def _site(self, domain_name="shop.example.org", **changes):
+        domain = domain_name
+        site = {
+            "domain": domain,
+            "backoffice": "commun",
+            "sso": False,
+            "home": f"https://{domain}/",
+        }
+        site.update(changes)
+        return site
+
+    def test_sites_are_optional_and_validated(self):
+        code, report, _ = self.check(valid_context())
+        self.assertEqual((code, report["errors"]), (0, []))
+        context = valid_context()
+        context["sites"] = [
+            self._site("a.example.org"),
+            self._site("b.example.org", backoffice="propre", sso=True),
+        ]
+        self.assertEqual(self.check(context)[:2][1]["errors"], [])
+        context["sites"] = []
+        self.assertEqual(self.check(context)[0], 0)
+
+    def test_sites_refuse_bad_shapes(self):
+        cases = {
+            "not a list": ({"domain": "a.example.org"}, "sites"),
+            "not objects": (["a.example.org"], "sites[0]"),
+        }
+        for label, (value, path) in cases.items():
+            with self.subTest(label=label):
+                context = valid_context()
+                context["sites"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertIn(f"« {path} »", report["errors"][0])
+        for field, value, needle in (
+            ("backoffice", "partagé", "commun"),
+            ("backoffice", None, "propre"),
+            ("sso", "oui", "booléen"),
+            ("sso", None, "booléen"),
+            ("domain", "https://a.example.org", "nom d'hôte"),
+            ("domain", "a.example.org/blog", "nom d'hôte"),
+            ("domain", "", "nom d'hôte"),
+            ("home", "", "URL"),
+            ("home", "a.example.org", "URL"),
+            ("home", "https://autre.example.org/", "a.example.org"),
+        ):
+            with self.subTest(field=field, value=value):
+                context = valid_context()
+                context["sites"] = [self._site("a.example.org", **{field: value})]
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                self.assertIn(f"sites[0].{field}", report["errors"][0])
+                self.assertIn(needle, report["errors"][0])
+        context = valid_context()
+        site = self._site("a.example.org")
+        del site["sso"]
+        context["sites"] = [site]
+        self.assertIn("sites[0].sso", self.check(context)[1]["errors"][0])
+
+    def test_sites_refuse_duplicates_and_more_than_ten(self):
+        context = valid_context()
+        context["sites"] = [self._site("a.example.org"), self._site("A.example.org")]
+        code, report, _ = self.check(context)
+        self.assertEqual(code, 6)
+        self.assertIn("deux fois", report["errors"][0])
+        context["sites"] = [self._site(f"s{n}.example.org") for n in range(10)]
+        self.assertEqual(self.check(context)[0], 0)
+        context["sites"] = [self._site(f"s{n}.example.org") for n in range(11)]
+        code, report, _ = self.check(context)
+        self.assertEqual(code, 6)
+        self.assertIn("10 éléments au plus", report["errors"][0])
+
     def test_nullable_values_are_accepted(self):
         context = valid_context()
         context["lead"]["option"] = None
@@ -770,6 +917,60 @@ class ContextCheckTest(RunDirCase):
                 self.assertEqual(code, 6)
                 self.assertTrue(report["errors"])
                 self.assertIn(dotted.replace(".0.", "[0]."), report["errors"][0])
+
+    def test_app_dirs_take_a_host_path_or_host_and_container(self):
+        for app_dirs in (
+            {"laravel": "/srv/app", "nuxt-3": {"host": "/opt/shop/front", "container": "/app"}},
+            {"laravel": {"container": "/var/www/html"}},
+            {"laravel": {"host": None, "container": "/var/www/html"}},
+            {"laravel": None},
+        ):
+            with self.subTest(app_dirs=app_dirs):
+                context = valid_context()
+                context["ssh"]["app_dirs"] = app_dirs
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report), (0, {"ok": True, "errors": []}))
+
+    def test_legacy_app_dirs_are_tolerated_with_a_warning(self):
+        context = valid_context()
+        context["ssh"]["app_dirs"] = {"laravel": None, "nuxt-3": "www/front", "api": ""}
+        code, report, _ = self.check(context)
+        self.assertEqual((code, report["ok"], report["errors"]), (0, True, []))
+        self.assertEqual(len(report["warnings"]), 2, report["warnings"])
+        for warning, name in zip(report["warnings"], ("nuxt-3", "api")):
+            self.assertIn(f"« ssh.app_dirs.{name} »", warning)
+            self.assertIn("ancien run", warning)
+            self.assertIn("redemander", warning)
+            self.assertNotIn(chr(0x2014), warning)
+
+    def test_app_dirs_invalid_forms_are_reported(self):
+        for value, path, needle in (
+            ("/srv/app\n", "ssh.app_dirs.laravel", "retour à la ligne"),
+            ("srv\tapp", "ssh.app_dirs.laravel", "tabulation"),
+            (3, "ssh.app_dirs.laravel", '{"host"'),
+            (True, "ssh.app_dirs.laravel", '{"host"'),
+            (["/srv/app"], "ssh.app_dirs.laravel", '{"host"'),
+            ({"host": "/srv/app"}, "ssh.app_dirs.laravel.container", "absent"),
+            ({}, "ssh.app_dirs.laravel.container", "absent"),
+            ({"host": "/srv/app", "container": None}, "ssh.app_dirs.laravel.container",
+             "chemin absolu"),
+            ({"host": "/srv/app", "container": "app"}, "ssh.app_dirs.laravel.container",
+             "chemin absolu"),
+            ({"host": "", "container": "/app"}, "ssh.app_dirs.laravel.host", "chemin absolu"),
+            ({"host": "srv/app", "container": "/app"}, "ssh.app_dirs.laravel.host",
+             "chemin absolu"),
+            ({"host": "/srv/app", "container": "/app", "service": "php"},
+             "ssh.app_dirs.laravel", "« service »"),
+        ):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["ssh"]["app_dirs"] = {"laravel": value}
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                self.assertIn(f"« {path} »", report["errors"][0])
+                self.assertIn(needle, report["errors"][0])
+                self.assertNotIn(chr(0x2014), report["errors"][0])
 
     def test_duplicate_repo_names_are_rejected(self):
         context = valid_context()
@@ -1429,7 +1630,19 @@ class ToolboxEnvTest(RunDirCase):
                 "GM_AUDIT_ROBOTS=ignore",
                 "GM_AUDIT_RATE=2",
                 f"GM_AUDIT_USER_AGENT=GingermindsAudit/{plugin_version()}",
+                "GM_CQA_CRAWL_MINUTES=30",
+                "GM_CQA_CRAWL_MAX_URLS=2000",
             ],
+        )
+
+    def test_toolbox_env_gives_the_crawl_limits(self):
+        self.assertEqual(
+            self.env_lines(crawl_minutes=60)[4:6],
+            ["GM_CQA_CRAWL_MINUTES=60", "GM_CQA_CRAWL_MAX_URLS=4000"],
+        )
+        self.assertEqual(
+            self.env_lines(crawl_minutes=240)[4:6],
+            ["GM_CQA_CRAWL_MINUTES=240", "GM_CQA_CRAWL_MAX_URLS=8000"],
         )
 
     def test_toolbox_env_passes_the_prod_origin_on_preprod(self):
@@ -1487,7 +1700,14 @@ class ToolboxEnvTest(RunDirCase):
             self.assertNotIn(secret, out + err)
         self.assertEqual(
             [line.partition("=")[0] for line in out.splitlines()],
-            ["GM_AUDIT_TARGET", "GM_AUDIT_ROBOTS", "GM_AUDIT_RATE", "GM_AUDIT_USER_AGENT"],
+            [
+                "GM_AUDIT_TARGET",
+                "GM_AUDIT_ROBOTS",
+                "GM_AUDIT_RATE",
+                "GM_AUDIT_USER_AGENT",
+                "GM_CQA_CRAWL_MINUTES",
+                "GM_CQA_CRAWL_MAX_URLS",
+            ],
         )
 
     def test_invalid_target_is_a_context_error(self):
@@ -1628,12 +1848,58 @@ class RunsCommandTest(CliCase):
         self.assertEqual(old_state["path"], str(old))
         self.assertEqual(empty_state["path"], str(empty))
         keys = ["context", "lots", "findings", "plan", "applied", "synthese", "done"]
-        self.assertEqual(sorted(full_state), sorted(["run_id", "path", *keys]))
+        self.assertEqual(sorted(full_state), sorted(["run_id", "path", "write_pending", *keys]))
+        self.assertEqual(
+            [state["write_pending"] for state in result["runs"]], [False, False, False]
+        )
         self.assertEqual([full_state[key] for key in keys], [True] * 7)
         self.assertEqual([empty_state[key] for key in keys], [False] * 7)
         self.assertEqual(
             [old_state[key] for key in keys], [True, False, False, False, False, False, False]
         )
+
+    def write(self, run_dir, relative, value):
+        (run_dir / relative).parent.mkdir(parents=True, exist_ok=True)
+        (run_dir / relative).write_text(json.dumps(value), encoding="utf-8")
+
+    def pending_run(self, notion_write="all", dry_run=False, applied=("k1",), plan_id="p2"):
+        run_dir = self.make_run("2026-10-20-1000", "done.json")
+        self.write(run_dir, "context.json", {"notion_write": notion_write, "dry_run": dry_run})
+        ops = [{"key": "k1"}, {"key": "k2"}]
+        self.write(run_dir, "notion/plan.json", {"plan_id": plan_id, "ops": ops})
+        entries = [{"key": key, "plan_id": "p2"} for key in applied]
+        entries.append({"key": "k2", "plan_id": "p1"})
+        self.write(run_dir, "notion/applied.json", {"applied": entries})
+        return run_dir
+
+    def test_write_pending_when_an_operation_of_the_plan_is_not_in_the_journal(self):
+        self.pending_run()
+        state = self.runs()["runs"][0]
+        self.assertTrue(state["done"])
+        self.assertTrue(state["write_pending"])
+
+    def test_no_write_pending_when_the_plan_is_written_or_not_to_be_written(self):
+        for options in (
+            {"applied": ("k1", "k2")},
+            {"notion_write": "none"},
+            {"dry_run": True},
+        ):
+            with self.subTest(options=options):
+                shutil.rmtree(self.base, ignore_errors=True)
+                self.pending_run(**options)
+                self.assertFalse(self.runs()["runs"][0]["write_pending"])
+
+    def test_write_pending_without_journal_or_with_a_legacy_plan(self):
+        run_dir = self.pending_run()
+        (run_dir / "notion" / "applied.json").unlink()
+        self.assertTrue(self.runs()["runs"][0]["write_pending"])
+        self.write(run_dir, "notion/plan.json", {"ops": [{"key": "k1"}]})
+        self.write(run_dir, "notion/applied.json", {"applied": [{"key": "k1"}]})
+        self.assertFalse(self.runs()["runs"][0]["write_pending"])
+        self.write(run_dir, "notion/plan.json", {"ops": []})
+        self.assertFalse(self.runs()["runs"][0]["write_pending"])
+        (run_dir / "notion" / "plan.json").write_text("{", encoding="utf-8")
+        self.assertFalse(self.runs()["runs"][0]["write_pending"])
 
     def test_done_needs_the_final_scan_file(self):
         self.make_run("2026-10-20-1000", "context.json", "synthese.md", "notion/applied.json")
@@ -1700,6 +1966,852 @@ class MainTest(CliCase):
         source = (Path(cqa_plan.__file__)).read_text(encoding="utf-8")
         self.assertNotIn(chr(0x2014), source)
         self.assertNotIn(chr(0x2014), (Path(target.__file__)).read_text(encoding="utf-8"))
+
+
+class SiteOpener:
+    """Opener that serves pages {url: (status, body)} and records the requests."""
+
+    def __init__(self, pages, final=None):
+        self.pages = pages
+        self.final = final or {}
+        self.requests = []
+
+    def open(self, request, timeout=None):
+        self.requests.append((request.get_method(), request.full_url, dict(request.header_items())))
+        status, body = self.pages.get(request.full_url, (404, ""))
+        if status >= 400:
+            raise urllib.error.HTTPError(request.full_url, status, "Error", {}, io.BytesIO())
+        return _Page(self.final.get(request.full_url, request.full_url), status, body)
+
+    @property
+    def urls(self):
+        return [request[1] for request in self.requests]
+
+
+class _Page:
+    def __init__(self, url, status, body):
+        self.url, self.status, self.body = url, status, io.BytesIO(body.encode("utf-8"))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def getcode(self):
+        return self.status
+
+    def geturl(self):
+        return self.url
+
+    def read(self, size=-1):
+        return self.body.read(size)
+
+
+HOME = "https://preprod.example.org/"
+
+
+def page(url, template, status, checked=True, gap=False):
+    return {"url": url, "template": template, "status": status, "checked": checked, "gap": gap}
+
+
+class KeyPagesCheckTest(RunDirCase):
+    def setUp(self):
+        super().setUp()
+        self.fast = {"GM_AUDIT_RATE": "1000"}
+
+    def pages(self, urls):
+        return [{"template": f"T{index}", "url": url} for index, url in enumerate(urls)]
+
+    def check_pages(self, pages, opener, extra=None, env=None, **changes):
+        self.write_context(key_pages=self.pages(pages), **changes)
+        argv = ["key-pages-check", self.run_dir, *(extra or [])]
+        return self.run_main(argv, env={**self.fast, **(env or {})}, opener=opener)
+
+    def test_statuses_and_dead_links_of_the_home_page(self):
+        home = (
+            '<a href="/a">a</a> <a href="/gone">g</a> <a href="/a#top">again</a> '
+            '<a href="https://other.example.org/x">out</a> <a href="mailto:x@example.org">m</a> '
+            '<a href="#top">t</a> <a href="rel">r</a>'
+        )
+        opener = SiteOpener(
+            {
+                HOME: (200, home),
+                HOME + "liste": (200, ""),
+                HOME + "missing": (404, ""),
+                HOME + "a": (200, ""),
+                HOME + "rel": (200, ""),
+            }
+        )
+        code, out, err = self.check_pages([HOME, HOME + "liste", HOME + "missing"], opener)
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(
+            result["pages"],
+            [
+                page(HOME, "T0", 200),
+                page(HOME + "liste", "T1", 200),
+                page(HOME + "missing", "T2", 404, gap=True),
+                page(HOME + "a", None, 200),
+                page(HOME + "gone", None, 404, gap=True),
+                page(HOME + "rel", None, 200),
+            ],
+        )
+        self.assertEqual(result["home_links_404"], [HOME + "gone"])
+        self.assertNotIn("https://other.example.org/x", opener.urls)
+        self.assertEqual(opener.urls.count(HOME), 1)
+
+    def test_a_key_page_on_another_origin_is_not_requested(self):
+        opener = SiteOpener({HOME: (200, "")})
+        code, out, err = self.check_pages([HOME, "https://other.example.org/"], opener)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(opener.urls, [HOME])
+        self.assertEqual(
+            json.loads(out)["pages"][1], page("https://other.example.org/", "T1", None, False)
+        )
+
+    def test_at_most_fifty_requests(self):
+        links = "".join(f'<a href="/p{number}">x</a>' for number in range(80))
+        opener = SiteOpener({HOME: (200, links)})
+        code, out, err = self.check_pages([HOME], opener)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(opener.requests), 50)
+        self.assertEqual(len(json.loads(out)["pages"]), 50)
+
+    def test_the_rate_of_the_toolbox_is_respected(self):
+        opener = SiteOpener({HOME: (200, '<a href="/a">a</a>'), HOME + "a": (200, "")})
+        with mock.patch.object(cqa_plan.time, "sleep") as sleep:
+            code, _, err = self.check_pages([HOME], opener, env={"GM_AUDIT_RATE": "4"})
+        self.assertEqual(code, 0, err)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.25])
+        with mock.patch.object(cqa_plan.time, "sleep") as sleep:
+            self.check_pages([HOME], opener, env={"GM_AUDIT_RATE": ""})
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.5])
+
+    def test_an_invalid_rate_is_a_usage_error(self):
+        opener = SiteOpener({HOME: (200, "")})
+        code, _, err = self.check_pages([HOME], opener, env={"GM_AUDIT_RATE": "fast"})
+        self.assertEqual(code, 2)
+        self.assertEqual(opener.requests, [])
+
+    def test_unreachable_page_has_a_null_status(self):
+        class Down:
+            def open(self, request, timeout=None):
+                raise urllib.error.URLError("down")
+
+        code, out, _ = self.check_pages([HOME], Down())
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["pages"], [page(HOME, "T0", None, True, True)])
+
+    def test_a_404_template_answering_404_is_not_a_gap(self):
+        opener = SiteOpener({HOME: (200, ""), HOME + "nope": (404, ""), HOME + "x": (404, "")})
+        self.write_context(
+            key_pages=[
+                {"template": "Accueil", "url": HOME},
+                {"template": "404", "url": HOME + "nope"},
+                {"template": "Liste", "url": HOME + "x"},
+            ]
+        )
+        result = self.run_json(["key-pages-check", self.run_dir], env=self.fast, opener=opener)
+        self.assertEqual(
+            [(p["template"], p["status"], p["gap"]) for p in result["pages"]],
+            [("Accueil", 200, False), ("404", 404, False), ("Liste", 404, True)],
+        )
+
+    def test_the_404_template_is_compared_stripped(self):
+        err = HOME + "gm-cqa-404-0a1b2c3d"
+        opener = SiteOpener({HOME: (200, ""), err: (200, "")})
+        self.write_context(
+            key_pages=[{"template": "Accueil", "url": HOME}, {"template": "404 ", "url": err}]
+        )
+        result = self.run_json(["key-pages-check", self.run_dir], env=self.fast, opener=opener)
+        self.assertFalse(result["pages"][1]["gap"])
+        self.assertEqual(result["soft_404"], [{"url": err, "status": 200}])
+
+    def test_key_pages_check_expects_404_on_the_error_page(self):
+        err = HOME + "gm-cqa-404-0a1b2c3d"
+        for status in (404, 200, 302, 500, 401):
+            with self.subTest(status=status):
+                opener = SiteOpener({HOME: (200, ""), err: (status, ""), HOME + "x": (404, "")})
+                self.write_context(
+                    key_pages=[
+                        {"template": "Accueil", "url": HOME},
+                        {"template": "404", "url": err},
+                        {"template": "Accueil", "url": HOME + "x"},
+                    ]
+                )
+                result = self.run_json(["key-pages-check", self.run_dir], env=self.fast, opener=opener)
+                error_page = result["pages"][1]
+                self.assertEqual((error_page["template"], error_page["gap"]), ("404", False))
+                self.assertTrue(result["pages"][2]["gap"])
+                expected = [] if status == 404 else [{"url": err, "status": status}]
+                self.assertEqual(result["soft_404"], expected)
+        self.write_context(
+            key_pages=[{"template": "404", "url": err}, {"template": "404", "url": "https://other.example.org/e"}]
+        )
+
+        class Down:
+            def open(self, request, timeout=None):
+                raise urllib.error.URLError("down")
+
+        result = self.run_json(["key-pages-check", self.run_dir], env=self.fast, opener=Down())
+        self.assertEqual(result["soft_404"], [{"url": err, "status": None}])
+        self.assertFalse(any(p["gap"] for p in result["pages"] if p["template"] == "404"))
+        opener = SiteOpener({HOME: (200, "")})
+        self.write_context(key_pages=[{"template": "404", "url": "https://other.example.org/e"}])
+        result = self.run_json(["key-pages-check", self.run_dir], env=self.fast, opener=opener)
+        self.assertEqual(result["soft_404"], [])
+
+    def test_a_key_page_with_credentials_is_refused_and_never_printed(self):
+        url = "https://leak-user:leak-pass@preprod.example.org/liste"
+        opener = SiteOpener({HOME: (200, "")})
+        code, out, err = self.check_pages([HOME, url], opener)
+        self.assertEqual(code, 6)
+        self.assertEqual(opener.requests, [])
+        self.assertNotIn("leak", out + err)
+        self.write_context(key_pages=[{"template": "Liste", "url": url}])
+        code, out, err = self.run_main(["context", "--check", self.run_dir])
+        self.assertEqual(code, 6)
+        self.assertNotIn("leak", out + err)
+        self.assertIn("key_pages[0].url", out)
+
+    def test_after_the_deadline_the_remaining_pages_are_reported_unchecked(self):
+        opener = SiteOpener({HOME: (200, '<a href="/a">a</a>'), HOME + "liste": (200, "")})
+        with mock.patch.object(cqa_plan, "KEY_PAGES_DEADLINE", -1):
+            code, out, err = self.check_pages([HOME, HOME + "liste"], opener)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(opener.urls, [HOME])
+        self.assertEqual(json.loads(out)["pages"][1], page(HOME + "liste", "T1", None, False))
+
+    def test_no_more_links_are_listed_after_the_deadline(self):
+        links = "".join(f'<a href="/p{number}">x</a>' for number in range(40))
+        opener = SiteOpener({HOME: (200, links)})
+        with mock.patch.object(cqa_plan, "KEY_PAGES_DEADLINE", -1):
+            code, out, err = self.check_pages([HOME], opener)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(opener.urls, [HOME])
+        self.assertEqual(len(json.loads(out)["pages"]), 1)
+
+    def test_home_links_follow_an_allowed_https_upgrade(self):
+        http_home = "http://preprod.example.org/"
+        opener = SiteOpener(
+            {http_home: (200, '<a href="/a">a</a>'), HOME + "a": (200, "")},
+            final={http_home: HOME},
+        )
+        code, out, err = self.check_pages(
+            [http_home], opener, target__preprod_url="http://preprod.example.org"
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(opener.urls, [http_home, HOME + "a"])
+
+    def test_a_cross_origin_redirect_reaches_nothing_else(self):
+        other, other_url = start_server(self, answer(200))
+        server, url = start_server(
+            self, lambda method, path, headers: (302, {"Location": other_url + "/loot"})
+        )
+        env = {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        code, out, err = self.check_pages(
+            [url + "/x"], None, extra=["--auth-env"], env=env, target__preprod_url=url
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(other.requests, [])
+        self.assertEqual(json.loads(out)["pages"][1]["status"], 302)
+
+    def test_no_credentials_without_the_flag(self):
+        opener = SiteOpener({HOME: (200, "")})
+        env = {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        self.check_pages([HOME], opener, env=env)
+        self.assertNotIn("Authorization", opener.requests[0][2])
+
+    def test_credentials_are_sent_to_the_target_only_and_never_printed(self):
+        server, url = start_server(self, basic_gate)
+        env = {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        code, out, err = self.check_pages(
+            [url + "/", "https://other.example.org/"],
+            None,
+            extra=["--auth-env"],
+            env=env,
+            target__preprod_url=url,
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual([page["status"] for page in json.loads(out)["pages"]], [200, None])
+        self.assertEqual({request[2]["Authorization"] for request in server.requests}, {BASIC})
+        self.assertNotIn(PASSWORD, out + err)
+        self.assertNotIn(BASIC.split()[1], out + err)
+
+    def test_credentials_are_refused_over_clear_text_http(self):
+        opener = SiteOpener({"http://preprod.example.org/": (200, "")})
+        env = {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        code, out, err = self.check_pages(
+            ["http://preprod.example.org/"],
+            opener,
+            extra=["--auth-env"],
+            env=env,
+            target__preprod_url="http://preprod.example.org/",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(opener.requests, [])
+        self.assertNotIn(PASSWORD, out + err)
+
+    def test_missing_variables_with_the_flag_are_a_usage_error(self):
+        opener = SiteOpener({HOME: (200, "")})
+        code, _, _ = self.check_pages([HOME], opener, extra=["--auth-env"])
+        self.assertEqual(code, 2)
+
+    def test_prod_run_checks_the_prod_origin(self):
+        prod = "https://www.example.org/"
+        opener = SiteOpener({prod: (200, "")})
+        code, out, err = self.check_pages(
+            [prod, HOME],
+            opener,
+            target__prod_url="https://www.example.org",
+            target__prod_live=True,
+            phase_filter="MEL J0",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(opener.urls, [prod])
+
+
+class _SiteHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.requests.append((self.path, dict(self.headers)))
+        status, body = self.server.pages.get(self.path, (404, b""))
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class CrawlEstimateTest(RunDirCase):
+    def setUp(self):
+        super().setUp()
+        self.fast = {"GM_AUDIT_RATE": "1000"}
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _SiteHandler)
+        self.server.requests = []
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def serve(self, pages):
+        self.server.pages = {path: (200, body) for path, body in pages.items()}
+
+    def estimate(self, extra=None, env=None, **changes):
+        sleeping = mock.patch.object(cqa_plan.crawl_budget.time, "sleep")
+        with sleeping:
+            return self.run_main(
+                ["crawl-estimate", self.run_dir, *(extra or [])],
+                env={**self.fast, **(env or {})},
+            )
+
+    def test_crawl_estimate_counts_the_sitemap_and_times_the_key_pages(self):
+        prod = "https://www.example.org"
+        index = (
+            f"<sitemapindex><sitemap><loc>{prod}/s1.xml</loc></sitemap>"
+            f"<sitemap><loc>{self.base}/s2.xml.gz</loc></sitemap></sitemapindex>"
+        ).encode()
+        first = (
+            f"<urlset><url><loc>{prod}/a</loc></url><url><loc>{prod}/b?x=1</loc></url>"
+            "<url><loc>https://other.example.net/c</loc></url></urlset>"
+        ).encode()
+        second = gzip.compress(
+            f"<urlset><url><loc>{self.base}/a</loc></url><url><loc>{prod}/d</loc></url></urlset>".encode()
+        )
+        self.serve(
+            {
+                "/sitemap.xml": index,
+                "/robots.txt": f"User-agent: *\nSitemap: {prod}/sitemap.xml\n".encode(),
+                "/s1.xml": first,
+                "/s2.xml.gz": second,
+                "/": b"home",
+                "/liste": b"list",
+                "/fiche": b"card",
+            }
+        )
+        self.write_context(
+            target__preprod_url=self.base,
+            target__prod_url=prod,
+            key_pages=[
+                {"template": "Accueil", "url": self.base + "/"},
+                {"template": "Liste", "url": prod + "/liste"},
+                {"template": "Fiche", "url": self.base + "/fiche"},
+                {"template": "404", "url": self.base + "/nope"},
+            ],
+        )
+        code, out, err = self.estimate(
+            ["--auth-env"], {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        )
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(3, result["sitemap_urls"])
+        self.assertEqual(3, result["pages_timed"])
+        self.assertEqual(30, result["proposed_minutes"])
+        self.assertEqual(2000, result["max_urls"])
+        self.assertIsInstance(result["mean_response_s"], float)
+        paths = [path for path, _ in self.server.requests]
+        self.assertNotIn("/nope", paths)
+        self.assertIn("/liste", paths)
+        for path, headers in self.server.requests:
+            self.assertEqual(BASIC, headers.get("Authorization"), path)
+        self.assertNotIn(PASSWORD, out + err)
+        self.assertNotIn(USER, out + err)
+
+    def test_crawl_estimate_reports_a_truncated_count_and_refuses_clear_credentials(self):
+        self.serve({"/sitemap.xml": b"<urlset></urlset>", "/": b""})
+        self.write_context(target__preprod_url=self.base, key_pages=[{"template": "A", "url": self.base + "/"}])
+        self.assertFalse(json.loads(self.estimate()[1])["truncated"])
+        self.write_context(
+            target__preprod_url="http://preprod.example.org",
+            key_pages=[{"template": "A", "url": "http://preprod.example.org/"}],
+        )
+        code, out, err = self.estimate(
+            ["--auth-env"], {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        )
+        self.assertNotEqual(0, code)
+        self.assertNotIn(PASSWORD, out + err)
+
+    def test_key_pages_take_half_of_the_budget_at_most(self):
+        self.serve({"/sitemap.xml": b"<urlset></urlset>", "/": b""})
+        self.write_context(target__preprod_url=self.base, key_pages=[{"template": "A", "url": self.base + "/"}])
+        seen = []
+        real = cqa_plan.crawl_budget.mean_response_time
+
+        def spy(urls, fetch, **kwargs):
+            seen.append(kwargs["deadline"] - time.monotonic())
+            return real(urls, fetch, **kwargs)
+
+        with mock.patch.object(cqa_plan.crawl_budget, "mean_response_time", spy):
+            code, _, err = self.estimate()
+        self.assertEqual(code, 0, err)
+        self.assertLessEqual(seen[0], cqa_plan.KEY_PAGES_DEADLINE / 2)
+
+    def test_crawl_estimate_without_a_sitemap(self):
+        self.serve({"/": b"home"})
+        self.write_context(target__preprod_url=self.base, key_pages=[{"template": "A", "url": self.base + "/"}])
+        code, out, err = self.estimate()
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertIsNone(result["sitemap_urls"])
+        self.assertEqual((30, 2000), (result["proposed_minutes"], result["max_urls"]))
+        self.assertEqual(1, result["pages_timed"])
+
+    def test_crawl_estimate_without_credentials_sends_no_header(self):
+        self.serve({"/sitemap.xml": b"<urlset></urlset>", "/": b""})
+        self.write_context(target__preprod_url=self.base, key_pages=[{"template": "A", "url": self.base + "/"}])
+        code, out, err = self.estimate()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(0, json.loads(out)["sitemap_urls"])
+        for _, headers in self.server.requests:
+            self.assertNotIn("Authorization", headers)
+
+    def test_crawl_estimate_needs_the_credentials_with_auth_env(self):
+        self.write_context(target__preprod_url=self.base)
+        code, _, _ = self.estimate(["--auth-env"])
+        self.assertEqual(2, code)
+
+
+class FetchTimedTest(CliCase):
+    def serve(self, handler):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_a_slowly_streamed_body_counts_as_unanswered(self):
+        class Slow(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                try:
+                    for _ in range(100):
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                except OSError:
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        _, base = self.serve(Slow)
+        started = time.monotonic()
+        status, body, _ = target.fetch_timed(base + "/", timeout=5, deadline=time.monotonic() + 0.3)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual((None, b""), (status, body))
+
+    def test_a_cross_origin_redirect_is_not_followed_and_gets_nothing(self):
+        seen = []
+
+        class Second(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(dict(self.headers))
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        _, other = self.serve(Second)
+
+        class First(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", other + "/x")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        _, base = self.serve(First)
+        status, body, _ = target.fetch_timed(base + "/", auth=(USER, PASSWORD))
+        self.assertEqual((302, b""), (status, body))
+        self.assertEqual([], seen)
+
+
+class ReuseContextTest(RunDirCase):
+    def setUp(self):
+        super().setUp()
+        self.old = self.run_dir
+        self.new = self.old.parent / "2026-10-21-0900"
+        self.new.mkdir()
+        old = valid_context()
+        old.update({"mode": "autonome", "notion_write": "all", "crawl_minutes": 30})
+        old["sites"] = [
+            {"domain": "preprod.example.org", "backoffice": "commun", "sso": True, "home": HOME}
+        ]
+        old["target"]["access"] = "basic_auth"
+        old["target"]["prod_live"] = True
+        old["notion"]["bot_id"] = "aa" * 16
+        old["repos"][0]["preprod_branch"] = "release"
+        old["ssh"] = {"alias": "example-preprod", "app_dirs": {"laravel": "/srv/app"}}
+        old["test_accounts"] = {"front": True, "backoffice": True}
+        old["available_tools"] = ["Code", "SSH serveur"]
+        old["dry_run"] = True
+        self.write_context(old)
+
+    def fresh(self, run_id="2026-10-21-0900"):
+        document = valid_context()
+        document["run_id"] = run_id
+        document["target"]["access"] = None
+        document["repos"] = [
+            dict(repo, audited_sha="f" * 40, deployed_sha=None, aligned=None, preprod_branch="main")
+            for repo in document["repos"]
+        ]
+        (self.new / "context.json").write_text(json.dumps(document), encoding="utf-8")
+        return document
+
+    def reuse(self):
+        return self.run_json(["reuse-context", self.new, self.old])
+
+    def written(self):
+        return json.loads((self.new / "context.json").read_text(encoding="utf-8"))
+
+    def test_reusable_answers_are_copied_and_listed(self):
+        self.fresh()
+        result = self.reuse()
+        context, old = self.written(), json.loads((self.old / "context.json").read_text())
+        for key in ("repos", "notion", "lead", "team", "ssh", "test_accounts", "key_pages", "sites"):
+            self.assertIn(key, result["copied"])
+            if key not in ("repos", "notion"):
+                self.assertEqual(context[key], old[key], key)
+        self.assertEqual(context["notion"]["assignee_options"], old["notion"]["assignee_options"])
+        self.assertIn("target", result["copied"])
+        self.assertEqual(context["target"]["preprod_url"], old["target"]["preprod_url"])
+
+    def test_probe_and_per_invocation_answers_are_not_copied(self):
+        self.fresh()
+        self.reuse()
+        context = self.written()
+        self.assertIsNone(context["target"]["access"])
+        for key in ("mode", "notion_write", "crawl_minutes"):
+            self.assertNotIn(key, context)
+        self.assertEqual(context["run_id"], "2026-10-21-0900")
+        self.assertEqual(context["available_tools"], ["Code", "CLI local", "HTTP"])
+        self.assertFalse(context["dry_run"])
+
+    def test_fresh_repos_are_kept_and_only_the_preprod_branch_is_taken(self):
+        self.fresh()
+        self.reuse()
+        repos = self.written()["repos"]
+        self.assertEqual([repo["audited_sha"] for repo in repos], ["f" * 40] * 2)
+        self.assertEqual([repo["preprod_branch"] for repo in repos], ["release"] * 2)
+
+    def test_reuse_context_keeps_third_party_paths(self):
+        old = json.loads((self.old / "context.json").read_text())
+        old["repos"][0]["third_party_paths"] = ["wp-content/plugins/seo-pack"]
+        self.write_context(old)
+        self.fresh()
+        self.reuse()
+        repos = self.written()["repos"]
+        self.assertEqual(repos[0]["third_party_paths"], ["wp-content/plugins/seo-pack"])
+        self.assertNotIn("third_party_paths", repos[1])
+        self.assertEqual(repos[0]["audited_sha"], "f" * 40)
+
+    def test_an_invalid_old_third_party_paths_is_not_copied(self):
+        old = json.loads((self.old / "context.json").read_text())
+        old["repos"][0]["third_party_paths"] = ["../x"]
+        self.write_context(old)
+        self.fresh()
+        self.reuse()
+        self.assertNotIn("third_party_paths", self.written()["repos"][0])
+
+    def test_repos_of_an_old_run_are_reset_when_the_new_run_has_none(self):
+        self.reuse()
+        for repo in self.written()["repos"]:
+            self.assertIsNone(repo["audited_sha"])
+            self.assertIsNone(repo["deployed_sha"])
+            self.assertIsNone(repo["aligned"])
+
+    def test_prod_live_and_the_bot_are_not_copied(self):
+        fresh = self.fresh()
+        self.reuse()
+        context = self.written()
+        self.assertIs(context["target"]["prod_live"], False)
+        self.assertEqual(context["notion"]["bot_id"], fresh["notion"]["bot_id"])
+
+    def test_resulting_context_is_valid(self):
+        self.fresh()
+        self.reuse()
+        code, out, err = self.run_main(["context", "--check", self.new])
+        self.assertEqual(code, 0, out + err)
+
+    def test_without_a_context_in_the_new_run_only_the_answers_are_written(self):
+        result = self.reuse()
+        self.assertEqual(set(self.written()), set(result["copied"]))
+        self.assertNotIn("run_id", self.written())
+
+    def test_an_old_context_without_sites_does_not_list_them(self):
+        old = json.loads((self.old / "context.json").read_text())
+        del old["sites"]
+        self.write_context(old)
+        self.fresh()
+        self.assertNotIn("sites", self.reuse()["copied"])
+        self.assertNotIn("sites", self.written())
+
+    def test_missing_old_context_is_an_error(self):
+        (self.old / "context.json").unlink()
+        code, _, err = self.run_main(["reuse-context", self.new, self.old])
+        self.assertEqual(code, 6)
+
+    def test_new_run_folder_must_exist(self):
+        code, _, _ = self.run_main(["reuse-context", self.new / "nope", self.old])
+        self.assertEqual(code, 2)
+
+
+class ThirdPartyPathsTest(RunDirCase):
+    def test_third_party_paths_are_validated(self):
+        valid = [[], ["wp-content/plugins/acme-forms"], ["src/plugins/a", "plugins/b.c"]]
+        for value in valid:
+            with self.subTest(value=value):
+                context = valid_context()
+                context["repos"][0]["third_party_paths"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report["errors"]), (0, []))
+        invalid = {
+            "not a list": "plugins/a",
+            "not texts": ["plugins/a", 3],
+            "parent segment": ["plugins/../a"],
+            "leading slash": ["/plugins/a"],
+            "backslash": ["plugins\\a"],
+            "empty segment": ["plugins//a"],
+            "trailing slash": ["plugins/a/"],
+            "empty path": [""],
+            "dot segment": ["./plugins/a"],
+            "too many": [f"plugins/p{n}" for n in range(201)],
+        }
+        for label, value in invalid.items():
+            with self.subTest(label):
+                context = valid_context()
+                context["repos"][1]["third_party_paths"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1)
+                self.assertIn("repos[1].third_party_paths", report["errors"][0])
+
+    def test_an_absent_third_party_paths_stays_valid(self):
+        code, report, _ = self.check(valid_context())
+        self.assertEqual((code, report["errors"]), (0, []))
+
+
+class WpPluginsTest(RunDirCase):
+    def make_wordpress(self, files, name="Acme - Shop - WordPress"):
+        repo = self.tmp_dir() / name
+        repo.mkdir()
+        git_fixtures.git(repo, "init", "-q")
+        for relative, text in files.items():
+            target = repo / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        git_fixtures.git(repo, "add", "-A")
+        git_fixtures.git(repo, "commit", "-q", "-m", "init")
+        return repo
+
+    def context_for(self, repo, stack="wordpress"):
+        context = valid_context()
+        context["repos"] = [
+            dict(context["repos"][0], name="wordpress", path=str(repo), stack=stack)
+        ]
+        context["target"]["prod_url"] = "https://www.example.org"
+        self.write_context(context)
+
+    def plugins(self):
+        found = self.run_json(["wp-plugins", self.run_dir])["plugins"]
+        return {entry["path"]: entry for entry in found}
+
+    def test_wp_plugins_proposes_third_party_and_custom(self):
+        header = "<?php\n/*\nPlugin Name: {}\n{}*/\n"
+        repo = self.make_wordpress({
+            "wp-content/plugins/acme-forms/acme-forms.php": header.format("Acme Forms", ""),
+            "wp-content/plugins/acme-forms/inc/a.php": "<?php\n",
+            "wp-content/plugins/seo-pack/readme.txt": "=== SEO ===\nStable tag: 1.4.2\n",
+            "wp-content/plugins/seo-pack/seo-pack.php": header.format("SEO", ""),
+            "wp-content/plugins/vendor-tool/main.php": header.format(
+                "Vendor Tool", "Plugin URI: https://vendor.example.com/tool\n"
+            ),
+            "wp-content/plugins/own-links/main.php": header.format(
+                "Own", "Author URI: https://www.example.org/\n"
+            ),
+            "wp-content/plugins/wordfence/wordfence.php": header.format("Wordfence", ""),
+            "wp-content/mu-plugins/acme-hooks/loader.php": header.format("Hooks", ""),
+            "wp-content/plugins/index.php": "<?php\n",
+            "wp-content/themes/acme/plugins/skip/a.php": "<?php\n",
+        })
+        self.context_for(repo)
+        found = self.plugins()
+        base = "wp-content/plugins/"
+        self.assertEqual(
+            {path: entry["third_party"] for path, entry in found.items()},
+            {
+                base + "acme-forms": False,
+                base + "seo-pack": True,
+                base + "vendor-tool": True,
+                base + "own-links": False,
+                base + "wordfence": True,
+                "wp-content/mu-plugins/acme-hooks": False,
+                "wp-content/themes/acme/plugins/skip": False,
+            },
+        )
+        self.assertEqual(set(found[base + "seo-pack"]), {"repo", "path", "third_party", "why"})
+        self.assertEqual(found[base + "seo-pack"]["repo"], "wordpress")
+        self.assertIn("Stable tag", found[base + "seo-pack"]["why"])
+        self.assertIn("vendor.example.com", found[base + "vendor-tool"]["why"])
+        self.assertIn("connu", found[base + "wordfence"]["why"])
+
+    def test_plugin_folders_under_bedrock_and_src_are_found(self):
+        repo = self.make_wordpress({
+            "web/app/plugins/acme-a/a.php": "<?php\n",
+            "src/plugins/acme-b/b.php": "<?php\n",
+        })
+        self.context_for(repo)
+        self.assertEqual(set(self.plugins()), {"web/app/plugins/acme-a", "src/plugins/acme-b"})
+
+    def test_only_wordpress_repos_are_listed(self):
+        repo = self.make_wordpress({"plugins/acme-a/a.php": "<?php\n"})
+        self.context_for(repo, stack="vue")
+        self.assertEqual(self.run_json(["wp-plugins", self.run_dir]), {"plugins": []})
+
+    def test_reads_are_capped_and_the_plugin_code_never_runs(self):
+        calls = []
+        repo = self.make_wordpress({
+            "plugins/big/readme.txt": "x" * 200000 + "\nStable tag: 1.0\n",
+            "plugins/big/big.php": "<?php\n",
+        })
+        self.context_for(repo)
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.run(command, **kwargs)
+
+        found = {e["path"]: e for e in self.run_json(["wp-plugins", self.run_dir], run=run)["plugins"]}
+        self.assertFalse(found["plugins/big"]["third_party"])
+        self.assertTrue(all(command[0] == "git" for command in calls))
+        self.assertTrue(all("ls-tree" in command or "show" in command for command in calls))
+
+    def test_wp_plugins_runs_on_the_minimal_first_context(self):
+        repo = self.make_wordpress({"plugins/own/own.php": "<?php\n"})
+        self.write_context({
+            "repos": [{"name": "wordpress", "path": str(repo), "stack": "wordpress"}],
+            "target": {"preprod_url": "https://preprod.example.org"},
+            "sites": [],
+        })
+        self.assertEqual(set(self.plugins()), {"plugins/own"})
+
+    def test_the_repo_host_domain_is_a_project_domain(self):
+        header = "<?php\n/*\nPlugin Name: {}\n{}*/\n"
+        repo = self.make_wordpress({
+            "plugins/agency/a.php": header.format("A", "Author URI: https://www.example.dev/\n"),
+            "plugins/vendor/v.php": header.format("V", "Author URI: https://vendor.example.com/\n"),
+        })
+        self.context_for(repo)
+        context = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))
+        context["repos"][0]["web_url"] = "https://gitlab.example.dev/grp/wordpress"
+        context["repos"][0]["remote"] = "git@git.example.test:grp/wordpress.git"
+        self.write_context(context)
+        found = self.plugins()
+        self.assertFalse(found["plugins/agency"]["third_party"])
+        self.assertTrue(found["plugins/vendor"]["third_party"])
+        context["repos"][0]["web_url"] = None
+        context["repos"][0]["remote"] = "git@git.example.dev:grp/wordpress.git"
+        self.write_context(context)
+        self.assertFalse(self.plugins()["plugins/agency"]["third_party"])
+
+    def test_unreadable_repo_is_reported_not_fatal(self):
+        self.context_for(self.tmp_dir() / "missing")
+        result = self.run_json(["wp-plugins", self.run_dir])
+        self.assertEqual(result["plugins"], [])
+        self.assertEqual([item["repo"] for item in result["unreadable"]], ["wordpress"])
+
+    def test_a_malformed_header_url_does_not_break_the_listing(self):
+        repo = self.make_wordpress({
+            "plugins/odd/odd.php": "<?php\n/*\nPlugin Name: Odd\nPlugin URI: http://[abc\n*/\n",
+            "plugins/fine/fine.php": "<?php\n",
+        })
+        self.context_for(repo)
+        self.assertEqual(set(self.plugins()), {"plugins/odd", "plugins/fine"})
+
+    def test_submodule_and_symlink_plugins_are_third_party_and_never_followed(self):
+        repo = self.make_wordpress({"plugins/own/own.php": "<?php\n", "elsewhere/x.txt": "x"})
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        git_fixtures.git(
+            repo, "update-index", "--add", "--cacheinfo", f"160000,{sha},plugins/sub-plugin"
+        )
+        (repo / "plugins" / "linked").symlink_to("../elsewhere")
+        git_fixtures.git(repo, "add", "plugins/linked")
+        git_fixtures.git(repo, "commit", "-q", "-m", "links")
+        self.context_for(repo)
+        found = self.plugins()
+        self.assertEqual(set(found), {"plugins/own", "plugins/sub-plugin", "plugins/linked"})
+        self.assertEqual(found["plugins/sub-plugin"]["why"], "sous-module")
+        self.assertEqual(found["plugins/linked"]["why"], "lien symbolique")
+        self.assertTrue(found["plugins/sub-plugin"]["third_party"])
+        self.assertTrue(found["plugins/linked"]["third_party"])
+        self.assertFalse(found["plugins/own"]["third_party"])
+
+    def test_the_commit_is_read_not_the_working_tree(self):
+        repo = self.make_wordpress({"plugins/acme-a/readme.txt": "Stable tag: 1.0\n"})
+        (repo / "plugins/acme-a/readme.txt").write_text("nothing", encoding="utf-8")
+        self.context_for(repo)
+        self.assertTrue(self.plugins()["plugins/acme-a"]["third_party"])
+
+    def test_a_stable_tag_alone_does_not_override_a_project_domain_uri(self):
+        header = "<?php\n/*\nPlugin Name: Own\nAuthor URI: https://www.example.org/\n*/\n"
+        repo = self.make_wordpress({
+            "plugins/own/readme.txt": "Stable tag: 0.1.0\n",
+            "plugins/own/own.php": header,
+            "plugins/scaffold/readme.txt": "Stable tag: 0.1.0\n",
+            "plugins/scaffold/scaffold.php": "<?php\n/*\nPlugin Name: Scaffold\n*/\n",
+        })
+        self.context_for(repo)
+        found = self.plugins()
+        self.assertFalse(found["plugins/own"]["third_party"])
+        self.assertTrue(found["plugins/scaffold"]["third_party"])
 
 
 if __name__ == "__main__":

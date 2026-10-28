@@ -25,10 +25,15 @@ ALL_ORDER = [
     ("gitleaks", "git /repos/nuxt"),
     ("agence", "summarize gitleaks"),
     ("agence", "assets --repos"),
-    ("agence", "lighthouse --pages"),
+    ("agence", "stylelint --repos"),
+    ("agence", "deps --repos"),
+    ("agence", "lighthouse --pages /in/context.json"),
+    ("agence", "lighthouse --pages /in/context.json --form-factor desktop"),
     ("agence", "a11y --pages"),
+    ("agence", "viewport --pages"),
     ("agence", "nu --pages"),
-    ("agence", "yellowlab --pages"),
+    ("agence", "yellowlab --pages /in/context.json"),
+    ("agence", "yellowlab --pages /in/context.json --device desktop"),
     ("testssl", "--quiet --color"),
     ("agence", "summarize testssl"),
     ("redocly", "lint /repos/laravel/docs/swagger v2.json"),
@@ -207,7 +212,7 @@ class CommonOptionsTest(LauncherCase):
         self.log.unlink()
         self.launch("run", str(self.run_dir), "crawl", **SECRETS)
         (options, args), = self.runs_of("agence")
-        self.assertEqual(["crawl"], args)
+        self.assertEqual(["crawl", "--max-minutes", "30", "--max-urls", "2000"], args)
         for name in (
             "GM_AUDIT_TARGET",
             "GM_AUDIT_ROBOTS",
@@ -280,6 +285,50 @@ class ToolCommandsTest(LauncherCase):
             [[tool, "--pages", "/in/context.json"] for tool in ("lighthouse", "a11y", "yellowlab")],
             [args for _, args in self.runs_of("agence")],
         )
+
+    def test_new_tools_commands(self):
+        web = [
+            "GM_AUDIT_TARGET",
+            "GM_AUDIT_RATE",
+            "GM_AUDIT_USER_AGENT",
+            "GM_AUDIT_ROBOTS",
+            "GM_AUDIT_AUTH_USER",
+            "GM_AUDIT_AUTH_PASS",
+        ]
+        cases = (
+            (
+                "lighthouse-desktop",
+                ["lighthouse", "--pages", "/in/context.json", "--form-factor", "desktop",
+                 "--name", "lighthouse-desktop"],
+                True,
+            ),
+            (
+                "yellowlab-desktop",
+                ["yellowlab", "--pages", "/in/context.json", "--device", "desktop",
+                 "--name", "yellowlab-desktop"],
+                True,
+            ),
+            ("viewport", ["viewport", "--pages", "/in/context.json"], True),
+            ("stylelint", ["stylelint", "--repos", "/repos", "--context", "/in/context.json"], False),
+            ("deps", ["deps", "--repos", "/repos", "--context", "/in/context.json"], False),
+        )
+        for tool, expected, uses_web in cases:
+            with self.subTest(tool=tool):
+                if self.log.exists():
+                    self.log.unlink()
+                result = self.run_tool(tool, **SECRETS)
+                self.assertEqual(0, result.returncode, result.stderr)
+                (options, args), = self.runs_of("agence")
+                self.assertEqual(expected, args)
+                if uses_web:
+                    self.assertEqual(
+                        sorted(["HOME=/tmp"] + web),
+                        sorted(env_args(options)),
+                    )
+                else:
+                    # Project JavaScript configs are executed: no GM_AUDIT_* variable.
+                    self.assertEqual(["HOME=/tmp"], env_args(options))
+                self.assertTrue((self.run_dir / "tools" / tool / "raw").is_dir())
 
     def test_assets(self):
         self.run_tool("assets")
@@ -532,26 +581,67 @@ class ToolCommandsTest(LauncherCase):
         self.assertEqual("skipped", document["status"])
         self.assertEqual("authentification requise", document["reason"])
 
-    def test_no_openapi_spec_skips_redocly_and_schemathesis(self):
+    def test_no_openapi_spec_makes_redocly_and_schemathesis_not_applicable(self):
         (self.laravel / "openapi.yaml").unlink()
         (self.laravel / "docs" / "swagger v2.json").unlink()
         for tool in ("redocly", "schemathesis"):
             result = self.run_tool(tool)
             self.assertEqual(0, result.returncode, result.stderr)
             document = self.read_json(f"tools/{tool}/result.json")
-            self.assertEqual("skipped", document["status"])
-            self.assertIn("OpenAPI", document["reason"])
+            self.assertEqual("not_applicable", document["status"])
+            self.assertEqual("aucune spec OpenAPI trouvée dans les repos", document["reason"])
+            self.assertIn(f"{tool} : non applicable (aucune spec OpenAPI", result.stdout + result.stderr)
+        self.assertEqual([], self.tool_runs())
+
+    def test_schemathesis_without_spec_is_not_applicable_even_with_auth(self):
+        (self.laravel / "openapi.yaml").unlink()
+        (self.laravel / "docs" / "swagger v2.json").unlink()
+        result = self.run_tool("schemathesis", **SECRETS)
+        self.assertEqual(0, result.returncode, result.stderr)
+        document = self.read_json("tools/schemathesis/result.json")
+        self.assertEqual("not_applicable", document["status"])
         self.assertEqual([], self.tool_runs())
 
     def test_crawl(self):
         result = self.run_tool("crawl", **SECRETS)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual([["crawl"]], [args for _, args in self.runs_of("agence")])
+        self.assertEqual(
+            [["crawl", "--max-minutes", "30", "--max-urls", "2000"]],
+            [args for _, args in self.runs_of("agence")],
+        )
+
+    def test_crawl_passes_the_duration_and_the_url_cap(self):
+        context = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))
+        context["crawl_minutes"] = 60
+        (self.run_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
+        result = self.run_tool("crawl", **SECRETS)
+        self.assertEqual(0, result.returncode, result.stderr)
+        (options, args), = self.runs_of("agence")
+        self.assertEqual(["crawl", "--max-minutes", "60", "--max-urls", "4000"], args)
+        self.assertFalse(any("GM_CQA" in item for item in options))
 
     def test_crawl_failure_is_tolerated(self):
         result = self.run_tool("crawl", CQA_STUB_FAIL="agence:1 crawl", CQA_STUB_FAIL_CODE="2")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("code de sortie 2", result.stderr)
+
+    def test_run_updates_the_manifest(self):
+        manifest = self.run_dir / "tools" / "manifest.json"
+        result = self.run_tool("crawl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(manifest.is_file())
+        self.assertIn("tools", json.loads(manifest.read_text(encoding="utf-8")))
+
+    def test_run_updates_the_manifest_after_a_failed_tool(self):
+        result = self.run_tool("http", CQA_STUB_FAIL="http --probes", CQA_STUB_FAIL_CODE="3")
+        self.assertEqual(3, result.returncode)
+        self.assertTrue((self.run_dir / "tools" / "manifest.json").is_file())
+
+    def test_run_returns_the_manifest_failure_when_the_tool_succeeds(self):
+        (self.run_dir / "tools" / "manifest.json").mkdir(parents=True)
+        result = self.run_tool("crawl")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("manifeste", result.stderr)
 
     def test_tool_exit_code_is_passed_through(self):
         result = self.run_tool("http", CQA_STUB_FAIL="http --probes", CQA_STUB_FAIL_CODE="3")
@@ -583,6 +673,31 @@ class AllTest(LauncherCase):
     def test_all_keeps_tool_output_off_stdout(self):
         result = self.launch("all", str(self.run_dir))
         json.loads(result.stdout)
+
+    def test_toolbox_older_than_1_2_skips_the_new_tools(self):
+        self.check_new_tools_skipped("1.1.0")
+
+    def test_unknown_image_label_skips_the_new_tools(self):
+        self.check_new_tools_skipped("unknown")
+
+    def check_new_tools_skipped(self, version):
+        result = self.launch("all", str(self.run_dir), CQA_STUB_VERSION=version)
+        self.assertEqual(0, result.returncode, result.stderr)
+        new_tools = ("stylelint", "deps", "lighthouse-desktop", "viewport", "yellowlab-desktop")
+        for tool in new_tools:
+            with self.subTest(tool=tool):
+                found = self.read_json(f"tools/{tool}/result.json")
+                self.assertEqual("skipped", found["status"])
+                self.assertEqual(
+                    "boîte à outils 1.2 requise : lancez cqa-toolbox.sh pull", found["reason"]
+                )
+        runs = [args for _, _, args in self.tool_runs()]
+        for args in runs:
+            self.assertNotIn(args[0], ("viewport", "stylelint", "deps"), args)
+            self.assertNotIn("--form-factor", args)
+            self.assertNotIn("--device", args)
+        self.assertIn(["lighthouse", "--pages", "/in/context.json"], runs)
+        self.assertIn(["yellowlab", "--pages", "/in/context.json"], runs)
 
     def test_all_skips_schemathesis_with_auth(self):
         result = self.launch("all", str(self.run_dir), **SECRETS)
@@ -680,13 +795,14 @@ class DoctorTest(LauncherCase):
     def test_report_without_run_directory(self):
         report = self.doctor()
         self.assertEqual(
-            {"docker", "docker_version", "registry_login", "images", "agence_crawl", "arch"},
+            {"docker", "docker_version", "registry_login", "images", "agence_crawl", "agence_1_2", "arch"},
             set(report),
         )
         self.assertIs(True, report["docker"])
         self.assertEqual("27.0.1", report["docker_version"])
         self.assertIs(True, report["registry_login"])
         self.assertIs(True, report["agence_crawl"])
+        self.assertIs(True, report["agence_1_2"])
         self.assertIn(report["arch"], ("amd64", "arm64"))
         self.assertEqual(IMAGES, list(report["images"]))
         self.assertEqual({"1.2.3"}, set(report["images"].values()))
@@ -717,6 +833,14 @@ class DoctorTest(LauncherCase):
                 self.assertIs(expected, self.doctor(CQA_STUB_VERSION=version)["agence_crawl"])
         self.assertIs(False, self.doctor(CQA_STUB_MISSING="agence")["agence_crawl"])
 
+    def test_agence_1_2_needs_toolbox_1_2(self):
+        cases = {"1.2.0": True, "1.2.3": True, "2.0.0": True, "1.10.0": True, "1.1.0": False,
+                 "1.2.0-rc1": False, "0.0.0-dev": False}
+        for version, expected in cases.items():
+            with self.subTest(version=version):
+                self.assertIs(expected, self.doctor(CQA_STUB_VERSION=version)["agence_1_2"])
+        self.assertIs(False, self.doctor(CQA_STUB_MISSING="agence")["agence_1_2"])
+
     def test_registry_and_tag_overrides(self):
         self.doctor(GM_CQA_REGISTRY="registry.example.org/team", GM_CQA_TOOLBOX_TAG="3")
         self.assertIn(["manifest", "inspect", "registry.example.org/team/agence:3"], self.calls())
@@ -732,6 +856,7 @@ class DoctorTest(LauncherCase):
         self.assertIs(False, report["registry_login"])
         self.assertEqual({None}, set(report["images"].values()))
         self.assertIs(False, report["agence_crawl"])
+        self.assertIs(False, report["agence_1_2"])
 
 
 class PullTest(LauncherCase):

@@ -13,6 +13,7 @@ from cqa.findings import (
     REQUIRED_FINDING_KEYS,
     VERDICTS,
     apply_guardrails,
+    requests_php_file,
     validate_document,
     worst,
 )
@@ -27,6 +28,50 @@ SCHEMA_PATH = (
 EM_DASH = chr(0x2014)
 HUMAN = "Intervention humaine"
 LOT_REFS = {79, 80}
+# A GET runs a PHP file: only the public entry points of the application may be probed.
+PHP_FILE_PATHS = [
+    "/wp-content/uploads/x.php",
+    "/x.PHP",
+    "/x.phtml",
+    "/x.php5",
+    "/x.phar",
+    "/x.php/foo",
+    "/x.php?y=1",
+    "/x.%70hp",
+    "/blog/index.php",
+    "/wp-admin/admin-ajax.php?action=heartbeat",
+    "/x.php.jpg",
+    "/x.pht",
+    "/x.php%20",
+    "/x.php%00",
+]
+PHP_ALLOWED_PATHS = [
+    "/index.php",
+    "/index.php?q=node/1",
+    "/wp-login.php",
+    "/wp-login.php?action=lostpassword",
+    "/wp-admin/admin-ajax.php",
+    "/wp-config.php.bak",
+]
+PHP_FILE_ERROR = "fichier PHP hors des routes de l'application"
+# The entry points sit under the path the application is served from (context.json target).
+APP_PATH = "/blog"
+PHP_ALLOWED_UNDER_APP = [
+    "/blog/index.php",
+    "/blog/index.php?p=12",
+    "/blog/index.php/node/1",
+    "/blog/wp-login.php",
+    "/blog/wp-admin/admin-ajax.php",
+]
+PHP_REFUSED_UNDER_APP = [
+    "/index.php",
+    "/wp-login.php",
+    "/blogger/index.php",
+    "/blog/x.php",
+    "/blog/../index.php",
+    "/blog/index.php/../x.php",
+    "/blog/wp-admin/admin-ajax.php?action=heartbeat",
+]
 
 
 def make_finding(**overrides):
@@ -379,6 +424,45 @@ class ValidateDocumentTest(unittest.TestCase):
         )
         self.assertEqual(errors, ["constat CQ-79 : preuve n° 2 (file) : « path » manquant"])
 
+    def test_tool_dates_are_optional_and_checked(self):
+        valid, errors = validate(make_finding(), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        dates = {"crawl": "2026-10-27T21:15:05.068Z", "a11y": "2026-10-27T21:15:05Z"}
+        valid, errors = validate(make_finding(tool_dates=dates), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(valid[0]["tool_dates"], dates)
+        valid, errors = validate(make_finding(tool_dates={}), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(valid[0]["tool_dates"], {})
+        for bad in (
+            "2026-10-27T21:15:05+00:00",
+            "2026-10-27T21:15:05",
+            "",
+            123,
+            "٢٠٢٦-١٠-٢٧T٢١:١٥:٠٥Z",
+        ):
+            with self.subTest(date=bad):
+                valid, errors = validate(make_finding(tool_dates={"crawl": bad}), make_finding(ref=80))
+                self.assertEqual([item["ref"] for item in valid], [80])
+                self.assertEqual(len(errors), 1)
+                self.assertIn("invalide pour l'outil « crawl »", errors[0])
+        cases = {
+            "Crawl": ("2026-10-27T21:15:05Z", "nom d'outil « Crawl » invalide"),
+            "crawl": ("hier", "date « hier » invalide pour l'outil « crawl »"),
+        }
+        for name, (value, message) in cases.items():
+            with self.subTest(name=name):
+                valid, errors = validate(make_finding(tool_dates={name: value}), make_finding(ref=80))
+                self.assertEqual([item["ref"] for item in valid], [80])
+                self.assertEqual(errors, [f"constat CQ-79 : « tool_dates » : {message}"])
+        for value in (["crawl"], "2026-10-27T21:15:05Z", None):
+            with self.subTest(value=value):
+                valid, errors = validate(make_finding(tool_dates=value), make_finding(ref=80))
+                self.assertEqual([item["ref"] for item in valid], [80])
+                self.assertEqual(
+                    errors, ["constat CQ-79 : « tool_dates » doit être un objet {outil: date}"]
+                )
+
     def test_needs_probes(self):
         probes = [
             {"url": "https://preprod.example.org/robots.txt", "method": "GET"},
@@ -422,6 +506,38 @@ class ValidateDocumentTest(unittest.TestCase):
                 self.assertEqual([item["ref"] for item in valid], [80])
         _, errors = validate(make_finding(needs_probes="GET /"), make_finding(ref=80))
         self.assertEqual(errors, ["constat CQ-79 : « needs_probes » doit être une liste"])
+
+    def test_needs_probes_refuse_php_files_outside_the_routes(self):
+        for path in PHP_FILE_PATHS:
+            with self.subTest(path=path):
+                probes = [{"url": f"https://preprod.example.org{path}", "method": "GET"}]
+                valid, errors = validate(make_finding(needs_probes=probes), make_finding(ref=80))
+                self.assertEqual(len(errors), 1)
+                self.assertTrue(errors[0].startswith(f"constat CQ-79 : sonde n° 1 : {PHP_FILE_ERROR}"))
+                self.assertEqual([item["ref"] for item in valid], [80])
+        probes = [
+            {"url": f"https://preprod.example.org{path}", "method": "HEAD"}
+            for path in PHP_ALLOWED_PATHS
+        ]
+        valid, errors = validate(make_finding(needs_probes=probes), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 2)
+
+    def test_needs_probes_follow_the_path_of_the_application(self):
+        def errors_for(paths, app_path):
+            base = "https://preprod.example.org"
+            probes = [{"url": f"{base}{path}", "method": "GET"} for path in paths]
+            document = make_document(make_finding(needs_probes=probes), make_finding(ref=80))
+            return validate_document(document, LOT_REFS, app_path=app_path)[1]
+
+        self.assertEqual(errors_for(PHP_ALLOWED_UNDER_APP, APP_PATH), [])
+        self.assertEqual(errors_for(PHP_ALLOWED_UNDER_APP, f"{APP_PATH}/"), [])
+        for path in PHP_REFUSED_UNDER_APP:
+            with self.subTest(path=path):
+                errors = errors_for([path], APP_PATH)
+                self.assertEqual(len(errors), 1)
+                self.assertIn(PHP_FILE_ERROR, errors[0])
+                self.assertIn("/blog/index.php", errors[0])
 
     def test_extra_keys_are_tolerated(self):
         valid, errors = validate(make_finding(notes="x"), make_finding(ref=80))
@@ -470,6 +586,65 @@ class ValidateDocumentTest(unittest.TestCase):
         self.assertGreater(len(errors), 5)
         for message in errors:
             self.assertNotIn(EM_DASH, message)
+
+
+class RequestsPhpFileTest(unittest.TestCase):
+    def test_entry_points_under_the_application_path(self):
+        for app_path in (APP_PATH, f"{APP_PATH}/", "/Blog"):
+            for path in PHP_ALLOWED_UNDER_APP:
+                with self.subTest(app_path=app_path, path=path):
+                    url = f"https://preprod.example.org{path}"
+                    self.assertFalse(requests_php_file(url, app_path))
+        for path in PHP_REFUSED_UNDER_APP:
+            with self.subTest(path=path):
+                self.assertTrue(requests_php_file(f"https://preprod.example.org{path}", APP_PATH))
+
+    def test_front_controller_routes_at_the_root(self):
+        for app_path in ("", "/"):
+            for path in ("/index.php/node/1", "/index.php/", "/INDEX.PHP/node/1?page=2"):
+                with self.subTest(app_path=app_path, path=path):
+                    url = f"https://preprod.example.org{path}"
+                    self.assertFalse(requests_php_file(url, app_path))
+        for path in (
+            "/index.php/../x.php",
+            "/index.php/./node",
+            "/index.php%2F..%2Fx.php",
+            "/index.php/uploads/x.php",
+            "/wp-login.php/x",
+            "/wp-admin/admin-ajax.php/x",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(requests_php_file(f"https://preprod.example.org{path}"))
+
+    def test_disguised_php_files_are_refused(self):
+        for path in (
+            "/x.php.jpg",
+            "/uploads/x.PHP.png",
+            "/x.pht",
+            "/x.php%20",
+            "/x.php%00",
+            "/x.php%2500",
+            "/x.php.",
+            "/x.php;.jpg",
+            "/x.php::$DATA",
+            "/x.php.bak/y",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(requests_php_file(f"https://preprod.example.org{path}"))
+
+    def test_backups_and_other_extensions_are_not_php_files(self):
+        for path in (
+            "/wp-config.php.bak",
+            "/wp-config.php.old",
+            "/wp-config.php.orig",
+            "/wp-config.php.save",
+            "/wp-config.php~",
+            "/x.phpx",
+            "/x.php_old",
+            "/composer.json",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(requests_php_file(f"https://preprod.example.org{path}"))
 
 
 class GuardrailsTest(unittest.TestCase):
@@ -729,7 +904,9 @@ class SchemaTest(unittest.TestCase):
         self.assertEqual(self.schema["properties"]["findings"]["items"], {"$ref": "#/$defs/finding"})
 
     def test_every_property_of_the_finding_is_described(self):
-        self.assertEqual(set(self.finding["properties"]), set(REQUIRED_FINDING_KEYS))
+        self.assertEqual(
+            set(self.finding["properties"]), set(REQUIRED_FINDING_KEYS) | {"tool_dates"}
+        )
         for name, definition in self.finding["properties"].items():
             with self.subTest(name=name):
                 self.assertTrue(definition.get("description"))

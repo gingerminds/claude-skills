@@ -127,6 +127,15 @@ class ScanTextTest(unittest.TestCase):
         redact(text, [])
         self.assertLess(time.monotonic() - started, 5)
 
+    def test_f_string_with_a_long_blank_run_stays_fast(self):
+        for blank in (" ", "\t"):
+            with self.subTest(blank=repr(blank)):
+                text = "token = f'Bearer " + blank * 80000 + "x'"
+                started = time.monotonic()
+                scan_text(text, [])
+                redact(text, [])
+                self.assertLess(time.monotonic() - started, 5)
+
     def test_value_minimum_length_is_four(self):
         for text in ["token=abcd", 'token="abcd"', "token: abcd"]:
             with self.subTest(text=text):
@@ -134,6 +143,204 @@ class ScanTextTest(unittest.TestCase):
         for text in ["token=abc", 'token="abc"', "token: abc"]:
             with self.subTest(text=text):
                 self.assertEqual(scan_text(text, []), [])
+
+
+class NonSecretTest(unittest.TestCase):
+    NON_SECRETS = [
+        "password : type=password, autocomplete=current-password",
+        'autocomplete="new-password"',
+        'type="password"',
+        "name=password",
+        "'password' => ['required', 'confirmed', Password::defaults()]",
+        "$token = bin2hex(random_bytes(32))",
+        "'secret' => config('services.turnstile.secret')",
+        "password=$PASSWORD",
+        'password="${DB_PASSWORD}"',
+        "Hash::make($request->password)",
+        "$x->password = Hash::make($request->password);",
+        "Le mot de passe vient de `password=$PASSWORD` dans l'environnement de l'application.",
+        "Hachage via `$user->password = Hash::make($request->password)`, conforme à l'attente de l'OWASP.",
+        "`'password' => ['required', 'confirmed', Password::defaults()]` : règle d'Laravel, c'est l'usage.",
+        "'password' => env('DB_PASSWORD', ''),",
+        "'password' => Hash::make($input['password']),",
+        "Hash::make($data['password'])",
+        "$password = $request->input('password');",
+        "$token = $request->header('X-Api-Token');",
+        "['password' => $password, 'remember' => $remember]",
+        "`password=$PASSWORD` : d'abord l'ordre, L'app, N'oubliez pas, qu'on, s'il, jusqu'ici, aujourd'hui.",
+        "password=${DB_PASSWORD}",
+        "MYSQL_PASSWORD: $MYSQL_PASSWORD",
+        "'password' => $_ENV['DB_PASSWORD'],",
+        "Le mot de passe vient de password=$PASSWORD.",
+        "PGPASSWORD=$DB_PASS psql -h db.example.org",
+        "$token = $this->token;",
+        "'token' => $request->bearerToken(),",
+        "password: $password,",
+        "$token = $this->jwtManager->create($user);",
+        "'password' => $hasher->hashPassword($user, $plainPassword),",
+        "'password' => $encoder->encodePassword($user, $plain),",
+        "$password = $this->hash($password);",
+        "$token = $jwt->encode($payload);",
+        "'password' => $this->hasher->make($data['password']),",
+        "$token = $request->get($field);",
+        "$token = $this->em->getRepository(Token::class)->find($id);",
+        "DB_PASSWORD=$(cat /run/secrets/db_password)",
+        "password: ${MYSQL_PASSWORD:?required}",
+        "token = f'Bearer {token}'",
+        "TOKEN=$(openssl rand -hex 32)",
+        'DB_PASSWORD="$(cat /run/secrets/db_password)"',
+        "password: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}",
+        "'token': f'{settings.API_TOKEN}'",
+        "SECRET_KEY=$(head -c 32 /dev/urandom | base64)",
+    ]
+    # (line, its secret literal): masking must remove that literal, not only the first token.
+    SECRETS = [
+        ('password: "S3cr3t-Pass!"', "S3cr3t-Pass!"),
+        ('password: "Pa(ss)word!"', "Pa(ss)word!"),
+        ("DB_PASSWORD=Pa55word2024", "Pa55word2024"),
+        ("'password' => 'hunter2hunter2'", "hunter2hunter2"),
+        ("api_key=sk_live_51Habcdefghijkl", "sk_live_51Habcdefghijkl"),
+        ("token: abcd1234efgh5678", "abcd1234efgh5678"),
+        ("'password' => '$uper-Secret1',", "$uper-Secret1"),
+        ('DB_PASSWORD="$ecretPa55"', "$ecretPa55"),
+        ('"password": "$2y$10$abcdefghijklmnopqrstuv"', "$2y$10$abcdefghijklmnopqrstuv"),
+        ('password: ":Secret123"', "Secret123"),
+        ('"password": "password"', ': "password"'),
+        ("'password' => env('DB_PASSWORD', 'RealSecret123'),", "RealSecret123"),
+        ("'secret' => env('STRIPE_SECRET', 'sk_live_abcdef123456'),", "sk_live_abcdef123456"),
+        ("'password' => Hash::make('Adm1nP@ss2024'),", "Adm1nP@ss2024"),
+        ("'password' => bcrypt('Adm1nP@ss2024'),", "Adm1nP@ss2024"),
+        ("$user->password = Hash::make('Adm1nP@ss2024');", "Adm1nP@ss2024"),
+        ("'password' => $_ENV['DB_PASSWORD'] ?? 'RealSecret123',", "RealSecret123"),
+        ("MYSQL_PASSWORD: ${MYSQL_PASSWORD:-S3cretDefault}", "S3cretDefault"),
+        ("PASSWORD=${DB_PASSWORD:-S3cretDefault}", "S3cretDefault"),
+        ("DB_PASSWORD=password", "=password"),
+        ("password=:Secret123", "Secret123"),
+        ("token = hmac.new(b'RealSecretKey123', msg, sha256).hexdigest()", "RealSecretKey123"),
+        ("token = jwt.encode(payload, b'my-signing-secret-123', algorithm='HS256')", "my-signing-secret-123"),
+        ("token = jwt.encode(payload, 'my-signing-secret-123', algorithm='HS256')", "my-signing-secret-123"),
+        ("token = hmac.new(key, b'RealSecretKey123')", "RealSecretKey123"),
+        ("token = hmac.new (key, b'RealSecretKey123')", "RealSecretKey123"),
+        ("token = cfg[b'RealSecretKey123']", "RealSecretKey123"),
+        ("token = base64.b64encode(b'admin:Adm1nP@ss2024').decode()", "Adm1nP@ss2024"),
+        ("password = make_password(r'Adm1nP@ss2024')", "Adm1nP@ss2024"),
+        ("password = make_password(f'Adm1nP@ss2024')", "Adm1nP@ss2024"),
+        ("password = HASHBYTES('SHA2_256', N'Adm1nP@ss2024')", "Adm1nP@ss2024"),
+        ("'password' => Hash::make('Adm1nP@ss2024'), // l'admin d'origine", "Adm1nP@ss2024"),
+        ("MYSQL_PASSWORD: $$ecretPa55", "$ecretPa55"),
+        ("WORDPRESS_DB_PASSWORD=$$ecretPa55", "$ecretPa55"),
+        ("password_hash=$2y$10$abcdefghijklmnopqrstuv", "$2y$10$abcdefghijklmnopqrstuv"),
+        ("password=$PASSWORD&token=abcd1234efgh5678", "abcd1234efgh5678"),
+        ("?password=$PASSWORD&api_key=sk_live_51Habcdefghijkl", "sk_live_51Habcdefghijkl"),
+        ("password=$user->name;secret=abcd1234efgh5678", "abcd1234efgh5678"),
+        ("api_key=id=sk_live_51Habcdefghijkl", "sk_live_51Habcdefghijkl"),
+        ("token=name=abcd1234efgh5678", "abcd1234efgh5678"),
+        ("password=type=text&token=abcd1234efgh5678", "abcd1234efgh5678"),
+        ("SECRET_KEY = b'RealSecretKey123'", "RealSecretKey123"),
+        ("password = r'Adm1nP@ss2024'", "Adm1nP@ss2024"),
+        ("$token = $jwt->encode($payload, 'my-signing-secret-123');", "my-signing-secret-123"),
+        ("'password' => $hasher->hashPassword($user, 'Adm1nP@ss2024'),", "Adm1nP@ss2024"),
+        ("DB_PASSWORD=$(echo Adm1nP@ss2024)", "Adm1nP@ss2024"),
+        ("DB_PASSWORD=$(echo 'Adm1nP@ss2024' | base64)", "Adm1nP@ss2024"),
+        ("PASSWORD=$(htpasswd -nbB admin Adm1nP@ss2024)", "Adm1nP@ss2024"),
+        ('DB_PASSWORD="$(printf Adm1nP@ss2024)"', "Adm1nP@ss2024"),
+        ("MYSQL_PASSWORD: ${MYSQL_PASSWORD:=S3cretDefault}", "S3cretDefault"),
+        ("MYSQL_PASSWORD: ${MYSQL_PASSWORD:+S3cretDefault}", "S3cretDefault"),
+        ("token = f'Adm1nP@ss{suffix}'", "Adm1nP@ss"),
+        ("token = f'{prefix}Adm1nP@ss2024'", "Adm1nP@ss2024"),
+        ("token = f'Bearer abcd1234efgh5678'", "abcd1234efgh5678"),
+        ("password = f'{19800101}'", "19800101"),
+        ("HTPASSWD=$(htpasswd -nb admin changeme)", "changeme"),
+        ("ADMIN_PASSWORD_HASH=$(openssl passwd -6 changeme)", "changeme"),
+        ("PASSWORD=$(mkpasswd -m sha-512 changeme)", "changeme"),
+        ("PASSWORD=$(openssl enc -d -aes-256-cbc -k changeme -in /x)", "changeme"),
+        ("DB_PASSWORD=$(mysql -uroot -prootpass app)", "rootpass"),
+        ("X_PASSWORD=$(command echo Adm1nP4ss)", "Adm1nP4ss"),
+        ("X_PASSWORD=$(builtin printf Adm1nP4ss)", "Adm1nP4ss"),
+        ("X_PASSWORD=$(cat /x | echo Adm1nP4ss)", "Adm1nP4ss"),
+        ("SECRET=$(decrypt Adm1n/P4ss)", "Adm1n/P4ss"),
+        ("DB_PASSWORD=$(mysql --password=changeme app)", "changeme"),
+        ("DB_PASSWORD=$(mysql --password changeme)", "changeme"),
+        ("X_PASSWORD=$(exec cat /x | env echo changeme)", "changeme"),
+    ]
+
+    def test_form_field_descriptions_are_not_secrets(self):
+        for text in self.NON_SECRETS[:4]:
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, []), [])
+                self.assertEqual(redact(text, []), text)
+
+    def test_code_expressions_are_not_secrets(self):
+        for text in self.NON_SECRETS[4:]:
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, []), [])
+                self.assertEqual(redact(text, []), text)
+
+    def test_credential_assignment_still_catches_real_secrets(self):
+        for text, literal in self.SECRETS:
+            with self.subTest(text=text):
+                self.assertIn(literal, text)
+                labels = scan_text(text, [])
+                self.assertEqual(labels[0], "credential_assignment")
+                self.assertTrue(set(labels[1:]) <= {"mysql_password_option"}, labels)
+                masked = redact(text, [])
+                self.assertIn("[secret masqué]", masked)
+                self.assertNotIn(literal, masked)
+                self.assertEqual(scan_text(masked, []), [])
+                self.assertEqual(redact(masked, []), masked)
+
+    def test_a_masked_call_stops_at_the_end_of_its_line(self):
+        text = "token = jwt.encode(payload, b'my-signing-secret-123')\nDB_HOST=db.example.org"
+        self.assertEqual(redact(text, []), "token = [secret masqué]\nDB_HOST=db.example.org")
+
+    def test_secret_after_a_form_description_is_still_masked(self):
+        text = "password : type=password\nDB_PASSWORD=Pa55word2024"
+        self.assertEqual(scan_text(text, []), ["credential_assignment"])
+        self.assertEqual(redact(text, []), "password : type=password\nDB_PASSWORD=[secret masqué]")
+
+
+class ProcessAndKubeSecretsTest(unittest.TestCase):
+    """A database password on a command line (ps auxww) and a kubeconfig key (F2, F16)."""
+
+    def test_password_option_of_database_clients_is_masked(self):
+        for line, kept in (
+            ("mysql -uroot -phunter2 db", "mysql -uroot -p"),
+            ("root 4242 0.0 0.1 mysqldump -h db -u app -pS3cr3t! shop", "mysqldump -h db -u app -p"),
+            ("mariadb -u app -p'two words' shop", "mariadb -u app -p"),
+            ("/usr/bin/mariadb-dump --single-transaction -pAbc123 shop", "--single-transaction -p"),
+            ("mysqladmin -u root -proot status", "mysqladmin -u root -p"),
+        ):
+            with self.subTest(line=line):
+                masked = redact(line, [])
+                self.assertIn(kept + "[secret masqué]", masked)
+                self.assertNotIn("hunter2", masked)
+                self.assertNotIn("S3cr3t", masked)
+                self.assertNotIn("two words", masked)
+                self.assertNotIn("Abc123", masked)
+                self.assertEqual(scan_text(line, []), ["mysql_password_option"])
+                self.assertEqual(scan_text(masked, []), [])
+                self.assertEqual(redact(masked, []), masked)
+
+    def test_database_command_lines_without_a_password_value_stay(self):
+        for line in (
+            "mysql -u root -p shop",
+            "mysql -h db -P 3306 shop",
+            "/usr/sbin/mysqld --pid-file=/run/mysqld/mysqld.pid",
+            "mysql --protocol=tcp shop",
+            "Le client mysql demande le mot de passe avec -p seul.",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(redact(line, []), line)
+                self.assertEqual(scan_text(line, []), [])
+
+    def test_kubeconfig_client_key_is_masked(self):
+        line = "    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo="
+        masked = redact(line, [])
+        self.assertEqual(masked, "    client-key-data: [secret masqué]")
+        self.assertEqual(scan_text(line, []), ["kube_client_key"])
+        self.assertEqual(scan_text(masked, []), [])
+        certificate = "    client-certificate-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCg=="
+        self.assertEqual(redact(certificate, []), certificate)
 
 
 class RedactTest(unittest.TestCase):
@@ -308,6 +515,14 @@ class ScanTreeTest(unittest.TestCase):
     def test_binary_file_is_scanned_without_error(self):
         (self.root / "blob.bin").write_bytes(b"\xff\xfe\x00DB_PASSWORD=hunter22\x80")
         self.assertEqual(scan_tree(self.root, []), [("blob.bin", "credential_assignment")])
+
+    def test_exclude_skips_by_first_segment(self):
+        self.write("fiches/a.md", "DB_PASSWORD=hunter22")
+        self.write("findings/fiches/b.md", "DB_PASSWORD=hunter22")
+        self.assertEqual(
+            scan_tree(self.root, [], exclude=("fiches",)),
+            [("findings/fiches/b.md", "credential_assignment")],
+        )
 
     def test_missing_root_raises(self):
         with self.assertRaises(FileNotFoundError):

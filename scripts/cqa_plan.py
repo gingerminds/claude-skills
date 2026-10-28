@@ -11,17 +11,20 @@ import functools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional
-from urllib.parse import urlsplit
+from html.parser import HTMLParser
+from urllib.parse import urldefrag, urljoin, urlsplit
 
-from cqa import probes, report
-from cqa.checklist import ref_label
+from cqa import deferred, probes, report
+from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
 from cqa.findings import apply_guardrails, validate_document
 from cqa.git_tools import (
     alignment,
@@ -33,10 +36,12 @@ from cqa.git_tools import (
 from cqa.lots import TOOLS, build_lots, coverage, select_rows
 from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
-from cqa.plan import build_plan, filter_plan, load_history, operation_key
+from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_digest
+from cqa.rerun import latest_findings, read_grounded_findings, rerun_candidates
 from cqa.project import parse_project_md, project_slug, sibling_repos
 from cqa.secrets import known_values_from_env, scan_tree
-from cqa.target import probe_target, validate_url
+from cqa import crawl_budget
+from cqa.target import build_opener, fetch_page, fetch_timed, probe_target, validate_url
 from cqa.version import plugin_version
 
 EXIT_OK = 0
@@ -45,6 +50,9 @@ EXIT_CONTEXT = 6
 EXIT_SECRET = 7
 
 MAX_KEY_PAGES = 10
+MAX_SITES = 10
+MAX_KEY_PAGE_REQUESTS = 50
+KEY_PAGES_DEADLINE = 80
 TOOLBOX_RATE = "2"
 
 _SEPARATOR = " - "
@@ -55,11 +63,12 @@ _REPO_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _UNPROTECTED = frozenset({"", "non", "aucun", "aucune", "n/a"})
 _ACCESS_VALUES = ("open", "basic_auth", "ip_filtered", "unreachable")
 _TOOL_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
-_EVIDENCE_TOOL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _REF_KEY = re.compile(r"[0-9]+")
 _SPEC_NAME = re.compile(r"(?:openapi|swagger).*\.(?:ya?ml|json)")
 _SPEC_SKIPPED_DIRS = frozenset({"vendor", "node_modules", ".git"})
 _EXCLUDED_KEYS = ("ref", "page_id", "reason", "verdict", "detail")
+_MISSING_ROW = "constat manquant : "
+_RERUN_FILE = re.compile(r"(.+)-rerun-([0-9]{2})\.json")
 _MAX_COMMENT = 1500
 _EM_DASH = chr(0x2014)
 _RUN_FILES = {
@@ -147,6 +156,25 @@ def _register_preparation(commands) -> None:
         action="store_true",
         help="envoie GM_AUDIT_AUTH_USER et GM_AUDIT_AUTH_PASS en Basic Auth",
     )
+    sub = _command(commands, "key-pages-check", "pages clés et liens de l'accueil", _cmd_key_pages)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument(
+        "--auth-env",
+        action="store_true",
+        help="envoie GM_AUDIT_AUTH_USER et GM_AUDIT_AUTH_PASS en Basic Auth",
+    )
+    sub = _command(commands, "crawl-estimate", "durée proposée pour le crawl", _cmd_crawl_estimate)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument(
+        "--auth-env",
+        action="store_true",
+        help="envoie GM_AUDIT_AUTH_USER et GM_AUDIT_AUTH_PASS en Basic Auth",
+    )
+    sub = _command(commands, "reuse-context", "reprend les réponses d'un run précédent", _cmd_reuse)
+    sub.add_argument("new_run_dir", type=Path, help="dossier du nouveau run")
+    sub.add_argument("old_run_dir", type=Path, help="dossier du run à réutiliser")
+    sub = _command(commands, "wp-plugins", "plugins WordPress maison ou tiers", _cmd_wp_plugins)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub = _command(commands, "context", "contrôle de context.json", _cmd_context)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("--check", action="store_true", required=True, help="valide context.json")
@@ -178,11 +206,52 @@ def _register_audit(commands) -> None:
     sub.add_argument(
         "--followup", action="store_true", help="valide findings/<lot>-followup.json"
     )
+    sub.add_argument(
+        "--rerun",
+        type=_rerun_number,
+        metavar="NN",
+        help="valide findings/<lot>-rerun-NN.json sur les seules Réf qu'il contient",
+    )
+    sub.add_argument(
+        "--rows",
+        default=None,
+        help="avec --rerun : Réf relancées (CQ-3,CQ-12), toute autre Réf écrite est une erreur",
+    )
+    _run_command(
+        commands, "snapshot", "copie findings/ et notion/ dans history/", _cmd_snapshot
+    )
+    _run_command(
+        commands,
+        "rerun-start",
+        "ouvre une relance : écarte les relances non closes, sauvegarde, donne NN",
+        _cmd_rerun_start,
+    )
+    sub = _run_command(
+        commands, "rerun-close", "clôt une relance : écarte les fichiers invalides", _cmd_rerun_close
+    )
+    sub.add_argument("number", type=_rerun_number, help="numéro de la relance (NN)")
+    sub.add_argument(
+        "--rows",
+        default=None,
+        help="Réf relancées dans cette relance (CQ-3,CQ-12) : un fichier qui en écrit une autre "
+        "est écarté, comme avec validate --rows",
+    )
     sub = _run_command(commands, "plan", "plan d'écriture Notion (notion/plan.json)", _cmd_plan)
     sub.add_argument(
         "--skip-human-overrides",
         action="store_true",
         help="retire les pages dont le statut a été posé par un humain",
+    )
+    sub.add_argument(
+        "--recette",
+        type=_rerun_number,
+        metavar="NN",
+        nargs="?",
+        const=0,
+        default=None,
+        help="plan d'une recette : NN est le numéro de la relance qui a jugé les lignes de "
+        "notion/recette.json ; celles qui sont « Mis en place » et jugées peuvent changer "
+        "ce statut posé par un dev",
     )
     _run_command(commands, "manifest", "résultats des outils (tools/manifest.json)", _cmd_manifest)
     _run_command(commands, "synthesis", "synthese.md et commentaire de la page", _cmd_synthesis)
@@ -191,11 +260,34 @@ def _register_audit(commands) -> None:
     sub = _run_command(commands, "skip", "marque un outil comme ignoré", _cmd_skip)
     sub.add_argument("tool", help="nom de l'outil")
     sub.add_argument("reason", help="raison, affichée dans la synthèse")
+    sub.add_argument(
+        "--not-applicable",
+        action="store_true",
+        help="statut non applicable (rien à examiner) au lieu d'ignoré",
+    )
     sub = _run_command(commands, "assign", "propose une répartition des lignes", _cmd_assign)
     sub.add_argument(
         "--include-unknown", action="store_true", help="ajoute les lignes non évaluées"
     )
+    sub = _run_command(
+        commands, "rerun-candidates", "lignes à réévaluer lors d'une relance ciblée", _cmd_rerun
+    )
+    sub.add_argument(
+        "--refs", default="", help="Réf à ajouter, séparées par des virgules (CQ-12,CQ-40)"
+    )
     _run_command(commands, "assign-plan", "plan d'assignation (assign-plan.json)", _cmd_assign_plan)
+    sub = _run_command(
+        commands, "defer", "met une décision de côté pour le lead (deferred.json)", _cmd_defer
+    )
+    sub.add_argument(
+        "--kind", required=True, help="type de décision : " + ", ".join(deferred.KINDS)
+    )
+    sub.add_argument("--detail", required=True, help="texte pour le lead, en français")
+    sub.add_argument("--refs", default="", help="Réf concernées, séparées par des virgules")
+    sub = _run_command(
+        commands, "deferred", "décisions mises de côté encore ouvertes", _cmd_deferred
+    )
+    sub.add_argument("--resolve", type=int, metavar="ID", help="ferme la décision ID")
 
 
 def _cmd_project(args, services) -> int:
@@ -277,12 +369,386 @@ def _cmd_probe_target(args, services) -> int:
     return EXIT_OK
 
 
+def _cmd_key_pages(args, services) -> int:
+    context = _load_context(args.run_dir)
+    target = context.get("target")
+    if not isinstance(target, dict):
+        raise ContextError("context.json : « target » est absent.")
+    home = _target_url(target, "prod_url" if probes.is_prod_run(context) else "preprod_url")
+    if not urlsplit(home).path:
+        home += "/"
+    entries = _key_page_entries(context.get("key_pages"))
+    delay = 1 / _request_rate()
+    auth = _auth_from_env() if args.auth_env else None
+    opener = services.opener
+    if opener is None:
+        opener = build_opener(authenticated=auth is not None)
+    origins = {_origin(home)}
+    checker = _PageChecker(opener, auth, delay, time.monotonic() + KEY_PAGES_DEADLINE)
+    first = checker.get(home, with_body=True)
+    origins.add(_origin(first["url"]))
+    links = _home_links(first["url"], first["body"], _origin(first["url"]))
+    templates = {home: None}
+    for template, url in entries:
+        if templates.get(url) is None:
+            templates[url] = template
+    pages = []
+    for url, template in templates.items():
+        if url == home:
+            status, checked = first["status"], True
+        elif any(_same_origin(url, origin) for origin in origins):
+            result = checker.get(url)
+            status, checked = result["status"], result["checked"]
+        else:
+            status, checked = None, False
+        pages.append(_page_entry(url, template, status, checked, key=True))
+    dead = []
+    for url in links:
+        if time.monotonic() >= checker.deadline:
+            break
+        if url in templates or len(checker.requests) >= MAX_KEY_PAGE_REQUESTS:
+            continue
+        result = checker.get(url)
+        entry = _page_entry(url, None, result["status"], result["checked"], key=False)
+        pages.append(entry)
+        if entry["status"] == 404:
+            dead.append(url)
+    soft = [
+        {"url": entry["url"], "status": entry["status"]}
+        for entry in pages
+        if _is_404_template(entry["template"]) and entry["checked"] and entry["status"] != 404
+    ]
+    _emit({"pages": pages, "home_links_404": dead, "soft_404": soft})
+    return EXIT_OK
+
+
+def _key_page_entries(key_pages) -> list:
+    """Return (template, url) of each key page; a URL that fails validation is never echoed."""
+    if not isinstance(key_pages, list):
+        raise ContextError("context.json : « key_pages » est absent.")
+    entries = []
+    for index, page in enumerate(key_pages):
+        template = page.get("template") if isinstance(page, dict) else None
+        url = page.get("url") if isinstance(page, dict) else None
+        label = template if isinstance(template, str) and template else f"n° {index + 1}"
+        try:
+            validate_url(url if isinstance(url, str) else "")
+        except ValueError:
+            raise ContextError(
+                f"context.json : l'URL de la page clé « {label} » est invalide "
+                "(http ou https, sans identifiants, sans espace)."
+            )
+        entries.append((template, url))
+    return entries
+
+
+def _is_404_template(template) -> bool:
+    return isinstance(template, str) and template.strip() == "404"
+
+
+def _page_entry(url: str, template, status, checked: bool, *, key: bool) -> dict:
+    """One page of the report; "gap" is true for a checked page that should have answered."""
+    if not checked:
+        gap = False
+    elif key:
+        gap = not (isinstance(status, int) and status < 400)
+        gap = gap and not _is_404_template(template)
+    else:
+        gap = status == 404
+    return {"url": url, "template": template, "status": status, "checked": checked, "gap": gap}
+
+
+class _PageChecker:
+    """GET pages one after the other at the toolbox rate, until the deadline."""
+
+    def __init__(self, opener, auth, delay: float, deadline: float):
+        self.opener, self.auth, self.delay, self.deadline = opener, auth, delay, deadline
+        self.requests = []
+
+    def get(self, url: str, *, with_body: bool = False) -> dict:
+        if self.requests:
+            if time.monotonic() >= self.deadline:
+                return {"status": None, "url": url, "body": "", "checked": False}
+            time.sleep(self.delay)
+        self.requests.append(url)
+        try:
+            result = fetch_page(url, auth=self.auth, opener=self.opener, with_body=with_body)
+        except ValueError:
+            if len(self.requests) == 1:
+                raise
+            result = {"status": None, "url": url, "body": ""}
+        return {**result, "checked": True}
+
+
+def _request_rate() -> float:
+    raw = os.environ.get("GM_AUDIT_RATE") or TOOLBOX_RATE
+    try:
+        rate = float(raw)
+    except ValueError:
+        rate = 0.0
+    if not rate > 0 or rate == float("inf"):
+        raise UsageError("GM_AUDIT_RATE doit être un nombre de requêtes par seconde supérieur à 0.")
+    return rate
+
+
+def _origin(url: str) -> tuple:
+    parts = urlsplit(url)
+    return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port or (
+        443 if parts.scheme.lower() == "https" else 80
+    )
+
+
+def _same_origin(url: str, origin: tuple) -> bool:
+    try:
+        return _origin(url) == origin
+    except ValueError:
+        return False
+
+
+class _LinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.hrefs = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            href = dict(attrs).get("href")
+            if href:
+                self.hrefs.append(href.strip())
+
+
+def _home_links(base: str, body: str, origin: tuple) -> list:
+    """Return the internal links of an HTML page: absolute, without fragment, once each."""
+    parser = _LinkParser()
+    parser.feed(body)
+    links = []
+    for href in parser.hrefs:
+        try:
+            url = urldefrag(urljoin(base, href))[0]
+            if urlsplit(url).scheme in ("http", "https") and _same_origin(url, origin):
+                validate_url(url)
+            else:
+                continue
+        except ValueError:
+            continue
+        if url not in links and url != urldefrag(base)[0]:
+            links.append(url)
+    return links
+
+
+_REUSED_SECTIONS = ("lead", "team", "ssh", "test_accounts", "key_pages", "sites")
+_REUSED_TARGET_FIELDS = ("preprod_url", "prod_url")
+_RECOMPUTED_REPO_FIELDS = ("audited_sha", "deployed_sha", "aligned")
+
+
+def _cmd_reuse(args, services) -> int:
+    if not args.new_run_dir.is_dir():
+        raise UsageError(f"{args.new_run_dir} n'est pas un dossier de run.")
+    old = _load_context(args.old_run_dir)
+    path = args.new_run_dir / "context.json"
+    new = _load_context(args.new_run_dir) if path.exists() else {}
+    copied = []
+    if _reuse_repos(old, new):
+        copied.append("repos")
+    if isinstance(old.get("notion"), dict):
+        previous = new.get("notion") if isinstance(new.get("notion"), dict) else {}
+        kept = {key: value for key, value in old["notion"].items() if key != "bot_id"}
+        new["notion"] = {**kept, **({"bot_id": previous["bot_id"]} if "bot_id" in previous else {})}
+        copied.append("notion")
+    target = old.get("target")
+    if isinstance(target, dict):
+        previous = new.get("target") if isinstance(new.get("target"), dict) else {}
+        new["target"] = {
+            **{field: target[field] for field in _REUSED_TARGET_FIELDS if field in target},
+            "prod_live": previous.get("prod_live", False),
+            "access": previous.get("access"),
+        }
+        copied.append("target")
+    for key in _REUSED_SECTIONS:
+        if key in old:
+            new[key] = old[key]
+            copied.append(key)
+    write_json(path, new)
+    _emit({"copied": copied})
+    return EXIT_OK
+
+
+def _reuse_repos(old: dict, new: dict) -> bool:
+    """Keep the repos of the new run (fresh from project) and take only their preprod branch."""
+    old_repos = [repo for repo in old.get("repos") or [] if isinstance(repo, dict)]
+    if not old_repos:
+        return False
+    if not isinstance(new.get("repos"), list):
+        new["repos"] = [
+            {**repo, **{field: None for field in _RECOMPUTED_REPO_FIELDS}} for repo in old_repos
+        ]
+        return True
+    branches = {repo.get("name"): repo.get("preprod_branch") for repo in old_repos}
+    third_party = {
+        repo.get("name"): repo["third_party_paths"]
+        for repo in old_repos
+        if "third_party_paths" in repo and _third_party_paths(repo["third_party_paths"]) is None
+    }
+    for repo in new["repos"]:
+        if not isinstance(repo, dict):
+            continue
+        if branches.get(repo.get("name")):
+            repo["preprod_branch"] = branches[repo["name"]]
+        if repo.get("name") in third_party:
+            repo["third_party_paths"] = third_party[repo["name"]]
+    return True
+
+
+WP_PLUGIN_ROOTS = ("plugins", "mu-plugins")
+WP_READ_CAP = 64 * 1024
+WP_KNOWN_THIRD_PARTY = frozenset((
+    "wordfence", "gravityforms", "wp-all-import", "wp-all-export", "advanced-custom-fields",
+    "advanced-custom-fields-pro", "wordpress-seo", "wordpress-seo-premium", "yoast",
+    "sitepress-multilingual-cms", "wpml", "woocommerce", "contact-form-7", "elementor",
+    "elementor-pro", "wp-rocket", "akismet", "jetpack", "redirection", "updraftplus",
+    "polylang", "all-in-one-seo-pack", "really-simple-ssl", "wp-mail-smtp",
+))
+_PLUGIN_HEADER = re.compile(r"^[ \t/*#@]*(Plugin URI|Author URI|Plugin Name)[ \t]*:[ \t]*(.*)$", re.I | re.M)
+_STABLE_TAG = re.compile(r"^[ \t]*Stable tag[ \t]*:", re.I | re.M)
+
+
+def _cmd_wp_plugins(args, services) -> int:
+    context = _load_context(args.run_dir)
+    own = _project_domains(context)
+    plugins, unreadable = [], []
+    for repo in context.get("repos") or []:
+        if not (isinstance(repo, dict) and repo.get("stack") == "wordpress"):
+            continue
+        name, path = repo.get("name"), repo.get("path")
+        if not isinstance(name, str) or not isinstance(path, str):
+            continue
+        listed = _git(services.run, Path(path), "ls-tree", "-r", "-z", "HEAD")
+        if listed.returncode != 0:
+            unreadable.append({"repo": name, "reason": "liste des fichiers illisible"})
+            continue
+        files, linked = _tree_entries(listed.stdout)
+        for folder in _plugin_folders(files, linked):
+            if folder in linked:
+                plugins.append({"repo": name, "path": folder, "third_party": True, "why": linked[folder]})
+            else:
+                plugins.append(_plugin_entry(name, Path(path), folder, files, own, services.run))
+    result = {"plugins": sorted(plugins, key=lambda entry: (entry["repo"], entry["path"]))}
+    if unreadable:
+        result["unreadable"] = unreadable
+    _emit(result)
+    return EXIT_OK
+
+
+_LINK_MODES = {"160000": "sous-module", "120000": "lien symbolique"}
+
+
+def _tree_entries(output: str) -> tuple:
+    """Split `git ls-tree -r -z` into the regular files and the submodules and symlinks."""
+    files, linked = set(), {}
+    for record in output.split("\0"):
+        meta, _, entry = record.partition("\t")
+        mode = meta.split(" ", 1)[0]
+        if not entry:
+            continue
+        if mode in _LINK_MODES:
+            linked[entry] = _LINK_MODES[mode]
+        else:
+            files.add(entry)
+    return files, linked
+
+
+def _plugin_folders(files: set, linked: dict) -> list:
+    """Return the plugins/<name> and mu-plugins/<name> folders of the tree."""
+    folders = set()
+    for entry, is_file in [(e, True) for e in files] + [(e, False) for e in linked]:
+        parts = entry.split("/")
+        for index, segment in enumerate(parts[:-1]):
+            if segment in ("node_modules", "vendor"):
+                break
+            if segment in WP_PLUGIN_ROOTS:
+                if len(parts) > index + 2 or not is_file:
+                    folders.add("/".join(parts[: index + 2]))
+                break
+    return sorted(folders)
+
+
+def _project_domains(context: dict) -> set:
+    """Return the base domains (last two labels) of the preprod, the prod, the sites and the repo host."""
+    urls = []
+    target = context.get("target")
+    if isinstance(target, dict):
+        urls += [target.get("preprod_url"), target.get("prod_url")]
+    for site in context.get("sites") or []:
+        if isinstance(site, dict):
+            urls += [site.get("home"), f"https://{site.get('domain')}"]
+    for repo in context.get("repos") or []:
+        if not isinstance(repo, dict):
+            continue
+        urls.append(repo.get("web_url"))
+        remote = repo.get("remote")
+        if isinstance(remote, str) and remote:
+            try:
+                urls.append(remote_web_url(remote))
+            except ValueError:
+                pass
+    return {_base_domain(_safe_hostname(url)) for url in urls if isinstance(url, str)} - {None}
+
+
+def _safe_hostname(url) -> Optional[str]:
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
+def _base_domain(host) -> Optional[str]:
+    if not host:
+        return None
+    return ".".join(host.lower().rstrip(".").split(".")[-2:])
+
+
+def _read_capped(run, path: Path, relative: str) -> str:
+    result = _git(run, path, "show", f"HEAD:{relative}")
+    return result.stdout[:WP_READ_CAP] if result.returncode == 0 else ""
+
+
+def _plugin_entry(repo: str, path: Path, folder: str, files: list, own: set, run) -> dict:
+    entry = {"repo": repo, "path": folder}
+    name = folder.rsplit("/", 1)[1].lower()
+    if name in WP_KNOWN_THIRD_PARTY:
+        return {**entry, "third_party": True, "why": "plugin tiers connu"}
+    project_uri = False
+    for relative in sorted(files):
+        if relative.startswith(folder + "/") and relative.endswith(".php") and "/" not in relative[len(folder) + 1:]:
+            headers = _PLUGIN_HEADER.findall(_read_capped(run, path, relative))
+            if not any(key.lower() == "plugin name" for key, _ in headers):
+                continue
+            for key, value in headers:
+                host = _safe_hostname(value.strip())
+                if key.lower() != "plugin name" and host and _base_domain(host) not in own:
+                    return {
+                        **entry,
+                        "third_party": True,
+                        "why": f"{key} hors du projet ({host})",
+                    }
+                project_uri = project_uri or bool(key.lower() != "plugin name" and host)
+            break
+    if f"{folder}/readme.txt" in files and not project_uri:
+        if _STABLE_TAG.search(_read_capped(run, path, f"{folder}/readme.txt")):
+            return {**entry, "third_party": True, "why": "readme.txt avec « Stable tag »"}
+    return {**entry, "third_party": False, "why": "aucun signe de plugin tiers"}
+
+
 def _cmd_context(args, services) -> int:
     try:
-        errors = validate_context(_load_context(args.run_dir))
+        context = _load_context(args.run_dir)
+        errors, warnings = validate_context(context), context_warnings(context)
     except ContextError as error:
-        errors = [str(error)]
-    _emit({"ok": not errors, "errors": errors})
+        errors, warnings = [str(error)], []
+    report = {"ok": not errors, "errors": errors}
+    if warnings:
+        report["warnings"] = warnings
+    _emit(report)
     return EXIT_CONTEXT if errors else EXIT_OK
 
 
@@ -338,26 +804,108 @@ def _prod_origin(url) -> Optional[str]:
     return f"{parts.scheme}://{parts.netloc}"
 
 
-def _cmd_toolbox_env(args, services) -> int:
-    context = _load_context(args.run_dir)
+def _toolbox_target(context: dict) -> tuple:
+    """Return (url, robots mode) of the target the toolbox audits."""
     target = context.get("target")
     if not isinstance(target, dict):
         raise ContextError("context.json : « target » est absent.")
     if probes.is_prod_run(context):
-        url, robots = _target_url(target, "prod_url"), "respect"
-    else:
-        url, robots = _target_url(target, "preprod_url"), "ignore"
+        return _target_url(target, "prod_url"), "respect"
+    return _target_url(target, "preprod_url"), "ignore"
+
+
+def _cmd_toolbox_env(args, services) -> int:
+    context = _load_context(args.run_dir)
+    url, robots = _toolbox_target(context)
+    minutes = _crawl_minutes(context)
     lines = [
         f"GM_AUDIT_TARGET={url}",
         f"GM_AUDIT_ROBOTS={robots}",
         f"GM_AUDIT_RATE={TOOLBOX_RATE}",
         f"GM_AUDIT_USER_AGENT=GingermindsAudit/{plugin_version()}",
+        f"GM_CQA_CRAWL_MINUTES={minutes}",
+        f"GM_CQA_CRAWL_MAX_URLS={crawl_budget.crawl_max_urls(minutes)}",
     ]
     if robots == "ignore":
-        origin = _prod_origin(target.get("prod_url"))
+        origin = _prod_origin(context["target"].get("prod_url"))
         if origin:
             lines.append(f"GM_AUDIT_PROD_ORIGIN={origin}")
     _emit_lines(lines)
+    return EXIT_OK
+
+
+def _crawl_minutes(context: dict) -> int:
+    value = context.get("crawl_minutes")
+    if isinstance(value, int) and not isinstance(value, bool) and 5 <= value <= 240:
+        return value
+    return crawl_budget.DEFAULT_MINUTES
+
+
+def _cmd_crawl_estimate(args, services) -> int:
+    context = _load_context(args.run_dir)
+    url, robots = _toolbox_target(context)
+    origin = "{0.scheme}://{0.netloc}".format(urlsplit(url))
+    prod_origin = _prod_origin(context["target"].get("prod_url")) if robots == "ignore" else None
+    rate = _request_rate()
+    auth = _auth_from_env() if args.auth_env else None
+    opener = services.opener
+    if opener is None:
+        opener = build_opener(authenticated=auth is not None)
+    deadline = time.monotonic() + KEY_PAGES_DEADLINE
+
+    sent = []
+
+    def fetcher(limit: int):
+        def fetch(page_url: str) -> tuple:
+            cut = []
+            try:
+                result = fetch_timed(
+                    page_url, auth=auth, opener=opener, max_bytes=limit, deadline=deadline, cut=cut
+                )
+                if cut:
+                    result = (crawl_budget.CUT, b"", result[2])
+            except ValueError:
+                if not sent:
+                    raise
+                result = (None, b"", 0.0)
+            sent.append(page_url)
+            return result
+
+        return fetch
+
+    pages = [
+        mapped
+        for template, page_url in _key_page_entries(context.get("key_pages"))
+        if not _is_404_template(template)
+        for mapped in [crawl_budget.on_target(page_url, origin, prod_origin)]
+        if mapped
+    ][:MAX_KEY_PAGES - 1]
+    timings, info = [], {}
+    mean = crawl_budget.mean_response_time(
+        pages,
+        fetcher(crawl_budget.MAX_PAGE_BYTES),
+        deadline=time.monotonic() + KEY_PAGES_DEADLINE / 2,
+        timed=timings,
+    )
+    sitemap_urls = crawl_budget.count_sitemap_urls(
+        origin,
+        fetcher(crawl_budget.MAX_SITEMAP_BYTES + 1),
+        prod_origin,
+        delay=1 / rate,
+        deadline=deadline,
+        info=info,
+    )
+    minutes = crawl_budget.propose_crawl_minutes(sitemap_urls, mean, float(TOOLBOX_RATE))
+    _emit(
+        {
+            "sitemap_urls": sitemap_urls,
+            "mean_response_s": None if mean is None else round(mean, 3),
+            "pages_timed": len(timings),
+            "truncated": bool(info.get("truncated")),
+            "proposed_minutes": minutes,
+            "max_urls": crawl_budget.crawl_max_urls(minutes),
+        }
+    )
     return EXIT_OK
 
 
@@ -403,13 +951,14 @@ def _cmd_probes(args, services) -> int:
         )
         return EXIT_OK
     context, kept, _ = _selection(run_dir)
-    document = probes.build_probes(
+    result = probes.build_probes(
         base_url=probes.target_url(context),
         technos=context["technos"],
         rows=kept,
         fiches_dir=run_dir / "fiches",
         key_pages=context["key_pages"],
     )
+    document = {"base_url": result["base_url"], "probes": result["probes"]}
     write_json(run_dir / "probes.json", document)
     from_fiches = sum(1 for probe in document["probes"] if probe["id"].startswith("fiche-"))
     _emit(
@@ -418,24 +967,210 @@ def _cmd_probes(args, services) -> int:
             "base_url": document["base_url"],
             "count": len(document["probes"]),
             "from_fiches": from_fiches,
+            "discarded": result["discarded"],
         }
     )
     return EXIT_OK
 
 
+def _rerun_number(text: str) -> int:
+    if not re.fullmatch(r"[0-9]+", text) or int(text) < 1:
+        raise argparse.ArgumentTypeError(f"« {text} » n'est pas un numéro de relance (1, 2, ...).")
+    return int(text)
+
+
+def _new_history_dir(run_dir: Path, suffix: str = "") -> Path:
+    """Create history/<stamp><suffix>, adding -2, -3... when the name is taken."""
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S") + suffix
+    (run_dir / "history").mkdir(exist_ok=True)
+    for index in range(1, 1000):
+        target = run_dir / "history" / (stamp if index == 1 else f"{stamp}-{index}")
+        try:
+            target.mkdir()
+        except FileExistsError:
+            continue
+        return target
+    raise UsageError("history/ : impossible de créer un dossier de sauvegarde.")
+
+
+def _copy_state(run_dir: Path, target: Path) -> None:
+    for name in ("findings", "notion"):
+        if (run_dir / name).is_dir():
+            shutil.copytree(run_dir / name, target / name)
+
+
+def _require_findings(run_dir: Path) -> None:
+    if not (run_dir / "findings").is_dir():
+        raise UsageError("findings/ est introuvable : il n'y a rien à sauvegarder.")
+
+
+def _cmd_snapshot(args, services) -> int:
+    run_dir = args.run_dir.resolve()
+    _require_findings(run_dir)
+    target = _new_history_dir(run_dir)
+    _copy_state(run_dir, target)
+    print(target)
+    return EXIT_OK
+
+
+def _rerun_files(run_dir: Path, number: Optional[str] = None) -> list:
+    """Return the findings/<lot>-rerun-NN.json files, sorted, of one rerun or of all."""
+    folder = run_dir / "findings"
+    if not folder.is_dir():
+        return []
+    found = []
+    for path in sorted(folder.iterdir()):
+        match = _RERUN_FILE.fullmatch(path.name)
+        if match and (number is None or match.group(2) == number):
+            found.append(path)
+    return found
+
+
+def _closed_reruns(run_dir: Path) -> set:
+    document = _read_json_object(run_dir / "reruns.json")
+    closed = document.get("closed")
+    return {item for item in closed if isinstance(item, str)} if isinstance(closed, list) else set()
+
+
+def _rerun_dates(run_dir: Path) -> dict:
+    """Return {NN: date} of the closed reruns that recorded their date (rerun-close)."""
+    dates = _read_json_object(run_dir / "reruns.json").get("dates")
+    found = {}
+    for key, value in (dates.items() if isinstance(dates, dict) else []):
+        if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            try:
+                found[key] = datetime.strptime(value, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+    return found
+
+
+def _read_json_object(path: Path) -> dict:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def _highest_rerun(run_dir: Path) -> int:
+    numbers = [int(_RERUN_FILE.fullmatch(path.name).group(2)) for path in _rerun_files(run_dir)]
+    numbers += [int(item) for item in _closed_reruns(run_dir) if item.isdigit()]
+    history = run_dir / "history"
+    if history.is_dir():
+        for path in history.rglob("*-rerun-*.json"):
+            match = _RERUN_FILE.fullmatch(path.name)
+            if match:
+                numbers.append(int(match.group(2)))
+    return max(numbers, default=0)
+
+
+def _cmd_defer(args, services) -> int:
+    _emit(deferred.add(args.run_dir.resolve(), args.kind, args.detail, args.refs))
+    return EXIT_OK
+
+
+def _cmd_deferred(args, services) -> int:
+    run_dir = args.run_dir.resolve()
+    if args.resolve is not None:
+        deferred.resolve(run_dir, args.resolve)
+    _emit({"items": deferred.open_items(run_dir)})
+    return EXIT_OK
+
+
+def _cmd_rerun_start(args, services) -> int:
+    run_dir = args.run_dir.resolve()
+    _require_findings(run_dir)
+    number = _highest_rerun(run_dir) + 1
+    if number > 99:
+        raise UsageError("Il y a déjà 99 relances dans ce run : lancer un nouveau run.")
+    target = _new_history_dir(run_dir)
+    closed = _closed_reruns(run_dir)
+    abandoned = []
+    for path in _rerun_files(run_dir):
+        if _RERUN_FILE.fullmatch(path.name).group(2) in closed:
+            continue
+        (target / "abandoned").mkdir(exist_ok=True)
+        shutil.move(str(path), str(target / "abandoned" / path.name))
+        abandoned.append(path.name)
+    _copy_state(run_dir, target)
+    _emit({"snapshot": str(target), "rerun": f"{number:02d}", "abandoned": abandoned})
+    return EXIT_OK
+
+
+def _cmd_rerun_close(args, services) -> int:
+    run_dir = args.run_dir.resolve()
+    number = f"{args.number:02d}"
+    rows = _parse_rows(args.rows) if args.rows is not None else None
+    files = _rerun_files(run_dir, number)
+    if not files:
+        raise UsageError(
+            f"Rien à clore, aucun fichier de la relance {number} : aucun lot n'a rien écrit "
+            f"(findings/<lot>-rerun-{number}.json). Construire le plan sans clore cette relance."
+        )
+    context = _checked_context(run_dir)
+    lots = {item["id"]: item for item in _read_lots(run_dir)["lots"]}
+    discarded = []
+    for path in files:
+        lot = lots.get(_RERUN_FILE.fullmatch(path.name).group(1))
+        if lot is None or _rerun_errors(run_dir, context, lot, path.name, rows):
+            folder = _new_history_dir(run_dir, f"-rerun-{number}-invalid")
+            shutil.move(str(path), str(folder / path.name))
+            discarded.append(path.name)
+    closed = sorted(_closed_reruns(run_dir) | {number})
+    dates = {key: value.isoformat() for key, value in _rerun_dates(run_dir).items()}
+    dates.setdefault(number, datetime.now().date().isoformat())
+    write_json(run_dir / "reruns.json", {"closed": closed, "dates": dict(sorted(dates.items()))})
+    _emit({"closed": number, "discarded": discarded})
+    return EXIT_OK
+
+
+def _parse_rows(text: str) -> set:
+    return set(parse_refs(text))
+
+
+def _rerun_errors(run_dir, context, lot, name, rows) -> list:
+    """Return the errors of a rerun file: only the rows it holds count, none is required."""
+    found = _read_findings_file(run_dir, context, lot, name)
+    if found is None:
+        return [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
+    errors = [error for error in found[1] if not error.startswith(_MISSING_ROW)]
+    if rows is not None:
+        document = _read_json_object(run_dir / "findings" / name)
+        items = document.get("findings")
+        for item in items if isinstance(items, list) else []:
+            ref = item.get("ref") if isinstance(item, dict) else None
+            if isinstance(ref, int) and not isinstance(ref, bool) and ref not in rows:
+                errors.append(
+                    f"constat {ref_label(ref)} : Réf absente de la liste des lignes relancées"
+                )
+    if not found[0] and not errors:
+        errors = [f"findings/{name} ne contient aucun constat."]
+    return errors
+
+
 def _cmd_validate(args, services) -> int:
+    if args.rerun is not None and args.followup:
+        raise UsageError("--rerun et --followup ne se combinent pas.")
+    if args.rows is not None and args.rerun is None:
+        raise UsageError("--rows ne s'utilise qu'avec --rerun.")
     context = _checked_context(args.run_dir)
     lots = _read_lots(args.run_dir)["lots"]
     lot = next((item for item in lots if item["id"] == args.lot_id), None)
     if lot is None:
         known = ", ".join(item["id"] for item in lots) or "aucun"
         raise UsageError(f"Le lot « {args.lot_id} » est absent de lots.json (lots : {known}).")
-    found = _read_findings(args.run_dir, context, lot, followup=args.followup)
-    if found is None:
-        name = _findings_name(lot["id"], args.followup)
-        errors = [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
+    if args.rerun is not None:
+        name = f"{lot['id']}-rerun-{args.rerun:02d}.json"
+        rows = _parse_rows(args.rows) if args.rows is not None else None
+        errors = _rerun_errors(args.run_dir, context, lot, name, rows)
     else:
-        errors = found[1]
+        name = _findings_name(lot["id"], args.followup)
+        found = _read_findings_file(args.run_dir, context, lot, name)
+        if found is None:
+            errors = [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
+        else:
+            errors = found[1]
     _emit({"ok": not errors, "errors": errors})
     return EXIT_CONTEXT if errors else EXIT_OK
 
@@ -446,9 +1181,19 @@ def _cmd_plan(args, services) -> int:
     rows, missing = _read_rows(run_dir)
     lots = _read_lots(run_dir)
     visible = _read_visible_verdicts(run_dir)
-    findings, followup_done = _collect_findings(run_dir, context, lots["lots"])
+    sources = {}
+    findings, followup_done = _collect_findings(run_dir, context, lots["lots"], sources)
     copy_ds_id = context["notion"]["copy_data_source_id"]
     history = load_history(run_dir.parent.parent, run_dir.parent.name, copy_ds_id, run_dir.name)
+    recette = {"refs": frozenset(), "judged": [], "unjudged": []}
+    if args.recette == 0:
+        raise UsageError(
+            "--recette demande le numéro de la relance qui a jugé les lignes (par exemple "
+            "--recette 01) : celle que rerun-close vient de clore."
+        )
+    if args.recette is not None:
+        _check_closed(run_dir, args.recette)
+        recette = _recette_scope(run_dir, context, lots["lots"], rows, args.recette)
     plan = build_plan(
         rows=rows,
         findings=findings,
@@ -460,11 +1205,110 @@ def _cmd_plan(args, services) -> int:
         plugin_version=context["plugin_version"],
         followup_done=followup_done,
         missing_in_copy=missing,
+        recette_refs=recette["refs"],
+        comment_dates=_comment_dates(run_dir, sources),
     )
+    if args.recette is not None:
+        plan["recette"] = {**recette, "rerun": f"{args.recette:02d}"}
+        plan["recette"]["refs"] = sorted(recette["refs"])
+    built = plan
     plan = filter_plan(plan, skip_human_overrides=args.skip_human_overrides)
+    if args.recette is not None:
+        plan["recette"]["kept"] = _kept_human_statuses(built, plan)
+    plan["plan_id"] = plan_digest(plan)
     (run_dir / "notion").mkdir(exist_ok=True)
     write_json(run_dir / "notion" / "plan.json", plan)
     _emit(plan["summary"])
+    return EXIT_OK
+
+
+def _comment_dates(run_dir: Path, sources: dict) -> dict:
+    """Return {ref: date of its rerun} for the rows whose latest finding comes from a rerun.
+
+    Their comment then says when they were judged again; a rerun closed before its date was
+    recorded keeps the date of the run.
+    """
+    dates = _rerun_dates(run_dir)
+    found = {}
+    for ref, name in sources.items():
+        match = _RERUN_FILE.fullmatch(name)
+        if match and match.group(2) in dates:
+            found[ref] = dates[match.group(2)]
+    return found
+
+
+def _check_closed(run_dir: Path, number: int) -> None:
+    """Refuse a recette NN that reruns.json does not list as closed.
+
+    A closed NN older than the last one is accepted: the deferred rerun of the end block
+    (SKILL.md section 8, step 5) closes NN+1 inside the recette NN.
+    """
+    closed = sorted(int(item) for item in _closed_reruns(run_dir) if item.isdigit())
+    if number not in closed:
+        listed = ", ".join(f"{item:02d}" for item in closed) or "aucune"
+        raise UsageError(
+            f"--recette {number:02d} : la recette doit porter sur une relance close "
+            f"(relances closes dans reruns.json : {listed}). Clore la relance avec "
+            "rerun-close d'abord."
+        )
+
+
+def _kept_human_statuses(built: dict, filtered: dict) -> list:
+    """Return the judged rows of the recette whose human status the filter kept, with the verdict."""
+    recette = built["recette"]
+    judged = set(recette["judged"]) - set(recette["refs"])
+    written = {op["key"] for op in filtered["ops"]}
+    return [
+        {"ref": op["ref"], "verdict": op["verdict"], "status": op["before"]}
+        for op in built["ops"]
+        if op["kind"] == "status"
+        and op["human_override"]
+        and op["ref"] in judged
+        and op["key"] not in written
+    ]
+
+
+def _recette_scope(run_dir: Path, context: dict, lots: list, rows: list, number: int) -> dict:
+    """Return the refs of the recette by what the plan may do with them.
+
+    refs: "Mis en place" in the copy and judged again by the rerun NN of the recette or a closed
+    rerun after it (a finding in a kept findings/<lot>-rerun-MM.json, MM >= NN, as the deferred
+    rerun of the end block of a recette): they may replace the status a dev set. judged: every
+    ref of the recette with such a finding. unjudged: the others, left as they are.
+    """
+    document = _read_run_json(run_dir, "notion/recette.json", "cqa_notion.py recette")
+    listed = document.get("rows") if isinstance(document, dict) else None
+    if not isinstance(listed, list):
+        raise UsageError("notion/recette.json : la liste « rows » est absente.")
+    wanted = {row["ref"] for row in listed if isinstance(row, dict) and _is_ref(row.get("ref"))}
+    judged = set()
+    later = sorted(int(item) for item in _closed_reruns(run_dir) if item.isdigit())
+    for rerun in (item for item in later if item >= number):
+        for lot in lots:
+            name = f"{lot['id']}-rerun-{rerun:02d}.json"
+            found = _read_findings_file(run_dir, context, lot, name)
+            judged.update(item["ref"] for item in (found[0] if found else []))
+    status = {row["ref"]: row.get("status") for row in rows if row.get("ref") is not None}
+    exempt = {ref for ref in wanted & judged if status.get(ref) == STATUS_IMPLEMENTED}
+    return {
+        "refs": frozenset(exempt),
+        "judged": sorted(wanted & judged),
+        "unjudged": sorted(wanted - judged),
+    }
+
+
+def _cmd_rerun(args, services) -> int:
+    refs = parse_refs(args.refs)
+    run_dir = args.run_dir.resolve()
+    context = _checked_context(run_dir)
+    _emit(
+        rerun_candidates(
+            run_dir,
+            extra_refs=refs,
+            git_run=services.run,
+            read=lambda lot, name: _read_findings_file(run_dir, context, lot, name),
+        )
+    )
     return EXIT_OK
 
 
@@ -495,7 +1339,7 @@ def _cmd_synthesis(args, services) -> int:
 def _cmd_scan(args, services) -> int:
     found = [
         {"path": path, "label": label}
-        for path, label in scan_tree(args.run_dir, known_values_from_env())
+        for path, label in scan_tree(args.run_dir, known_values_from_env(), exclude=("fiches",))
     ]
     _emit({"ok": not found, "found": found})
     return EXIT_SECRET if found else EXIT_OK
@@ -528,7 +1372,7 @@ def _cmd_skip(args, services) -> int:
         "tool": args.tool,
         "toolbox_version": None,
         "tool_version": None,
-        "status": "skipped",
+        "status": "not_applicable" if args.not_applicable else "skipped",
         "reason": reason,
         "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "duration_s": 0,
@@ -756,7 +1600,32 @@ def _run_state(run_dir: Path) -> dict:
         state[key] = (run_dir / relative).is_file()
     findings = run_dir / "findings"
     state["findings"] = findings.is_dir() and any(findings.glob("*.json"))
+    state["write_pending"] = _write_pending(run_dir)
     return state
+
+
+def _write_pending(run_dir: Path) -> bool:
+    """True when the last plan was to be written and the journal lacks one of its operations.
+
+    It catches a rerun or a recette whose write stopped (exit 3) in a run already done. A key
+    counts as written only when the journal holds it under the plan_id of notion/plan.json, as
+    apply skips it; an operation blocked by a safety gate is never journaled and keeps it true.
+    """
+    plan = _read_json_object(run_dir / "notion" / "plan.json")
+    ops = plan.get("ops")
+    if not isinstance(ops, list) or not ops:
+        return False
+    context = _read_json_object(run_dir / "context.json")
+    if context.get("notion_write") == "none" or context.get("dry_run") is True:
+        return False
+    journal = _read_json_object(run_dir / "notion" / "applied.json").get("applied")
+    plan_id = plan.get("plan_id")
+    written = {
+        entry.get("key")
+        for entry in (journal if isinstance(journal, list) else [])
+        if isinstance(entry, dict) and entry.get("plan_id") == plan_id
+    }
+    return any(isinstance(op, dict) and op.get("key") not in written for op in ops)
 
 
 def _target_url(target: dict, key: str) -> str:
@@ -792,6 +1661,9 @@ def validate_context(context: dict) -> list:
     """Return the problems of a context.json document, in French; an empty list means valid."""
     errors = []
     _check_fields(errors, "", context, _TOP_FIELDS)
+    _check_fields(
+        errors, "", context, {key: c for key, c in _OPTIONAL_TOP_FIELDS.items() if key in context}
+    )
     for name, fields in _SECTIONS.items():
         _check_object(errors, name, context, fields)
     for name, fields in _OPTIONAL_SECTION_FIELDS.items():
@@ -801,8 +1673,13 @@ def validate_context(context: dict) -> list:
             _check_fields(errors, name, section, present)
     _check_list(errors, "team", context, _TEAM_FIELDS)
     _check_list(errors, "repos", context, _REPO_FIELDS, minimum=1)
+    _check_third_party_paths(errors, context.get("repos"))
     _check_list(errors, "key_pages", context, _PAGE_FIELDS, maximum=MAX_KEY_PAGES)
     _check_repo_names(errors, context.get("repos"))
+    _check_app_dirs(errors, context)
+    if "sites" in context:
+        _check_list(errors, "sites", context, _SITE_FIELDS, maximum=MAX_SITES)
+        _check_sites(errors, context["sites"])
     target = context.get("target")
     if isinstance(target, dict) and target.get("prod_live") is True and not target.get("prod_url"):
         errors.append(_invalid("target.prod_url", "est vide alors que target.prod_live est vrai"))
@@ -851,6 +1728,14 @@ def _check_fields(errors: list, label: str, node: dict, fields: dict) -> None:
             errors.append(_invalid(path, problem))
 
 
+def _check_third_party_paths(errors: list, repos) -> None:
+    for index, repo in enumerate(repos if isinstance(repos, list) else []):
+        if isinstance(repo, dict) and "third_party_paths" in repo:
+            problem = _third_party_paths(repo["third_party_paths"])
+            if problem:
+                errors.append(_invalid(f"repos[{index}].third_party_paths", problem))
+
+
 def _check_repo_names(errors: list, repos) -> None:
     names = [
         repo["name"]
@@ -859,6 +1744,91 @@ def _check_repo_names(errors: list, repos) -> None:
     ]
     for name in sorted({name for name in names if names.count(name) > 1}):
         errors.append(_invalid("repos", f"contient deux fois le nom « {name} »"))
+
+
+_APP_DIR_KEYS = ("host", "container")
+
+
+def _app_dirs(context) -> dict:
+    ssh = context.get("ssh") if isinstance(context, dict) else None
+    app_dirs = ssh.get("app_dirs") if isinstance(ssh, dict) else None
+    return app_dirs if isinstance(app_dirs, dict) else {}
+
+
+def _check_app_dirs(errors: list, context) -> None:
+    """Check each folder of ssh.app_dirs: a host path, or {"host": ..., "container": ...}.
+
+    null (folder not known) and a relative path left by a run before 0.12 are tolerated:
+    context_warnings reports the second.
+    """
+    for name, value in _app_dirs(context).items():
+        label = f"ssh.app_dirs.{name}"
+        if value is None or _legacy_app_dir(value):
+            continue
+        if isinstance(value, str):
+            problem = _absolute_path(value)
+            if problem:
+                errors.append(_invalid(label, problem))
+        elif isinstance(value, dict):
+            unknown = sorted(str(key) for key in value if key not in _APP_DIR_KEYS)
+            if unknown:
+                errors.append(_invalid(label, (
+                    "contient une clé inconnue : "
+                    + ", ".join(f"« {key} »" for key in unknown)
+                    + " (seules « host » et « container » sont permises)"
+                )))
+            fields = {"container": _absolute_path}
+            if value.get("host") is not None:
+                fields["host"] = _absolute_path
+            _check_fields(errors, label, value, fields)
+        else:
+            errors.append(_invalid(label, (
+                'doit être un chemin absolu sur le serveur, null, ou un objet {"host": '
+                '"<chemin>", "container": "<chemin>"} pour une application en conteneur'
+            )))
+
+
+def _legacy_app_dir(value) -> bool:
+    """True for a relative folder, which runs before 0.12 could record."""
+    return (
+        isinstance(value, str)
+        and not value.startswith("/")
+        and not any(char in value for char in "\t\r\n")
+    )
+
+
+def context_warnings(context) -> list:
+    """Return the French warnings of a context.json document; they never block the run."""
+    return [
+        f"context.json : « ssh.app_dirs.{name} » n'est pas un chemin absolu (« {value} », "
+        "laissé par un ancien run) : il est ignoré, redemander le dossier au lead avant toute "
+        "commande sur le serveur."
+        for name, value in _app_dirs(context).items()
+        if _legacy_app_dir(value)
+    ]
+
+
+def _absolute_path(value) -> Optional[str]:
+    if isinstance(value, str) and value.startswith("/") and _path(value) is None:
+        return None
+    return "doit être un chemin absolu (commençant par « / »), sans tabulation ni retour à la ligne"
+
+
+def _check_sites(errors: list, sites) -> None:
+    if not isinstance(sites, list):
+        return
+    domains = []
+    for index, site in enumerate(sites):
+        if not isinstance(site, dict):
+            continue
+        domain, home = site.get("domain"), site.get("home")
+        if _hostname(domain) is not None:
+            continue
+        domains.append(domain.lower())
+        if _url(home) is None and urlsplit(home).hostname != domain.lower():
+            errors.append(_invalid(f"sites[{index}].home", f"doit être une URL du domaine {domain}"))
+    for domain in sorted({name for name in domains if domains.count(name) > 1}):
+        errors.append(_invalid("sites", f"contient deux fois le domaine « {domain} »"))
 
 
 def _absent(path: str) -> str:
@@ -884,12 +1854,62 @@ def _filled_text_or_null(value) -> Optional[str]:
     return "doit être un texte non vide ou null"
 
 
+def _choice(*allowed):
+    def check(value) -> Optional[str]:
+        if isinstance(value, str) and value in allowed:
+            return None
+        return "doit valoir " + ", ".join(f"« {item} »" for item in allowed)
+
+    return check
+
+
+def _choice_or_null(*allowed):
+    inner = _choice(*allowed)
+
+    def check(value) -> Optional[str]:
+        return None if value is None else inner(value)
+
+    return check
+
+
+def _crawl_minutes_value(value) -> Optional[str]:
+    if isinstance(value, int) and not isinstance(value, bool) and 5 <= value <= 240:
+        return None
+    return "doit être un entier de minutes entre 5 et 240"
+
+
 def _boolean(value) -> Optional[str]:
     return None if isinstance(value, bool) else "doit être un booléen"
 
 
 def _boolean_or_null(value) -> Optional[str]:
     return None if value is None or isinstance(value, bool) else "doit être un booléen ou null"
+
+
+def _hostname(value) -> Optional[str]:
+    if isinstance(value, str) and _HOSTNAME.fullmatch(value):
+        return None
+    return "doit être un nom d'hôte, sans schéma ni chemin"
+
+
+def _url(value) -> Optional[str]:
+    try:
+        parts = urlsplit(value) if isinstance(value, str) else None
+        if parts and parts.scheme in ("http", "https") and parts.hostname:
+            return None
+    except ValueError:
+        pass
+    return "doit être une URL http ou https"
+
+
+def _key_page_url(value) -> Optional[str]:
+    if not isinstance(value, str):
+        return "doit être un texte"
+    try:
+        validate_url(value)
+    except ValueError as error:
+        return str(error)[0].lower() + str(error)[1:].rstrip(".")
+    return None
 
 
 def _object(value) -> Optional[str]:
@@ -919,6 +1939,25 @@ def _tools(value) -> Optional[str]:
     return f"contient des outils inconnus : {', '.join(unknown)}" if unknown else None
 
 
+MAX_THIRD_PARTY_PATHS = 200
+
+
+def _third_party_paths(value) -> Optional[str]:
+    """Check a list of folders of a repo, as the toolbox reads them (CONTRACT.md)."""
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return "doit être une liste de textes"
+    if len(value) > MAX_THIRD_PARTY_PATHS:
+        return f"doit contenir {MAX_THIRD_PARTY_PATHS} chemins au plus ({len(value)})"
+    for item in value:
+        segments = item.split("/")
+        if "\\" in item or any(segment in ("", ".", "..") for segment in segments):
+            return (
+                f"contient « {item} » : un chemin relatif au repo est attendu, "
+                "sans « / » initial ou final, ni « \\ », ni segment vide, « . » ou « .. »"
+            )
+    return None
+
+
 def _repo_name(value) -> Optional[str]:
     if isinstance(value, str) and _REPO_NAME.fullmatch(value):
         return None
@@ -940,6 +1979,11 @@ _TOP_FIELDS = {
     "phase_filter": _text_or_null,
     "dry_run": _boolean,
 }
+_OPTIONAL_TOP_FIELDS = {
+    "mode": _choice("autonome", "interactif"),
+    "notion_write": _choice_or_null("all", "keep_human", "none"),
+    "crawl_minutes": _crawl_minutes_value,
+}
 _SECTIONS = {
     "project": {"slug": _text, "name": _text, "protection": _text_or_null},
     "lead": {"name": _text_or_null, "option": _text_or_null},
@@ -959,7 +2003,10 @@ _SECTIONS = {
         "assignee_options": _texts,
     },
 }
-_OPTIONAL_SECTION_FIELDS = {"notion": {"reference_page_id": _filled_text_or_null}}
+_OPTIONAL_SECTION_FIELDS = {
+    "notion": {"reference_page_id": _filled_text_or_null},
+    "ssh": {"sql_skip_ssl": _boolean},
+}
 _TEAM_FIELDS = {"name": _text, "role": _text_or_null, "option": _text_or_null}
 _REPO_FIELDS = {
     "name": _repo_name,
@@ -973,7 +2020,14 @@ _REPO_FIELDS = {
     "deployed_sha": _text_or_null,
     "aligned": _boolean_or_null,
 }
-_PAGE_FIELDS = {"template": _text, "url": _text}
+_PAGE_FIELDS = {"template": _text, "url": _key_page_url}
+_SITE_FIELDS = {
+    "domain": _hostname,
+    "backoffice": _choice("commun", "propre"),
+    "sso": _boolean,
+    "home": _url,
+}
+_HOSTNAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*")
 
 
 def _read_run_json(run_dir: Path, relative: str, hint: str):
@@ -1107,48 +2161,47 @@ def _findings_name(lot_id: str, followup: bool) -> str:
 
 
 def _read_findings(run_dir: Path, context: dict, lot: dict, *, followup: bool) -> Optional[tuple]:
-    """Return (valid findings, errors) of a lot file, None when the file does not exist.
+    """Return (valid findings, errors) of a lot file, None when the file does not exist."""
+    return _read_findings_file(run_dir, context, lot, _findings_name(lot["id"], followup))
+
+
+def _read_findings_file(run_dir: Path, context: dict, lot: dict, name: str) -> Optional[tuple]:
+    """Return (valid findings, errors) of a findings file, None when it does not exist.
 
     The valid findings are those of validate_document whose evidence also holds against the run.
     """
-    name = _findings_name(lot["id"], followup)
-    try:
-        document = json.loads((run_dir / "findings" / name).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as error:
-        return [], [f"findings/{name} est illisible : {error}"]
-    valid, errors = validate_document(document, set(lot["refs"]))
-    roots = {repo["name"]: Path(repo["path"]) for repo in context["repos"]}
-    grounded = []
-    for item in valid:
-        problems = _evidence_problems(item["evidence"], roots, run_dir)
-        errors.extend(f"constat {ref_label(item['ref'])} : {problem}" for problem in problems)
-        if not problems:
-            grounded.append(item)
-    return grounded, errors
+    return read_grounded_findings(run_dir, context, lot, name)
 
 
-def _collect_findings(run_dir: Path, context: dict, lots: list) -> tuple:
+def _collect_findings(
+    run_dir: Path, context: dict, lots: list, sources: Optional[dict] = None
+) -> tuple:
     """Return ({ref: finding}, refs of the lots that went through the follow-up of the probes).
 
-    A finding of the follow-up file replaces the one of the first round; a ref the follow-up
-    file does not give (or gives invalid) keeps its first-round finding. A lot went through the
-    follow-up when it has a follow-up file, or when probes-followup.json exists and the lot
-    still asked for probes: if every URL was discarded no relaunch has any use, but what the lot
-    waited for will not come either.
+    The latest finding of a row prevails: first round, follow-up, then the reruns in order (see
+    latest_findings); a ref a later file does not give (or gives invalid) keeps its previous
+    finding. A lot went through the follow-up when it has a follow-up file, or when
+    probes-followup.json exists and the lot still asked for probes: if every URL was discarded
+    no relaunch has any use, but what the lot waited for will not come either. sources, when
+    given, receives {ref: name of the findings file of its latest finding}.
     """
-    findings, followup_done = {}, set()
+
+    def read(lot, name):
+        found = _read_findings_file(run_dir, context, lot, name)
+        if sources is not None:
+            for item in found[0] if found else []:
+                sources[item["ref"]] = name
+        return found
+
+    findings = latest_findings(run_dir, lots, read)
+    followup_done = set()
     requested = set()
     if (run_dir / "probes-followup.json").is_file():
-        requested = set(probes.pending_lots(run_dir, lots))
+        requested = set(probes.pending_lots(run_dir, lots, probes.app_path(context)))
     for lot in lots:
-        first = _read_findings(run_dir, context, lot, followup=False)
-        second = _read_findings(run_dir, context, lot, followup=True)
-        for found in (first, second):
-            for item in found[0] if found else []:
-                findings[item["ref"]] = item
-        if second is not None or lot["id"] in requested:
+        if (run_dir / "findings" / _findings_name(lot["id"], True)).exists() or lot[
+            "id"
+        ] in requested:
             followup_done.update(lot["refs"])
     return findings, followup_done
 
@@ -1177,55 +2230,6 @@ def _verdicts(run_dir: Path, context: dict, rows: list) -> dict:
                     "verdict"
                 ]
     return verdicts
-
-
-def _evidence_problems(evidence: list, roots: dict, run_dir: Path) -> list:
-    """Return what the evidence of a valid finding claims that the run does not hold."""
-    problems = []
-    for number, item in enumerate(evidence, start=1):
-        kind = item["type"]
-        if kind == "file":
-            problem = _file_problem(item, roots)
-        elif kind == "tool":
-            problem = _tool_problem(item, run_dir)
-        else:
-            problem = None
-        if problem:
-            problems.append(f"preuve n° {number} ({kind}) : {problem}")
-    return problems
-
-
-def _file_problem(item: dict, roots: dict) -> Optional[str]:
-    repo, path = item["repo"], item["path"]
-    if repo not in roots:
-        return f"repo {_quoted(repo)} absent de context.json (repos : {', '.join(roots)})"
-    relative = Path(path)
-    if relative.is_absolute() or ".." in relative.parts:
-        return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
-    if relative.parts == ():
-        return f"chemin {_quoted(path)} : la racine du repo {_quoted(repo)} n'est pas une preuve"
-    candidate = roots[repo] / relative
-    if not candidate.exists():
-        return f"chemin {_quoted(path)} introuvable dans le repo {_quoted(repo)}"
-    if not candidate.resolve().is_relative_to(roots[repo].resolve()):
-        return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
-    if not candidate.is_file():
-        return f"chemin {_quoted(path)} : pas un fichier dans le repo {_quoted(repo)} (dossier ?)"
-    return None
-
-
-def _tool_problem(item: dict, run_dir: Path) -> Optional[str]:
-    tool = item["tool"]
-    if not _EVIDENCE_TOOL.fullmatch(tool):
-        return f"nom d'outil {_quoted(tool)} invalide"
-    if not (run_dir / "tools" / tool / "summary.json").is_file():
-        return f"outil {_quoted(tool)} sans résumé (tools/{tool}/summary.json est introuvable)"
-    return None
-
-
-def _quoted(value) -> str:
-    text = str(value)
-    return f"« {text if len(text) <= 60 else text[:59] + '…'} »"
 
 
 def _openapi_files(root: Path) -> list:

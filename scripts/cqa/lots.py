@@ -27,7 +27,7 @@ TOOL_ACTIONS = {
     "BDD": "CLI de l'application accessible en SSH",
     "Navigateur": "Claude in Chrome connecté",
     "HTTP": "accès à la préprod (réseau de l'agence ou identifiants)",
-    "CLI local": "runner du projet démarré",
+    "CLI local": "runner du projet démarré, ou boîte à outils 1.2 (docker pull)",
     "Comptes de test": "comptes de test",
     "Service externe": "préprod publique (à J0)",
     "Code": "repos présents et à jour",
@@ -41,6 +41,14 @@ _DEFERRED_PHASES = frozenset({"MEL J0", "Post-MEL J+7"})
 _MERGED_CATEGORIES = {"process-interne": "process-rgpd", "rgpd-legal": "process-rgpd"}
 _BUCKETS = {"standby": "standby", "techno": "na", "phase": "deferred", "no_tools": "not_evaluable"}
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
+_TEST_ACCOUNTS = "Comptes de test"
+_BACKOFFICE_SECTION = re.compile(r"^(back|bo$)", re.IGNORECASE)
+# Matches tool names, not substrings ("syntaxe", "taxe").
+_TOOLBOX_HINT = re.compile(
+    r"gitleaks|testssl|lighthouse|\baxe\b|validateur nu|\bnu html|yellow ?lab|redocly"
+    r"|schemathesis|\bcrawl|\bstylelint|\bcomposer audit|\bnpm audit|\bd[ée]bordements?",
+    re.IGNORECASE,
+)
 
 
 def select_rows(
@@ -127,22 +135,26 @@ def coverage(kept: list[dict], excluded: list[dict], available_tools: list[str])
 def build_lots(kept: list[dict], max_size: int = 20) -> list[dict]:
     """Group the kept rows into lots, one per sub-agent, in dispatch order.
 
-    A lot is {id, kind, needs_toolbox, needs_server_facts, refs}, refs in ascending order.
+    A lot is {id, kind, needs_toolbox, needs_server_facts, needs_session, refs}, refs in
+    ascending order.
     Rows are routed by the tools they ask for, whether those tools are available or not:
     browser lots (accessibility apart, no size limit), a server lot, then code lots of at
     most max_size rows (a category group is split by sub-category, then into balanced
-    numbered chunks). Rows that need the toolbox move to a sibling "<id>-outils" lot.
-    Order: server, code, browser, then every sibling.
+    numbered chunks). Browser rows that need a session (test accounts, back-office section)
+    go to their own "-session" lots, so the others run without a login. Rows that need the
+    toolbox (a toolbox tool, or a tool named in tooling_hint) move to a sibling "<id>-outils"
+    lot. Order: server, code, browser, browser "-session", then every sibling.
     """
     rows = sorted(kept, key=lambda row: row["ref"])
-    server, browser, code = [], {"accessibilite": [], "autres": []}, []
+    server, code = [], []
+    browser = {"accessibilite": [], "autres": [], "accessibilite-session": [], "autres-session": []}
     for row in rows:
         kind = _kind(row)
         if kind == "server":
             server.append(row)
         elif kind == "browser":
             key = "accessibilite" if _slug(row.get("category")) == "accessibilite" else "autres"
-            browser[key].append(row)
+            browser[key + ("-session" if _needs_session(row) else "")].append(row)
         else:
             code.append(row)
 
@@ -151,6 +163,7 @@ def build_lots(kept: list[dict], max_size: int = 20) -> list[dict]:
     groups += [(f"browser-{key}", "browser", browser[key]) for key in browser]
 
     plain, with_toolbox = [], []
+    groups = [group for group in groups if group[2]]
     for lot_id, kind, lot_rows in groups:
         needing = [row for row in lot_rows if _needs_toolbox(row)]
         others = [row for row in lot_rows if not _needs_toolbox(row)]
@@ -159,6 +172,11 @@ def build_lots(kept: list[dict], max_size: int = 20) -> list[dict]:
         if needing:
             with_toolbox.append(_lot(f"{lot_id}-outils", kind, needing, needs_toolbox=True))
     return plain + with_toolbox
+
+
+def lot_needs_session(lot: dict) -> bool:
+    """Read needs_session of a lot entry; a lots.json of an older run has none: false."""
+    return lot.get("needs_session") is True
 
 
 def _exclusion(row, technos, available, phase_filter):
@@ -196,7 +214,17 @@ def _kind(row):
 
 
 def _needs_toolbox(row):
-    return any(tool in (row.get("tools") or []) for tool in _TOOLBOX_TOOLS)
+    if any(tool in (row.get("tools") or []) for tool in _TOOLBOX_TOOLS):
+        return True
+    return bool(_TOOLBOX_HINT.search(row.get("tooling_hint") or ""))
+
+
+def _needs_session(row):
+    if _TEST_ACCOUNTS in (row.get("tools") or []):
+        return True
+    return any(
+        _BACKOFFICE_SECTION.match((section or "").strip()) for section in row.get("sections") or []
+    )
 
 
 def _lot(lot_id, kind, rows, needs_toolbox):
@@ -208,6 +236,7 @@ def _lot(lot_id, kind, rows, needs_toolbox):
         "kind": kind,
         "needs_toolbox": needs_toolbox,
         "needs_server_facts": server_facts,
+        "needs_session": any(_needs_session(row) for row in rows) if kind == "browser" else False,
         "refs": [row["ref"] for row in rows],
     }
 

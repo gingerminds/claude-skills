@@ -5,6 +5,7 @@
       "kind": "code",
       "needs_toolbox": false,
       "needs_server_facts": false,
+      "needs_session": false,
       "refs": [
         101,
         102
@@ -15,6 +16,7 @@
       "kind": "code",
       "needs_toolbox": false,
       "needs_server_facts": false,
+      "needs_session": false,
       "refs": [
         103,
         104

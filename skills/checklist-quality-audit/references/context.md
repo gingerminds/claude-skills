@@ -130,7 +130,7 @@ grep -iE '^[[:space:]]*(Host|Include)[[:space:]]' ~/.ssh/config
 
 - Show only alias names (also from the included files), never `HostName`, user or key.
 - Question « Alias SSH » : « Quel alias SSH utiliser pour la préprod (ou saisir l'alias dans « Autre ») ? » with up to 2 aliases whose name contains a word of the project slug, then always « Autre alias » and « Aucun »; another alias in « Autre ». « Autre alias » chosen without a typed value: ask the alias as a plain message.
-- `ssh.alias` is the choice, or `null`. `ssh.app_dirs` (`{"<repo name>": "<folder on the server>"}`) is filled during the diagnostic.
+- `ssh.alias` is the choice, or `null`. `ssh.app_dirs` is filled during the diagnostic: `{"<repo name>": "<folder on the server>"}`, or, for an application in a container, `{"<repo name>": {"host": "<folder on the server>", "container": "<folder inside the container>"}}`. Use `container` for `--app-dir` of the SQL queries in a container, `host` otherwise. In the container form, `host` is optional (or `null`) when the code exists only in the image: the server commands on the folder then run through `docker exec <conteneur>` with `container`. `null` means the folder is not known (« Je ne sais pas »): the entry is skipped. A relative folder left by a run before 0.12 is tolerated: `context --check` lists it in `warnings` and it is asked again. `ssh.sql_skip_ssl` (optional boolean, default `false`) is set to `true` by the diagnostic when SQL queries only work with `--skip-ssl`.
 
 ## 5. Test accounts
 
@@ -154,10 +154,65 @@ curl -q -sS --max-time 20 -A "GingermindsAudit/<plugin_version>" "<preprod_url>/
 ```
 
 - Routes of the code: Nuxt `pages/`; Laravel `routes/web.php` (back-office); Drupal content types and views in `config/sync/`; WordPress templates of the theme (`archive-*.php`, `single-*.php`, `page-*.php`).
-- 404: `<preprod_url>/cqa-page-inexistante-<4 chiffres>`.
+- WordPress with an SSH alias: the « Formulaire » page, found through the guard (the only `wp post list` form it allows; `url` is a field of this command):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+python3 "$S/cqa_ssh_ro.py" <alias> -- wp post list --post_type=page --s=gravityform --fields=ID,post_title,post_status,url --path=<dossier>
+```
+
+  `<dossier>` is the WordPress folder found in section 6.1, step 1. Keep only the pages whose `post_status` is `publish`, and propose the `url` of one as the key page « Formulaire »; none found or a guard refusal: go on without it, never work around the guard.
+- 404: always proposed, counted in the 10, template written exactly `404`: `<preprod_url>/gm-cqa-404-<8 random hex>` (8 random hexadecimal characters, new for each run). On a prod run, the same path on the host of `prod_url`. A `404` page copied from an earlier run keeps its URL.
 - Other `access`: routes of the code only; the lead completes the URLs.
 
 Show the list (template, URL), then « Valider ces pages clés ? » with « Valider » and « Annuler l'audit »; corrections in « Autre », in one answer. Absolute URLs on the preprod host, or on the back-office host. On a prod run, the same pages on the host of `prod_url`.
+
+## 6.1 Other sites (multisite)
+
+A project can serve several sites. The back-office is usually shared by all of them, but a site can have one of its own, so the questions are asked here, in the context step, never asked after the audit starts (the lead is present now, and the launch questions of the next step come later). One question at a time, in French.
+
+Detection of the other domains, in this order:
+
+1. WordPress with an SSH alias: first locate the folder through the guard, then list the sites through it:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+python3 "$S/cqa_ssh_ro.py" <alias> -- find /var/www /srv /app /opt -maxdepth 3 -name wp-load.php
+```
+
+A root missing on the server makes `find` exit 1: keep the paths it printed (the lines starting with `find:` are the missing roots). Then, with the folder:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+python3 "$S/cqa_ssh_ro.py" <alias> -- wp site list --field=url --path=<dossier>
+```
+
+   The folder is the one holding `wp-load.php` (`wp-config.php` is refused by the guard as a secret carrier) (`ssh.app_dirs`, when already known, is reused). WordPress in a container: run both commands through `docker exec <conteneur>` (`-- docker exec <conteneur> find ...`, `-- docker exec <conteneur> wp site list ...`), with the folder inside the container as `--path`. Several candidates or none: ask « Dossier de WordPress sur le serveur (ou saisir le chemin dans « Autre ») ? » with the candidates and « Je ne sais pas ». `wp site list --field=url` is the only `wp site` command the guard allows, and a guard refusal is never worked around (the guard is not widened). One URL per line. Any failure (no alias, no folder found, not a multisite, wp error) falls through to step 2, keeping the domains already found.
+2. Otherwise the domains listed in the `CLAUDE.md` or `PROJECT.md` of the project.
+3. Otherwise ask « Autres domaines du projet en préprod ? » with « Aucun, un seul site » and « Saisir les domaines » (hosts in « Autre », separated by commas).
+
+Show the domains found as a proposal for the lead to confirm or correct. No other domain: ask « Connexion par SSO ? » once for the preprod site (its `backoffice` is `commun`), then write `sites` only if it is `true`; otherwise no `sites` key, the project is a single site. With other domains: the preprod site (the host of `target.preprod_url`) is the first entry, always `"backoffice": "commun"`, and gets « Connexion par SSO ? » once, like the others. For each other domain, one question at a time:
+
+- « Back-office commun ou propre à ce site ? » with « Commun » and « Propre à ce site ».
+- « Connexion par SSO ? » with « Oui » and « Non ».
+
+`sites` (optional top-level list, 10 at most, unique domains) is `[{"domain": "<host>", "backoffice": "commun" or "propre", "sso": <bool>, "home": "<URL of the home page>"}]`, the preprod site included. `home` is an absolute URL on the host `domain`. More than 10 domains: keep the 10 the lead picks and say so. A `context.json` without `sites` is a single site.
+
+The browser may only visit the hosts of `target.preprod_url`, of `sites` and of `key_pages` (plus `target.prod_url` on a prod run). Each `home` is visited in addition to the 10 key pages, so the sites never use their places.
+
+## 6.1.1 Third-party plugins (WordPress only)
+
+Only themes and custom plugins are analysed: the code of third-party plugins is outside the scope of the code rows and of stylelint and deps (the assets and gitleaks tools of the toolbox still read it). `wp-plugins` reads `$RUN/context.json`: in a new run, before it, write a first `context.json` holding `repos` (from `project`), `target` and `sites`; step 8 of the skill completes and checks it. On the reuse path the file already exists: add `sites` to it, never overwrite it. For each WordPress repo (`stack` `wordpress`), run `python3 "$S/cqa_plan.py" wp-plugins "$RUN"`. It lists, read-only from the commit of the repo (`git ls-files`, `readme.txt` and the header of the main PHP file, 64 KiB at most each, the plugins' code is never run), each folder `plugins/<name>` and `mu-plugins/<name>` wherever it sits (`wp-content/plugins/`, `web/app/plugins/`, `src/plugins/`), as `{"repo", "path", "third_party", "why"}`. `third_party` is true for a short list of well-known plugins, a `readme.txt` with a `Stable tag:`, or a `Plugin URI` or `Author URI` outside the domains of the project (the preprod, the prod, the sites and the host of the repo, so an agency `Author URI` is not third-party); anything else is proposed as custom. The `unreadable` key, when present, names a repo whose files could not be listed: say so and go on.
+
+No plugin found: no question. Otherwise ask « Plugins maison à analyser ? » as a multi-select question (4 options at most per question: split the list in several questions, one at a time, when it is longer), with the plugins proposed as custom checked and the others listed as third-party with their `why`. The lead corrects the list in « Autre ». Every plugin that stays unchecked goes into `repos[].third_party_paths` of its repo (the `path` as listed, relative to the repo root; 200 at most); with none to exclude, leave the key out. `reuse-context` copies `third_party_paths` per repo into the new `context.json` (a plugin added since is custom by default: `wp-plugins` proposes it checked), and the recap of the reused values names the excluded plugins; the question is never asked after the audit starts (the lead is present now, and the launch questions of the next step come later).
+
+## 6.2 Without PROJECT.md
+
+`project_md` is `null` (exit 2 of `team`, no preprod URL): do not ask everything from scratch. Read the `CLAUDE.md` of the repo and the Markdown files of `docs/` (Read, only these), look for the preprod and prod URLs, the other domains and the people of the team (name, role), and propose what you found for the lead to confirm or correct, one question at a time, in the questions of sections 2, 3 and 6.1 (the `team` matching with `assignee_options` stays as in section 2). Nothing found: ask as usual. At the end of step 6 of section 4 of SKILL.md (key pages and multisite, the lead being present), offer « Générer un PROJECT.md à partir de ces réponses ? » with « Oui » and « Non » : on « Oui », write `PROJECT.md` at the root of the repo from the answers (lead, team, URLs, protection, branches) with Write, following the layout of the `PROJECT.md` of the other projects when the lead gives one; never commit it. This is a context question: it is asked before the lead leaves, in autonomous mode too.
+
+## 6.3 Earlier run
+
+`cqa_plan.py reuse-context` (SKILL.md, section 3) pre-fills `context.json` from a previous run. Ask again only: the probe of the target (section 3 above, `probe-target`, and the credentials); `prod_live` (the question of section 3 above, only with `--phase "MEL J0"` or `--phase "Post-MEL J+7"`), and on a prod run the key pages again on the host of `prod_url` (section 6); then `cqa_plan.py key-pages-check "$RUN"` (`--auth-env` with the credentials). Look only at the pages with `checked` true. A page with `gap` true and a `status` of 404: « La page <template> (<url>) répond 404. Quelle URL la remplace ? » with « Retirer cette page » and « Garder cette page » (the new URL in « Autre »). A `checked` page whose `status` is `null`: say « <url> ne répond pas » (not 404) and ask the same question. A page with `checked` false was not requested (another origin, or the time limit): it is neither a gap nor a 404. The page of the template « 404 » is expected to answer 404: it is never asked for a replacement because of it, whatever it answers (a non-404 answer is reported by `soft_404`, never as a gap to replace). Everything else is kept as copied.
 
 ## 7. context.json
 
@@ -181,22 +236,29 @@ Write `$RUN/context.json` with Write. Example (values to replace):
   "ssh": {"alias": "acme-preprod", "app_dirs": {}},
   "test_accounts": {"front": false, "backoffice": true},
   "key_pages": [{"template": "Accueil", "url": "https://preprod.example.org/"}],
+  "sites": [{"domain": "preprod.example.org", "backoffice": "commun", "sso": false, "home": "https://preprod.example.org/"}],
   "notion": {"copy_page_id": "<page_id de la copie ou null>", "copy_data_source_id": "<data_source_id de la copie>",
              "reference_data_source_id": "<data_source_id du modèle>", "reference_page_id": "<page_id du modèle ou null>",
              "bot_id": "<bot_id de whoami>",
              "assignee_options": ["Camille B", "Inès"]},
   "available_tools": [],
   "phase_filter": null,
-  "dry_run": false
+  "dry_run": false,
+  "mode": "interactif",
+  "notion_write": "all"
 }
 ```
 
 - `run_id`: the name of the run folder. `plugin_version`: the `version` of `.claude-plugin/plugin.json`, two folders above this skill.
 - `project`: `slug` and `name` from `project`; `protection`: `project_md.protection`, else `null`.
 - `repos[]`: `name` from `project` (letters, digits, `.`, `-`, `_`; unique), `path` absolute (no tab, no line break), `remote`, `web_url`, `stack`, `techno` from `project`. `preprod_branch`: `project_md.branches.preprod`, else `release`. `audited_sha`, `deployed_sha` and `aligned` stay `null` until the diagnostic.
+- `sites`: optional, see section 6.1; leave it out for a single site.
+- `repos[].third_party_paths`: optional, see section 6.1.1: folders of third-party code (plugins) relative to the repo root, no `..`, no leading `/`, no `\`, no empty segment, 200 at most. Matched by segment; the toolbox leaves them out. Any other value is refused by `context --check`.
 - `target.access`: `open`, `basic_auth`, `ip_filtered` or `unreachable`.
 - `notion`: `copy_page_id` from the resolve of the copy (`null` for a database URL), `copy_data_source_id`, `reference_data_source_id` and `reference_page_id` (`null` for a database URL) from the resolve of `GM_CQA_REFERENCE`: the writes refuse this page and this data source (exit 8), `bot_id` from `whoami`, `assignee_options` from `schema.json`.
 - `available_tools`: `[]` until the diagnostic. `phase_filter`: the value of `--phase`, else `null`. `dry_run`: true with `--dry-run`.
+- `mode` (optional, default `interactif`): `"autonome"` or `"interactif"`, the answer to « Mode 100 % autonome ? » (SKILL.md, section 4). `notion_write` (optional): `"all"`, `"keep_human"` or `"none"`, the answer to « Écrire dans la copie Notion à la fin de l'audit ? », `null` while not asked (section 7 then asks it, as before). A run without these keys behaves as an interactive run that asks at section 7. Any other value is refused by `context --check`.
+- `crawl_minutes` (optional, integer from 5 to 240, default 30): the maximum duration of the crawl, answered at the diagnostic (`references/diagnostic.md`, section 6, « Durée maximale du crawl ? »; in autonomous mode the proposed duration). It is not reused from an earlier run. `toolbox-env` derives the URL cap from it. Any other value is refused by `context --check`.
 - Never a secret: no credential, no token.
 
 ```bash

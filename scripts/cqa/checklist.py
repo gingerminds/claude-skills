@@ -158,6 +158,23 @@ def ref_label(ref: int) -> str:
     return f"{_REF_PREFIX}-{ref}"
 
 
+_REF_ARGUMENT = re.compile(r"(?:CQ-)?([0-9]+)", re.IGNORECASE)
+
+
+def parse_refs(text: str) -> list:
+    """Return the sorted unique refs of "CQ-5, 12"; raise ValueError on anything else."""
+    refs = set()
+    for part in (text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        found = _REF_ARGUMENT.fullmatch(part)
+        if not found:
+            raise ValueError(f"« {part} » n'est pas une Réf (attendu : CQ-12 ou 12).")
+        refs.add(int(found.group(1)))
+    return sorted(refs)
+
+
 def fiche_filename(ref: int) -> str:
     """Return the file name of a cached fiche (CQ-079.md)."""
     return f"{_REF_PREFIX}-{ref:03d}.md"

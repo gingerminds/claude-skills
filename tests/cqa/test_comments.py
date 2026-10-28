@@ -8,6 +8,7 @@ from cqa.comments import (
     format_comment,
     format_excluded_comment,
     format_page_summary,
+    is_linkable_url,
     parse_verdict,
     to_rich_text,
 )
@@ -59,14 +60,20 @@ F_KO = {
 EXPECTED_KO_TEXT = "\n".join(
     [
         HEADER,
-        "Verdict : À traiter (confiance haute)",
-        "Constat : 3 éléments ont un tabindex positif : l'ordre de tabulation saute le menu"
-        " principal.",
+        "",
+        "Verdict :",
+        "À traiter (confiance haute)",
+        "",
+        "Constat :",
+        "3 éléments ont un tabindex positif : l'ordre de tabulation saute le menu principal.",
+        "",
         "Preuves :",
         f"- components/AppHeader.vue:42 ({BLOB_NUXT}/components/AppHeader.vue#L42)",
         "- https://preprod.example.org/actualites/x : parcours au clavier",
         "- a11y : summary.json#home/3",
-        "À faire : Supprimer les tabindex positifs et suivre l'ordre du DOM.",
+        "",
+        "À faire :",
+        "Supprimer les tabindex positifs et suivre l'ordre du DOM.",
         FOOTER,
     ]
 )
@@ -191,7 +198,7 @@ class FormatCommentTest(unittest.TestCase):
         for confidence, label in (("high", "haute"), ("medium", "moyenne"), ("low", "basse")):
             with self.subTest(confidence=confidence):
                 lines = comment(finding(confidence=confidence)).split("\n")
-                self.assertEqual(lines[1], f"Verdict : À traiter (confiance {label})")
+                self.assertEqual(lines[2:4], ["Verdict :", f"À traiter (confiance {label})"])
 
     def test_optional_lines_follow_the_template_order(self):
         text = comment(
@@ -202,11 +209,16 @@ class FormatCommentTest(unittest.TestCase):
             )
         )
         self.assertEqual(
-            text.split("\n")[-4:],
+            text.split("\n")[-9:],
             [
-                "À faire : Corriger.",
-                "À valider : Vérifier au lecteur d'écran.",
-                "Écart code / préprod : Le correctif est absent de la préprod.",
+                "À faire :",
+                "Corriger.",
+                "",
+                "À valider :",
+                "Vérifier au lecteur d'écran.",
+                "",
+                "Écart code / préprod :",
+                "Le correctif est absent de la préprod.",
                 FOOTER,
             ],
         )
@@ -217,6 +229,7 @@ class FormatCommentTest(unittest.TestCase):
                 text = comment(finding(todo=empty, human_check=empty, divergence=empty))
                 for label in ("À faire", "À valider", "Écart code / préprod"):
                     self.assertNotIn(label, text)
+                self.assertNotIn("\n\n\n", text)
 
     def test_missing_optional_keys_are_tolerated(self):
         minimal = {key: F_KO[key] for key in ("ref", "verdict", "confidence", "summary")}
@@ -224,8 +237,12 @@ class FormatCommentTest(unittest.TestCase):
             comment(minimal).split("\n"),
             [
                 HEADER,
-                "Verdict : À traiter (confiance haute)",
-                f"Constat : {F_KO['summary']}",
+                "",
+                "Verdict :",
+                "À traiter (confiance haute)",
+                "",
+                "Constat :",
+                F_KO["summary"],
                 FOOTER,
             ],
         )
@@ -298,7 +315,7 @@ class FormatCommentTest(unittest.TestCase):
         self.assertLessEqual(len(text), 1500)
         self.assertIn("autres preuves", text)
         self.assertIn("- et 15 autres preuves\n", text)
-        self.assertIn("Constat : " + "s" * 600 + "\n", text)
+        self.assertIn("Constat :\n" + "s" * 600 + "\n", text)
 
     def test_cap_drops_evidence_from_the_end(self):
         evidence = [page_evidence(n, "d" * 300) for n in range(8)]
@@ -308,18 +325,19 @@ class FormatCommentTest(unittest.TestCase):
         self.assertTrue(1 <= len(shown) < 5)
         self.assertEqual(shown, list(range(len(shown))))
         self.assertIn(f"- et {8 - len(shown)} autres preuves\n", text)
-        self.assertIn("Constat : " + F_KO["summary"] + "\n", text)
+        self.assertIn("Constat :\n" + F_KO["summary"] + "\n", text)
         self.assertEqual(text.split("\n")[-1], FOOTER)
 
     def test_cap_truncates_the_summary_last(self):
         todo = "t" * 1000
         text = comment(finding(summary="s" * 600, todo=todo, evidence=[]))
         self.assertLessEqual(len(text), 1500)
-        self.assertIn("À faire : " + todo + "\n", text)
-        constat = next(line for line in text.split("\n") if line.startswith("Constat : "))
+        self.assertIn("À faire :\n" + todo + "\n", text)
+        lines = text.split("\n")
+        constat = lines[lines.index("Constat :") + 1]
         self.assertTrue(constat.endswith("…"))
-        self.assertTrue(constat.startswith("Constat : " + "s" * 100))
-        self.assertLess(len(constat), len("Constat : ") + 600)
+        self.assertTrue(constat.startswith("s" * 100))
+        self.assertLess(len(constat), 600)
         self.assertEqual(text.split("\n")[-1], FOOTER)
 
     def test_cap_cuts_the_other_lines_when_the_summary_is_not_enough(self):
@@ -334,9 +352,9 @@ class FormatCommentTest(unittest.TestCase):
         )
         self.assertEqual(len(text), 1500)
         lines = text.split("\n")
-        self.assertEqual(lines[2], "Constat : …")
+        self.assertEqual(lines[lines.index("Constat :") + 1], "…")
         for label in ("À faire", "À valider", "Écart code / préprod"):
-            self.assertTrue(any(line.startswith(label + " : ") for line in lines))
+            self.assertIn(label + " :", lines)
         self.assertEqual(lines[-1], FOOTER)
 
     def test_cap_holds_for_oversized_fields(self):
@@ -382,8 +400,8 @@ class FormatCommentTest(unittest.TestCase):
             )
         )
         self.assertNotIn(EM_DASH, text)
-        self.assertIn("Constat : a - b\n", text)
-        self.assertIn("À faire : a - b\n", text)
+        self.assertIn("Constat :\na - b\n", text)
+        self.assertIn("À faire :\na - b\n", text)
         self.assertIn("/page-0 : a - b\n", text)
 
 
@@ -394,8 +412,12 @@ class FormatExcludedCommentTest(unittest.TestCase):
             "\n".join(
                 [
                     HEADER,
-                    "Verdict : Non applicable",
-                    "Constat : tâche propre à Wordpress, projet Laravel + Nuxt",
+                    "",
+                    "Verdict :",
+                    "Non applicable",
+                    "",
+                    "Constat :",
+                    "tâche propre à Wordpress, projet Laravel + Nuxt",
                     FOOTER,
                 ]
             ),
@@ -404,16 +426,23 @@ class FormatExcludedCommentTest(unittest.TestCase):
     def test_unknown_verdict(self):
         text = excluded(verdict="unknown", detail="outils indisponibles : SSH serveur, BDD")
         self.assertEqual(
-            text.split("\n")[1:3],
-            ["Verdict : Non évaluable", "Constat : outils indisponibles : SSH serveur, BDD"],
+            text.split("\n")[2:7],
+            [
+                "Verdict :",
+                "Non évaluable",
+                "",
+                "Constat :",
+                "outils indisponibles : SSH serveur, BDD",
+            ],
         )
 
     def test_cap_truncates_the_detail(self):
         text = excluded(detail="d" * 5000)
         self.assertLessEqual(len(text), 1500)
         lines = text.split("\n")
-        self.assertTrue(lines[2].startswith("Constat : " + "d" * 100))
-        self.assertTrue(lines[2].endswith("…"))
+        self.assertEqual(lines[5], "Constat :")
+        self.assertTrue(lines[6].startswith("d" * 100))
+        self.assertTrue(lines[6].endswith("…"))
         self.assertEqual(lines[-1], FOOTER)
         self.assertEqual(parse_verdict(text), "na")
 
@@ -452,6 +481,30 @@ class ParseVerdictTest(unittest.TestCase):
     def test_first_verdict_line_wins(self):
         text = "Verdict : À traiter (confiance haute)\nVerdict : Ok / Recetté (confiance haute)"
         self.assertEqual(parse_verdict(text), "ko")
+
+    def test_reads_the_block_layout(self):
+        text = "Audit\n\nVerdict :\nMis en place, à valider (confiance moyenne)\n\nConstat :\nx"
+        self.assertEqual(parse_verdict(text), "ok_human")
+        self.assertEqual(parse_verdict("Verdict :\nNon applicable"), "na")
+        self.assertEqual(parse_verdict("Verdict :\r\nÀ traiter (confiance haute)\r\n"), "ko")
+        self.assertEqual(parse_verdict("Verdict\xa0:\nOk / Recetté"), "ok")
+
+    def test_reads_the_old_one_line_layout_written_by_0_10(self):
+        old = "\n".join(
+            [
+                HEADER,
+                "Verdict : À traiter (confiance moyenne)",
+                "Constat : x",
+                "À faire : y",
+                FOOTER,
+            ]
+        )
+        self.assertEqual(parse_verdict(old), "ko")
+
+    def test_block_label_alone_needs_a_known_verdict_after_it(self):
+        for text in ("Verdict :", "Verdict :\n", "Verdict :\n\nÀ traiter", "Verdict :\nPeut-être"):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_verdict(text))
 
     def test_none_without_a_verdict_line(self):
         for text in ("", "Pas de verdict ici", "Le Verdict : À traiter est discutable"):
@@ -518,6 +571,106 @@ class ToRichTextTest(unittest.TestCase):
                 rt = to_rich_text(text)
                 self.assertEqual(links(rt), [])
                 self.assertEqual("".join(contents(rt)), text)
+
+    def test_url_stops_at_markup(self):
+        rt = to_rich_text('<a href="https://www.example.org">Accueil')
+        self.assertEqual(links(rt), ["https://www.example.org"])
+        self.assertEqual("".join(contents(rt)), '<a href="https://www.example.org">Accueil')
+        rt = to_rich_text("https://example.org/a'b")
+        self.assertEqual(links(rt), ["https://example.org/a"])
+        for char in "<>\"'":
+            with self.subTest(char=char):
+                text = f"https://example.org/a{char}b"
+                rt = to_rich_text(text)
+                self.assertEqual(links(rt), ["https://example.org/a"])
+                self.assertEqual("".join(contents(rt)), text)
+
+    def test_placeholder_urls_stay_text(self):
+        for text in ("https://<domaine prod>/robots.txt", "https://", "voir https:// ici"):
+            with self.subTest(text=text):
+                rt = to_rich_text(text)
+                self.assertEqual(links(rt), [])
+                self.assertEqual("".join(contents(rt)), text)
+
+    def test_valid_urls_stay_links(self):
+        for url in (
+            "https://example.org:8443/a/b?x=1#y",
+            "http://[2001:db8::1]/",
+            "http://localhost:8080/",
+        ):
+            with self.subTest(url=url):
+                rt = to_rich_text(f"voir {url} ok")
+                self.assertEqual(links(rt), [url])
+                self.assertEqual("".join(contents(rt)), f"voir {url} ok")
+
+    def test_link_url_is_ascii(self):
+        url = "https://bücher.example/été?q=ü#frag-é"
+        rt = to_rich_text(f"voir {url} ok")
+        target = links(rt)[0]
+        self.assertTrue(target.isascii(), target)
+        self.assertEqual(
+            target, "https://xn--bcher-kva.example/%C3%A9t%C3%A9?q=%C3%BC#frag-%C3%A9"
+        )
+        self.assertEqual("".join(contents(rt)), f"voir {url} ok")
+
+    def test_link_url_keeps_reserved_characters_and_never_double_encodes(self):
+        url = "https://bücher.example/a%20b/é:@!$&()*+,;=~?x=%C3%A9&y=é#é"
+        target = links(to_rich_text(url))[0]
+        self.assertTrue(target.isascii(), target)
+        self.assertEqual(
+            target,
+            "https://xn--bcher-kva.example/a%20b/%C3%A9:@!$&()*+,;=~?x=%C3%A9&y=%C3%A9#%C3%A9",
+        )
+        self.assertEqual(
+            links(to_rich_text("https://example.org/é/100%"))[0], "https://example.org/%C3%A9/100%25"
+        )
+
+    def test_link_url_keeps_port_and_ipv6(self):
+        self.assertEqual(
+            links(to_rich_text("https://bücher.example:8443/é"))[0],
+            "https://xn--bcher-kva.example:8443/%C3%A9",
+        )
+        self.assertEqual(
+            links(to_rich_text("http://[2001:db8::1]/é"))[0], "http://[2001:db8::1]/%C3%A9"
+        )
+
+    def test_url_with_credentials_is_never_linked(self):
+        for url in (
+            "https://user:pass@example.org/x",
+            "https://user@example.org/",
+            "https://bücher.example@example.org/é",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(is_linkable_url(url))
+                rt = to_rich_text(f"voir {url} ok")
+                self.assertEqual(links(rt), [])
+                self.assertEqual("".join(contents(rt)), f"voir {url} ok")
+
+    def test_is_linkable_url(self):
+        for url in (
+            "https://example.org",
+            "http://localhost",
+            "http://127.0.0.1:80/x",
+            "http://[2001:db8::1]/",
+            "https://bücher.example/",
+        ):
+            with self.subTest(url=url):
+                self.assertTrue(is_linkable_url(url))
+        for url in (
+            "",
+            "https://",
+            "ftp://example.org",
+            "https://nodot",
+            "https:///path",
+            "https://<domaine>/x",
+            "https://example.org/a b",
+            "https://example.org/a\"b",
+            "https://example..org/",
+            "https://example.org:99999/",
+            "http://[2001:db8/",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(is_linkable_url(url))
 
     def test_chunk_boundary(self):
         self.assertEqual([len(c) for c in contents(to_rich_text("a" * 2000))], [2000])

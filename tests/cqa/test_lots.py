@@ -3,7 +3,8 @@ import unicodedata
 import unittest
 
 from cqa import checklist
-from cqa.lots import TOOL_ACTIONS, TOOLS, build_lots, coverage, select_rows
+from cqa.lots import TOOL_ACTIONS, TOOLS, build_lots, coverage, lot_needs_session, select_rows
+from cqa.probes import _lot_entries
 
 PROJECT = ["Laravel", "Nuxt"]
 CODE_TOOLS = ["Code", "CLI local", "HTTP"]
@@ -20,7 +21,7 @@ def make_row(ref=1, **overrides):
         "category": "QUALITÉ",
         "subcategory": "Général",
         "blocking": False,
-        "sections": ["Back"],
+        "sections": ["Front"],
         "technos": [],
         "phases": ["Build"],
         "tools": ["Code"],
@@ -63,7 +64,9 @@ class ConstantsTest(unittest.TestCase):
         self.assertEqual(
             TOOL_ACTIONS["HTTP"], "accès à la préprod (réseau de l'agence ou identifiants)"
         )
-        self.assertEqual(TOOL_ACTIONS["CLI local"], "runner du projet démarré")
+        self.assertEqual(
+            TOOL_ACTIONS["CLI local"], "runner du projet démarré, ou boîte à outils 1.2 (docker pull)"
+        )
         self.assertEqual(TOOL_ACTIONS["Comptes de test"], "comptes de test")
         self.assertEqual(TOOL_ACTIONS["Service externe"], "préprod publique (à J0)")
         self.assertEqual(TOOL_ACTIONS["Code"], "repos présents et à jour")
@@ -395,7 +398,8 @@ class BrowserLotsTest(unittest.TestCase):
     def test_lot_keys(self):
         built = build_lots([make_row(1, tools=["Navigateur"])])
         self.assertEqual(
-            sorted(built[0]), ["id", "kind", "needs_server_facts", "needs_toolbox", "refs"]
+            sorted(built[0]),
+            ["id", "kind", "needs_server_facts", "needs_session", "needs_toolbox", "refs"],
         )
 
     def test_other_categories_share_one_lot_without_size_limit(self):
@@ -687,6 +691,96 @@ class LotOrderTest(unittest.TestCase):
             self.assertTrue(lot["refs"])
             if lot["kind"] == "code":
                 self.assertLessEqual(len(lot["refs"]), 8)
+
+
+class SessionLotsTest(unittest.TestCase):
+    def test_session_rows_get_their_own_browser_lot(self):
+        rows = [
+            make_row(1, category="ACCESSIBILITÉ", tools=["Navigateur"], sections=["Front"]),
+            make_row(2, category="ACCESSIBILITÉ", tools=["Navigateur"], sections=["Back-office"]),
+            make_row(3, category="SEO / GEO", tools=["Navigateur", "Comptes de test"], sections=["Front"]),
+            make_row(4, category="SEO / GEO", tools=["Navigateur"], sections=["bo"]),
+            make_row(5, category="SEO / GEO", tools=["Navigateur"], sections=["Front", "BACK"]),
+            make_row(6, category="SEO / GEO", tools=["Navigateur"], sections=["Backup front"]),
+            make_row(7, category="SEO / GEO", tools=["Navigateur"], sections=["Boutique"]),
+        ]
+        built = build_lots(rows)
+        self.assertEqual(
+            lot_ids(built),
+            [
+                "browser-accessibilite",
+                "browser-autres",
+                "browser-accessibilite-session",
+                "browser-autres-session",
+            ],
+        )
+        self.assertEqual(lot_by_id(built, "browser-accessibilite")["refs"], [1])
+        self.assertEqual(lot_by_id(built, "browser-accessibilite-session")["refs"], [2])
+        self.assertEqual(lot_by_id(built, "browser-autres")["refs"], [7])
+        self.assertEqual(lot_by_id(built, "browser-autres-session")["refs"], [3, 4, 5, 6])
+        self.assertEqual(
+            [lot["needs_session"] for lot in built], [False, False, True, True]
+        )
+
+    def test_session_toolbox_row_keeps_needs_session(self):
+        rows = [make_row(1, tools=["Navigateur", "Audit web"], sections=["Back"])]
+        built = build_lots(rows)
+        self.assertEqual(lot_ids(built), ["browser-autres-session-outils"])
+        self.assertTrue(built[0]["needs_session"])
+        self.assertTrue(built[0]["needs_toolbox"])
+
+    def test_non_browser_lots_never_need_a_session(self):
+        rows = [make_row(1, tools=["Code", "Comptes de test"], sections=["Back"])]
+        built = build_lots(rows)
+        self.assertEqual(lot_ids(built), ["code-qualite"])
+        self.assertFalse(built[0]["needs_session"])
+
+    def test_tooling_hint_moves_rows_to_outils_lots(self):
+        rows = [
+            make_row(109, category="SÉCURITÉ", tooling_hint="Gitleaks sur le dépôt"),
+            make_row(110, category="SÉCURITÉ", tooling_hint="relecture du code"),
+            make_row(111, category="SÉCURITÉ", tooling_hint="Yellow Lab + axe-core"),
+            make_row(112, category="SÉCURITÉ", tooling_hint=""),
+        ]
+        built = build_lots(rows)
+        self.assertEqual(lot_ids(built), ["code-securite", "code-securite-outils"])
+        self.assertEqual(built[0]["refs"], [110, 112])
+        self.assertEqual(built[1]["refs"], [109, 111])
+        self.assertTrue(built[1]["needs_toolbox"])
+
+    def test_old_lots_json_without_needs_session_is_read(self):
+        old = {"lots": [{"id": "browser-autres", "kind": "browser", "needs_toolbox": False, "refs": [1]}]}
+        entries = _lot_entries(old)
+        self.assertEqual([lot_needs_session(lot) for lot in entries], [False])
+        self.assertTrue(lot_needs_session({"needs_session": True}))
+
+    def test_hint_matches_tool_names_not_substrings(self):
+        for hint in ("syntaxe PHP", "taxe", "relaxe", "axes de recherche", "menu html"):
+            with self.subTest(hint=hint):
+                built = build_lots([make_row(1, tooling_hint=hint)])
+                self.assertEqual(lot_ids(built), ["code-qualite"])
+        for hint in (
+            "axe-core", "axe DevTools", "Nu HTML Checker", "Yellow Lab", "yellowlab", "crawler"
+        ):
+            with self.subTest(hint=hint):
+                built = build_lots([make_row(1, tooling_hint=hint)])
+                self.assertEqual(lot_ids(built), ["code-qualite-outils"])
+
+    def test_lot_c_rows_go_to_outils_lots(self):
+        for hint in (
+            "Stylelint (max-nesting-depth)",
+            "composer audit, npm audit",
+            "détection des débordements horizontaux",
+            "zoom 200 %, détection des débordements",
+            "Débordement à 320 px",
+        ):
+            with self.subTest(hint=hint):
+                built = build_lots([make_row(1, tooling_hint=hint)])
+                self.assertEqual(lot_ids(built), ["code-qualite-outils"])
+        for hint in ("Navigateur piloté (onglet Coverage)", "audit", "audit de code", "relecture"):
+            with self.subTest(hint=hint):
+                built = build_lots([make_row(1, tooling_hint=hint)])
+                self.assertEqual(lot_ids(built), ["code-qualite"])
 
 
 if __name__ == "__main__":

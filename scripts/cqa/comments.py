@@ -1,7 +1,9 @@
 """Comments the audit writes in Notion: the French texts, their rich_text form, their verdict."""
+import ipaddress
 import re
 from datetime import date
 from typing import Optional
+from urllib.parse import quote, urlsplit
 
 from cqa.checklist import (
     STATUS_IMPLEMENTED,
@@ -47,7 +49,9 @@ _BLOCKING_LABEL = "Lignes bloquantes non conformes"
 
 _VERDICT_BY_LABEL = {label: verdict for verdict, label in VERDICT_LABELS.items()}
 _VERDICT_LINE = re.compile(r"\s*Verdict\s*:\s*(?P<label>.*?)\s*(?:\(confiance[^)]*\))?\s*")
-_URL = re.compile(r"https?://\S+")
+_VERDICT_VALUE = re.compile(r"\s*(?P<label>.*?)\s*(?:\(confiance[^)]*\))?\s*")
+_URL = re.compile(r"https?://[^\s<>\"']+")
+_URL_FORBIDDEN = re.compile(r"[\s<>\"'`\\{}|^\x00-\x1f\x7f]")
 _URL_TRAILING = ".,;:!?'\"`*>»”’…"
 _URL_CLOSERS = {")": "(", "]": "[", "}": "{"}
 
@@ -63,15 +67,17 @@ def format_comment(
 ) -> str:
     """Return the Notion comment of a finding, at most MAX_COMMENT_LENGTH characters.
 
-    The lines "À faire", "À valider" and "Écart code / préprod" appear only when their field is
-    filled, and "Preuves" only when there is evidence. Beyond 5 pieces of evidence the rest
+    The header, then one block per field (label alone on its line, content on the next one,
+    a blank line between blocks), then the footer right after the last block. The blocks "À faire", "À valider" and
+    "Écart code / préprod" appear only when their field is filled, and "Preuves" only when there is evidence. Beyond 5 pieces of evidence the rest
     becomes "et N autres preuves". A text still too long loses evidence from the end, then
     the summary is cut with an ellipsis, then the other lines if that is not enough.
     """
     verdict = VERDICT_LABELS[finding["verdict"]]
     confidence = CONFIDENCE_LABELS[finding["confidence"]]
     return _compose(
-        head=[_header(run_date, lead_option), f"Verdict : {verdict} (confiance {confidence})"],
+        head=_header(run_date, lead_option),
+        verdict=f"{verdict} (confiance {confidence})",
         summary=finding["summary"],
         evidence=[_evidence_line(item, repos) for item in finding.get("evidence") or []],
         extras=[(label, finding.get(key)) for key, label in _OPTIONAL_LINES],
@@ -91,7 +97,8 @@ def format_excluded_comment(
 ) -> str:
     """Return the Notion comment of a row the audit left out, with detail as its summary."""
     return _compose(
-        head=[_header(run_date, lead_option), f"Verdict : {VERDICT_LABELS[verdict]}"],
+        head=_header(run_date, lead_option),
+        verdict=VERDICT_LABELS[verdict],
         summary=detail,
         evidence=[],
         extras=[],
@@ -140,55 +147,123 @@ def to_rich_text(text: str) -> list[dict]:
     start = 0
     for found in _URL.finditer(text):
         url = _trim_url(found.group())
-        if url in ("http://", "https://") or _units(url) > MAX_TEXT_LENGTH:
+        target = ascii_url(url) if is_linkable_url(url) else None
+        if target is None or _units(url) > MAX_TEXT_LENGTH or len(target) > MAX_TEXT_LENGTH:
             continue
         objects.extend(_plain_objects(text[start : found.start()]))
-        objects.append({"type": "text", "text": {"content": url, "link": {"url": url}}})
+        objects.append({"type": "text", "text": {"content": url, "link": {"url": target}}})
         start = found.start() + len(url)
     objects.extend(_plain_objects(text[start:]))
     return objects
 
 
+def is_linkable_url(url: str) -> bool:
+    """Return True when Notion can take url as a link: http(s), a real host, allowed characters."""
+    if _URL_FORBIDDEN.search(url):
+        return False
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        parts.port
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not host:
+        return False
+    if "@" in parts.netloc:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    labels = host.split(".")
+    if host != "localhost" and len(labels) < 2:
+        return False
+    return all(labels)
+
+
+def ascii_url(url: str) -> Optional[str]:
+    """Return url in pure ASCII (IDNA host, percent-encoded path, query and fragment), or None.
+
+    Existing %XX escapes and reserved characters are kept as they are.
+    """
+    if url.isascii():
+        return url
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname.encode("idna").decode("ascii")
+        port = parts.port
+    except (ValueError, UnicodeError, AttributeError):
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = host if port is None else f"{host}:{port}"
+    return (
+        f"{parts.scheme}://{netloc}{_encode(parts.path)}"
+        + (f"?{_encode(parts.query)}" if parts.query else "")
+        + (f"#{_encode(parts.fragment)}" if parts.fragment else "")
+    )
+
+
+def _encode(part: str) -> str:
+    part = re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", part)
+    return quote(part, safe="/:?#[]@!$&'()*+,;=%~-._")
+
+
 def parse_verdict(text: str) -> Optional[str]:
-    """Return the verdict named by the first "Verdict : <label>" line of a comment, or None."""
-    for line in text.splitlines():
+    """Return the verdict of a comment, or None.
+
+    Two layouts: "Verdict : <label>" on one line (comments written before the block layout),
+    or "Verdict :" alone with the label on the next line.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
         found = _VERDICT_LINE.fullmatch(line)
-        if found:
-            return _VERDICT_BY_LABEL.get(found.group("label"))
+        if not found:
+            continue
+        label = found.group("label")
+        if label or not re.fullmatch(r"\s*Verdict\s*:\s*", line):
+            return _VERDICT_BY_LABEL.get(label)
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        value = _VERDICT_VALUE.fullmatch(following)
+        return _VERDICT_BY_LABEL.get(value.group("label")) if value else None
     return None
 
 
 def _compose(
-    *, head: list[str], summary: str, evidence: list[str], extras: list[tuple], foot: str
+    *, head: str, verdict: str, summary: str, evidence: list[str], extras: list[tuple], foot: str
 ) -> str:
     fields = [("Constat", _text(summary))]
     fields.extend((label, _text(value)) for label, value in extras)
     shown = min(len(evidence), _MAX_EVIDENCE)
-    text = _render(head, fields, evidence, shown, foot)
+    text = _render(head, verdict, fields, evidence, shown, foot)
     while len(text) > MAX_COMMENT_LENGTH and shown:
         shown -= 1
-        text = _render(head, fields, evidence, shown, foot)
+        text = _render(head, verdict, fields, evidence, shown, foot)
     for index, (label, value) in enumerate(fields):
         excess = len(text) - MAX_COMMENT_LENGTH
         if excess <= 0:
             break
         if value:
             fields[index] = (label, _shorten(value, excess))
-            text = _render(head, fields, evidence, shown, foot)
+            text = _render(head, verdict, fields, evidence, shown, foot)
     return _finish(text)
 
 
-def _render(head, fields, evidence, shown, foot) -> str:
+def _render(head, verdict, fields, evidence, shown, foot) -> str:
     (label, summary), *extras = fields
-    lines = [*head, f"{label} : {summary}"]
+    blocks = [["Verdict :", verdict]]
+    if summary:
+        blocks.append([f"{label} :", summary])
     if evidence:
-        lines.append("Preuves :")
+        lines = ["Preuves :"]
         lines.extend(f"- {line}" for line in evidence[:shown])
         if shown < len(evidence):
             lines.append(f"- {_others(len(evidence) - shown, 'preuve')}")
-    lines.extend(f"{name} : {text}" for name, text in extras if text)
-    lines.append(foot)
-    return "\n".join(lines)
+        blocks.append(lines)
+    blocks.extend([f"{name} :", text] for name, text in extras if text)
+    body = "\n\n".join("\n".join(block) for block in blocks)
+    return f"{head}\n\n{body}\n{foot}"
 
 
 def _finish(text: str) -> str:

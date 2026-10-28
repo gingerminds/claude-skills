@@ -26,7 +26,7 @@ The contract is the JSON Schema `skills/checklist-quality-audit/schemas/finding.
 
 ## Texts
 
-`summary`, `todo`, `human_check` and `divergence` end up in a Notion comment that the devs read: "Constat : ...", "À faire : ...", "À valider : ...", "Écart code / préprod : ...". The whole comment holds 1,500 characters and shows the first 5 pieces of evidence.
+`summary`, `todo`, `human_check` and `divergence` end up in a Notion comment that the devs read: blocks labelled "Constat", "À faire", "À valider", "Écart code / préprod". The whole comment holds 1,500 characters and shows the first 5 pieces of evidence.
 
 - Always write these texts, and the `detail` of evidence, in French.
 - Never write an em dash. Use a colon, a comma or parentheses.
@@ -276,6 +276,7 @@ python3 "$S/cqa_plan.py" plan "$RUN"
 
 - It merges the findings (after the guardrails above), the rows and the exclusions into `notion/plan.json`, and prints its `summary`: `{"by_status_after", "blocking_non_conform", "unknown", "human_overrides": [{"ref", "before", "after"}], "deferred", "missing_in_copy"}`.
 - A comment is planned only when the status changes, or when neither the visible comments of the integration (`comments.json`) nor the earlier runs of this copy already carry the verdict: a run again does not repeat comments.
+- The header of a comment gives the date of the run; for a row whose latest finding comes from a rerun, the date of the rerun (recorded by `rerun-close` in `reruns.json`), so that the lead sees when it was judged again. The footer keeps the audited commit.
 - Exit 6: `context.json` incomplete for the comments (`lead.option`, `audited_sha`, `run_id`): fix it. Exit 2: a file of the run is missing (the message names the command).
 
 Titles of the refs to show, from `rows.json`:
@@ -301,10 +302,10 @@ What the lead sees, in French:
 
 ### Confirmation
 
-One question, « Écrire le plan dans la copie Notion ? »:
+The consent is given at launch (`notion_write` in `context.json`, SKILL.md section 4): when it is set, the question is not asked and the matching choice below applies (`all`, `keep_human`, `none`). In autonomous mode the summary above is not shown before the write but as a recap after it. Only when `notion_write` is `null`, one question, « Écrire le plan dans la copie Notion ? »:
 
 - « Tout écrire »: statuses, assignments of the lead and comments, the human statuses listed included.
-- « Sans toucher aux statuts posés par un humain »: offered only when `human_overrides` is not empty. Those pages are left as they are, comments included. Keep the list shown above: the rebuilt plan no longer holds it, and SKILL.md section 8, step 3, adds it to « Remarques » in `synthese.md`. Rebuild the plan first, so that the synthesis describes what is written, then apply with the same option:
+- « Sans toucher aux statuts posés par un humain »: offered only when `human_overrides` is not empty. Those pages are left as they are, comments included. Keep the list shown above: the rebuilt plan no longer holds it, and SKILL.md section 8, step 3, adds it to `remarques.md`, which the synthesis injects as « Remarques ». Rebuild the plan first, so that the synthesis describes what is written, then apply with the same option:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

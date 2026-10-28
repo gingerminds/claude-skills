@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 import uuid
@@ -745,6 +746,234 @@ class RowsCommandTest(CliTestCase):
         self.assertEqual(code, 3)
         self.assertIn("restricted_resource", err)
         self.assertFalse((self.run_dir / "rows.json").exists())
+
+
+def dated_comment(text, when, author="user-1"):
+    return {
+        "object": "comment",
+        "created_by": {"object": "user", "id": author},
+        "created_time": when,
+        "rich_text": [{"plain_text": text}],
+    }
+
+
+class RecetteCommandTest(CliTestCase):
+    REFERENCE_URL = f"https://www.notion.so/ws/Modele-{fake_id(4)}"
+    ENV = {"NOTION_TOKEN": "tok", "GM_CQA_REFERENCE": REFERENCE_URL}
+
+    def routes(self, comments=None):
+        copy_pages = [
+            page("c1", 79, "Activer la compression", status="Mis en place"),
+            page("c2", 80, "Forcer HTTPS", status="Mis en place"),
+            page("c3", 81, "Limiter les redirections"),
+            page("c4", 82, "Autre ligne"),
+        ]
+        ref_pages = [
+            page("r1", 79, "Activer la compression"),
+            page("r2", 80, "Forcer HTTPS"),
+            page("r3", 81, "Limiter les redirections"),
+            page("r4", 82, "Autre ligne"),
+        ]
+        routes = {
+            f"POST /data_sources/{COPY_DS}/query": ok(listing(copy_pages)[2]),
+            f"GET /databases/{REF_DATABASE}": database(REF_DS),
+            f"POST /data_sources/{REF_DS}/query": ok(listing(ref_pages)[2]),
+        }
+        for block in ("c1", "c2", "c3"):
+            routes[f"GET /comments?block_id={block}"] = ok(listing((comments or {}).get(block, []))[2])
+        return routes
+
+    def write_audit(self, *, journal=True):
+        plan_rows = [
+            {"page_id": "c1", "ref": 79, "blocking": False, "before": "À traiter", "after": "À traiter"},
+            {"page_id": "c2", "ref": 80, "blocking": False, "before": "À traiter", "after": "Mis en place"},
+        ]
+        operation = {"key": "status:c2", "kind": "status", "ref": 80, "before": "À traiter",
+                     "after": "Mis en place"}
+        self.write_json("notion/plan.json", {"rows": plan_rows, "ops": [operation]})
+        entry = {"key": "status:c2", "kind": "status", "ref": 80, "verdict": "ok_human"}
+        self.write_json("notion/applied.json", {"applied": [entry] if journal else []})
+
+    def run_recette(self, comments=None, git_run=None, options=()):
+        client, transport = routed_client(self.routes(comments))
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, self.ENV, clear=True):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cqa_notion.main(
+                    ["recette", str(self.run_dir), *options], client=client, git_run=git_run
+                )
+        return code, out.getvalue(), err.getvalue(), transport
+
+    def setUp(self):
+        super().setUp()
+        (self.run_dir / "notion").mkdir()
+        (self.run_dir / "findings").mkdir()
+        self.write_context()
+
+    def test_recette_writes_the_rows_the_devs_fixed(self):
+        self.write_audit()
+        comments = {
+            "c1": [
+                dated_comment("Premier avis", "2026-10-02T10:00:00.000Z"),
+                dated_comment("Constat\nVerdict : À traiter", "2026-10-01T10:00:00.000Z", BOT),
+                dated_comment("MR : https://gitlab.example.org/acme/back/-/merge_requests/7",
+                              "2026-10-03T10:00:00.000Z"),
+            ]
+        }
+        code, out, err, transport = self.run_recette(comments)
+        self.assertEqual(code, 0, err)
+        document = self.read_json("notion/recette.json")
+        self.assertEqual(list(document), ["rows"])
+        [item] = document["rows"]
+        self.assertEqual(
+            item,
+            {
+                "ref": 79,
+                "page_id": "c1",
+                "status": "Mis en place",
+                "skill_last": "À traiter",
+                "comments": [
+                    "MR : https://gitlab.example.org/acme/back/-/merge_requests/7",
+                    "Premier avis",
+                ],
+            },
+        )
+        self.assertEqual(json.loads(out)["recette"], [79])
+        self.assertEqual(len(self.read_json("rows.json")["rows"]), 4)
+        posts = [call for call in transport.calls if call.method == "POST"]
+        self.assertTrue(posts)
+        self.assertTrue(all(call.url.split("?")[0].endswith("/query") for call in posts))
+        self.assertEqual({call.method for call in transport.calls}, {"GET", "POST"})
+
+    def test_recette_command_is_registered(self):
+        code, _, _ = self.run_main(["recette", "--help"], None, {})
+        self.assertEqual(code, 0)
+
+    def test_recette_without_and_refs_options(self):
+        self.write_audit()
+        code, out, err, _ = self.run_recette(options=["--without", "CQ-79", "--refs", "CQ-81,CQ-999"])
+        self.assertEqual(code, 0, err)
+        found = {item["ref"]: item for item in self.read_json("notion/recette.json")["rows"]}
+        self.assertEqual(sorted(found), [81])
+        self.assertEqual(found[81]["status"], "À traiter")
+        self.assertIn("CQ-999", err)
+        code, _, _, _ = self.run_recette(options=[])
+        refs = [item["ref"] for item in self.read_json("notion/recette.json")["rows"]]
+        self.assertEqual(refs, [79])
+        code, _, err, _ = self.run_recette(options=["--refs", "abc"])
+        self.assertEqual(code, 2)
+
+    def test_recette_still_a_candidate_after_a_later_plan(self):
+        self.write_json("notion/plan.json", {"rows": [
+            {"page_id": "c1", "ref": 79, "blocking": False, "before": "Mis en place",
+             "after": "Mis en place"}], "ops": []})
+        entry = {"key": "old", "kind": "status", "ref": 79, "value": "À traiter"}
+        self.write_json("notion/applied.json", {"applied": [entry]})
+        self.run_recette()
+        [item] = self.read_json("notion/recette.json")["rows"][:1]
+        self.assertEqual((item["ref"], item["skill_last"]), (79, "À traiter"))
+
+    def test_recette_masks_secrets_in_the_comments(self):
+        self.write_audit()
+        secret = "DB_PASSWORD=Adm1nP4ss2024"
+        self.run_recette({"c1": [dated_comment(f"Config : {secret}", "2026-10-02T10:00:00.000Z")]})
+        text = (self.run_dir / "notion" / "recette.json").read_text(encoding="utf-8")
+        self.assertNotIn("Adm1nP4ss2024", text)
+        self.assertIn("Config", text)
+
+    def test_recette_prints_the_notes_of_the_candidate_search(self):
+        self.write_audit()
+        code, _, err, _ = self.run_recette()
+        self.assertIn("lots.json", err)
+
+    def test_recette_warns_about_an_unreadable_journal(self):
+        self.write_audit()
+        (self.run_dir / "notion" / "applied.json").write_text("{", encoding="utf-8")
+        code, _, err, _ = self.run_recette()
+        self.assertEqual(code, 0)
+        self.assertIn("applied.json est illisible", err)
+        self.assertIn("se déduit du plan", err)
+        self.assertNotIn("plan.json est illisible", err)
+
+    def test_recette_creates_the_notion_folder(self):
+        (self.run_dir / "notion").rmdir()
+        code, _, err, _ = self.run_recette()
+        self.assertEqual(code, 0, err)
+        self.assertTrue((self.run_dir / "notion" / "recette.json").is_file())
+
+    def test_recette_keeps_five_comments_at_most(self):
+        self.write_audit()
+        many = [dated_comment(f"avis {n}", f"2026-10-{n:02d}T10:00:00.000Z") for n in range(1, 8)]
+        self.run_recette({"c1": many})
+        [item] = self.read_json("notion/recette.json")["rows"]
+        self.assertEqual(item["comments"], [f"avis {n}" for n in range(7, 2, -1)])
+
+    def test_recette_on_a_legacy_run(self):
+        self.write_audit(journal=False)
+        entry = {"key": "comment:c1:abc", "kind": "comment", "ref": 79, "verdict": "ko"}
+        self.write_json("notion/applied.json", {"applied": [entry]})
+        code, _, err, _ = self.run_recette({"c1": [dated_comment("ok", "2026-10-02T10:00:00.000Z")]})
+        self.assertEqual(code, 0, err)
+        refs = [item["ref"] for item in self.read_json("notion/recette.json")["rows"]]
+        self.assertEqual(refs, [79, 80])
+
+    def test_recette_without_any_journal(self):
+        code, _, err, _ = self.run_recette()
+        self.assertEqual(code, 0, err)
+        refs = [item["ref"] for item in self.read_json("notion/recette.json")["rows"]]
+        self.assertEqual(refs, [79, 80])
+
+    def write_code_finding(self, *, path="app/Redirect.php", probes=(), preprod_url=None):
+        """A code lot whose finding of CQ-81 cites path in a repo that holds app/Redirect.php."""
+        self.write_audit()
+        self.write_json(
+            "lots.json",
+            {"lots": [{"id": "code-a", "kind": "code", "refs": [79, 80, 81, 82]}], "excluded": []},
+        )
+        evidence = [{"type": "file", "repo": "laravel", "path": path, "line": 1}]
+        finding = {
+            "ref": 81, "verdict": "unknown" if probes else "ko", "confidence": "high",
+            "summary": "x", "evidence": evidence, "todo": None if probes else "x",
+            "human_check": None, "divergence": None, "needs_probes": list(probes),
+        }
+        self.write_json("findings/code-a.json", {"lot": "code-a", "findings": [finding]})
+        repo = self.run_dir / "repos" / "laravel"
+        (repo / "app").mkdir(parents=True, exist_ok=True)
+        (repo / "app" / "Redirect.php").write_text("<?php\n", encoding="utf-8")
+        context = self.read_json("context.json")
+        context["repos"] = [{"name": "laravel", "path": str(repo), "audited_sha": "a" * 40}]
+        if preprod_url:
+            context["target"] = {"preprod_url": preprod_url, "prod_url": None, "prod_live": False}
+        self.write_json("context.json", context)
+
+    def recette_refs(self, changed):
+        def git(command, **kwargs):
+            return subprocess.CompletedProcess(command, 0, changed + "\n", "")
+
+        code, out, err, _ = self.run_recette(git_run=git)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)["code_modifie"], self.read_json("notion/recette.json")["rows"]
+
+    def test_recette_adds_the_rows_whose_code_changed(self):
+        self.write_code_finding()
+        changed, rows = self.recette_refs("app/Redirect.php")
+        self.assertEqual(changed, [81])
+        found = {item["ref"]: item for item in rows}
+        self.assertEqual(sorted(found), [79, 81])
+        self.assertEqual(found[81]["status"], "À traiter")
+        self.assertEqual(found[81]["comments"], [])
+
+    def test_recette_reads_only_the_findings_whose_evidence_holds(self):
+        self.write_code_finding(path="app/Missing.php")
+        changed, rows = self.recette_refs("app/Missing.php")
+        self.assertEqual(changed, [])
+        self.assertEqual([item["ref"] for item in rows], [79])
+
+    def test_recette_reads_the_findings_with_the_path_of_the_application(self):
+        probe = {"url": "https://preprod.example.org/blog/index.php/node/1", "method": "GET"}
+        self.write_code_finding(probes=[probe], preprod_url="https://preprod.example.org/blog/")
+        changed, _ = self.recette_refs("app/Redirect.php")
+        self.assertEqual(changed, [81])
 
 
 class FichesCommandTest(CliTestCase):

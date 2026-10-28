@@ -2,6 +2,7 @@
 import base64
 import http.client
 import ipaddress
+import time
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -73,10 +74,7 @@ def probe_target(
         _require_encryption(url)
     if opener is None:
         opener = build_opener(authenticated=auth is not None)
-    headers = {"User-Agent": f"GingermindsAudit/{plugin_version()}"}
-    if auth is not None:
-        token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode("utf-8")).decode("ascii")
-        headers["Authorization"] = f"Basic {token}"
+    headers = _headers(auth)
     status, location = _answer(opener, url, "HEAD", headers, timeout)
     if status == 405:
         status, location = _answer(opener, url, "GET", headers, timeout)
@@ -84,6 +82,102 @@ def probe_target(
     if location:
         result["location"] = location
     return result
+
+
+def fetch_page(
+    url: str,
+    *,
+    auth: Optional[tuple] = None,
+    opener=None,
+    timeout: float = 10.0,
+    max_bytes: int = 1_000_000,
+    with_body: bool = False,
+) -> dict:
+    """Return {"status", "url", "body"} for a GET of url, under the rules of probe_target.
+
+    status is None when nothing answered. url is the final address after the redirects probe_target
+    follows. body is the text of the page (max_bytes at most) when with_body is true and the
+    answer is 2xx, else "". Raises ValueError for a URL validate_url refuses, or for credentials
+    on a clear-text URL.
+    """
+    validate_url(url)
+    if auth is not None:
+        _require_encryption(url)
+    if opener is None:
+        opener = build_opener(authenticated=auth is not None)
+    request = urllib.request.Request(url, headers=_headers(auth), method="GET")
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = response.getcode()
+            body = ""
+            if with_body and 200 <= status < 300:
+                body = response.read(max_bytes).decode("utf-8", errors="replace")
+            return {"status": status, "url": response.geturl() or url, "body": body}
+    except urllib.error.HTTPError as error:
+        error.close()
+        return {"status": error.code, "url": url, "body": ""}
+    except (urllib.error.URLError, http.client.HTTPException, OSError, UnicodeError):
+        return {"status": None, "url": url, "body": ""}
+
+
+def fetch_timed(
+    url: str,
+    *,
+    auth: Optional[tuple] = None,
+    opener=None,
+    timeout: float = 20.0,
+    max_bytes: int = 2_097_152,
+    deadline: Optional[float] = None,
+    cut: Optional[list] = None,
+) -> tuple:
+    """Return (status, body, elapsed_s) of a GET, under the rules of fetch_page.
+
+    body is the raw bytes (max_bytes at most, kept as is for a compressed file); elapsed_s runs
+    until the end of the body. status is None when nothing answered, or when the body was not
+    complete before the time limit (timeout from the start, and deadline, a time.monotonic
+    value); cut, when given, then receives True. Raises ValueError as fetch_page does.
+    """
+    validate_url(url)
+    if auth is not None:
+        _require_encryption(url)
+    if opener is None:
+        opener = build_opener(authenticated=auth is not None)
+    request = urllib.request.Request(url, headers=_headers(auth), method="GET")
+    started = time.monotonic()
+    if deadline is not None:
+        timeout = min(timeout, max(0.5, deadline - started))
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = response.getcode()
+            if not 200 <= status < 300:
+                return status, b"", time.monotonic() - started
+            limit = started + timeout if deadline is None else min(started + timeout, deadline)
+            chunks, size = [], 0
+            while size < max_bytes:
+                if time.monotonic() >= limit:
+                    if cut is not None:
+                        cut.append(True)
+                    return None, b"", time.monotonic() - started
+                read = getattr(response, "read1", response.read)
+                chunk = read(min(65536, max_bytes - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+            return status, b"".join(chunks), time.monotonic() - started
+    except urllib.error.HTTPError as error:
+        error.close()
+        return error.code, b"", time.monotonic() - started
+    except (urllib.error.URLError, http.client.HTTPException, OSError, UnicodeError):
+        return None, b"", time.monotonic() - started
+
+
+def _headers(auth: Optional[tuple]) -> dict:
+    headers = {"User-Agent": f"GingermindsAudit/{plugin_version()}"}
+    if auth is not None:
+        token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode("utf-8")).decode("ascii")
+        headers["Authorization"] = f"Basic {token}"
+    return headers
 
 
 def build_opener(*handlers, authenticated: bool = False):
@@ -100,6 +194,8 @@ def build_opener(*handlers, authenticated: bool = False):
 
 
 class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirections = 3
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not _may_follow(req.full_url, newurl):
             return None

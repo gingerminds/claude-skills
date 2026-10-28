@@ -17,7 +17,10 @@ S="$(cd "$(dirname "$0")" && pwd)"
 
 DEFAULT_REGISTRY="registry.gitlab.gingerminds.fr/gm/tools/checklist-qualite-outillage-audit"
 IMAGES=(agence nu testssl gitleaks redocly schemathesis)
-ALL_TOOLS=(http gitleaks assets lighthouse a11y nu yellowlab testssl redocly schemathesis crawl)
+ALL_TOOLS=(http gitleaks assets stylelint deps lighthouse lighthouse-desktop a11y viewport nu yellowlab yellowlab-desktop testssl redocly schemathesis crawl)
+NEEDS_1_2_REASON="boîte à outils 1.2 requise : lancez cqa-toolbox.sh pull"
+# Version gate: "unset" until read, then 0 or 1 (once per launcher call).
+AGENCE_1_2="unset"
 # Schemathesis probes undeclared methods (TRACE, PUT, ...) despite --include-method, and
 # --exclude-checks only hides their verdict: this filter is what stops the requests.
 UNSAFE_METHODS_REGEX='^(?!(GET|HEAD|OPTIONS)$)'
@@ -86,12 +89,16 @@ load_run() {
   [ -f "$RUN_DIR/context.json" ] || die "context.json est introuvable dans $RUN_DIR."
   UID_GID="$(id -u):$(id -g)"
 
+  CRAWL_MINUTES=30
+  CRAWL_MAX_URLS=2000
   env_lines="$(python3 "$S/cqa_plan.py" toolbox-env "$RUN_DIR")" || exit 2
   while IFS='=' read -r key value; do
     case "$key" in
       GM_AUDIT_TARGET | GM_AUDIT_ROBOTS | GM_AUDIT_RATE | GM_AUDIT_USER_AGENT | GM_AUDIT_PROD_ORIGIN)
         export "$key=$value"
         ;;
+      GM_CQA_CRAWL_MINUTES) CRAWL_MINUTES="$value" ;;
+      GM_CQA_CRAWL_MAX_URLS) CRAWL_MAX_URLS="$value" ;;
       "") ;;
       *) die "toolbox-env a renvoyé une variable inattendue : $key" ;;
     esac
@@ -128,6 +135,11 @@ prepare_tool() {
 skip_tool() {
   python3 "$S/cqa_plan.py" skip "$RUN_DIR" "$1" "$2" >/dev/null || return 1
   say "$1 : ignoré ($2)."
+}
+
+na_tool() {
+  python3 "$S/cqa_plan.py" skip "$RUN_DIR" "$1" "$2" --not-applicable >/dev/null || return 1
+  say "$1 : non applicable ($2)."
 }
 
 # docker_tool <image> <env set> [docker options ...] -- [image arguments ...]
@@ -203,6 +215,48 @@ tool_http() {
 tool_pages() {
   prepare_tool "$1" || return 1
   docker_tool agence web -- "$1" --pages /in/context.json
+}
+
+# True when the local agence image is toolbox 1.2.0 or later (keep in sync with agence_1_2 in doctor).
+agence_supports_1_2() {
+  local label
+  if [ "$AGENCE_1_2" = "unset" ]; then
+    AGENCE_1_2=0
+    if label="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$(image_ref agence)" 2>/dev/null </dev/null)"; then
+      if printf '%s' "$label" | grep -Eq '^([2-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$|^1\.([2-9]|[1-9][0-9]+)\.[0-9]+$'; then
+        AGENCE_1_2=1
+      fi
+    fi
+  fi
+  [ "$AGENCE_1_2" = "1" ]
+}
+
+# tool_desktop <name> <subcommand> <flag> <value>
+tool_desktop() {
+  if ! agence_supports_1_2; then
+    skip_tool "$1" "$NEEDS_1_2_REASON"
+    return
+  fi
+  prepare_tool "$1" || return 1
+  docker_tool agence web -- "$2" --pages /in/context.json "$3" "$4" --name "$1"
+}
+
+tool_viewport() {
+  if ! agence_supports_1_2; then
+    skip_tool viewport "$NEEDS_1_2_REASON"
+    return
+  fi
+  prepare_tool viewport || return 1
+  docker_tool agence web -- viewport --pages /in/context.json
+}
+
+tool_repos_1_2() {
+  if ! agence_supports_1_2; then
+    skip_tool "$1" "$NEEDS_1_2_REASON"
+    return
+  fi
+  prepare_tool "$1" || return 1
+  docker_tool agence none -- "$1" --repos /repos --context /in/context.json
 }
 
 tool_assets() {
@@ -289,7 +343,7 @@ tool_redocly() {
   prepare_tool redocly || return 1
   list_specs || return 1
   if [ -z "$SPECS" ]; then
-    skip_tool redocly "aucune spec OpenAPI trouvée dans les repos"
+    na_tool redocly "aucune spec OpenAPI trouvée dans les repos"
     return
   fi
   while IFS=$'\t' read -r repo spec; do
@@ -304,13 +358,13 @@ tool_redocly() {
 tool_schemathesis() {
   local repo spec
   prepare_tool schemathesis || return 1
-  if [ -n "${GM_AUDIT_AUTH_USER:-}" ]; then
-    skip_tool schemathesis "authentification requise"
-    return
-  fi
   list_specs || return 1
   if [ -z "$SPECS" ]; then
-    skip_tool schemathesis "aucune spec OpenAPI trouvée dans les repos"
+    na_tool schemathesis "aucune spec OpenAPI trouvée dans les repos"
+    return
+  fi
+  if [ -n "${GM_AUDIT_AUTH_USER:-}" ]; then
+    skip_tool schemathesis "authentification requise"
     return
   fi
   while IFS=$'\t' read -r repo spec; do
@@ -325,13 +379,17 @@ tool_schemathesis() {
 
 tool_crawl() {
   prepare_tool crawl || return 1
-  tolerate crawl docker_tool agence crawl -- crawl
+  tolerate crawl docker_tool agence crawl -- crawl --max-minutes "$CRAWL_MINUTES" --max-urls "$CRAWL_MAX_URLS"
 }
 
 run_tool() {
   case "$1" in
     http) tool_http "$2" ;;
     lighthouse | a11y | yellowlab) tool_pages "$1" ;;
+    lighthouse-desktop) tool_desktop lighthouse-desktop lighthouse --form-factor desktop ;;
+    yellowlab-desktop) tool_desktop yellowlab-desktop yellowlab --device desktop ;;
+    viewport) tool_viewport ;;
+    stylelint | deps) tool_repos_1_2 "$1" ;;
     assets) tool_assets ;;
     nu) tool_nu ;;
     testssl) tool_testssl ;;
@@ -358,7 +416,16 @@ cmd_run() {
   fi
   require_docker
   load_run "$1"
-  run_tool "$2" "$followup"
+  local rc=0 manifest_rc=0
+  run_tool "$2" "$followup" || rc=$?
+  python3 "$S/cqa_plan.py" manifest "$RUN_DIR" >/dev/null || manifest_rc=$?
+  if [ "$manifest_rc" -ne 0 ]; then
+    say "Le manifeste des résultats n'a pas pu être écrit."
+  fi
+  if [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
+  return "$manifest_rc"
 }
 
 cmd_all() {
@@ -458,6 +525,8 @@ report = {
     "registry_login": login == "1",
     "images": images,
     "agence_crawl": bool(match) and (int(match[1]), int(match[2])) >= (1, 1),
+    # Keep in sync with agence_supports_1_2.
+    "agence_1_2": bool(match) and (int(match[1]), int(match[2])) >= (1, 2),
     "arch": arch,
 }
 print(json.dumps(report, indent=2, ensure_ascii=False))
