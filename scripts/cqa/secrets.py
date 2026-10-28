@@ -51,7 +51,8 @@ _FORM_ATTRIBUTE = re.compile(r"(?:type|autocomplete|name|id)=", re.IGNORECASE)
 _ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_]\w*\}")
 _CODE_PREFIX = re.compile(r"[A-Za-z_][\w\\]*(?:::|->)")
 _CODE_CALL = re.compile(r"[A-Za-z_][\w.\\]*\(.*\)", re.DOTALL)
-_QUOTED_LITERAL = re.compile(r"""(?<!\w)(["'])(.*?)\1""")
+_QUOTED_LITERAL = re.compile(r"""(?:(?<!\w)|(?<=\b[bBrRuUfF])|(?<=\b[bBrRfF][bBrRfF]))(["'])(.*?)\1""")
+_N_LITERAL = re.compile(r"""(?<![A-Za-z])N(["'])([^\s"']+)\1(?=[)\],;]|\s*$)""", re.MULTILINE)
 _ACCESSOR_CALL = re.compile(
     r"\b(?:input|get|post|query|header|cookie|env|getenv|config|old|only|except|has|filled"
     r"|string|boolean|integer)\s*\(\s*\Z"
@@ -77,7 +78,8 @@ def _is_non_secret(match: re.Match) -> bool:
     )
     if not is_code or ":-" in rest:
         return False
-    return all(_is_harmless_literal(rest, literal) for literal in _QUOTED_LITERAL.finditer(rest))
+    literals = list(_QUOTED_LITERAL.finditer(rest)) + list(_N_LITERAL.finditer(rest))
+    return all(_is_harmless_literal(rest, literal) for literal in literals)
 
 
 def _is_harmless_literal(line: str, literal: re.Match) -> bool:
@@ -173,7 +175,9 @@ def _redact_credentials(text: str) -> str:
         if match.start() < position or _is_non_secret(match):
             continue
         end = match.end("val")
-        if not match.group("q") and match.group("val")[-1] in "([":
+        if not match.group("q") and (match.group("val")[-1] in "([" or (
+            "(" in match.group("val") and text[end:end + 1] in ("'", '"')
+        )):
             newline = text.find("\n", end)
             end = len(text) if newline < 0 else newline
         out.append(text[position:match.start()] + match.group("pre") + MASK)

@@ -158,6 +158,7 @@ class NonSecretTest(unittest.TestCase):
         "$password = $request->input('password');",
         "$token = $request->header('X-Api-Token');",
         "['password' => $password, 'remember' => $remember]",
+        "`password=$PASSWORD` : d'abord l'ordre, L'app, N'oubliez pas, qu'on, s'il, jusqu'ici, aujourd'hui.",
     ]
     SECRETS = [
         'password: "S3cr3t-Pass!"',
@@ -181,6 +182,12 @@ class NonSecretTest(unittest.TestCase):
         "PASSWORD=${DB_PASSWORD:-S3cretDefault}",
         "DB_PASSWORD=password",
         "password=:Secret123",
+        "token = hmac.new(b'RealSecretKey123', msg, sha256).hexdigest()",
+        "token = jwt.encode(payload, b'my-signing-secret-123', algorithm='HS256')",
+        "token = base64.b64encode(b'admin:Adm1nP@ss2024').decode()",
+        "password = make_password(r'Adm1nP@ss2024')",
+        "password = make_password(f'Adm1nP@ss2024')",
+        "password = HASHBYTES('SHA2_256', N'Adm1nP@ss2024')",
         "'password' => Hash::make('Adm1nP@ss2024'), // l'admin d'origine",
     ]
 
