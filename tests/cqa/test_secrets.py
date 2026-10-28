@@ -149,6 +149,15 @@ class NonSecretTest(unittest.TestCase):
         'password="${DB_PASSWORD}"',
         "Hash::make($request->password)",
         "$x->password = Hash::make($request->password);",
+        "Le mot de passe vient de `password=$PASSWORD` dans l'environnement de l'application.",
+        "Hachage via `$user->password = Hash::make($request->password)`, conforme à l'attente de l'OWASP.",
+        "`'password' => ['required', 'confirmed', Password::defaults()]` : règle d'Laravel, c'est l'usage.",
+        "'password' => env('DB_PASSWORD', ''),",
+        "'password' => Hash::make($input['password']),",
+        "Hash::make($data['password'])",
+        "$password = $request->input('password');",
+        "$token = $request->header('X-Api-Token');",
+        "['password' => $password, 'remember' => $remember]",
     ]
     SECRETS = [
         'password: "S3cr3t-Pass!"',
@@ -172,6 +181,7 @@ class NonSecretTest(unittest.TestCase):
         "PASSWORD=${DB_PASSWORD:-S3cretDefault}",
         "DB_PASSWORD=password",
         "password=:Secret123",
+        "'password' => Hash::make('Adm1nP@ss2024'), // l'admin d'origine",
     ]
 
     def test_form_field_descriptions_are_not_secrets(self):

@@ -51,7 +51,11 @@ _FORM_ATTRIBUTE = re.compile(r"(?:type|autocomplete|name|id)=", re.IGNORECASE)
 _ENV_REFERENCE = re.compile(r"\$\{[A-Za-z_]\w*\}")
 _CODE_PREFIX = re.compile(r"[A-Za-z_][\w\\]*(?:::|->)")
 _CODE_CALL = re.compile(r"[A-Za-z_][\w.\\]*\(.*\)", re.DOTALL)
-_QUOTED_LITERAL = re.compile(r"""(["'])(.*?)\1""")
+_QUOTED_LITERAL = re.compile(r"""(?<!\w)(["'])(.*?)\1""")
+_ACCESSOR_CALL = re.compile(
+    r"\b(?:input|get|post|query|header|cookie|env|getenv|config|old|only|except|has|filled"
+    r"|string|boolean|integer)\s*\(\s*\Z"
+)
 _HARMLESS_LITERAL = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+|[A-Z][A-Z0-9_]*")
 
 
@@ -73,7 +77,19 @@ def _is_non_secret(match: re.Match) -> bool:
     )
     if not is_code or ":-" in rest:
         return False
-    return all(_HARMLESS_LITERAL.fullmatch(literal) for _, literal in _QUOTED_LITERAL.findall(rest))
+    return all(_is_harmless_literal(rest, literal) for literal in _QUOTED_LITERAL.finditer(rest))
+
+
+def _is_harmless_literal(line: str, literal: re.Match) -> bool:
+    content = literal.group(2)
+    if not content or _HARMLESS_LITERAL.fullmatch(content):
+        return True
+    if line[literal.end():].lstrip().startswith("=>"):
+        return True
+    before = line[:literal.start()]
+    if before.rstrip().endswith("[") and line[literal.end():].lstrip().startswith("]"):
+        return True
+    return bool(_ACCESSOR_CALL.search(before))
 
 
 _PATTERNS = (
