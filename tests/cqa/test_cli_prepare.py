@@ -5,6 +5,7 @@ import http.client
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -1810,12 +1811,58 @@ class RunsCommandTest(CliCase):
         self.assertEqual(old_state["path"], str(old))
         self.assertEqual(empty_state["path"], str(empty))
         keys = ["context", "lots", "findings", "plan", "applied", "synthese", "done"]
-        self.assertEqual(sorted(full_state), sorted(["run_id", "path", *keys]))
+        self.assertEqual(sorted(full_state), sorted(["run_id", "path", "write_pending", *keys]))
+        self.assertEqual(
+            [state["write_pending"] for state in result["runs"]], [False, False, False]
+        )
         self.assertEqual([full_state[key] for key in keys], [True] * 7)
         self.assertEqual([empty_state[key] for key in keys], [False] * 7)
         self.assertEqual(
             [old_state[key] for key in keys], [True, False, False, False, False, False, False]
         )
+
+    def write(self, run_dir, relative, value):
+        (run_dir / relative).parent.mkdir(parents=True, exist_ok=True)
+        (run_dir / relative).write_text(json.dumps(value), encoding="utf-8")
+
+    def pending_run(self, notion_write="all", dry_run=False, applied=("k1",), plan_id="p2"):
+        run_dir = self.make_run("2026-10-20-1000", "done.json")
+        self.write(run_dir, "context.json", {"notion_write": notion_write, "dry_run": dry_run})
+        ops = [{"key": "k1"}, {"key": "k2"}]
+        self.write(run_dir, "notion/plan.json", {"plan_id": plan_id, "ops": ops})
+        entries = [{"key": key, "plan_id": "p2"} for key in applied]
+        entries.append({"key": "k2", "plan_id": "p1"})
+        self.write(run_dir, "notion/applied.json", {"applied": entries})
+        return run_dir
+
+    def test_write_pending_when_an_operation_of_the_plan_is_not_in_the_journal(self):
+        self.pending_run()
+        state = self.runs()["runs"][0]
+        self.assertTrue(state["done"])
+        self.assertTrue(state["write_pending"])
+
+    def test_no_write_pending_when_the_plan_is_written_or_not_to_be_written(self):
+        for options in (
+            {"applied": ("k1", "k2")},
+            {"notion_write": "none"},
+            {"dry_run": True},
+        ):
+            with self.subTest(options=options):
+                shutil.rmtree(self.base, ignore_errors=True)
+                self.pending_run(**options)
+                self.assertFalse(self.runs()["runs"][0]["write_pending"])
+
+    def test_write_pending_without_journal_or_with_a_legacy_plan(self):
+        run_dir = self.pending_run()
+        (run_dir / "notion" / "applied.json").unlink()
+        self.assertTrue(self.runs()["runs"][0]["write_pending"])
+        self.write(run_dir, "notion/plan.json", {"ops": [{"key": "k1"}]})
+        self.write(run_dir, "notion/applied.json", {"applied": [{"key": "k1"}]})
+        self.assertFalse(self.runs()["runs"][0]["write_pending"])
+        self.write(run_dir, "notion/plan.json", {"ops": []})
+        self.assertFalse(self.runs()["runs"][0]["write_pending"])
+        (run_dir / "notion" / "plan.json").write_text("{", encoding="utf-8")
+        self.assertFalse(self.runs()["runs"][0]["write_pending"])
 
     def test_done_needs_the_final_scan_file(self):
         self.make_run("2026-10-20-1000", "context.json", "synthese.md", "notion/applied.json")

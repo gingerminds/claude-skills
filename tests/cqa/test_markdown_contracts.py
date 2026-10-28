@@ -440,6 +440,18 @@ class SkillTest(unittest.TestCase):
         self.assertIn("`--recette <that NN>`", _section(text, "3. Resume"))
         self.assertIn("Statut humain conservé", _section(text, "11. Recette"))
 
+    def test_rerun_and_recette_offer_to_finish_an_interrupted_write(self):
+        skill = _text(SKILL)
+        step1 = _section(skill, "10. Rerun").split("\n2. ")[0]
+        for needle in ("`write_pending`", "« L'écriture de la dernière relance est incomplète. »",
+                       "« Reprendre l'écriture »", "« Ouvrir une nouvelle relance »",
+                       "section 8, step 1", "stored"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, step1)
+        recette = _section(skill, "11. Recette").split("\n2. ")[0]
+        self.assertIn("section 10, step 1", recette)
+        self.assertIn("`write_pending`", recette)
+
     def test_rerun_close_checks_the_dispatched_rows_and_handles_an_empty_rerun(self):
         skill = _text(SKILL)
         for label, text in (("10", _section(skill, "10. Rerun")),

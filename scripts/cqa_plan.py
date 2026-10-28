@@ -1314,7 +1314,32 @@ def _run_state(run_dir: Path) -> dict:
         state[key] = (run_dir / relative).is_file()
     findings = run_dir / "findings"
     state["findings"] = findings.is_dir() and any(findings.glob("*.json"))
+    state["write_pending"] = _write_pending(run_dir)
     return state
+
+
+def _write_pending(run_dir: Path) -> bool:
+    """True when the last plan was to be written and the journal lacks one of its operations.
+
+    It catches a rerun or a recette whose write stopped (exit 3) in a run already done. A key
+    counts as written only when the journal holds it under the plan_id of notion/plan.json, as
+    apply skips it; an operation blocked by a safety gate is never journaled and keeps it true.
+    """
+    plan = _read_json_object(run_dir / "notion" / "plan.json")
+    ops = plan.get("ops")
+    if not isinstance(ops, list) or not ops:
+        return False
+    context = _read_json_object(run_dir / "context.json")
+    if context.get("notion_write") == "none" or context.get("dry_run") is True:
+        return False
+    journal = _read_json_object(run_dir / "notion" / "applied.json").get("applied")
+    plan_id = plan.get("plan_id")
+    written = {
+        entry.get("key")
+        for entry in (journal if isinstance(journal, list) else [])
+        if isinstance(entry, dict) and entry.get("plan_id") == plan_id
+    }
+    return any(isinstance(op, dict) and op.get("key") not in written for op in ops)
 
 
 def _target_url(target: dict, key: str) -> str:

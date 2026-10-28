@@ -478,7 +478,7 @@ Exit codes as in section 8, step 1 (prefix `GM_AUDIT_AUTH_PASS` the same way). E
 
 Re-evaluates a few rows of a finished run after something changed (a cause fixed, a tool rerun, code modified), without redoing the audit. The imperative rules of section 1 and the recheck before each wave (section 6) hold. One Bash call per step.
 
-1. Pick the run: `cqa_plan.py project "$PWD"`, then `cqa_plan.py runs "<slug>"`. Take the most recent run whose `lots` and `plan` are true. Ask « Utiliser le run <run_id> ? » with « Oui » and « Choisir un autre run » (then list the runs with their date and ask which one). No such run: say « Aucun run à relancer : lancez d'abord /gm:checklist-quality-audit. » and stop. Then check the context as in section 3, steps 3 and 4 (`context "$RUN" --check`, Basic Auth credentials asked again if `target.access` is `basic_auth`).
+1. Pick the run: `cqa_plan.py project "$PWD"`, then `cqa_plan.py runs "<slug>"`. Take the most recent run whose `lots` and `plan` are true. Ask « Utiliser le run <run_id> ? » with « Oui » and « Choisir un autre run » (then list the runs with their date and ask which one). No such run: say « Aucun run à relancer : lancez d'abord /gm:checklist-quality-audit. » and stop. Then check the context as in section 3, steps 3 and 4 (`context "$RUN" --check`, Basic Auth credentials asked again if `target.access` is `basic_auth`). When `runs` gives that run `write_pending` true (its last plan was to be written and `notion/applied.json` lacks some of its operations: a write that stopped, exit 3, or an operation blocked), ask « L'écriture de la dernière relance est incomplète. » with « Reprendre l'écriture » and « Ouvrir une nouvelle relance ». « Reprendre l'écriture »: start the inhibitor as at the beginning of section 6, then run section 8, step 1 with the write mode stored in `notion_write` (`--skip-human-overrides` for `keep_human`), without rebuilding the plan (`apply` skips what the journal holds), then section 8 from step 2; this invocation ends there. « Ouvrir une nouvelle relance »: go on with step 2.
 2. Read the Notion copy again, as the lead left it (statuses and comments):
 
 ```bash
@@ -557,7 +557,7 @@ python3 "$S/cqa_plan.py" plan "$RUN"
 
 Checks the corrections after the devs set rows to « Mis en place » in the copy. It reuses the mechanism of the rerun (section 10): same snapshot, same tools, same dispatch, same validation, same closing; only the choice of the rows differs. The imperative rules of section 1 and the recheck before each wave (section 6) hold. One Bash call per step.
 
-1. Pick the run and check the context exactly as in section 10, step 1.
+1. Pick the run and check the context exactly as in section 10, step 1, including the question on a run whose `write_pending` is true.
 2. Read the Notion copy again and list the rows to check. A row is a candidate when it is « Mis en place » in the copy and the last status the skill wrote for it was something else (« À traiter », « Mise en place partielle », or no status written); a row the skill itself set to « Mis en place » (human validation) is not a fix and stays with the lead. The rows whose code changed since the audited commit are added. For each row the command keeps the last comments that are not the skill's (the devs' notes, the merge request link), at most 5, most recent first:
 
 ```bash
