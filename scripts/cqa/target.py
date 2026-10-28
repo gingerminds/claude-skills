@@ -141,6 +141,8 @@ def build_opener(*handlers, authenticated: bool = False):
 
 
 class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirections = 3
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not _may_follow(req.full_url, newurl):
             return None

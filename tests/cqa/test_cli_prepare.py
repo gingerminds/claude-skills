@@ -1833,8 +1833,9 @@ class MainTest(CliCase):
 class SiteOpener:
     """Opener that serves pages {url: (status, body)} and records the requests."""
 
-    def __init__(self, pages):
+    def __init__(self, pages, final=None):
         self.pages = pages
+        self.final = final or {}
         self.requests = []
 
     def open(self, request, timeout=None):
@@ -1842,7 +1843,7 @@ class SiteOpener:
         status, body = self.pages.get(request.full_url, (404, ""))
         if status >= 400:
             raise urllib.error.HTTPError(request.full_url, status, "Error", {}, io.BytesIO())
-        return _Page(request.full_url, status, body)
+        return _Page(self.final.get(request.full_url, request.full_url), status, body)
 
     @property
     def urls(self):
@@ -1870,6 +1871,10 @@ class _Page:
 
 
 HOME = "https://preprod.example.org/"
+
+
+def page(url, template, status, checked=True, gap=False):
+    return {"url": url, "template": template, "status": status, "checked": checked, "gap": gap}
 
 
 class KeyPagesCheckTest(RunDirCase):
@@ -1906,12 +1911,12 @@ class KeyPagesCheckTest(RunDirCase):
         self.assertEqual(
             result["pages"],
             [
-                {"url": HOME, "status": 200},
-                {"url": HOME + "liste", "status": 200},
-                {"url": HOME + "missing", "status": 404},
-                {"url": HOME + "a", "status": 200},
-                {"url": HOME + "gone", "status": 404},
-                {"url": HOME + "rel", "status": 200},
+                page(HOME, "T0", 200),
+                page(HOME + "liste", "T1", 200),
+                page(HOME + "missing", "T2", 404, gap=True),
+                page(HOME + "a", None, 200),
+                page(HOME + "gone", None, 404, gap=True),
+                page(HOME + "rel", None, 200),
             ],
         )
         self.assertEqual(result["home_links_404"], [HOME + "gone"])
@@ -1923,8 +1928,9 @@ class KeyPagesCheckTest(RunDirCase):
         code, out, err = self.check_pages([HOME, "https://other.example.org/"], opener)
         self.assertEqual(code, 0, err)
         self.assertEqual(opener.urls, [HOME])
-        skipped = [page for page in json.loads(out)["pages"] if page["status"] is None]
-        self.assertEqual(skipped, [{"url": "https://other.example.org/", "status": None}])
+        self.assertEqual(
+            json.loads(out)["pages"][1], page("https://other.example.org/", "T1", None, False)
+        )
 
     def test_at_most_fifty_requests(self):
         links = "".join(f'<a href="/p{number}">x</a>' for number in range(80))
@@ -1957,7 +1963,68 @@ class KeyPagesCheckTest(RunDirCase):
 
         code, out, _ = self.check_pages([HOME], Down())
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)["pages"], [{"url": HOME, "status": None}])
+        self.assertEqual(json.loads(out)["pages"], [page(HOME, "T0", None, True, True)])
+
+    def test_a_404_template_answering_404_is_not_a_gap(self):
+        opener = SiteOpener({HOME: (200, ""), HOME + "nope": (404, ""), HOME + "x": (404, "")})
+        self.write_context(
+            key_pages=[
+                {"template": "Accueil", "url": HOME},
+                {"template": "404", "url": HOME + "nope"},
+                {"template": "Liste", "url": HOME + "x"},
+            ]
+        )
+        result = self.run_json(["key-pages-check", self.run_dir], env=self.fast, opener=opener)
+        self.assertEqual(
+            [(p["template"], p["status"], p["gap"]) for p in result["pages"]],
+            [("Accueil", 200, False), ("404", 404, False), ("Liste", 404, True)],
+        )
+
+    def test_a_key_page_with_credentials_is_refused_and_never_printed(self):
+        url = "https://leak-user:leak-pass@preprod.example.org/liste"
+        opener = SiteOpener({HOME: (200, "")})
+        code, out, err = self.check_pages([HOME, url], opener)
+        self.assertEqual(code, 6)
+        self.assertEqual(opener.requests, [])
+        self.assertNotIn("leak", out + err)
+        self.write_context(key_pages=[{"template": "Liste", "url": url}])
+        code, out, err = self.run_main(["context", "--check", self.run_dir])
+        self.assertEqual(code, 6)
+        self.assertNotIn("leak", out + err)
+        self.assertIn("key_pages[0].url", out)
+
+    def test_after_the_deadline_the_remaining_pages_are_reported_unchecked(self):
+        opener = SiteOpener({HOME: (200, '<a href="/a">a</a>'), HOME + "liste": (200, "")})
+        with mock.patch.object(cqa_plan, "KEY_PAGES_DEADLINE", -1):
+            code, out, err = self.check_pages([HOME, HOME + "liste"], opener)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(opener.urls, [HOME])
+        self.assertEqual(json.loads(out)["pages"][1], page(HOME + "liste", "T1", None, False))
+
+    def test_home_links_follow_an_allowed_https_upgrade(self):
+        http_home = "http://preprod.example.org/"
+        opener = SiteOpener(
+            {http_home: (200, '<a href="/a">a</a>'), HOME + "a": (200, "")},
+            final={http_home: HOME},
+        )
+        code, out, err = self.check_pages(
+            [http_home], opener, target__preprod_url="http://preprod.example.org"
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(opener.urls, [http_home, HOME + "a"])
+
+    def test_a_cross_origin_redirect_reaches_nothing_else(self):
+        other, other_url = start_server(self, answer(200))
+        server, url = start_server(
+            self, lambda method, path, headers: (302, {"Location": other_url + "/loot"})
+        )
+        env = {"GM_AUDIT_AUTH_USER": USER, "GM_AUDIT_AUTH_PASS": PASSWORD}
+        code, out, err = self.check_pages(
+            [url + "/x"], None, extra=["--auth-env"], env=env, target__preprod_url=url
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(other.requests, [])
+        self.assertEqual(json.loads(out)["pages"][1]["status"], 302)
 
     def test_no_credentials_without_the_flag(self):
         opener = SiteOpener({HOME: (200, "")})
@@ -2026,6 +2093,9 @@ class ReuseContextTest(RunDirCase):
             {"domain": "preprod.example.org", "backoffice": "commun", "sso": True, "home": HOME}
         ]
         old["target"]["access"] = "basic_auth"
+        old["target"]["prod_live"] = True
+        old["notion"]["bot_id"] = "aa" * 16
+        old["repos"][0]["preprod_branch"] = "release"
         old["ssh"] = {"alias": "example-preprod", "app_dirs": {"laravel": "/srv/app"}}
         old["test_accounts"] = {"front": True, "backoffice": True}
         old["available_tools"] = ["Code", "SSH serveur"]
@@ -2037,7 +2107,7 @@ class ReuseContextTest(RunDirCase):
         document["run_id"] = run_id
         document["target"]["access"] = None
         document["repos"] = [
-            dict(repo, audited_sha="f" * 40, deployed_sha=None, aligned=None)
+            dict(repo, audited_sha="f" * 40, deployed_sha=None, aligned=None, preprod_branch="main")
             for repo in document["repos"]
         ]
         (self.new / "context.json").write_text(json.dumps(document), encoding="utf-8")
@@ -2055,8 +2125,9 @@ class ReuseContextTest(RunDirCase):
         context, old = self.written(), json.loads((self.old / "context.json").read_text())
         for key in ("repos", "notion", "lead", "team", "ssh", "test_accounts", "key_pages", "sites"):
             self.assertIn(key, result["copied"])
-            if key != "repos":
+            if key not in ("repos", "notion"):
                 self.assertEqual(context[key], old[key], key)
+        self.assertEqual(context["notion"]["assignee_options"], old["notion"]["assignee_options"])
         self.assertIn("target", result["copied"])
         self.assertEqual(context["target"]["preprod_url"], old["target"]["preprod_url"])
 
@@ -2071,14 +2142,26 @@ class ReuseContextTest(RunDirCase):
         self.assertEqual(context["available_tools"], ["Code", "CLI local", "HTTP"])
         self.assertFalse(context["dry_run"])
 
-    def test_values_the_diagnostic_recomputes_are_reset(self):
+    def test_fresh_repos_are_kept_and_only_the_preprod_branch_is_taken(self):
         self.fresh()
+        self.reuse()
+        repos = self.written()["repos"]
+        self.assertEqual([repo["audited_sha"] for repo in repos], ["f" * 40] * 2)
+        self.assertEqual([repo["preprod_branch"] for repo in repos], ["release"] * 2)
+
+    def test_repos_of_an_old_run_are_reset_when_the_new_run_has_none(self):
         self.reuse()
         for repo in self.written()["repos"]:
             self.assertIsNone(repo["audited_sha"])
             self.assertIsNone(repo["deployed_sha"])
             self.assertIsNone(repo["aligned"])
-            self.assertTrue(repo["path"].startswith("/work/"))
+
+    def test_prod_live_and_the_bot_are_not_copied(self):
+        fresh = self.fresh()
+        self.reuse()
+        context = self.written()
+        self.assertIs(context["target"]["prod_live"], False)
+        self.assertEqual(context["notion"]["bot_id"], fresh["notion"]["bot_id"])
 
     def test_resulting_context_is_valid(self):
         self.fresh()

@@ -724,10 +724,17 @@ class SkillTest(unittest.TestCase):
                 "cqa_plan.py\" reuse-context",
                 "`mode`, `notion_write`, `available_tools`",
                 "cqa_plan.py key-pages-check",
-                "section 11",
+                "section 10.1",
+                "in both modes, whenever `deferred.json` has open entries",
+                "`prod_live`",
+                "one message, recap the reused values",
+                "(`references/context.md`, section 6.2)",
             )),
             ("context.md", context, (
-                "wp post list --post_type=page --s=gravityform --fields=ID,post_title,url",
+                "wp post list --post_type=page --s=gravityform --fields=ID,post_title,post_status,url",
+                "`post_status` is `publish`",
+                "never asked for a replacement because of it",
+                "ne répond pas",
                 "## 6.2 Without PROJECT.md",
                 "`CLAUDE.md`",
                 "`docs/`",
@@ -739,7 +746,10 @@ class SkillTest(unittest.TestCase):
                 "key-pages-check",
                 "home_links_404",
                 "répond 404",
-                "wp post list --post_type=page --s=gravityform",
+                "`checked` true",
+                "--kind gap --detail \"<url> répond <status>\"",
+                "ask nothing",
+                "--kind question --detail \"La ligne CQ-<n>",
                 "CQ-115",
                 "compte à rôle restreint",
                 "Compte à rôle restreint manquant.",
@@ -750,6 +760,10 @@ class SkillTest(unittest.TestCase):
                     self.assertIn(needle, text)
         self.assertLess(skill.index("Earlier runs"), skill.index("New run (also for"))
         self.assertLess(diagnostic.index("## 4.1"), diagnostic.index("## 5."))
+        self.assertLess(diagnostic.index("## 10.1"), diagnostic.index("## 11."))
+        self.assertEqual(diagnostic.count("\n## 11."), 1)
+        self.assertNotIn("--kind login --detail \"La ligne", diagnostic)
+        self.assertNotIn("gravityform", diagnostic)
 
     def test_the_guard_allows_only_the_post_list_form_the_skill_uses(self):
         for argv, allowed in (

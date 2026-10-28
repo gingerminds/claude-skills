@@ -51,6 +51,7 @@ EXIT_SECRET = 7
 MAX_KEY_PAGES = 10
 MAX_SITES = 10
 MAX_KEY_PAGE_REQUESTS = 50
+KEY_PAGES_DEADLINE = 100
 TOOLBOX_RATE = "2"
 
 _SEPARATOR = " - "
@@ -356,59 +357,96 @@ def _cmd_key_pages(args, services) -> int:
     home = _target_url(target, "prod_url" if probes.is_prod_run(context) else "preprod_url")
     if not urlsplit(home).path:
         home += "/"
-    key_pages = context.get("key_pages")
-    if not isinstance(key_pages, list):
-        raise ContextError("context.json : « key_pages » est absent.")
+    entries = _key_page_entries(context.get("key_pages"))
     delay = 1 / _request_rate()
     auth = _auth_from_env() if args.auth_env else None
     opener = services.opener
     if opener is None:
         opener = build_opener(authenticated=auth is not None)
-    origin = _origin(home)
-    checker = _PageChecker(opener, auth, delay)
+    origins = {_origin(home)}
+    checker = _PageChecker(opener, auth, delay, time.monotonic() + KEY_PAGES_DEADLINE)
     first = checker.get(home, with_body=True)
-    links = _home_links(first["url"], first["body"], origin)
-    urls = [home]
-    for page in key_pages:
-        url = page.get("url") if isinstance(page, dict) else None
-        if isinstance(url, str) and url not in urls:
-            urls.append(url)
+    origins.add(_origin(first["url"]))
+    links = _home_links(first["url"], first["body"], _origin(first["url"]))
+    templates = {home: None}
+    for template, url in entries:
+        if templates.get(url) is None:
+            templates[url] = template
     pages = []
-    for url in urls:
+    for url, template in templates.items():
         if url == home:
-            status = first["status"]
+            status, checked = first["status"], True
+        elif any(_same_origin(url, origin) for origin in origins):
+            result = checker.get(url)
+            status, checked = result["status"], result["checked"]
         else:
-            status = checker.get(url)["status"] if _same_origin(url, origin) else None
-        pages.append({"url": url, "status": status})
+            status, checked = None, False
+        pages.append(_page_entry(url, template, status, checked, key=True))
     dead = []
     for url in links:
-        if url in urls or len(checker.requests) >= MAX_KEY_PAGE_REQUESTS:
+        if url in templates or len(checker.requests) >= MAX_KEY_PAGE_REQUESTS:
             continue
-        status = checker.get(url)["status"]
-        pages.append({"url": url, "status": status})
-        if status == 404:
+        result = checker.get(url)
+        entry = _page_entry(url, None, result["status"], result["checked"], key=False)
+        pages.append(entry)
+        if entry["status"] == 404:
             dead.append(url)
     _emit({"pages": pages, "home_links_404": dead})
     return EXIT_OK
 
 
-class _PageChecker:
-    """GET pages one after the other at the toolbox rate."""
+def _key_page_entries(key_pages) -> list:
+    """Return (template, url) of each key page; a URL that fails validation is never echoed."""
+    if not isinstance(key_pages, list):
+        raise ContextError("context.json : « key_pages » est absent.")
+    entries = []
+    for index, page in enumerate(key_pages):
+        template = page.get("template") if isinstance(page, dict) else None
+        url = page.get("url") if isinstance(page, dict) else None
+        label = template if isinstance(template, str) and template else f"n° {index + 1}"
+        try:
+            validate_url(url if isinstance(url, str) else "")
+        except ValueError:
+            raise ContextError(
+                f"context.json : l'URL de la page clé « {label} » est invalide "
+                "(http ou https, sans identifiants, sans espace)."
+            )
+        entries.append((template, url))
+    return entries
 
-    def __init__(self, opener, auth, delay: float):
-        self.opener, self.auth, self.delay = opener, auth, delay
+
+def _page_entry(url: str, template, status, checked: bool, *, key: bool) -> dict:
+    """One page of the report; "gap" is true for a checked page that should have answered."""
+    if not checked:
+        gap = False
+    elif key:
+        gap = not (isinstance(status, int) and status < 400)
+        gap = gap and not (template == "404" and status == 404)
+    else:
+        gap = status == 404
+    return {"url": url, "template": template, "status": status, "checked": checked, "gap": gap}
+
+
+class _PageChecker:
+    """GET pages one after the other at the toolbox rate, until the deadline."""
+
+    def __init__(self, opener, auth, delay: float, deadline: float):
+        self.opener, self.auth, self.delay, self.deadline = opener, auth, delay, deadline
         self.requests = []
 
     def get(self, url: str, *, with_body: bool = False) -> dict:
         if self.requests:
+            if time.monotonic() >= self.deadline:
+                return {"status": None, "url": url, "body": "", "checked": False}
             time.sleep(self.delay)
         self.requests.append(url)
         try:
-            return fetch_page(url, auth=self.auth, opener=self.opener, with_body=with_body)
+            result = fetch_page(url, auth=self.auth, opener=self.opener, with_body=with_body)
         except ValueError:
             if len(self.requests) == 1:
                 raise
-            return {"status": None, "url": url, "body": ""}
+            result = {"status": None, "url": url, "body": ""}
+        return {**result, "checked": True}
 
 
 def _request_rate() -> float:
@@ -467,9 +505,9 @@ def _home_links(base: str, body: str, origin: tuple) -> list:
     return links
 
 
-_REUSED_SECTIONS = ("notion", "lead", "team", "ssh", "test_accounts", "key_pages", "sites")
+_REUSED_SECTIONS = ("lead", "team", "ssh", "test_accounts", "key_pages", "sites")
+_REUSED_TARGET_FIELDS = ("preprod_url", "prod_url")
 _RECOMPUTED_REPO_FIELDS = ("audited_sha", "deployed_sha", "aligned")
-_REUSED_TARGET_FIELDS = ("preprod_url", "prod_url", "prod_live")
 
 
 def _cmd_reuse(args, services) -> int:
@@ -479,19 +517,19 @@ def _cmd_reuse(args, services) -> int:
     path = args.new_run_dir / "context.json"
     new = _load_context(args.new_run_dir) if path.exists() else {}
     copied = []
-    repos = old.get("repos")
-    if isinstance(repos, list):
-        new["repos"] = [
-            {**repo, **{field: None for field in _RECOMPUTED_REPO_FIELDS}}
-            for repo in repos
-            if isinstance(repo, dict)
-        ]
+    if _reuse_repos(old, new):
         copied.append("repos")
+    if isinstance(old.get("notion"), dict):
+        previous = new.get("notion") if isinstance(new.get("notion"), dict) else {}
+        kept = {key: value for key, value in old["notion"].items() if key != "bot_id"}
+        new["notion"] = {**kept, **({"bot_id": previous["bot_id"]} if "bot_id" in previous else {})}
+        copied.append("notion")
     target = old.get("target")
     if isinstance(target, dict):
         previous = new.get("target") if isinstance(new.get("target"), dict) else {}
         new["target"] = {
             **{field: target[field] for field in _REUSED_TARGET_FIELDS if field in target},
+            "prod_live": previous.get("prod_live", False),
             "access": previous.get("access"),
         }
         copied.append("target")
@@ -502,6 +540,23 @@ def _cmd_reuse(args, services) -> int:
     write_json(path, new)
     _emit({"copied": copied})
     return EXIT_OK
+
+
+def _reuse_repos(old: dict, new: dict) -> bool:
+    """Keep the repos of the new run (fresh from project) and take only their preprod branch."""
+    old_repos = [repo for repo in old.get("repos") or [] if isinstance(repo, dict)]
+    if not old_repos:
+        return False
+    if not isinstance(new.get("repos"), list):
+        new["repos"] = [
+            {**repo, **{field: None for field in _RECOMPUTED_REPO_FIELDS}} for repo in old_repos
+        ]
+        return True
+    branches = {repo.get("name"): repo.get("preprod_branch") for repo in old_repos}
+    for repo in new["repos"]:
+        if isinstance(repo, dict) and branches.get(repo.get("name")):
+            repo["preprod_branch"] = branches[repo["name"]]
+    return True
 
 
 def _cmd_context(args, services) -> int:
@@ -1429,6 +1484,16 @@ def _url(value) -> Optional[str]:
     return "doit être une URL http ou https"
 
 
+def _key_page_url(value) -> Optional[str]:
+    if not isinstance(value, str):
+        return "doit être un texte"
+    try:
+        validate_url(value)
+    except ValueError as error:
+        return str(error)[0].lower() + str(error)[1:].rstrip(".")
+    return None
+
+
 def _object(value) -> Optional[str]:
     return None if isinstance(value, dict) else "doit être un objet"
 
@@ -1517,7 +1582,7 @@ _REPO_FIELDS = {
     "deployed_sha": _text_or_null,
     "aligned": _boolean_or_null,
 }
-_PAGE_FIELDS = {"template": _text, "url": _text}
+_PAGE_FIELDS = {"template": _text, "url": _key_page_url}
 _SITE_FIELDS = {
     "domain": _hostname,
     "backoffice": _choice("commun", "propre"),

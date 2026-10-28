@@ -81,7 +81,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" reuse-context "$RUN" "<path du run réutilisé>"
 ```
 
-It copies the answers that hold from one run to the next (`repos`, `notion`, `lead`, `team`, `target` without `access`, `ssh`, `test_accounts`, `key_pages`, `sites`) into `$RUN/context.json` and prints the list taken. `mode`, `notion_write`, `available_tools` and what the diagnostic recomputes (`audited_sha`, `deployed_sha`, `aligned`) are never taken. Section 4 then asks only what may have changed: the probe of the target (`access`, and the Basic Auth credentials, never stored), the key pages that answer 404 (`cqa_plan.py key-pages-check`), and the launch questions (mode, consent). `cqa_notion.py schema` is run again into `$RUN/schema.json`; the lead confirms nothing else. « Repartir de zéro »: section 4 in full.
+Run `cqa_plan.py project "$PWD"` first (section 3 above) and write its repos into `$RUN/context.json` with the other fixed keys (step 8 below fills `schema`, `run_id`, `plugin_version`, `project`, `technos`, `phase_filter`, `dry_run` and `available_tools` around the copied keys). `reuse-context` copies the answers that hold from one run to the next into that file and prints the list taken: `notion` (without `bot_id`), `lead`, `team`, `target` (`preprod_url` and `prod_url` only), `ssh`, `test_accounts`, `key_pages`, `sites`, and from `repos` only the `preprod_branch` (the repos stay those just read from the folder; an old run's repos are used only when there are none). `prod_live`, `access`, `mode`, `notion_write`, `available_tools`, `bot_id` and what the diagnostic recomputes (`audited_sha`, `deployed_sha`, `aligned`) are never taken. Then, in one message, recap the reused values to the lead (SSH alias, preprod URL, Notion copy, key pages) and go on. Section 4 asks only what may have changed: `cqa_notion.py whoami` and `cqa_notion.py schema` run again (into `$RUN/schema.json`, no question), the probe of the target (`access`, and the Basic Auth credentials, never stored), `prod_live` (only with `--phase "MEL J0"` or `--phase "Post-MEL J+7"`, then the key pages again on the host of `prod_url`), the key pages that answer 404 (`cqa_plan.py key-pages-check`), and the launch questions (mode, consent). « Repartir de zéro »: section 4 in full.
 
 New run (also for `diagnostic`):
 
@@ -101,7 +101,7 @@ Read `references/context.md`. In order, one question at a time:
 3. Target: preprod URL read in `PROJECT.md` and confirmed, then `cqa_plan.py probe-target`. Access `basic_auth`: ask the identifier, then the password, and check them with `cqa_plan.py probe-target --auth-env`. Access `ip_filtered`: announce « HTTP indisponible hors réseau agence ».
 4. SSH alias, from the list of `~/.ssh/config`, or none.
 5. Test accounts (front, back-office).
-6. Key pages: one per template, 10 at most, proposed from the sitemap, the links of the home page and the routes of the code (WordPress: the « Formulaire » page found through the guard, `references/context.md`, section 6), validated by the lead. Other sites (multisite), still before the launch questions: detect the other domains, then ask for each one its back-office (common or its own) and its SSO login (`references/context.md`, section 6.1).
+6. Key pages: one per template, 10 at most, proposed from the sitemap, the links of the home page and the routes of the code (WordPress: the « Formulaire » page found through the guard, `references/context.md`, section 6), validated by the lead. Other sites (multisite), still before the launch questions: detect the other domains, then ask for each one its back-office (common or its own) and its SSO login (`references/context.md`, section 6.1). Without `PROJECT.md`, close this step by offering to generate one from the answers (`references/context.md`, section 6.2).
 7. Mode and Notion consent, two questions, one at a time, with AskUserQuestion (neither is asked with `diagnostic`, which runs only sections 3 to 5; the second one is not asked with `--dry-run`, which writes nothing). Each invocation asks them again and overwrites both keys: a value stored by an earlier invocation never counts (a resume reuses its own):
    - « Mode 100 % autonome ? » with « Oui, je m'absente » and « Non, je reste disponible ». Store `mode` to `"autonome"` for the first, `"interactif"` for the second.
    - « Écrire dans la copie Notion à la fin de l'audit ? » with « Tout écrire », « Sans toucher aux statuts posés par un humain » and « Ne rien écrire ». Store `notion_write` to `"all"`, `"keep_human"` or `"none"` (`null` when not asked). The copy does not change during the audit, so this consent holds for section 7.
@@ -161,7 +161,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" coverage "$RUN"
 ```
 
-Show the table of checks, the coverage and the gains as `references/diagnostic.md` words them. `evaluable` already includes `evaluable_human`: never add them. A selected row that needs an account with a restricted role (CQ-115): `references/diagnostic.md`, section 11, before « Lancer l'audit ». With `diagnostic`, stop here. Otherwise ask « Lancer l'audit » or « Compléter mon poste d'abord » (then stop: a later launch the same day offers to resume); in autonomous mode do not ask, the audit starts.
+Show the table of checks, the coverage and the gains as `references/diagnostic.md` words them. `evaluable` already includes `evaluable_human`: never add them. A selected row that needs an account with a restricted role (CQ-115): `references/diagnostic.md`, section 10.1, before « Lancer l'audit ». With `diagnostic`, stop here. Otherwise ask « Lancer l'audit » or « Compléter mon poste d'abord » (then stop: a later launch the same day offers to resume); in autonomous mode do not ask, the audit starts.
 
 ## 6. Audit
 
@@ -324,7 +324,7 @@ It writes `synthese.md` and `notion/page-comment.txt`.
 - the operations blocked at step 1: « CQ-<ref> (<kind>) non écrit : <raison> »;
 - for `--dry-run` and « Ne rien écrire »: « Rien n'a été écrit dans Notion : le plan reste dans notion/plan.json. »
 
-**4. Page comment**, only when step 1 ran and wrote or found something (`done` plus `skipped` above 0). Never with `--dry-run` or « Ne rien écrire ». In autonomous mode, when `cqa_plan.py deferred "$RUN"` lists open entries, skip it now: it is written once, after the end block (step 5).
+**4. Page comment**, only when step 1 ran and wrote or found something (`done` plus `skipped` above 0). Never with `--dry-run` or « Ne rien écrire ». When `cqa_plan.py deferred "$RUN"` lists open entries (in either mode), skip it now: it is written once, after the end block (step 5).
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -334,7 +334,7 @@ GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_notion.py" comment-page "$RU
 
 Same exit codes as step 1. Without `copy_page_id` it writes nothing and says so. Exit 3 after one more try once the cause is fixed, or exit 7: say that the page comment is missing (its text is in `notion/page-comment.txt`) and go on.
 
-**5. Deferred decisions and rerun**, only when `mode` is `autonome`, after steps 1 to 4 (with `--dry-run` or `none`, the same, minus the writes). Without any open entry, go to step 6.
+**5. Deferred decisions and rerun**, in both modes, whenever `deferred.json` has open entries (an interactive run records some too: the restricted-role account, `references/diagnostic.md`, section 10.1), after steps 1 to 4 (with `--dry-run` or `none`, the same, minus the writes). Without any open entry, go to step 6.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -347,7 +347,7 @@ It prints `{"items"}`, the open entries (`id`, `kind`, `detail`, `refs`). The le
 - `login`: call `tabs_context_mcp` first (it fails: ask the lead to reconnect Claude in Chrome, as in section 6), open the preprod (and the back-office) in new Chrome tabs (`references/browser.md`), then ask « Connectez-vous dans Chrome, dans les onglets ouverts : Basic Auth de la préprod si elle le demande, puis vos comptes de test. N'utilisez pas cette fenêtre Chrome pendant les lots navigateur. » with « C'est fait » and « Passer ». Then dispatch the held session lots as normal first-round lots (`Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no.`, no `Rerun:`), validate each with `cqa_plan.py validate "$RUN" <lot_id>`, relaunch once on errors as in section 6, step 7, then run the probe follow-up for them (section 6, step 8). On « Passer », or when the lead cannot log in, dispatch them the same way without a session: the agents write `unknown` with the reason, so every row still has a finding. Close the tabs afterwards.
 - `ssh_refused`: as `references/server.md` (exit 4): the command, its impact, « Passer » and the lead's result in « Autre ». The command is never run by the skill; a result the lead gives is a short fact for the dispatch, never raw output in the run directory.
 - `gap`: say what was noted and ask « Relancer les lignes concernées » or « Passer ».
-- `question`: ask the question as recorded.
+- `question`: ask the question as recorded. For a restricted-role account (`refs` with the row), ask « Connectez-vous dans Chrome avec le compte à rôle restreint (<rôle>), puis répondez. » with « C'est fait » and « Passer »: after « C'est fait » the rows are rerun (below) under that session, after the other session lots; « Passer »: the row stays `unknown`.
 
 Close an entry only once it is settled: a `login` entry when its held lots are validated, the others when their rerun is closed (an entry passed by the lead is closed at once):
 
