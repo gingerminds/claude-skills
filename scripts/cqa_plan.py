@@ -618,13 +618,16 @@ def _cmd_wp_plugins(args, services) -> int:
         name, path = repo.get("name"), repo.get("path")
         if not isinstance(name, str) or not isinstance(path, str):
             continue
-        listed = _git(services.run, Path(path), "ls-files", "-z")
+        listed = _git(services.run, Path(path), "ls-tree", "-r", "-z", "HEAD")
         if listed.returncode != 0:
             unreadable.append({"repo": name, "reason": "liste des fichiers illisible"})
             continue
-        files = [entry for entry in listed.stdout.split("\0") if entry]
-        for folder in _plugin_folders(files):
-            plugins.append(_plugin_entry(name, Path(path), folder, files, own, services.run))
+        files, linked = _tree_entries(listed.stdout)
+        for folder in _plugin_folders(files, linked):
+            if folder in linked:
+                plugins.append({"repo": name, "path": folder, "third_party": True, "why": linked[folder]})
+            else:
+                plugins.append(_plugin_entry(name, Path(path), folder, files, own, services.run))
     result = {"plugins": sorted(plugins, key=lambda entry: (entry["repo"], entry["path"]))}
     if unreadable:
         result["unreadable"] = unreadable
@@ -632,16 +635,35 @@ def _cmd_wp_plugins(args, services) -> int:
     return EXIT_OK
 
 
-def _plugin_folders(files: list) -> list:
-    """Return the plugins/<name> and mu-plugins/<name> folders holding versioned files."""
+_LINK_MODES = {"160000": "sous-module", "120000": "lien symbolique"}
+
+
+def _tree_entries(output: str) -> tuple:
+    """Split `git ls-tree -r -z` into the regular files and the submodules and symlinks."""
+    files, linked = set(), {}
+    for record in output.split("\0"):
+        meta, _, entry = record.partition("\t")
+        mode = meta.split(" ", 1)[0]
+        if not entry:
+            continue
+        if mode in _LINK_MODES:
+            linked[entry] = _LINK_MODES[mode]
+        else:
+            files.add(entry)
+    return files, linked
+
+
+def _plugin_folders(files: set, linked: dict) -> list:
+    """Return the plugins/<name> and mu-plugins/<name> folders of the tree."""
     folders = set()
-    for entry in files:
+    for entry, is_file in [(e, True) for e in files] + [(e, False) for e in linked]:
         parts = entry.split("/")
-        for index, segment in enumerate(parts[:-2]):
+        for index, segment in enumerate(parts[:-1]):
             if segment in ("node_modules", "vendor"):
                 break
             if segment in WP_PLUGIN_ROOTS:
-                folders.add("/".join(parts[: index + 2]))
+                if len(parts) > index + 2 or not is_file:
+                    folders.add("/".join(parts[: index + 2]))
                 break
     return sorted(folders)
 
@@ -655,7 +677,14 @@ def _project_domains(context: dict) -> set:
     for site in context.get("sites") or []:
         if isinstance(site, dict):
             urls += [site.get("home"), f"https://{site.get('domain')}"]
-    return {_base_domain(urlsplit(url).hostname) for url in urls if isinstance(url, str)} - {None}
+    return {_base_domain(_safe_hostname(url)) for url in urls if isinstance(url, str)} - {None}
+
+
+def _safe_hostname(url) -> Optional[str]:
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
 
 
 def _base_domain(host) -> Optional[str]:
@@ -665,7 +694,7 @@ def _base_domain(host) -> Optional[str]:
 
 
 def _read_capped(run, path: Path, relative: str) -> str:
-    result = _git(run, path, "show", f":{relative}")
+    result = _git(run, path, "show", f"HEAD:{relative}")
     return result.stdout[:WP_READ_CAP] if result.returncode == 0 else ""
 
 
@@ -674,23 +703,25 @@ def _plugin_entry(repo: str, path: Path, folder: str, files: list, own: set, run
     name = folder.rsplit("/", 1)[1].lower()
     if name in WP_KNOWN_THIRD_PARTY:
         return {**entry, "third_party": True, "why": "plugin tiers connu"}
-    if f"{folder}/readme.txt" in files:
-        if _STABLE_TAG.search(_read_capped(run, path, f"{folder}/readme.txt")):
-            return {**entry, "third_party": True, "why": "readme.txt avec « Stable tag »"}
+    project_uri = False
     for relative in sorted(files):
         if relative.startswith(folder + "/") and relative.endswith(".php") and "/" not in relative[len(folder) + 1:]:
             headers = _PLUGIN_HEADER.findall(_read_capped(run, path, relative))
             if not any(key.lower() == "plugin name" for key, _ in headers):
                 continue
             for key, value in headers:
-                host = urlsplit(value.strip()).hostname
+                host = _safe_hostname(value.strip())
                 if key.lower() != "plugin name" and host and _base_domain(host) not in own:
                     return {
                         **entry,
                         "third_party": True,
                         "why": f"{key} hors du projet ({host})",
                     }
+                project_uri = project_uri or bool(key.lower() != "plugin name" and host)
             break
+    if f"{folder}/readme.txt" in files and not project_uri:
+        if _STABLE_TAG.search(_read_capped(run, path, f"{folder}/readme.txt")):
+            return {**entry, "third_party": True, "why": "readme.txt avec « Stable tag »"}
     return {**entry, "third_party": False, "why": "aucun signe de plugin tiers"}
 
 

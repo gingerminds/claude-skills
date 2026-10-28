@@ -2595,10 +2595,6 @@ class ReuseContextTest(RunDirCase):
         self.assertEqual(code, 2)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ThirdPartyPathsTest(RunDirCase):
     def test_third_party_paths_are_validated(self):
         valid = [[], ["wp-content/plugins/acme-forms"], ["src/plugins/a", "plugins/b.c"]]
@@ -2726,10 +2722,59 @@ class WpPluginsTest(RunDirCase):
         found = {e["path"]: e for e in self.run_json(["wp-plugins", self.run_dir], run=run)["plugins"]}
         self.assertFalse(found["plugins/big"]["third_party"])
         self.assertTrue(all(command[0] == "git" for command in calls))
-        self.assertTrue(all("ls-files" in command or "show" in command for command in calls))
+        self.assertTrue(all("ls-tree" in command or "show" in command for command in calls))
 
     def test_unreadable_repo_is_reported_not_fatal(self):
         self.context_for(self.tmp_dir() / "missing")
         result = self.run_json(["wp-plugins", self.run_dir])
         self.assertEqual(result["plugins"], [])
         self.assertEqual([item["repo"] for item in result["unreadable"]], ["wordpress"])
+
+    def test_a_malformed_header_url_does_not_break_the_listing(self):
+        repo = self.make_wordpress({
+            "plugins/odd/odd.php": "<?php\n/*\nPlugin Name: Odd\nPlugin URI: http://[abc\n*/\n",
+            "plugins/fine/fine.php": "<?php\n",
+        })
+        self.context_for(repo)
+        self.assertEqual(set(self.plugins()), {"plugins/odd", "plugins/fine"})
+
+    def test_submodule_and_symlink_plugins_are_third_party_and_never_followed(self):
+        repo = self.make_wordpress({"plugins/own/own.php": "<?php\n", "elsewhere/x.txt": "x"})
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        git_fixtures.git(
+            repo, "update-index", "--add", "--cacheinfo", f"160000,{sha},plugins/sub-plugin"
+        )
+        (repo / "plugins" / "linked").symlink_to("../elsewhere")
+        git_fixtures.git(repo, "add", "plugins/linked")
+        git_fixtures.git(repo, "commit", "-q", "-m", "links")
+        self.context_for(repo)
+        found = self.plugins()
+        self.assertEqual(set(found), {"plugins/own", "plugins/sub-plugin", "plugins/linked"})
+        self.assertEqual(found["plugins/sub-plugin"]["why"], "sous-module")
+        self.assertEqual(found["plugins/linked"]["why"], "lien symbolique")
+        self.assertTrue(found["plugins/sub-plugin"]["third_party"])
+        self.assertTrue(found["plugins/linked"]["third_party"])
+        self.assertFalse(found["plugins/own"]["third_party"])
+
+    def test_the_commit_is_read_not_the_working_tree(self):
+        repo = self.make_wordpress({"plugins/acme-a/readme.txt": "Stable tag: 1.0\n"})
+        (repo / "plugins/acme-a/readme.txt").write_text("nothing", encoding="utf-8")
+        self.context_for(repo)
+        self.assertTrue(self.plugins()["plugins/acme-a"]["third_party"])
+
+    def test_a_stable_tag_alone_does_not_override_a_project_domain_uri(self):
+        header = "<?php\n/*\nPlugin Name: Own\nAuthor URI: https://www.example.org/\n*/\n"
+        repo = self.make_wordpress({
+            "plugins/own/readme.txt": "Stable tag: 0.1.0\n",
+            "plugins/own/own.php": header,
+            "plugins/scaffold/readme.txt": "Stable tag: 0.1.0\n",
+            "plugins/scaffold/scaffold.php": "<?php\n/*\nPlugin Name: Scaffold\n*/\n",
+        })
+        self.context_for(repo)
+        found = self.plugins()
+        self.assertFalse(found["plugins/own"]["third_party"])
+        self.assertTrue(found["plugins/scaffold"]["third_party"])
+
+
+if __name__ == "__main__":
+    unittest.main()
