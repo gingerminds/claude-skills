@@ -27,7 +27,7 @@ TOOL_ACTIONS = {
     "BDD": "CLI de l'application accessible en SSH",
     "Navigateur": "Claude in Chrome connecté",
     "HTTP": "accès à la préprod (réseau de l'agence ou identifiants)",
-    "CLI local": "runner du projet démarré",
+    "CLI local": "runner du projet démarré, ou boîte à outils 1.2 (docker pull)",
     "Comptes de test": "comptes de test",
     "Service externe": "préprod publique (à J0)",
     "Code": "repos présents et à jour",

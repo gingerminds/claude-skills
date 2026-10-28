@@ -64,5 +64,15 @@ class RepoHostDomainContract(unittest.TestCase):
         self.assertIn("the host of the repo", body)
 
 
+class CrawlDurationContract(unittest.TestCase):
+    def test_crawl_question_only_when_crawl_is_relaunched(self):
+        body = section((REFS / "diagnostic.md").read_text(encoding="utf-8"), "### Crawl duration")
+        self.assertIn(
+            "In a rerun or a recette, run `crawl-estimate` and ask the question only when `crawl` "
+            "is among the tools to relaunch",
+            body,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

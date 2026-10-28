@@ -64,7 +64,9 @@ class ConstantsTest(unittest.TestCase):
         self.assertEqual(
             TOOL_ACTIONS["HTTP"], "accès à la préprod (réseau de l'agence ou identifiants)"
         )
-        self.assertEqual(TOOL_ACTIONS["CLI local"], "runner du projet démarré")
+        self.assertEqual(
+            TOOL_ACTIONS["CLI local"], "runner du projet démarré, ou boîte à outils 1.2 (docker pull)"
+        )
         self.assertEqual(TOOL_ACTIONS["Comptes de test"], "comptes de test")
         self.assertEqual(TOOL_ACTIONS["Service externe"], "préprod publique (à J0)")
         self.assertEqual(TOOL_ACTIONS["Code"], "repos présents et à jour")
