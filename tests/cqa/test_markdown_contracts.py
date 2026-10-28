@@ -1414,12 +1414,30 @@ class StaleToolsContract(unittest.TestCase):
             self.assertIn("run the check yourself on the current files (runner, then host)", body)
             self.assertIn("else `unknown` with that reason", body)
 
-    def test_skill_never_relaunches_stylelint_or_deps_in_a_rerun(self):
+    def test_skill_offers_stylelint_and_deps_only_when_they_never_ran(self):
         sec10 = section(SKILL.read_text(encoding="utf-8"), "## 10.")
         sec11 = section(SKILL.read_text(encoding="utf-8"), "## 11.")
         for body in (sec10, sec11):
-            self.assertRegex(body, r"(?i)never (offer )?stylelint or deps")
+            self.assertIn("tools/<tool>/result.json", body)
+            self.assertIn("`agence_1_2`", body)
+            self.assertRegex(body, r"(?i)never (offer them )?when they already ran|never when they already ran")
             self.assertIn("audited_sha", body)
+            self.assertIn("current files", body)
+        step7 = sec10[sec10.index("\n7. "):sec10.index("\n8. ")]
+        self.assertIn("same rule as step 6", step7)
+
+    def test_rerun_asks_the_plugins_question_before_stylelint_or_deps(self):
+        sec10 = section(SKILL.read_text(encoding="utf-8"), "## 10.")
+        sec11 = section(SKILL.read_text(encoding="utf-8"), "## 11.")
+        for body in (sec10, sec11):
+            self.assertIn("`third_party_paths`", body)
+            self.assertIn("wp-plugins", body)
+            self.assertIn("Plugins maison à analyser ?", body)
+            self.assertIn("references/context.md", body)
+            self.assertIn("context \"$RUN\" --check", body)
+        step6 = sec10[sec10.index("\n6. "):sec10.index("\n7. ")]
+        self.assertIn("no plugin found: no question", step6.lower())
+        self.assertLess(step6.index("Plugins maison"), step6.index("Lancer cette relance ?"))
 
     def test_rerun_candidates_tools_are_already_relaunched(self):
         sec10 = section(SKILL.read_text(encoding="utf-8"), "## 10.")

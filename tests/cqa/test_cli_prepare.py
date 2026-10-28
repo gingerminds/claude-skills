@@ -2665,6 +2665,28 @@ class WpPluginsTest(RunDirCase):
         found = self.run_json(["wp-plugins", self.run_dir])["plugins"]
         return {entry["path"]: entry for entry in found}
 
+    def test_an_old_run_without_sites_lists_plugins_and_accepts_third_party_paths(self):
+        header = "<?php\n/*\nPlugin Name: {}\n*/\n"
+        repo = self.make_wordpress({
+            "wp-content/plugins/own/own.php": header.format("Own"),
+            "wp-content/plugins/seo-pack/readme.txt": "=== SEO ===\nStable tag: 1.4.2\n",
+            "wp-content/plugins/seo-pack/seo-pack.php": header.format("SEO"),
+        })
+        context = valid_context()
+        context["plugin_version"] = "0.10.0"
+        context["repos"] = [
+            dict(context["repos"][0], name="wordpress", path=str(repo), stack="wordpress")
+        ]
+        for key in ("sites", "mode", "notion_write"):
+            self.assertNotIn(key, context)
+        self.write_context(context)
+        found = self.plugins()
+        self.assertTrue(found["wp-content/plugins/seo-pack"]["third_party"])
+        self.assertFalse(found["wp-content/plugins/own"]["third_party"])
+        context["repos"][0]["third_party_paths"] = ["wp-content/plugins/seo-pack"]
+        code, report, _ = self.check(context)
+        self.assertEqual((code, report["errors"]), (0, []))
+
     def test_wp_plugins_proposes_third_party_and_custom(self):
         header = "<?php\n/*\nPlugin Name: {}\n{}*/\n"
         repo = self.make_wordpress({
