@@ -11,6 +11,7 @@ import functools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -61,6 +62,7 @@ _REF_KEY = re.compile(r"[0-9]+")
 _SPEC_NAME = re.compile(r"(?:openapi|swagger).*\.(?:ya?ml|json)")
 _SPEC_SKIPPED_DIRS = frozenset({"vendor", "node_modules", ".git"})
 _EXCLUDED_KEYS = ("ref", "page_id", "reason", "verdict", "detail")
+_MISSING_ROW = "constat manquant : "
 _MAX_COMMENT = 1500
 _EM_DASH = chr(0x2014)
 _RUN_FILES = {
@@ -178,6 +180,15 @@ def _register_audit(commands) -> None:
     sub.add_argument("lot_id", help="identifiant du lot (lots.json)")
     sub.add_argument(
         "--followup", action="store_true", help="valide findings/<lot>-followup.json"
+    )
+    sub.add_argument(
+        "--rerun",
+        type=_rerun_number,
+        metavar="NN",
+        help="valide findings/<lot>-rerun-NN.json sur les seules Réf qu'il contient",
+    )
+    _run_command(
+        commands, "snapshot", "copie findings/ et notion/ dans history/", _cmd_snapshot
     )
     sub = _run_command(commands, "plan", "plan d'écriture Notion (notion/plan.json)", _cmd_plan)
     sub.add_argument(
@@ -432,17 +443,46 @@ def _cmd_probes(args, services) -> int:
     return EXIT_OK
 
 
+def _rerun_number(text: str) -> int:
+    if not re.fullmatch(r"[0-9]+", text) or int(text) < 1:
+        raise argparse.ArgumentTypeError(f"« {text} » n'est pas un numéro de relance (1, 2, ...).")
+    return int(text)
+
+
+def _cmd_snapshot(args, services) -> int:
+    run_dir = args.run_dir.resolve()
+    if not (run_dir / "findings").is_dir():
+        raise UsageError("findings/ est introuvable : il n'y a rien à sauvegarder.")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+    target = run_dir / "history" / stamp
+    target.mkdir(parents=True)
+    for name in ("findings", "notion"):
+        if (run_dir / name).is_dir():
+            shutil.copytree(run_dir / name, target / name)
+    print(target)
+    return EXIT_OK
+
+
 def _cmd_validate(args, services) -> int:
+    if args.rerun is not None and args.followup:
+        raise UsageError("--rerun et --followup ne se combinent pas.")
     context = _checked_context(args.run_dir)
     lots = _read_lots(args.run_dir)["lots"]
     lot = next((item for item in lots if item["id"] == args.lot_id), None)
     if lot is None:
         known = ", ".join(item["id"] for item in lots) or "aucun"
         raise UsageError(f"Le lot « {args.lot_id} » est absent de lots.json (lots : {known}).")
-    found = _read_findings(args.run_dir, context, lot, followup=args.followup)
-    if found is None:
+    if args.rerun is not None:
+        name = f"{lot['id']}-rerun-{args.rerun:02d}.json"
+    else:
         name = _findings_name(lot["id"], args.followup)
+    found = _read_findings_file(args.run_dir, context, lot, name)
+    if found is None:
         errors = [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
+    elif args.rerun is not None:
+        errors = [error for error in found[1] if not error.startswith(_MISSING_ROW)]
+        if not found[0] and not errors:
+            errors = [f"findings/{name} ne contient aucun constat."]
     else:
         errors = found[1]
     _emit({"ok": not errors, "errors": errors})

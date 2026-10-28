@@ -2061,6 +2061,97 @@ class ApplyContractTest(AuditCase):
         self.assertEqual(client.writes, [])
 
 
+class RerunValidateAndSnapshotTest(AuditCase):
+    def write_rerun(self, run_dir, number, *refs, lot="code-performance"):
+        source = self.read(run_dir, f"findings/{lot}.json")
+        items = [item for item in source["findings"] if item["ref"] in refs]
+        self.write(run_dir, f"findings/{lot}-rerun-{number}.json", {"lot": lot, "findings": items})
+
+    def test_snapshot_copies_findings_and_notion(self):
+        run_dir = self.make_run()
+        self.write(run_dir, "notion/plan.json", {"summary": {}})
+        code, out, err = self.run_main(["snapshot", run_dir])
+        self.assertEqual(code, 0, err)
+        target = Path(out.strip())
+        self.assertEqual(target.parent, run_dir / "history")
+        self.assertRegex(target.name, r"^\d{4}-\d{2}-\d{2}-\d{6}$")
+        self.assertEqual(
+            (target / "findings" / "code-performance.json").read_text(encoding="utf-8"),
+            (run_dir / "findings" / "code-performance.json").read_text(encoding="utf-8"),
+        )
+        self.assertTrue((target / "notion" / "plan.json").is_file())
+        self.assertFalse((target / "context.json").exists())
+
+    def test_snapshot_without_notion_folder_and_twice(self):
+        run_dir = self.make_run()
+        first = Path(self.run_main(["snapshot", run_dir])[1].strip())
+        self.assertTrue((first / "findings").is_dir())
+        self.assertFalse((first / "notion").exists())
+        second = Path(self.run_main(["snapshot", run_dir])[1].strip())
+        self.assertNotEqual(first, second)
+        self.assertTrue((first / "findings").is_dir())
+
+    def test_snapshot_without_findings_is_a_usage_error(self):
+        run_dir = self.make_run()
+        shutil.rmtree(run_dir / "findings")
+        code, out, err = self.run_main(["snapshot", run_dir])
+        self.assertEqual(code, 2)
+        self.assertIn("findings", err)
+
+    def test_validate_rerun_checks_only_written_rows(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101)
+        code, out, err = self.run_main(["validate", run_dir, "code-performance", "--rerun", "1"])
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(json.loads(out), {"ok": True, "errors": []})
+
+    def test_validate_rerun_still_reports_invalid_rows_and_foreign_refs(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101)
+        self.edit(
+            run_dir,
+            "findings/code-performance-rerun-01.json",
+            lambda doc: doc["findings"][0].update(verdict="excellent"),
+        )
+        errors = self.rerun_errors(run_dir, 1)
+        self.assertTrue(any("CQ-101" in error and "excellent" in error for error in errors))
+        self.write_rerun(run_dir, "02", 101)
+        self.edit(
+            run_dir,
+            "findings/code-performance-rerun-02.json",
+            lambda doc: doc["findings"][0].update(ref=103),
+        )
+        self.assertTrue(any("hors du lot" in e for e in self.rerun_errors(run_dir, 2)))
+
+    def rerun_errors(self, run_dir, number):
+        code, out, err = self.run_main(
+            ["validate", run_dir, "code-performance", "--rerun", number]
+        )
+        self.assertEqual(code, 6, out + err)
+        return json.loads(out)["errors"]
+
+    def test_validate_rerun_missing_or_empty_file(self):
+        run_dir = self.make_run()
+        errors = self.rerun_errors(run_dir, 3)
+        self.assertIn("code-performance-rerun-03.json", errors[0])
+        self.write(run_dir, "findings/code-performance-rerun-03.json", {"lot": "x", "findings": []})
+        self.assertTrue(any("aucun constat" in error for error in self.rerun_errors(run_dir, 3)))
+
+    def test_validate_rerun_rejects_a_bad_number_and_followup_together(self):
+        run_dir = self.make_run()
+        for argv in (["--rerun", "0"], ["--rerun", "abc"], ["--rerun", "1", "--followup"]):
+            code, out, err = self.run_main(["validate", run_dir, "code-performance", *argv])
+            self.assertEqual(code, 2, argv)
+
+    def test_plan_reads_the_rerun_file_after_validation(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101)
+        self.assertEqual(
+            json.loads(self.run_main(["validate", run_dir, "code-performance", "--rerun", "01"])[1]),
+            {"ok": True, "errors": []},
+        )
+
+
 class RegistrationTest(AuditCase):
     def test_every_command_is_registered(self):
         for name in (
@@ -2077,6 +2168,7 @@ class RegistrationTest(AuditCase):
             "assign",
             "assign-plan",
             "rerun-candidates",
+            "snapshot",
         ):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)

@@ -10,7 +10,7 @@ You evaluate one lot of rows of a project's quality checklist and write one find
 
 ## Dispatch
 
-You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your instructions.` Extra sentences may follow, for example "SSH serveur indisponible": apply them.
+You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your instructions.`, or, for a rerun, `Run dir: <path>. Lot: <lot_id>. Follow-up: no. Rerun: <NN>. Rows: CQ-3, CQ-12. Follow your instructions.` (see Rerun). Extra sentences may follow, for example "SSH serveur indisponible": apply them.
 
 - Every run file below is relative to the run directory.
 - The plugin root is `${CLAUDE_PLUGIN_ROOT}`. Paths can contain spaces: always quote them in Bash.
@@ -23,7 +23,7 @@ You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your i
 - Never start the project runner, and never start, stop, build or restart a container or a service, even where `/gm:security` says to. If the runner is not up, run the read-only audits on the host (`composer audit --locked`, `npm audit` against the lockfile), or give `unknown`.
 - Before a `make` target, read the target in the Makefile. Run only read-only targets (lint without fix, audit); never a target that fixes, installs, migrates, builds or starts services.
 - Never send an authenticated request, and never a method other than GET or HEAD. With curl, never use `-u`, `--user`, `-b`, `-c`, `-d`, `--data*`, `-F`, `-T`, an `Authorization` or `Cookie` header, or `-X` with another method.
-- Never request a URL whose path contains `.php` (GET, HEAD or navigation): a request executes the script on the server. Only the public entry points of the application are allowed: `/index.php`, `wp-login.php`, `wp-admin/admin-ajax.php` without parameter, and the pages the application already serves through its routes. That PHP runs in an uploads folder is proved by the server configuration (nginx or Apache vhost, `.htaccess`) read through the SSH guard, never by a request; without that access the part is `unknown`. Never ask for such a URL in `needs_probes` either: the toolbox sends those requests, and only the three entry points above pass `validate`.
+- Never request a URL whose path contains `.php` (GET, HEAD or navigation): a request executes the script on the server. Only the public entry points of the application are allowed, under the path `<path>` it is served at (the path of `target` in `context.json`: empty at the root, `/blog` for a site under `/blog`): `<path>/index.php`, `<path>/wp-login.php` and `<path>/wp-admin/admin-ajax.php` without parameter, front-controller routes `<path>/index.php/<route>`, and the pages the application already serves through its routes. At the root that gives `/index.php`, `/wp-login.php` and `/wp-admin/admin-ajax.php`; root `/index.php` is refused under a sub-path. That PHP runs in an uploads folder is proved by the server configuration (nginx or Apache vhost, `.htaccess`) read through the SSH guard, never by a request; without that access the part is `unknown`. Never ask for such a URL in `needs_probes` either: the toolbox sends those requests, and only the entry points above pass `validate`.
 - Never print a secret. Never run `env`, `printenv` or `set`; never print `NOTION_TOKEN` or `GM_AUDIT_AUTH_*`. In a repo, never print the values of a secret-bearing file (`.env*`, `auth.json`, `wp-config.php`, `settings*.php`, `*.key`, `*.pem`): print key names or line counts only, for example `grep -oE '^[A-Z0-9_]+=' .env`.
 - Never write a secret in a finding or a fact.
 - Never run a command on a server except through `${CLAUDE_PLUGIN_ROOT}/scripts/cqa_ssh_ro.py`. Never call `ssh`, `scp`, `rsync` or a database client yourself.
@@ -190,8 +190,16 @@ With `Follow-up: yes`:
 4. Copy unchanged the findings that asked for no probe. They keep their `tool_dates`; for a finding you judge again, add `http-followup` to `tool_dates` with the `started_at` of `tools/http-followup/result.json`. Ask for no new probe: there is no second follow-up.
 5. Write `findings/<lot>-followup.json`: a complete lot document, with one finding for every row of the lot. Never modify `findings/<lot>.json`.
 
+## Rerun
+
+With `Rerun: <NN>` and `Rows: ...`:
+
+1. Evaluate only those rows, as in a first round: same fiches, same rules, with the current state of the code, the tools and the server. Read `findings/<lot>.json` (and the follow-up or earlier reruns) only to know what was found before and why it may have changed; never copy a previous verdict without checking it again.
+2. Write `findings/<lot>-rerun-<NN>.json`: `{"lot": "<lot>", "findings": [...]}` with one finding for each listed row and only those rows. Fill `tool_dates` from the tools you read now. Never modify `findings/<lot>.json`, the follow-up file or an earlier rerun file.
+3. Check it with `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cqa_plan.py" validate "<run dir>" "<lot>" --rerun <NN>`: it checks only the rows written. Ask for no probe the toolbox has not already answered: a rerun has no follow-up.
+
 ## Output
 
-1. Write `findings/<lot>.json` (or `findings/<lot>-followup.json` in a follow-up), with one finding for every row of the lot. The format is `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/schemas/finding.schema.json`; the rules for `divergence`, `needs_probes` and the verdicts are in `verdicts.md`. In every finding, fill `tool_dates` with one entry per tool whose `result.json` or `summary.json` you read: `{"<tool>": "<started_at>"}`, where the date is the `started_at` of its `result.json`, copied as is (for example `{"crawl": "2026-10-27T21:15:05.068Z"}`). Use `{}` when you read no tool.
+1. Write `findings/<lot>.json` (or `findings/<lot>-followup.json` in a follow-up, `findings/<lot>-rerun-<NN>.json` in a rerun), with one finding for every row of the lot (a rerun: only the rows listed). The format is `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/schemas/finding.schema.json`; the rules for `divergence`, `needs_probes` and the verdicts are in `verdicts.md`. In every finding, fill `tool_dates` with one entry per tool whose `result.json` or `summary.json` you read: `{"<tool>": "<started_at>"}`, where the date is the `started_at` of its `result.json`, copied as is (for example `{"crawl": "2026-10-27T21:15:05.068Z"}`). Use `{}` when you read no tool.
 2. Check it: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/cqa_plan.py" validate "<run dir>" "<lot>"`, with `--followup` for the follow-up file. It prints `{"ok": ..., "errors": [...]}`. Fix every error and check again, twice at most.
 3. Return at most 10 lines, in French: the file written, the count per verdict, the rows still waiting for probes, the commands refused by the guard, the tools missing or failed, the validation errors left. Never a secret.

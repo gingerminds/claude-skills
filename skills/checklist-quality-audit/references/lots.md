@@ -95,6 +95,7 @@ Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no. Follow your instructions. Plug
 - `Plugin root:` always: the absolute folder two levels above this skill (the parent of `scripts/`).
 - `server` lot without "SSH serveur": add « SSH serveur indisponible. »; without "BDD": « BDD indisponible. ».
 - Browser lot given to `gm:cqa-auditor` (no "Navigateur"): add « Navigateur indisponible : évaluer ce que le code et les outils permettent, unknown pour le reste. »
+- Rerun (SKILL.md, section 10): replace `Follow-up: no.` by `Follow-up: no. Rerun: <NN>. Rows: CQ-3, CQ-12.` (the kept rows of that lot only). The agent writes `findings/<lot_id>-rerun-<NN>.json` with those rows only; validate it with `validate "$RUN" <lot_id> --rerun <NN>`.
 - Relaunch after validation errors: add « Corriger ces erreurs de validation : <erreurs, séparées par des points-virgules>. »
 - Never add a secret, a credential or a token to a prompt.
 

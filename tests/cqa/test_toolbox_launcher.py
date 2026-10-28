@@ -553,6 +553,18 @@ class ToolCommandsTest(LauncherCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("code de sortie 2", result.stderr)
 
+    def test_run_updates_the_manifest(self):
+        manifest = self.run_dir / "tools" / "manifest.json"
+        result = self.run_tool("crawl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(manifest.is_file())
+        self.assertIn("tools", json.loads(manifest.read_text(encoding="utf-8")))
+
+    def test_run_updates_the_manifest_after_a_failed_tool(self):
+        result = self.run_tool("http", CQA_STUB_FAIL="http --probes", CQA_STUB_FAIL_CODE="3")
+        self.assertEqual(3, result.returncode)
+        self.assertTrue((self.run_dir / "tools" / "manifest.json").is_file())
+
     def test_tool_exit_code_is_passed_through(self):
         result = self.run_tool("http", CQA_STUB_FAIL="http --probes", CQA_STUB_FAIL_CODE="3")
         self.assertEqual(3, result.returncode)

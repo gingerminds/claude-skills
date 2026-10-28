@@ -10,7 +10,7 @@ You evaluate one browser lot of a project's quality checklist in the lead's Chro
 
 ## Dispatch
 
-You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your instructions.` Extra sentences may follow: apply them.
+You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your instructions.`, or, for a rerun, `Run dir: <path>. Lot: <lot_id>. Follow-up: no. Rerun: <NN>. Rows: CQ-3, CQ-12. Follow your instructions.` (see Rerun). Extra sentences may follow: apply them.
 
 - Every run file below is relative to the run directory.
 - The plugin root is `${CLAUDE_PLUGIN_ROOT}`.
@@ -26,7 +26,7 @@ You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your i
 
 - Never submit a form. Never press Enter in a field. A row that needs a submitted form gets `ok_human` or `unknown`, with the test to run in `human_check`.
 - Never click an element or open a URL that changes state, in the front as in the back-office: submit, send, save, delete, trash, publish, unpublish, subscribe, add to cart, log in, log out, run cron, clear cache, and any link whose URL carries such an action (`/delete`, `/logout`, `/user/logout`, `/cron`, `action=trash`, `action=logout`, a token parameter). Read its `href` instead.
-- Never request a URL whose path contains `.php` (GET, HEAD or navigation): a request executes the script on the server. Only the public entry points of the application are allowed: `/index.php`, `wp-login.php`, `wp-admin/admin-ajax.php` without parameter, and the pages the application already serves through its routes. That PHP runs in an uploads folder is proved by the server configuration (nginx or Apache vhost, `.htaccess`) read through the SSH guard, never by a request; without that access the part is `unknown`. Never ask for such a URL in `needs_probes` either: the toolbox sends those requests, and only the three entry points above pass `validate`.
+- Never request a URL whose path contains `.php` (GET, HEAD or navigation): a request executes the script on the server. Only the public entry points of the application are allowed, under the path `<path>` it is served at (the path of `target` in `context.json`: empty at the root, `/blog` for a site under `/blog`): `<path>/index.php`, `<path>/wp-login.php` and `<path>/wp-admin/admin-ajax.php` without parameter, front-controller routes `<path>/index.php/<route>`, and the pages the application already serves through its routes. At the root that gives `/index.php`, `/wp-login.php` and `/wp-admin/admin-ajax.php`; root `/index.php` is refused under a sub-path. That PHP runs in an uploads folder is proved by the server configuration (nginx or Apache vhost, `.htaccess`) read through the SSH guard, never by a request; without that access the part is `unknown`. Never ask for such a URL in `needs_probes` either: the toolbox sends those requests, and only the entry points above pass `validate`.
 - Never type a password, and never type anything: the `type` action is forbidden.
 - Never open anything but new tabs. Call `tabs_context_mcp` once (with `createIfEmpty: true`), create one tab of your own with `tabs_create_mcp` for the whole lot, then always pass its `tabId`. Never call `navigate` without `tabId`.
 - Close only the tabs you created, at the end of the lot, with `tabs_close_mcp`.
@@ -100,8 +100,16 @@ With `Follow-up: yes`:
 4. Copy unchanged the findings that asked for no probe. They keep their `tool_dates`; for a finding you judge again, add `http-followup` to `tool_dates` with the `started_at` of `tools/http-followup/result.json`. Ask for no new probe: there is no second follow-up.
 5. Write `findings/<lot>-followup.json`: a complete lot document, with one finding for every row of the lot. Never modify `findings/<lot>.json`.
 
+## Rerun
+
+With `Rerun: <NN>` and `Rows: ...`:
+
+1. Evaluate only those rows, as in a first round: same templates, same rules, with the current state of the pages and the tools. Read `findings/<lot>.json` (and the follow-up or earlier reruns) only to know what was found before and why it may have changed; never copy a previous verdict without looking again.
+2. Write `findings/<lot>-rerun-<NN>.json`: `{"lot": "<lot>", "findings": [...]}` with one finding for each listed row and only those rows. Fill `tool_dates` from the tools you read now. Never modify `findings/<lot>.json`, the follow-up file or an earlier rerun file.
+3. You cannot run the validator: the orchestrator runs `validate --rerun <NN>`. Check yourself that every listed ref appears once and that no other ref is written. Ask for no probe the toolbox has not already answered: a rerun has no follow-up.
+
 ## Output
 
-1. Write `findings/<lot>.json` (or `findings/<lot>-followup.json` in a follow-up), with one finding for every row of the lot. The format is `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/schemas/finding.schema.json`; the rules for `divergence`, `needs_probes` and the verdicts are in `verdicts.md`. In every finding, fill `tool_dates` with one entry per tool whose `result.json` or `summary.json` you read: `{"<tool>": "<started_at>"}`, where the date is the `started_at` of its `result.json`, copied as is (for example `{"crawl": "2026-10-27T21:15:05.068Z"}`). Use `{}` when you read no tool.
+1. Write `findings/<lot>.json` (or `findings/<lot>-followup.json` in a follow-up, `findings/<lot>-rerun-<NN>.json` in a rerun), with one finding for every row of the lot (a rerun: only the rows listed). The format is `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/schemas/finding.schema.json`; the rules for `divergence`, `needs_probes` and the verdicts are in `verdicts.md`. In every finding, fill `tool_dates` with one entry per tool whose `result.json` or `summary.json` you read: `{"<tool>": "<started_at>"}`, where the date is the `started_at` of its `result.json`, copied as is (for example `{"crawl": "2026-10-27T21:15:05.068Z"}`). Use `{}` when you read no tool.
 2. You cannot run the validator: the orchestrator does. Check yourself that the JSON is valid, that every ref of the lot appears once, that every finding has its nine keys, and that the texts stay within their lengths.
 3. Return at most 10 lines, in French: the file written, the count per verdict, the rows still waiting for probes, the pages that could not be reached, the logins missing. Never a secret.

@@ -31,7 +31,7 @@ EXPECTED_REFERENCES = {
     "server.md",
     "assign.md",
 }
-ARGUMENT_HINT = '"[diagnostic | assign] [--phase \\"MEL J0\\"] [--dry-run]"'
+ARGUMENT_HINT = '"[diagnostic | assign | rerun] [--phase \\"MEL J0\\"] [--dry-run]"'
 MAX_DESCRIPTION = 1536
 SCRIPTS_LINE = 'S="${CLAUDE_SKILL_DIR}/../../scripts"'
 
@@ -342,6 +342,41 @@ class SkillTest(unittest.TestCase):
         self.assertIn("every other stop of the audit", skill)
         self.assertGreaterEqual(len(re.findall(r"cqa-keepawake\.sh\"? stop \"\$RUN\"", skill)), 5)
 
+    def test_rerun_argument_and_section(self):
+        text = _text(SKILL)
+        self.assertIn("- `rerun`:", _section(text, "2. Arguments"))
+        section = _section(text, "10. Rerun")
+        for needle in (
+            'cqa_plan.py" snapshot "$RUN"',
+            'cqa_plan.py" rerun-candidates "$RUN"',
+            "--refs",
+            'cqa_notion.py" rows "$RUN"',
+            'cqa-toolbox.sh" run "$RUN" <tool>',
+            'cqa_plan.py" validate "$RUN" <lot_id> --rerun <NN>',
+            'cqa_plan.py" plan "$RUN"',
+            "Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no. Rerun: <NN>. Rows: CQ-3, CQ-12. Follow your instructions.",
+            "section 7",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+
+    def test_rerun_presents_the_candidates_before_any_dispatch(self):
+        section = _section(_text(SKILL), "10. Rerun")
+        candidates = section.index("rerun-candidates")
+        presentation = section.index("« Lancer cette relance ? »")
+        snapshot = section.index("cqa_plan.py\" snapshot")
+        toolbox = section.index("cqa-toolbox.sh")
+        dispatch = section.index("Rerun: <NN>")
+        self.assertLess(snapshot, candidates)
+        self.assertLess(candidates, presentation)
+        self.assertLess(presentation, toolbox)
+        self.assertLess(presentation, dispatch)
+
+    def test_rerun_dispatch_is_documented_in_lots_reference(self):
+        text = _text(REFERENCES / "lots.md")
+        self.assertIn("Rerun: <NN>. Rows: CQ-3, CQ-12.", text)
+        self.assertIn("-rerun-<NN>.json", text)
+
     def test_toolbox_credentials_come_from_the_session(self):
         for path in _skill_files():
             text = _text(path)
@@ -429,6 +464,30 @@ class AgentsTest(unittest.TestCase):
                 self.assertIn("`started_at` of its `result.json`", text)
                 self.assertIn("keep their `tool_dates`", text)
                 self.assertIn("add `http-followup` to `tool_dates`", text)
+
+    def test_agents_evaluate_only_the_rows_of_a_rerun(self):
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            with self.subTest(agent=path.name):
+                self.assertIn("Rerun: <NN>. Rows: CQ-3, CQ-12.", text)
+                section = _section(text, "Rerun")
+                self.assertIn("only those rows", section)
+                self.assertIn("findings/<lot>-rerun-<NN>.json", section)
+                self.assertIn("Never modify `findings/<lot>.json`", section)
+
+    def test_agents_describe_the_php_entry_points_under_a_sub_path(self):
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            with self.subTest(agent=path.name):
+                for needle in (
+                    "<path>/index.php",
+                    "<path>/wp-login.php",
+                    "<path>/wp-admin/admin-ajax.php",
+                    "<path>/index.php/<route>",
+                    "root `/index.php` is refused under a sub-path",
+                ):
+                    self.assertIn(needle, text)
+                self.assertNotIn("only the three entry points above pass `validate`", text)
 
     def test_followup_writes_a_complete_lot_document(self):
         for path in (AUDITOR, BROWSER):

@@ -1,7 +1,7 @@
 ---
 name: checklist-quality-audit
 description: Runs the agency pre-launch (PRE-MEL) quality checklist audit on a project. Checks the workstation, verifies that the preprod runs the audited code, evaluates every row of the project's Notion checklist copy from the code, the preprod, a Docker toolbox and the browser, then writes statuses and evidence comments to that copy and splits the remaining rows between the devs. Use when the lead dev asks to run the quality checklist or a PRE-MEL audit, or invokes /gm:checklist-quality-audit or /gm:cqa.
-argument-hint: "[diagnostic | assign] [--phase \"MEL J0\"] [--dry-run]"
+argument-hint: "[diagnostic | assign | rerun] [--phase \"MEL J0\"] [--dry-run]"
 disable-model-invocation: true
 ---
 
@@ -33,6 +33,7 @@ Arguments: `$ARGUMENTS` (through the `/gm:cqa` alias, the alias gives them).
 - None: full audit, sections 3 to 8.
 - `diagnostic`: sections 3 to 5, then stop once the coverage is shown. Nothing is written to Notion.
 - `assign`: go to section 9.
+- `rerun`: go to section 10. Re-evaluates a few rows of an existing run, not the whole audit.
 - `--phase "<phase>"`: audit only the rows of that phase (`Cadrage`, `Build`, `Recette J-30`, `MEL J0`, `Post-MEL J+7`), stored as `phase_filter`. With `MEL J0` or `Post-MEL J+7`, section 4 asks whether the prod is live: the audit targets the prod only then.
 - `--dry-run`: everything except the Notion writes, stored as `dry_run`. Section 7 asks nothing and section 8 skips its Notion steps (apply, page comment); the synthesis and the final scan still run.
 - Anything else: show `/gm:checklist-quality-audit [diagnostic | assign] [--phase "MEL J0"] [--dry-run]` and stop.
@@ -219,6 +220,8 @@ Dispatch line, exactly, then the extra sentences of `references/lots.md`:
 Run dir: <run_dir>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your instructions.
 ```
 
+For a rerun (section 10) the line carries the rerun number and the rows instead.
+
 ## 7. Plan and confirmation
 
 Read `references/verdicts.md`, section "For the orchestrator".
@@ -359,6 +362,75 @@ python3 "$S/cqa_notion.py" apply "$RUN" --plan notion/assign-plan.json
 ```
 
 Exit codes as in section 8, step 1 (prefix `GM_AUDIT_AUTH_PASS` the same way). End with « <n> lignes assignées. »
+
+## 10. Rerun
+
+Re-evaluates a few rows of a finished run after something changed (a cause fixed, a tool rerun, code modified), without redoing the audit. The imperative rules of section 1 and the recheck before each wave (section 6) hold. One Bash call per step.
+
+1. Pick the run: `cqa_plan.py project "$PWD"`, then `cqa_plan.py runs "<slug>"`. Take the most recent run whose `lots` and `plan` are true. Ask « Utiliser le run <run_id> ? » with « Oui » and « Choisir un autre run » (then list the runs with their date and ask which one). No such run: say « Aucun run à relancer : lancez d'abord /gm:checklist-quality-audit. » and stop. Then check the context as in section 3, steps 3 and 4 (`context "$RUN" --check`, Basic Auth credentials asked again if `target.access` is `basic_auth`).
+2. Read the Notion copy again, as the lead left it (statuses and comments):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_notion.py" rows "$RUN"
+```
+
+3. Run the diagnostic of section 5 for the tools only (toolbox, Chrome, SSH), as it may have changed since the audit, and update `available_tools` in `context.json`.
+4. Keep what the run holds before anything changes. It copies `findings/` and `notion/` into `history/<AAAA-MM-JJ-HHMMSS>/` and prints the path:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" snapshot "$RUN"
+```
+
+5. List the rows worth evaluating again:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" rerun-candidates "$RUN"
+```
+
+It prints `{"candidates", "lots", "tools", "estimate_min", "notes"}`. Each candidate has a `ref`, its `lot` (null when no lot can take the row: it cannot be rerun, say so), its `reasons` (`cause_levee`, `outil_relance`, `code_modifie`, `lead`) and their `details`. Show the `notes` too.
+
+6. Present before anything is dispatched, in French: the rows grouped by reason (ref, title, detail), the lots and the tools that would run, and the estimated time (`estimate_min` minutes). Ask « Lancer cette relance ? » with « Lancer », « Modifier la liste » and « Annuler ». « Modifier la liste »: the lead removes refs (drop them from the list) or adds some in « Autre » (run the command again with `--refs CQ-12,CQ-40`, which adds them with the reason `lead`), then present again. « Annuler »: stop, nothing is written to Notion (the snapshot stays). Number the rerun `NN`: the highest number of the `findings/*-rerun-*.json` files plus one, on two digits (`01` when there is none).
+7. Start the workstation inhibitor as at the beginning of section 6 and stop it on every path that ends the rerun. Then relaunch the tools of `tools` that the lead kept (one call each, credentials inline only when the session holds the Basic Auth credentials). Each call rewrites `tools/manifest.json`. Toolbox not ready: `cqa_plan.py skip` for those tools and say so.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' bash "$S/cqa-toolbox.sh" run "$RUN" <tool>
+```
+
+8. Dispatch the lots that still have rows, with the same agent types, the same limits and the same fallbacks as section 6 (`references/lots.md`, section 3). The line, exactly, with the kept rows of that lot only:
+
+```
+Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no. Rerun: <NN>. Rows: CQ-3, CQ-12. Follow your instructions.
+```
+
+The agent evaluates only those rows and writes `findings/<lot_id>-rerun-<NN>.json` with those rows only.
+
+9. After each lot:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" validate "$RUN" <lot_id> --rerun <NN>
+```
+
+It checks only the rows written in the file. Errors: relaunch that agent once with the errors (`references/lots.md`, section 5); then leave it: a row without a valid new finding keeps its previous one.
+
+10. Build the plan, which takes the latest finding of each row, then go through section 7 and section 8 as for an audit (confirmation, writing, synthesis, scan, `done.json`):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" plan "$RUN"
+```
+
+11. End with the rows whose verdict changed (before, from the snapshot, and after) and the rows still unchanged, in French.
 
 ## Exit codes
 

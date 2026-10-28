@@ -358,7 +358,16 @@ cmd_run() {
   fi
   require_docker
   load_run "$1"
-  run_tool "$2" "$followup"
+  local rc=0 manifest_rc=0
+  run_tool "$2" "$followup" || rc=$?
+  python3 "$S/cqa_plan.py" manifest "$RUN_DIR" >/dev/null || manifest_rc=$?
+  if [ "$manifest_rc" -ne 0 ]; then
+    say "Le manifeste des résultats n'a pas pu être écrit."
+  fi
+  if [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
+  return "$manifest_rc"
 }
 
 cmd_all() {
