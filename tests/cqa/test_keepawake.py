@@ -174,7 +174,7 @@ class KeepawakeTest(unittest.TestCase):
         self.assertFalse(self.pid_file.exists())
 
     def test_keepawake_without_setsid_still_kills_the_group(self):
-        (self.bin / "setsid").unlink()
+        (self.bin / "setsid").unlink(missing_ok=True)
         self.stub("systemd-inhibit", INHIBITOR_STUB)
         result = self.keepawake("start", str(self.run_dir))
         self.assertEqual(result.returncode, 0, result.stderr)
