@@ -96,12 +96,17 @@ def rerun_candidates(
     excluded = [entry for entry in lots_document.get("excluded") or [] if isinstance(entry, dict)]
     latest = latest_findings(run_dir, lots, read)
     notes: list[str] = []
+    if not isinstance(lots_document.get("lots"), list):
+        notes.append(
+            "lots.json est introuvable ou illisible : aucune ligne à évaluer, "
+            "lancer d'abord cqa_plan.py lots."
+        )
     found: dict[int, dict] = {}
 
     def add(ref: int, lot_id: Optional[str], reason: str, detail: str) -> None:
-        entry = found.setdefault(ref, {"ref": ref, "lot": lot_id, "reasons": [], "details": []})
-        entry["reasons"].append(reason)
-        entry["details"].append(detail)
+        entry = found.setdefault(ref, {"ref": ref, "lot": lot_id, "pairs": []})
+        if (reason, detail) not in entry["pairs"]:
+            entry["pairs"].append((reason, detail))
 
     lot_of = {ref: lot["id"] for lot in lots for ref in lot.get("refs") or []}
     available = set(context.get("available_tools") or [])
@@ -137,6 +142,11 @@ def rerun_candidates(
     for ref in sorted(set(extra_refs)):
         if ref in known:
             add(ref, lot_of.get(ref), "lead", "ligne demandée par le lead")
+            if ref not in lot_of:
+                notes.append(
+                    f"{ref_label(ref)} ne peut pas être relancée dans ce run : "
+                    "elle n'appartient à aucun lot, il faut un nouveau run."
+                )
         else:
             notes.append(f"{ref_label(ref)} ne figure dans aucune ligne du run : ignorée.")
 
@@ -144,8 +154,8 @@ def rerun_candidates(
     candidates = []
     for ref in sorted(found):
         entry = found[ref]
-        pairs = sorted(zip(entry["reasons"], entry["details"]), key=lambda p: order[p[0]])
-        entry["reasons"] = [reason for reason, _ in pairs]
+        pairs = sorted(entry.pop("pairs"), key=lambda pair: order[pair[0]])
+        entry["reasons"] = list(dict.fromkeys(reason for reason, _ in pairs))
         entry["details"] = [detail for _, detail in pairs]
         candidates.append(entry)
 
