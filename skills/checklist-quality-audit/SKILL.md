@@ -200,7 +200,7 @@ RUN="<run_dir>"
 GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' bash "$S/cqa-toolbox.sh" all "$RUN"
 ```
 
-3. Dispatch the first lots of step 4, then the login pause: open the preprod (and the back-office) in new Chrome tabs and wait for the lead to log in (`references/browser.md`). Skip the pause when "Navigateur" is unavailable. In autonomous mode the lots that need a session (back-office, test accounts) go after all the other lots, and the login pause happens last, at the end of the audit (section 8, step 5): there is no pause here, the session lots run without a session (their rows that need one end `unknown`) and one `--kind login` entry asks the lead to log in later (below).
+3. Dispatch the first lots of step 4, then the login pause: open the preprod (and the back-office) in new Chrome tabs and wait for the lead to log in (`references/browser.md`). Skip the pause when "Navigateur" is unavailable. In autonomous mode the lots that need a session (back-office, test accounts) are held: they are not dispatched during the run, and there is no login pause here: the login pause happens last, at the end of the audit (section 8, step 5), and the held lots are dispatched then. Once every other lot is validated, record one `--kind login` entry (below) with the refs of the held lots.
 4. The `server` lot (always `gm:cqa-auditor`; say in the dispatch when "SSH serveur" or "BDD" is unavailable) and the `code` lots whose `needs_toolbox` is false, 4 sub-agents at most at once.
 5. The browser lots, one at a time, once the `server` lot is done: `gm:cqa-browser`. A return that starts with `CQA_BROWSER_UNAVAILABLE:` switches to the fallback: read `${CLAUDE_SKILL_DIR}/../../agents/cqa-browser.md` and run it yourself in this session, template by template, for this lot and the next browser lots. "Navigateur" unavailable from the start: give the browser lots to `gm:cqa-auditor`.
 6. Once the toolbox has finished, the `-outils` lots (same agents, same limits).
@@ -228,7 +228,7 @@ python3 "$S/cqa_plan.py" defer "$RUN" --kind <login|ssh_refused|gap|question> --
 
 - `--kind ssh_refused`: a command refused by the guard (exit 4) or needing the lead's confirmation. Never run it. The rows concerned stay `unknown`.
 - `--kind gap`: a deviation found on the way (preprod behind `develop`, access that changed at the check before a wave, SSH that fails): note it, launch the wave anyway with what is still possible; the rows concerned may end `unknown` and the synthesis remarks say so. Chrome disconnected at `tabs_context_mcp`: `--kind gap`, and the browser lots go to `gm:cqa-auditor` as with « Continuer sans navigateur ».
-- `--kind login`: the login pause, recorded once (preprod and back-office in the same entry) with the rows of the session lots left `unknown` for lack of a session; the lead logs in at the end and those rows are rerun (section 8, step 5).
+- `--kind login`: the login pause, recorded once (preprod and back-office in the same entry) with the refs of the held session lots. Those lots have no finding yet: they are dispatched at the end of the audit as normal first-round lots (section 8, step 5), after the lead's login or, if they decline, without a session.
 - `--kind question`: any other question the orchestrator would have asked.
 - `--detail` is short, in French, without any secret; `--refs` lists the rows left `unknown` because of it, when known.
 
@@ -329,9 +329,9 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" deferred "$RUN"
 ```
 
-It prints `{"items"}`, the open entries (`id`, `kind`, `detail`, `refs`). Go through them with the lead, one question at a time, in French, with AskUserQuestion:
+It prints `{"items"}`, the open entries (`id`, `kind`, `detail`, `refs`). Go through them with the lead, one question at a time, in French, with AskUserQuestion. The `login` entry comes first, then the others:
 
-- `login`: « Connectez-vous dans Chrome (onglets ouverts), puis répondez. » with « C'est fait » and « Passer ». The rows stay `unknown` on « Passer ».
+- `login`: open the preprod (and the back-office) in new Chrome tabs (`references/browser.md`), then ask « Connectez-vous dans Chrome (onglets ouverts), puis répondez. » with « C'est fait » and « Passer ». Then dispatch the held session lots as normal first-round lots (`Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no.`, no `Rerun:`), validate each with `cqa_plan.py validate "$RUN" <lot_id>`, relaunch once on errors as in section 6, step 7. On « Passer », or when the lead cannot log in, dispatch them the same way without a session: the agents write `unknown` with the reason, so every row still has a finding. Close the tabs afterwards.
 - `ssh_refused`: as `references/server.md` (exit 4): the command, its impact, « Passer » and the lead's result in « Autre ». The command is never run by the skill; a result the lead gives is a short fact for the dispatch, never raw output in the run directory.
 - `gap`: say what was noted and ask « Relancer les lignes concernées » or « Passer ».
 - `question`: ask the question as recorded.
@@ -344,7 +344,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" deferred "$RUN" --resolve <id>
 ```
 
-Then rerun automatically, without presenting the list to the lead, the rows whose entry was answered (« C'est fait », a result, « Relancer »): the `refs` of those entries, for a `login` entry, the rows it lists. Use the mechanism of section 10, steps 4 and 7 to 10, in this order, with those rows in `rerun-candidates --refs` (a row without a lot is dropped, say so).
+Then rerun automatically, without presenting the list to the lead, the rows whose entry was answered (« C'est fait », a result, « Relancer »): the `refs` of those entries, none for a `login` entry: its held lots were dispatched as first-round lots, so go straight to the plan. Use the mechanism of section 10, steps 4 and 7 to 10, in this order, with those rows in `rerun-candidates --refs` (a row without a lot is dropped, say so).
 
 1. Open the rerun, relaunch the tools that need it (section 10, step 7):
 
