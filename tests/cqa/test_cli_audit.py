@@ -11,6 +11,7 @@ from urllib.parse import urljoin, urlsplit
 from cqa import probes, report
 from cqa.notion_write import apply_plan, validate_plan
 from cqa.plan import operation_key
+from tests.cqa.fakes import apply_report
 from tests.cqa import test_cli_prepare as prepare
 from tests.cqa.test_findings import (
     APP_PATH,
@@ -2034,7 +2035,7 @@ class ApplyContractTest(AuditCase):
         run_dir = self.make_run()
         self.run_json(["plan", run_dir])
         plan, result, client = self.apply(run_dir, "notion/plan.json")
-        self.assertEqual(result, {"done": 8, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []})
+        self.assertEqual(result, apply_report(8, 0))
         self.assertEqual(len(client.writes), 8)
 
     def test_assign_plan_is_applicable(self):
@@ -2042,7 +2043,7 @@ class ApplyContractTest(AuditCase):
         self.run_json(["assign", run_dir])
         self.run_json(["assign-plan", run_dir])
         plan, result, client = self.apply(run_dir, "notion/assign-plan.json")
-        self.assertEqual(result, {"done": 6, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []})
+        self.assertEqual(result, apply_report(6, 0))
         kinds = [write[0] for write in client.writes]
         self.assertEqual(kinds.count("update"), 5)
         self.assertEqual(client.writes[-1][:2], ("comment", "page-copy"))

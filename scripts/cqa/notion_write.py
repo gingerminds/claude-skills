@@ -110,10 +110,10 @@ def apply_plan(
         recorded.add(key)
         entries.append(_entry(item, sent))
         write_json(journal, {"applied": entries})
-        for reason in (sent or {}).get("failed", []):
+        for reason in sent.get("failed", []):
             result["replace_failed"].append({"key": key, "ref": item.get("ref"), "reason": reason})
             log(f"{label} : ancien commentaire conservé ({reason})")
-        if sent is not None:
+        if not sent.get("skipped"):
             result["done"] += 1
             log(f"{label} : écrit")
         else:
@@ -208,10 +208,11 @@ def _outgoing_texts(item: dict) -> list:
     return texts
 
 
-def _send(client, item: dict, bot_id: Optional[str]) -> Optional[dict]:
-    """Send one operation. Return None when a comment was already on the page.
+def _send(client, item: dict, bot_id: Optional[str]) -> dict:
+    """Send one operation and return what it did.
 
-    Otherwise return what a comment did: {"comment_id", "mode", "failed"} (empty for the rest).
+    A comment gives {"comment_id", "mode", "failed"}, or {"skipped": True, "failed"} when the
+    text was already on the page; the other operations give {}.
     """
     kind, page_id = item["kind"], item["page_id"]
     if kind == "status":
@@ -221,9 +222,11 @@ def _send(client, item: dict, bot_id: Optional[str]) -> Optional[dict]:
         client.update_page(page_id, {ASSIGNEE_PROPERTY: {"multi_select": names}})
     else:
         existing = client.comments(page_id)
-        if _shown_in(existing, item["text"], bot_id):
-            return None
         own = _skill_comments(existing, bot_id) if kind == "comment" else []
+        if own and _plain_text(own[-1]).strip() == item["text"].strip():
+            return {"skipped": True, "failed": _delete_all(client, own[:-1])}
+        if not own and _shown_in(existing, item["text"], bot_id):
+            return {"skipped": True, "failed": []}
         return _write_comment(client, page_id, item["text"], own)
     return {}
 
@@ -231,34 +234,40 @@ def _send(client, item: dict, bot_id: Optional[str]) -> Optional[dict]:
 def _write_comment(client, page_id: str, text: str, own: list) -> dict:
     """Write a comment, replacing the skill's own ones (oldest first in own) when there are."""
     rich_text = to_rich_text(text)
-    failed = []
-    if own:
-        *surplus, latest = own
-        try:
-            client.update_comment(latest["id"], rich_text)
-        except NotionError as error:
-            if error.status != 403:
-                raise
-            surplus = own
-        else:
-            failed = _delete_all(client, surplus)
-            return {"comment_id": latest["id"], "mode": "update", "failed": failed}
-        failed = _delete_all(client, surplus)
+    if own and _try_update(client, own[-1]["id"], rich_text):
+        failed = _delete_all(client, own[:-1])
+        return {"comment_id": own[-1]["id"], "mode": "update", "failed": failed}
+    failed = _delete_all(client, own)
     created = client.create_comment(page_id, rich_text)
     mode = "recreate" if own and not failed else "create"
     return {"comment_id": created.get("id"), "mode": mode, "failed": failed}
 
 
+def _try_update(client, comment_id: str, rich_text: list) -> bool:
+    """Edit a comment. False when Notion refuses (403) or no longer finds it (404)."""
+    try:
+        client.update_comment(comment_id, rich_text)
+    except NotionError as error:
+        if error.status not in (403, 404):
+            raise
+        return False
+    return True
+
+
 def _delete_all(client, comments: list) -> list:
-    """Delete comments and return the reason of each deletion that Notion refused (403)."""
+    """Delete comments and return the reason of each deletion refused (403).
+
+    A 404 means the comment is already gone and counts as deleted.
+    """
     failed = []
     for comment in comments:
         try:
             client.delete_comment(comment["id"])
         except NotionError as error:
-            if error.status != 403:
+            if error.status == 403:
+                failed.append(str(error))
+            elif error.status != 404:
                 raise
-            failed.append(str(error))
     return failed
 
 
@@ -304,7 +313,7 @@ def _load_journal(path: Path) -> list:
     return entries
 
 
-def _entry(item: dict, sent: Optional[dict]) -> dict:
+def _entry(item: dict, sent: dict) -> dict:
     entry = {
         "key": item["key"],
         "kind": item["kind"],
@@ -312,7 +321,7 @@ def _entry(item: dict, sent: Optional[dict]) -> dict:
         "verdict": item.get("verdict"),
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    if sent and "comment_id" in sent:
+    if "comment_id" in sent:
         entry["comment_id"] = sent["comment_id"]
         entry["mode"] = sent["mode"]
     return entry
