@@ -36,7 +36,7 @@ Only when "Navigateur" is available, after the first batch of lots is dispatched
 
 ## Dispatch of the browser lots
 
-- Before each browser lot, call `tabs_context_mcp`. If it fails, ask the lead « Claude in Chrome est déconnecté : reconnecter l'extension, puis répondre » with « Reprendre » and « Continuer sans navigateur » (the lot then goes to `gm:cqa-auditor` with the no-"Navigateur" sentence), and do not dispatch before the lead has chosen. The lead must reconnect Claude in Chrome before the lot starts.
+- Before each browser lot, call `tabs_context_mcp`. If it fails, ask the lead « Claude in Chrome est déconnecté : reconnecter l'extension, puis répondre » with « Reprendre » and « Continuer sans navigateur » (the lot then goes to `gm:cqa-auditor` with the no-"Navigateur" sentence), and do not dispatch before the lead has chosen. « Continuer sans navigateur » holds for the rest of the run, unless the lead says otherwise: every later browser lot goes to `gm:cqa-auditor` the same way, without a new `tabs_context_mcp` check.
 - One browser lot at a time, after the `server` lot (its `facts/server.json` holds the server part of the mixed rows).
 - "Navigateur" available: `gm:cqa-browser`, with the prompt of `references/lots.md`.
 - A return that starts with `CQA_BROWSER_UNAVAILABLE:` (the sub-agent could not load the Chrome tools): fallback below, for this lot and every later browser lot. Do not dispatch `gm:cqa-browser` again in this run.

@@ -161,7 +161,16 @@ class SkillTest(unittest.TestCase):
         for path in (SKILL, REFERENCES / "browser.md"):
             with self.subTest(path=path.name):
                 self.assertIn("Before each browser lot", _text(path))
-                self.assertIn("reconnect Claude in Chrome", _text(path))
+                self.assertIn("« Continuer sans navigateur »", _text(path))
+        self.assertIn("reconnect Claude in Chrome", _text(SKILL))
+        browser = _text(REFERENCES / "browser.md")
+        self.assertNotIn("The lead must reconnect Claude in Chrome before the lot starts", browser)
+        self.assertIn("« Continuer sans navigateur » holds for the rest of the run, unless the lead says otherwise", browser)
+        self.assertIn(
+            "« Continuer quand même » and « Continuer sans navigateur » hold for the rest of the run, "
+            "unless the lead says otherwise",
+            _section(_text(SKILL), "6. Audit"),
+        )
 
     def test_skill_frontmatter(self):
         fields = _frontmatter(SKILL)
@@ -213,6 +222,12 @@ class SkillTest(unittest.TestCase):
         server = _text(REFERENCES / "server.md")
         self.assertRegex(server, r"ssh\.sql_skip_ssl.{0,40}true")
         self.assertIn("--skip-ssl", server)
+        for text in (section, server):
+            self.assertIn("without TLS", text)
+            self.assertIn("travel in clear", text)
+            self.assertNotIn("skips the TLS check", text)
+        self.assertIn("the folder inside the container", section)
+        self.assertIn("--compose-file <dossier sur l'hôte>/docker-compose.yml", section)
 
     def test_auditor_passes_skip_ssl_and_compose_file(self):
         auditor = _text(AUDITOR)

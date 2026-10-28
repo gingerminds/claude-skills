@@ -165,6 +165,13 @@ class PublicHygieneTest(unittest.TestCase):
         self.assertEqual(plugin["version"], EXPECTED_VERSION)
         self.assertEqual(marketplace["plugins"][0]["version"], EXPECTED_VERSION)
 
+    def test_readme_lists_every_script(self):
+        readme = read(ROOT / "README.md")
+        for path in sorted(ROOT.glob("scripts/*")):
+            if path.is_file():
+                with self.subTest(script=path.name):
+                    self.assertIn(path.name, readme)
+
     def test_marketplace_lists_the_skill(self):
         marketplace = json.loads(MARKETPLACE_JSON.read_text(encoding="utf-8"))
         self.assertIn(NEW_SKILL, marketplace["plugins"][0]["description"])

@@ -209,7 +209,9 @@ Before each new wave of lots (steps 4, 5, 6 and 8), recheck the access, because 
 
 If the `access` without credentials differs from the one in `context.json`, the check with credentials is not `open`, or the SSH test fails, launch no new lot. Tell the lead in French what changed (« La préprod répond maintenant <access> au lieu de <access du contexte> », « La préprod refuse maintenant les identifiants Basic Auth » or « Connexion SSH impossible avec <alias> »), then ask with « Reprendre » (after the lead restored the access: recheck) and « Continuer quand même » (launch the wave; note it in the « remarques de la synthèse »: the rows concerned may end `unknown`).
 
-Before each browser lot (steps 3 and 5), call `tabs_context_mcp`. If it fails, ask the lead to reconnect Claude in Chrome before going on (`references/browser.md`).
+Before each browser lot (steps 3 and 5), call `tabs_context_mcp`. If it fails, ask the lead to reconnect Claude in Chrome, with « Reprendre » and « Continuer sans navigateur » (`references/browser.md`).
+
+« Continuer quand même » and « Continuer sans navigateur » hold for the rest of the run, unless the lead says otherwise: at the next waves, ask again only for a change the lead has not answered yet, and after « Continuer sans navigateur » give every later browser lot to `gm:cqa-auditor` without a new check.
 
 Dispatch line, exactly, then the extra sentences of `references/lots.md`:
 

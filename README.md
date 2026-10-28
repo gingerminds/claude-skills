@@ -101,6 +101,7 @@ claude-skills/
 │   ├── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
 │   ├── cqa_notion.py  cqa_plan.py  cqa_ssh_ro.py   # CLI de l'audit : API Notion, plan, garde SSH en lecture seule
 │   ├── cqa/                 # bibliothèque de l'audit (Python >= 3.9, bibliothèque standard seule)
+│   ├── cqa-keepawake.sh     # empêche la mise en veille du poste pendant l'audit (systemd-inhibit, caffeinate)
 │   └── cqa-toolbox.sh       # lanceur de la boîte à outils Docker de l'audit
 ├── shared/                  # ressources transverses (indépendantes de la techno)
 │   ├── runner.md            # ordre de priorité du runner : make → docker → lando

@@ -861,7 +861,9 @@ def build_sql_remote(
     """Return (remote command, stdin text) for a validated query; raise ValueError otherwise.
 
     Refused (a ValueError) means the guard refuses the query, the folder or the name.
-    skip_ssl adds the client option that skips TLS verification (self-signed certificate).
+    skip_ssl adds the client option --skip-ssl, for a database with a self-signed certificate: it
+    turns TLS off for the connection, not only the certificate check, so the query travels in clear
+    between the server and the database. With a container, app_dir is the folder inside it.
     """
     if engine not in SQL_ENGINES:
         raise ValueError(f"moteur SQL inconnu « {engine} » : drush, wp ou artisan")

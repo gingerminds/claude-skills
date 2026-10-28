@@ -152,21 +152,21 @@ Only with "SSH serveur", for each repo with a database CLI, through the guard (f
 | drupal | `<dossier>/vendor/bin/drush --version` |
 | laravel | `php <dossier>/artisan --version` |
 | wordpress | `wp core version --path=<dossier>` |
-| in a container | `docker compose -f <dossier>/docker-compose.yml exec -T <service> <commande ci-dessus>` or `docker exec <conteneur> <commande ci-dessus>` |
+| in a container | `docker compose -f <dossier sur l'hôte>/docker-compose.yml exec -T <service> <commande ci-dessus>` or `docker exec <conteneur> <commande ci-dessus>`, with the folder inside the container in the command |
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 python3 "$S/cqa_ssh_ro.py" <alias> -- php <dossier>/artisan --version
 ```
 
-Exit 0 for each repo concerned: the application CLI is there. That does not prove the database answers (`wp core version` never touches it), so then test "BDD" with a real query, with the folder of step 2 and `--container <conteneur>` or `--compose-service <service>` for an application in a container:
+Exit 0 for each repo concerned: the application CLI is there. That does not prove the database answers (`wp core version` never touches it), so then test "BDD" with a real query. `--app-dir` is the folder of step 2 for an application on the host; for an application in a container (`--container <conteneur>` or `--compose-service <service>`), it is the folder inside the container, and `--compose-file` is the absolute path of the compose file on the host:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
-python3 "$S/cqa_ssh_ro.py" <alias> --sql <drush|wp|artisan> --app-dir <dossier> [--container <conteneur> | --compose-service <service> --compose-file <dossier>/docker-compose.yml] "SELECT 1"
+python3 "$S/cqa_ssh_ro.py" <alias> --sql <drush|wp|artisan> --app-dir <dossier> [--container <conteneur> | --compose-service <service> --compose-file <dossier sur l'hôte>/docker-compose.yml] "SELECT 1"
 ```
 
-Exit 0: "BDD" available. On a TLS certificate error in the output (« self-signed certificate », « SSL »), retry the same command with `--skip-ssl` (drush and wp only). If it passes, write `ssh.sql_skip_ssl: true` in `context.json` ("BDD" available). Otherwise, or on exit 1 (CLI missing, shared hosting), "BDD" is unavailable.
+Exit 0: "BDD" available. On a TLS certificate error in the output (« self-signed certificate », « SSL »), retry the same command with `--skip-ssl` (drush and wp only): the client then connects without TLS, so the queries travel in clear between the server and the database. If it passes, write `ssh.sql_skip_ssl: true` in `context.json` ("BDD" available). Otherwise, or on exit 1 (CLI missing, shared hosting), "BDD" is unavailable.
 
 ## 9. Other tools
 
