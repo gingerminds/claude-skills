@@ -440,6 +440,16 @@ class SkillTest(unittest.TestCase):
         self.assertIn("`--recette <that NN>`", _section(text, "3. Resume"))
         self.assertIn("Statut humain conservé", _section(text, "11. Recette"))
 
+    def test_rerun_and_recette_check_the_repos_and_date_their_comments(self):
+        skill = _text(SKILL)
+        for heading in ("10. Rerun", "11. Recette"):
+            step3 = _section(skill, heading).split("\n3. ")[1].split("\n4. ")[0]
+            with self.subTest(section=heading):
+                self.assertIn("`cqa_plan.py repo-state`", step3)
+                self.assertIn("« Continuer avec l'état actuel »", step3)
+                self.assertIn("the date of the rerun", step3)
+        self.assertIn("the date of the rerun", _text(REFERENCES / "verdicts.md"))
+
     def test_rerun_and_recette_offer_to_finish_an_interrupted_write(self):
         skill = _text(SKILL)
         step1 = _section(skill, "10. Rerun").split("\n2. ")[0]

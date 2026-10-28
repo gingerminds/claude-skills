@@ -104,6 +104,7 @@ def build_plan(
     followup_done: set[int],
     missing_in_copy: Optional[list] = None,
     recette_refs: frozenset = frozenset(),
+    comment_dates: Optional[dict] = None,
 ) -> dict:
     """Return the plan.json document: the Notion writes the run proposes, and their summary.
 
@@ -120,7 +121,9 @@ def build_plan(
     Operations come by ref. Besides the keys of the exchange format the plan carries "rows",
     the status of every row before and after the run, which filter_plan needs to recompute
     the summary, and "plan_id", a digest of the plan that scopes the journal of the writes to it.
-    missing_in_copy is the list of rows of the model absent from the copy.
+    missing_in_copy is the list of rows of the model absent from the copy. comment_dates maps
+    the ref of a row judged again in a rerun to the date of that rerun, which its comment
+    gives instead of run_date.
     """
     notion = context["notion"]
     common = {
@@ -135,10 +138,11 @@ def build_plan(
     for ref in sorted(by_ref):
         row, entry = by_ref[ref], excluded_by_ref.get(ref)
         if entry is None:
+            dated = (comment_dates or {}).get(ref)
             row_ops, verdict = _finding_operations(
                 row,
                 findings.get(ref),
-                common,
+                {**common, "run_date": dated} if dated else common,
                 followup_done,
                 visible_verdicts,
                 history,

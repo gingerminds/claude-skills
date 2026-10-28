@@ -1104,6 +1104,34 @@ class PlanTest(AuditCase):
         self.assertIn("gm:checklist-quality-audit 0.9.0", text)
         self.assertLessEqual(len(text), 1500)
 
+    def rerun_101(self, run_dir, dates):
+        source = self.read(run_dir, "findings/code-performance.json")["findings"]
+        changed = [{**item, "verdict": "partial", "todo": "Terminer."} for item in source
+                   if item["ref"] == 101]
+        self.write(run_dir, "findings/code-performance-rerun-01.json",
+                   {"lot": "code-performance", "findings": changed})
+        self.write(run_dir, "reruns.json", {"closed": ["01"], **dates})
+
+    def test_comments_of_rerun_rows_carry_the_date_of_the_rerun(self):
+        run_dir = self.make_run()
+        self.rerun_101(run_dir, {"dates": {"01": "2026-11-05"}})
+        self.plan(run_dir)
+        ops = self.ops(run_dir)
+        self.assertIn("Audit PRE-MEL · 05/11/2026 · lancé par", ops[(101, "comment")]["text"])
+        self.assertIn("Audit PRE-MEL · 20/10/2026 · lancé par", ops[(103, "comment")]["text"])
+        first = (run_dir / "notion" / "plan.json").read_text(encoding="utf-8")
+        self.plan(run_dir)
+        self.assertEqual((run_dir / "notion" / "plan.json").read_text(encoding="utf-8"), first)
+
+    def test_rerun_without_a_recorded_date_keeps_the_date_of_the_run(self):
+        for dates in ({}, {"dates": {"01": "05/11/2026"}}, {"dates": ["01"]}):
+            with self.subTest(dates=dates):
+                run_dir = self.make_run()
+                self.rerun_101(run_dir, dates)
+                self.plan(run_dir)
+                text = self.ops(run_dir)[(101, "comment")]["text"]
+                self.assertIn("Audit PRE-MEL · 20/10/2026 · lancé par", text)
+
     def test_plan_is_reproducible(self):
         run_dir = self.make_run()
         self.plan(run_dir)
@@ -2553,11 +2581,34 @@ class RerunValidateAndSnapshotTest(AuditCase):
         result = json.loads(out)
         self.assertEqual(result["closed"], "01")
         self.assertEqual(result["discarded"], ["code-securite-rerun-01.json"])
-        self.assertEqual(self.read(run_dir, "reruns.json"), {"closed": ["01"]})
+        self.assertEqual(self.read(run_dir, "reruns.json")["closed"], ["01"])
         self.assertTrue((run_dir / "findings" / "code-performance-rerun-01.json").is_file())
         self.assertFalse((run_dir / "findings" / "code-securite-rerun-01.json").exists())
         moved = list((run_dir / "history").glob("*-rerun-01-invalid/code-securite-rerun-01.json"))
         self.assertEqual(len(moved), 1)
+
+    def test_rerun_close_records_the_date_of_the_rerun(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101)
+
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 11, 5, 9, 30, 0)
+
+        with mock.patch.object(cqa_plan_module, "datetime", FrozenDatetime):
+            code, out, err = self.run_main(["rerun-close", run_dir, "01"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            self.read(run_dir, "reruns.json"), {"closed": ["01"], "dates": {"01": "2026-11-05"}}
+        )
+        self.write_rerun(run_dir, "02", 101)
+        self.write(run_dir, "reruns.json", {"closed": ["01"]})
+        code, out, err = self.run_main(["rerun-close", run_dir, "02"])
+        self.assertEqual(code, 0, err)
+        document = self.read(run_dir, "reruns.json")
+        self.assertEqual(document["closed"], ["01", "02"])
+        self.assertEqual(sorted(document["dates"]), ["02"])
 
     def test_rerun_close_twice_keeps_one_entry_and_a_discarded_file_is_not_read(self):
         run_dir = self.make_run()
@@ -2569,7 +2620,7 @@ class RerunValidateAndSnapshotTest(AuditCase):
         )
         self.run_main(["rerun-close", run_dir, "1"])
         self.run_main(["rerun-close", run_dir, "1"])
-        self.assertEqual(self.read(run_dir, "reruns.json"), {"closed": ["01"]})
+        self.assertEqual(self.read(run_dir, "reruns.json")["closed"], ["01"])
         from cqa.rerun import latest_findings
 
         lots = self.read(run_dir, "lots.json")["lots"]

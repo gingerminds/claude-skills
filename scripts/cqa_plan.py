@@ -777,6 +777,19 @@ def _closed_reruns(run_dir: Path) -> set:
     return {item for item in closed if isinstance(item, str)} if isinstance(closed, list) else set()
 
 
+def _rerun_dates(run_dir: Path) -> dict:
+    """Return {NN: date} of the closed reruns that recorded their date (rerun-close)."""
+    dates = _read_json_object(run_dir / "reruns.json").get("dates")
+    found = {}
+    for key, value in (dates.items() if isinstance(dates, dict) else []):
+        if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            try:
+                found[key] = datetime.strptime(value, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+    return found
+
+
 def _read_json_object(path: Path) -> dict:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -850,7 +863,9 @@ def _cmd_rerun_close(args, services) -> int:
             shutil.move(str(path), str(folder / path.name))
             discarded.append(path.name)
     closed = sorted(_closed_reruns(run_dir) | {number})
-    write_json(run_dir / "reruns.json", {"closed": closed})
+    dates = {key: value.isoformat() for key, value in _rerun_dates(run_dir).items()}
+    dates.setdefault(number, datetime.now().date().isoformat())
+    write_json(run_dir / "reruns.json", {"closed": closed, "dates": dict(sorted(dates.items()))})
     _emit({"closed": number, "discarded": discarded})
     return EXIT_OK
 
@@ -911,7 +926,8 @@ def _cmd_plan(args, services) -> int:
     rows, missing = _read_rows(run_dir)
     lots = _read_lots(run_dir)
     visible = _read_visible_verdicts(run_dir)
-    findings, followup_done = _collect_findings(run_dir, context, lots["lots"])
+    sources = {}
+    findings, followup_done = _collect_findings(run_dir, context, lots["lots"], sources)
     copy_ds_id = context["notion"]["copy_data_source_id"]
     history = load_history(run_dir.parent.parent, run_dir.parent.name, copy_ds_id, run_dir.name)
     recette = {"refs": frozenset(), "judged": [], "unjudged": []}
@@ -935,6 +951,7 @@ def _cmd_plan(args, services) -> int:
         followup_done=followup_done,
         missing_in_copy=missing,
         recette_refs=recette["refs"],
+        comment_dates=_comment_dates(run_dir, sources),
     )
     if args.recette is not None:
         plan["recette"] = {**recette, "rerun": f"{args.recette:02d}"}
@@ -948,6 +965,21 @@ def _cmd_plan(args, services) -> int:
     write_json(run_dir / "notion" / "plan.json", plan)
     _emit(plan["summary"])
     return EXIT_OK
+
+
+def _comment_dates(run_dir: Path, sources: dict) -> dict:
+    """Return {ref: date of its rerun} for the rows whose latest finding comes from a rerun.
+
+    Their comment then says when they were judged again; a rerun closed before its date was
+    recorded keeps the date of the run.
+    """
+    dates = _rerun_dates(run_dir)
+    found = {}
+    for ref, name in sources.items():
+        match = _RERUN_FILE.fullmatch(name)
+        if match and match.group(2) in dates:
+            found[ref] = dates[match.group(2)]
+    return found
 
 
 def _check_closed(run_dir: Path, number: int) -> None:
@@ -1851,18 +1883,27 @@ def _read_findings_file(run_dir: Path, context: dict, lot: dict, name: str) -> O
     return read_grounded_findings(run_dir, context, lot, name)
 
 
-def _collect_findings(run_dir: Path, context: dict, lots: list) -> tuple:
+def _collect_findings(
+    run_dir: Path, context: dict, lots: list, sources: Optional[dict] = None
+) -> tuple:
     """Return ({ref: finding}, refs of the lots that went through the follow-up of the probes).
 
     The latest finding of a row prevails: first round, follow-up, then the reruns in order (see
     latest_findings); a ref a later file does not give (or gives invalid) keeps its previous
     finding. A lot went through the follow-up when it has a follow-up file, or when
     probes-followup.json exists and the lot still asked for probes: if every URL was discarded
-    no relaunch has any use, but what the lot waited for will not come either.
+    no relaunch has any use, but what the lot waited for will not come either. sources, when
+    given, receives {ref: name of the findings file of its latest finding}.
     """
-    findings = latest_findings(
-        run_dir, lots, lambda lot, name: _read_findings_file(run_dir, context, lot, name)
-    )
+
+    def read(lot, name):
+        found = _read_findings_file(run_dir, context, lot, name)
+        if sources is not None:
+            for item in found[0] if found else []:
+                sources[item["ref"]] = name
+        return found
+
+    findings = latest_findings(run_dir, lots, read)
     followup_done = set()
     requested = set()
     if (run_dir / "probes-followup.json").is_file():

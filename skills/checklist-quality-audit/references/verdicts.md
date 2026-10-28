@@ -276,6 +276,7 @@ python3 "$S/cqa_plan.py" plan "$RUN"
 
 - It merges the findings (after the guardrails above), the rows and the exclusions into `notion/plan.json`, and prints its `summary`: `{"by_status_after", "blocking_non_conform", "unknown", "human_overrides": [{"ref", "before", "after"}], "deferred", "missing_in_copy"}`.
 - A comment is planned only when the status changes, or when neither the visible comments of the integration (`comments.json`) nor the earlier runs of this copy already carry the verdict: a run again does not repeat comments.
+- The header of a comment gives the date of the run; for a row whose latest finding comes from a rerun, the date of the rerun (recorded by `rerun-close` in `reruns.json`), so that the lead sees when it was judged again. The footer keeps the audited commit.
 - Exit 6: `context.json` incomplete for the comments (`lead.option`, `audited_sha`, `run_id`): fix it. Exit 2: a file of the run is missing (the message names the command).
 
 Titles of the refs to show, from `rows.json`:

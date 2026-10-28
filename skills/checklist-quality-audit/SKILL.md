@@ -487,7 +487,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_notion.py" rows "$RUN"
 ```
 
-3. Run the diagnostic of section 5 for the tools only (toolbox, Chrome, SSH), as it may have changed since the audit, and update `available_tools` in `context.json`.
+3. Run the diagnostic of section 5 for the tools only (toolbox, Chrome, SSH), as it may have changed since the audit, and update `available_tools` in `context.json`. Also run `cqa_plan.py repo-state` on each repo (`references/diagnostic.md`, section 1): a rerun judges the code as it is now, so a repo not on `develop` up to date gets the same question, « C'est corrigé, revérifier » or « Continuer avec l'état actuel ». `audited_sha` stays the commit of the audit (the evidence links and the code changes compare with it); the comments of the rows judged again carry the date of the rerun in their header instead of the date of the audit.
 4. Open the rerun. It sets aside the files of an earlier rerun that was never closed (`history/<stamp>/abandoned/`), copies `findings/` and `notion/` into `history/<AAAA-MM-JJ-HHMMSS>/`, and prints `{"snapshot", "rerun", "abandoned"}`: `rerun` is the number `NN` of this rerun, `snapshot` is where the verdicts of before are kept. Tell the lead (in French) which files were set aside, if any.
 
 ```bash
@@ -568,7 +568,7 @@ python3 "$S/cqa_notion.py" recette "$RUN"
 
 It writes `notion/recette.json`, `{"rows": [{"ref", "page_id", "status", "skill_last", "comments"}]}`, and prints the refs (`recette`) and those added for a code change (`code_modifie`). Exit codes as in section 8, step 1. A row without a known status of the skill is a candidate: the lead may drop it. The last status the skill wrote comes from the `value` of the status entries of `notion/applied.json`.
 
-3. Run the diagnostic of section 5 for the tools, and also its launch condition « commit deployed in preprod » (`references/diagnostic.md`: the guard commands, then `cqa_plan.py deployed`, then `cqa_plan.py align`): the devs' fixes must be deployed before they are checked, so ask the same « Déployer puis relancer (recommandé) » or « Lancer quand même » when the preprod is behind, and never deploy. Update `available_tools` in `context.json`. Then open the rerun and list the lots of the candidate rows, as in section 10, steps 4 and 5, with the refs of `notion/recette.json`:
+3. Run the diagnostic of section 5 for the tools, and also its launch condition « commit deployed in preprod » (`references/diagnostic.md`: the guard commands, then `cqa_plan.py deployed`, then `cqa_plan.py align`): the devs' fixes must be deployed before they are checked, so ask the same « Déployer puis relancer (recommandé) » or « Lancer quand même » when the preprod is behind, and never deploy. Update `available_tools` in `context.json`. Run `cqa_plan.py repo-state` on each repo as in section 10, step 3 (« C'est corrigé, revérifier » or « Continuer avec l'état actuel »; the comments of the rows judged again carry the date of the rerun). Then open the rerun and list the lots of the candidate rows, as in section 10, steps 4 and 5, with the refs of `notion/recette.json`:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
