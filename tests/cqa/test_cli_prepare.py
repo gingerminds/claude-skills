@@ -685,6 +685,43 @@ class ContextCheckTest(RunDirCase):
                 self.assertIn("ssh.sql_skip_ssl", report["errors"][0])
                 self.assertIn("booléen", report["errors"][0])
 
+    def test_mode_and_notion_write_are_optional_choices(self):
+        for key, values in (
+            ("mode", ("autonome", "interactif")),
+            ("notion_write", ("all", "keep_human", "none", None)),
+        ):
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    context = valid_context()
+                    context[key] = value
+                    code, report, _ = self.check(context)
+                    self.assertEqual((code, report["errors"]), (0, []))
+        code, report, _ = self.check(valid_context())
+        self.assertEqual((code, report["errors"]), (0, []))
+
+    def test_mode_and_notion_write_refuse_other_values(self):
+        for key, value in (
+            ("mode", "auto"),
+            ("mode", None),
+            ("mode", True),
+            ("notion_write", "tout"),
+            ("notion_write", ""),
+            ("notion_write", False),
+        ):
+            with self.subTest(key=key, value=value):
+                context = valid_context()
+                context[key] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                self.assertIn(f"« {key} »", report["errors"][0])
+        context = valid_context()
+        context["mode"] = "auto"
+        self.assertIn("autonome", self.check(context)[1]["errors"][0])
+        context = valid_context()
+        context["notion_write"] = "tout"
+        self.assertIn("keep_human", self.check(context)[1]["errors"][0])
+
     def test_nullable_values_are_accepted(self):
         context = valid_context()
         context["lead"]["option"] = None

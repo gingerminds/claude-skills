@@ -6,6 +6,7 @@ Every server command of the skill goes through the guard `cqa_ssh_ro.py`, with t
 
 - Read commands (files, logs, status, monitoring) run without confirmation, through the guard.
 - Any write, change, deletion, restart, or command of uncertain impact: stop and ask the lead, stating the impact. This holds even when the lead asks to go faster.
+- Autonomous mode (`mode` is `autonome`) changes nothing here: only read commands run without confirmation, and a command that needs the lead's confirmation is never run, even in autonomous mode. It is set aside (see exit 4 below) and put to the lead at the end of the audit.
 - v1 is read-only: the skill never runs a write on a server, even confirmed, and never a command outside the guard (the connection test aside). Give the command to the lead, who runs it if they want.
 
 ## Modes of the guard
@@ -90,7 +91,15 @@ Exit 4:
 1. Never rephrase the command to get it through. If the refusal names a dedicated mode (`--env-keys`, `--php-ini`), use it.
 2. Never run it outside the guard: v1 sends every server command through it.
 3. In the orchestrator, ask the lead, with the impact: « Le garde-fou SSH a refusé : <commande> (<raison>). Impact : <lecture seule, ce qu'elle affiche, ou ce qu'elle modifierait>. » with « Passer » and « Arrêter l'audit »; the lead who runs it himself pastes the useful result in « Autre ». That result is used as their answer, never written raw to the run directory.
-4. In a sub-agent, the part becomes `unknown`, with « Commande à faire confirmer par le lead : <commande> (lecture seule, <ce qu'elle affiche>) » in `human_check`: the lead sees it in the Notion comment.
+4. In autonomous mode, never ask: the orchestrator records the refusal, and the rows concerned stay `unknown` until the lead decides at the end of the audit:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" defer "$RUN" --kind ssh_refused --detail "Le garde-fou SSH a refusé : <commande> (<raison>). Impact : <lecture seule, ce qu'elle affiche, ou ce qu'elle modifierait>." --refs CQ-3,CQ-12
+```
+
+5. In a sub-agent, the part becomes `unknown`, with « Commande à faire confirmer par le lead : <commande> (lecture seule, <ce qu'elle affiche>) » in `human_check`: the lead sees it in the Notion comment.
 
 ## Facts for the browser lots
 

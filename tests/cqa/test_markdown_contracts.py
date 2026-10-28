@@ -330,7 +330,7 @@ class SkillTest(unittest.TestCase):
         self.assertIn("`start` reuses a live one", resume)
         writing = _section(skill, "8. Writing and synthesis")
         self.assertIn(stop, writing)
-        self.assertLess(writing.index("**6. Completion.**"), writing.index(stop))
+        self.assertLess(writing.index("**7. Completion.**"), writing.index(stop))
         plan = _section(skill, "7. Plan and confirmation")
         option = plan.index("   - « Sans toucher aux statuts posés par un humain »:")
         rebuild = plan.index('plan "$RUN" --skip-human-overrides')
@@ -470,6 +470,96 @@ class SkillTest(unittest.TestCase):
                 with self.subTest(file=path.name):
                     self.assertIn(_SESSION_CREDENTIALS, text)
                     self.assertNotIn("when `target.access` is `basic_auth`", text)
+
+    def test_launch_asks_mode_then_notion_consent(self):
+        section = _section(_text(SKILL), "4. Context")
+        mode = section.index("« Mode 100 % autonome ? »")
+        consent = section.index("« Écrire dans la copie Notion à la fin de l'audit ? »")
+        write = section.index("Write `context.json`")
+        self.assertLess(mode, consent)
+        self.assertLess(consent, write)
+        for needle in (
+            "« Oui, je m'absente »",
+            "« Non, je reste disponible »",
+            "« Tout écrire »",
+            "« Sans toucher aux statuts posés par un humain »",
+            "« Ne rien écrire »",
+            '`mode` to `"autonome"`',
+            '`"interactif"`',
+            '`notion_write` to `"all"`',
+            '`"keep_human"`',
+            '`"none"`',
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        context = _text(REFERENCES / "context.md")
+        for needle in ('"mode"', '"notion_write"', "interactif", "keep_human", "null"):
+            with self.subTest(context=needle):
+                self.assertIn(needle, context)
+
+    def test_autonomous_mode_defers_and_resumes(self):
+        skill = _text(SKILL)
+        audit = _section(skill, "6. Audit")
+        for needle in (
+            'cqa_plan.py" defer "$RUN" --kind',
+            "--kind ssh_refused",
+            "--kind gap",
+            "--kind login",
+            "--kind question",
+            "exit 4",
+            "`tabs_context_mcp`",
+            "stay `unknown`",
+            "the login pause happens last",
+        ):
+            with self.subTest(audit=needle):
+                self.assertIn(needle, audit)
+        rules = _section(skill, "1. Imperative rules")
+        self.assertIn("never run, even in autonomous mode", rules)
+        for name in ("server.md", "browser.md", "lots.md"):
+            with self.subTest(reference=name):
+                text = _text(REFERENCES / name)
+                self.assertIn("defer", text)
+                self.assertIn("autonomous", text)
+        self.assertIn("--kind ssh_refused", _text(REFERENCES / "server.md"))
+        self.assertIn("--kind login", _text(REFERENCES / "browser.md"))
+        writing = _section(skill, "8. Writing and synthesis")
+        end = writing[writing.index("**5. Deferred decisions") : writing.index("**6. Final scan**")]
+        order = [
+            'cqa_plan.py" deferred "$RUN"',
+            "--resolve",
+            'cqa_plan.py" rerun-start "$RUN"',
+            "Rerun: <NN>. Rows: CQ-3, CQ-12.",
+            "--rerun <NN> --rows",
+            'cqa_plan.py" rerun-close "$RUN" <NN>',
+            'cqa_plan.py" plan "$RUN"',
+            'cqa_notion.py" apply "$RUN"',
+        ]
+        positions = [end.index(item) for item in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("without presenting", end)
+        self.assertIn("one question at a time", end)
+        self.assertLess(
+            writing.index('cqa_notion.py" apply "$RUN"'), writing.index("**5. Deferred decisions")
+        )
+        self.assertIn("recap", writing[: writing.index("**2. Synthesis**")])
+
+    def test_section_7_skips_the_question_when_consent_is_known(self):
+        section = _section(_text(SKILL), "7. Plan and confirmation")
+        self.assertIn("`notion_write`", section)
+        asked = section.index(_PLAN_QUESTION)
+        self.assertIn("only when `notion_write` is `null`", section[asked - 200 : asked + 200])
+        for needle in (
+            "`all`",
+            "`keep_human`",
+            "`none`",
+            "`--skip-human-overrides`",
+            "`--recette <NN>`",
+            "`mode` is `autonome`",
+            "no presentation",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        self.assertIn("Never ask when `notion_write` is set", section)
 
     def test_no_em_dash_in_skill(self):
         for path in [*_skill_files(), ALIAS]:

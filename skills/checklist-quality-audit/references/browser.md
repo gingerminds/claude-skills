@@ -34,9 +34,19 @@ Only when "Navigateur" is available, after the first batch of lots is dispatched
 3. Without login, the rows that need a session end `unknown`, with the steps in `human_check`.
 4. After the last browser lot, close these tabs with `tabs_close_mcp`.
 
+In autonomous mode (`mode` is `autonome`) there is no pause at this point: the lead is away and the audit never waits. The browser lots that need no session run first, then the lots that need one (back-office, test accounts) run without a session and their rows that need one stay `unknown`. The login pause happens last, at the end of the audit (SKILL.md, section 8, step 5). Record it once, with the rows concerned:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" defer "$RUN" --kind login --detail "Connexion Chrome à faire : <préprod ou back-office>" --refs CQ-3,CQ-12
+```
+
+A Chrome disconnected at `tabs_context_mcp` is recorded with `--kind gap` instead, and the browser lots go to `gm:cqa-auditor`.
+
 ## Dispatch of the browser lots
 
-- Before each browser lot, call `tabs_context_mcp`. If it fails, ask the lead « Claude in Chrome est déconnecté : reconnecter l'extension, puis répondre » with « Reprendre » and « Continuer sans navigateur » (the lot then goes to `gm:cqa-auditor` with the no-"Navigateur" sentence), and do not dispatch before the lead has chosen. « Continuer sans navigateur » holds for the rest of the run, unless the lead says otherwise: every later browser lot goes to `gm:cqa-auditor` the same way, without a new `tabs_context_mcp` check.
+- Before each browser lot, call `tabs_context_mcp`. If it fails in autonomous mode, do not ask: defer it (`--kind gap`) and continue as with « Continuer sans navigateur ». Otherwise, ask the lead « Claude in Chrome est déconnecté : reconnecter l'extension, puis répondre » with « Reprendre » and « Continuer sans navigateur » (the lot then goes to `gm:cqa-auditor` with the no-"Navigateur" sentence), and do not dispatch before the lead has chosen. « Continuer sans navigateur » holds for the rest of the run, unless the lead says otherwise: every later browser lot goes to `gm:cqa-auditor` the same way, without a new `tabs_context_mcp` check.
 - One browser lot at a time, after the `server` lot (its `facts/server.json` holds the server part of the mixed rows).
 - "Navigateur" available: `gm:cqa-browser`, with the prompt of `references/lots.md`.
 - A return that starts with `CQA_BROWSER_UNAVAILABLE:` (the sub-agent could not load the Chrome tools): fallback below, for this lot and every later browser lot. Do not dispatch `gm:cqa-browser` again in this run.

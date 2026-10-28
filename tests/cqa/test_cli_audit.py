@@ -2479,6 +2479,8 @@ class RegistrationTest(AuditCase):
             "snapshot",
             "rerun-start",
             "rerun-close",
+            "defer",
+            "deferred",
         ):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import urlsplit
 
-from cqa import probes, report
+from cqa import deferred, probes, report
 from cqa.checklist import STATUS_IMPLEMENTED, ref_label
 from cqa.findings import apply_guardrails, validate_document
 from cqa.git_tools import (
@@ -241,6 +241,16 @@ def _register_audit(commands) -> None:
         "--refs", default="", help="Réf à ajouter, séparées par des virgules (CQ-12,CQ-40)"
     )
     _run_command(commands, "assign-plan", "plan d'assignation (assign-plan.json)", _cmd_assign_plan)
+    sub = _run_command(
+        commands, "defer", "met une décision de côté pour le lead (deferred.json)", _cmd_defer
+    )
+    sub.add_argument("--kind", required=True, choices=deferred.KINDS, help="type de décision")
+    sub.add_argument("--detail", required=True, help="texte pour le lead, en français")
+    sub.add_argument("--refs", default="", help="Réf concernées, séparées par des virgules")
+    sub = _run_command(
+        commands, "deferred", "décisions mises de côté encore ouvertes", _cmd_deferred
+    )
+    sub.add_argument("--resolve", type=int, metavar="ID", help="ferme la décision ID")
 
 
 def _cmd_project(args, services) -> int:
@@ -547,6 +557,19 @@ def _highest_rerun(run_dir: Path) -> int:
             if match:
                 numbers.append(int(match.group(2)))
     return max(numbers, default=0)
+
+
+def _cmd_defer(args, services) -> int:
+    _emit(deferred.add(args.run_dir.resolve(), args.kind, args.detail, args.refs))
+    return EXIT_OK
+
+
+def _cmd_deferred(args, services) -> int:
+    run_dir = args.run_dir.resolve()
+    if args.resolve is not None:
+        deferred.resolve(run_dir, args.resolve)
+    _emit({"items": deferred.open_items(run_dir)})
+    return EXIT_OK
 
 
 def _cmd_rerun_start(args, services) -> int:
@@ -1094,6 +1117,9 @@ def validate_context(context: dict) -> list:
     """Return the problems of a context.json document, in French; an empty list means valid."""
     errors = []
     _check_fields(errors, "", context, _TOP_FIELDS)
+    _check_fields(
+        errors, "", context, {key: c for key, c in _OPTIONAL_TOP_FIELDS.items() if key in context}
+    )
     for name, fields in _SECTIONS.items():
         _check_object(errors, name, context, fields)
     for name, fields in _OPTIONAL_SECTION_FIELDS.items():
@@ -1186,6 +1212,24 @@ def _filled_text_or_null(value) -> Optional[str]:
     return "doit être un texte non vide ou null"
 
 
+def _choice(*allowed):
+    def check(value) -> Optional[str]:
+        if isinstance(value, str) and value in allowed:
+            return None
+        return "doit valoir " + ", ".join(f"« {item} »" for item in allowed)
+
+    return check
+
+
+def _choice_or_null(*allowed):
+    inner = _choice(*allowed)
+
+    def check(value) -> Optional[str]:
+        return None if value is None else inner(value)
+
+    return check
+
+
 def _boolean(value) -> Optional[str]:
     return None if isinstance(value, bool) else "doit être un booléen"
 
@@ -1241,6 +1285,10 @@ _TOP_FIELDS = {
     "available_tools": _tools,
     "phase_filter": _text_or_null,
     "dry_run": _boolean,
+}
+_OPTIONAL_TOP_FIELDS = {
+    "mode": _choice("autonome", "interactif"),
+    "notion_write": _choice_or_null("all", "keep_human", "none"),
 }
 _SECTIONS = {
     "project": {"slug": _text, "name": _text, "protection": _text_or_null},
