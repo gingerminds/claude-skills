@@ -2581,6 +2581,33 @@ class RerunValidateAndSnapshotTest(AuditCase):
         code, out, err = self.run_main(["rerun-close", run_dir, "1"])
         self.assertEqual(code, 2)
         self.assertIn("rerun-01", err)
+        self.assertIn("aucun fichier de la relance 01 : aucun lot n'a rien écrit", err)
+        self.assertIn("sans clore", err)
+        self.assertNotIn("rerun-start", err)
+        self.assertFalse((run_dir / "reruns.json").exists())
+
+    def test_rerun_close_rows_discards_a_file_with_a_row_not_dispatched(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101, 102)
+        self.write_rerun(run_dir, "01", 103, lot="code-securite")
+        code, out, err = self.run_main(
+            ["rerun-close", run_dir, "01", "--rows", "CQ-101,CQ-103"]
+        )
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result["discarded"], ["code-performance-rerun-01.json"])
+        self.assertTrue((run_dir / "findings" / "code-securite-rerun-01.json").is_file())
+        self.assertFalse((run_dir / "findings" / "code-performance-rerun-01.json").exists())
+        self.assertEqual(self.read(run_dir, "reruns.json")["closed"], ["01"])
+
+    def test_rerun_close_rows_keeps_the_files_of_the_dispatched_rows(self):
+        run_dir = self.make_run()
+        self.write_rerun(run_dir, "01", 101, 102)
+        code, out, err = self.run_main(["rerun-close", run_dir, "1", "--rows", "CQ-101,102"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["discarded"], [])
+        code, out, err = self.run_main(["rerun-close", run_dir, "1", "--rows", "abc"])
+        self.assertEqual(code, 2)
 
     def test_plan_reads_the_rerun_file_after_validation(self):
         run_dir = self.make_run()

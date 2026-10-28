@@ -221,6 +221,12 @@ def _register_audit(commands) -> None:
         commands, "rerun-close", "clôt une relance : écarte les fichiers invalides", _cmd_rerun_close
     )
     sub.add_argument("number", type=_rerun_number, help="numéro de la relance (NN)")
+    sub.add_argument(
+        "--rows",
+        default=None,
+        help="Réf relancées dans cette relance (CQ-3,CQ-12) : un fichier qui en écrit une autre "
+        "est écarté, comme avec validate --rows",
+    )
     sub = _run_command(commands, "plan", "plan d'écriture Notion (notion/plan.json)", _cmd_plan)
     sub.add_argument(
         "--skip-human-overrides",
@@ -828,18 +834,19 @@ def _cmd_rerun_start(args, services) -> int:
 def _cmd_rerun_close(args, services) -> int:
     run_dir = args.run_dir.resolve()
     number = f"{args.number:02d}"
+    rows = _parse_rows(args.rows) if args.rows is not None else None
     files = _rerun_files(run_dir, number)
     if not files:
         raise UsageError(
-            f"Aucun fichier findings/<lot>-rerun-{number}.json à clore : "
-            "lancer d'abord rerun-start."
+            f"Rien à clore, aucun fichier de la relance {number} : aucun lot n'a rien écrit "
+            f"(findings/<lot>-rerun-{number}.json). Construire le plan sans clore cette relance."
         )
     context = _checked_context(run_dir)
     lots = {item["id"]: item for item in _read_lots(run_dir)["lots"]}
     discarded = []
     for path in files:
         lot = lots.get(_RERUN_FILE.fullmatch(path.name).group(1))
-        if lot is None or _rerun_errors(run_dir, context, lot, path.name, None):
+        if lot is None or _rerun_errors(run_dir, context, lot, path.name, rows):
             folder = _new_history_dir(run_dir, f"-rerun-{number}-invalid")
             shutil.move(str(path), str(folder / path.name))
             discarded.append(path.name)

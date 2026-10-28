@@ -533,13 +533,15 @@ python3 "$S/cqa_plan.py" validate "$RUN" <lot_id> --rerun <NN> --rows CQ-3,CQ-12
 
 It checks only the rows written in the file, and refuses a row that was not dispatched. Errors: relaunch that agent once with the errors (`references/lots.md`, section 5), then validate again.
 
-10. Close the rerun once every lot is validated or left. It moves the files still invalid out of `findings/` (into `history/`), so that their rows keep their previous finding, and records `NN` as closed. Tell the lead in French which files were discarded and that their rows keep their previous verdict:
+10. Close the rerun once every lot is validated or left, with `--rows` set to the union of the rows dispatched in this rerun (every lot). It moves the files still invalid out of `findings/` (into `history/`), and a file that writes a row not dispatched, so that their rows keep their previous finding, and records `NN` as closed. Tell the lead in French which files were discarded and that their rows keep their previous verdict:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-python3 "$S/cqa_plan.py" rerun-close "$RUN" <NN>
+python3 "$S/cqa_plan.py" rerun-close "$RUN" <NN> --rows CQ-3,CQ-12
 ```
+
+Exit 2 with « aucun fichier de la relance NN » (no lot wrote anything, every agent failed): do not close it; tell the lead « Aucune ligne n'a été réévaluée : les verdicts restent ceux d'avant la relance. », then build the plan without closing it (step 11).
 
 11. Build the plan, which takes the latest finding of each row, then go through section 7 and section 8 as for an audit (confirmation, writing, synthesis, scan, `done.json`):
 
@@ -597,13 +599,15 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" validate "$RUN" <lot_id> --rerun <NN> --rows CQ-3,CQ-12
 ```
 
-When every lot is validated or left, close the rerun and tell the lead which files were discarded:
+When every lot is validated or left, close the rerun with the union of the rows dispatched (as in section 10, step 10) and tell the lead which files were discarded:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-python3 "$S/cqa_plan.py" rerun-close "$RUN" <NN>
+python3 "$S/cqa_plan.py" rerun-close "$RUN" <NN> --rows CQ-3,CQ-12
 ```
+
+Exit 2 with « aucun fichier de la relance NN » (no lot wrote anything): do not close it; tell the lead « Aucune ligne n'a été recettée : aucun lot n'a rien écrit. », build the plan without `--recette` (no rerun of this recette is closed) and go through sections 7 and 8 as below; the synthesis then has no `## Recette` section.
 
 7. Build the plan with the recette option and the rerun number `NN`: the rows of `notion/recette.json` that are « Mis en place » in the copy and were judged again in `findings/<lot>-rerun-<NN>.json`, or in the file of a later closed rerun (the deferred rerun of section 8, step 5), may change the status a dev set; the others (no new finding, or a status nobody set to « Mis en place ») stay protected. Every rebuild of the plan keeps `--recette <NN>` (the rebuild of section 7, the rebuild of section 8 step 5 and the resume of section 3); `<NN>` is the rerun of this recette, closed in reruns.json, never the number of a later rerun. The synthesis lists the rows not judged as « Non évaluées », and the judged rows whose human status was kept (« Sans toucher ») as « Statut humain conservé ». Then go through section 7 and section 8 as for an audit (confirmation, writing, synthesis, scan, `done.json`). Every other row follows the write mode the lead chose:
 

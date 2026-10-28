@@ -440,6 +440,18 @@ class SkillTest(unittest.TestCase):
         self.assertIn("`--recette <that NN>`", _section(text, "3. Resume"))
         self.assertIn("Statut humain conservé", _section(text, "11. Recette"))
 
+    def test_rerun_close_checks_the_dispatched_rows_and_handles_an_empty_rerun(self):
+        skill = _text(SKILL)
+        for label, text in (("10", _section(skill, "10. Rerun")),
+                            ("11", _section(skill, "11. Recette"))):
+            with self.subTest(section=label):
+                self.assertIn('cqa_plan.py" rerun-close "$RUN" <NN> --rows CQ-3,CQ-12', text)
+                self.assertIn("« aucun fichier de la relance NN »", text)
+        rerun = _section(skill, "10. Rerun")
+        self.assertIn("the union of the rows dispatched", rerun)
+        self.assertIn("build the plan without closing it", rerun)
+        self.assertNotIn("lancer d'abord rerun-start", skill)
+
     def test_recette_plan_keeps_its_own_rerun_and_counts_later_closed_reruns(self):
         section = _section(_text(SKILL), "11. Recette")
         self.assertNotIn("must be the last rerun closed", section)
