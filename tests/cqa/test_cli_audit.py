@@ -488,6 +488,30 @@ class BuildProbesTest(unittest.TestCase):
         )
         self.assertEqual({item["reason"] for item in document["discarded"]}, {PHP_FILE_ERROR})
 
+    def test_a_php_file_cited_twice_by_one_source_is_discarded_once(self):
+        rows = [
+            {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"},
+            {"ref": 102, "tools": ["HTTP"], "fiche_path": "fiches/CQ-102.md"},
+        ]
+        fiches = {
+            "CQ-101.md": "`/wp-cron.php` puis `/x.php` et encore `/wp-cron.php`",
+            "CQ-102.md": "`/wp-cron.php`",
+        }
+        pages = [
+            {"template": "A", "url": f"{BASE}/wp-cron.php"},
+            {"template": "B", "url": f"{BASE}/wp-cron.php"},
+        ]
+        document = self.build(technos=(), rows=rows, fiches=fiches, key_pages=pages)
+        self.assertEqual(
+            [(item["source"], item.get("ref"), item["path"]) for item in document["discarded"]],
+            [
+                ("page", None, "/wp-cron.php"),
+                ("fiche", 101, "/wp-cron.php"),
+                ("fiche", 101, "/x.php"),
+                ("fiche", 102, "/wp-cron.php"),
+            ],
+        )
+
     def test_fixed_probes_are_not_reported_as_discarded_when_a_fiche_repeats_them(self):
         row = {"ref": 101, "tools": ["HTTP"], "fiche_path": "fiches/CQ-101.md"}
         text = "`/phpinfo.php` `/xmlrpc.php` `/wp-login.php`"

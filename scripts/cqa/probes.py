@@ -118,7 +118,8 @@ def build_probes(
 
     A key page or a fiche path that runs a PHP file outside the routes of the application (see
     requests_php_file, under the path of base_url) is never probed: discarded lists it as
-    {"source": "page"|"fiche", "ref" (fiche only), "path", "reason"}.
+    {"source": "page"|"fiche", "ref" (fiche only), "path", "reason"}, once per source, ref and
+    path.
     """
     base = _checked_base(base_url, "base_url")
     parts = urlsplit(base)
@@ -130,7 +131,9 @@ def build_probes(
         if collected.repeats(path):
             return False
         if requests_php_file(path, parts.path):
-            discarded.append({**source, "path": path, "reason": PHP_FILE_REASON})
+            entry = {**source, "path": path, "reason": PHP_FILE_REASON}
+            if entry not in discarded:
+                discarded.append(entry)
             return False
         return collected.add(name, path, **rule)
 
