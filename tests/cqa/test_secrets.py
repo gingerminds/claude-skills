@@ -127,6 +127,15 @@ class ScanTextTest(unittest.TestCase):
         redact(text, [])
         self.assertLess(time.monotonic() - started, 5)
 
+    def test_f_string_with_a_long_blank_run_stays_fast(self):
+        for blank in (" ", "\t"):
+            with self.subTest(blank=repr(blank)):
+                text = "token = f'Bearer " + blank * 80000 + "x'"
+                started = time.monotonic()
+                scan_text(text, [])
+                redact(text, [])
+                self.assertLess(time.monotonic() - started, 5)
+
     def test_value_minimum_length_is_four(self):
         for text in ["token=abcd", 'token="abcd"', "token: abcd"]:
             with self.subTest(text=text):

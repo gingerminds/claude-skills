@@ -83,7 +83,7 @@ _VARIABLE_REFERENCE = re.compile(
 _SEPARATORS = r"[\s:/@.,;=_-]*"
 _PLACEHOLDER = r"\{[A-Za-z_][^{}'\"\\\n]*\}"
 _F_TEMPLATE = re.compile(
-    rf"(?:(?:basic|bearer|digest|token)[ \t]+)?{_SEPARATORS}{_PLACEHOLDER}"
+    rf"(?:(?:basic|bearer|digest|token)(?=[ \t]))?{_SEPARATORS}{_PLACEHOLDER}"
     rf"(?:{_SEPARATORS}{_PLACEHOLDER})*{_SEPARATORS}",
     re.IGNORECASE,
 )
