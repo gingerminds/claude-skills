@@ -56,7 +56,8 @@ def apply_plan(
     comment with the same text (from bot_id, or from anyone when it is None), as Notion may
     have stored one whose answer was lost. A network error, an authentication failure, a 429
     or a 5xx stops the plan; any other Notion error only fails its operation and the later
-    ones of the same page.
+    ones of the same page. Only written, blocked and failed operations are logged: those
+    already present (journal or comment on the page) are counted in skipped, silently.
     """
     _refuse_reference(plan, reference_ds_id)
     ops = validate_plan(plan)
@@ -76,7 +77,6 @@ def apply_plan(
         key, label = item["key"], _describe(item)
         if key in recorded:
             result["skipped"] += 1
-            log(f"{label} : déjà écrit lors d'un passage précédent")
             continue
         labels = _blocking_labels(item, options, allowed, copy_page_id, known_secrets)
         if labels:
@@ -109,7 +109,6 @@ def apply_plan(
             log(f"{label} : écrit")
         else:
             result["skipped"] += 1
-            log(f"{label} : commentaire déjà présent sur la page")
     return result
 
 

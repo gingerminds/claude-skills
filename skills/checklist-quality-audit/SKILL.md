@@ -251,6 +251,8 @@ RUN="<run_dir>"
 GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_notion.py" apply "$RUN"
 ```
 
+The output lists only the operations written, blocked or failed, then the JSON summary (`done`, `skipped`, `blocked`, `errors`); operations already present are counted in `skipped`, never listed, so read it as is, without a pipe or filter.
+
 Then, by exit code (words for the lead in `references/verdicts.md`):
 
 - 0: everything written. Go on.

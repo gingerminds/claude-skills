@@ -661,6 +661,23 @@ class ResumeTest(ApplyTestCase):
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual(sorted(keys), sorted(item["key"] for item in ops))
 
+    def test_apply_prints_only_written_blocked_and_errors(self):
+        done = [comment_op(PAGE_1, n, f"Constat {n}") for n in range(247)]
+        self.apply(*done)
+        self.log.clear()
+        fresh = [comment_op(PAGE_2, n, f"Nouveau {n}") for n in range(3)]
+        blocked = status_op(OUTSIDE_PAGE, 9)
+        result = self.apply(*done, *fresh, blocked)
+        self.assertEqual(
+            {key: result[key] for key in ("done", "skipped", "errors")},
+            {"done": 3, "skipped": 247, "errors": []},
+        )
+        self.assertEqual(len(result["blocked"]), 1)
+        self.assertEqual(len(self.log), 4)
+        self.assertEqual(sum(line.endswith(" : écrit") for line in self.log), 3)
+        self.assertEqual(sum("bloqué" in line for line in self.log), 1)
+        self.assertFalse(any("déjà" in line for line in self.log))
+
     def test_resume_without_duplicates(self):
         ops = self.comment_ops()
         self.notion.post_faults = {2: "lost_request"}
