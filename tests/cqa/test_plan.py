@@ -15,6 +15,7 @@ from cqa.plan import (
     is_human_set,
     load_history,
     operation_key,
+    plan_digest,
 )
 
 EM_DASH = chr(0x2014)
@@ -837,6 +838,18 @@ class RecetteTest(unittest.TestCase):
             [state["after"] for state in filtered["rows"]], ["Ok / Recetté", "Mis en place"]
         )
         self.assertEqual(filtered["summary"]["human_overrides"], [])
+
+    def test_plan_id_is_a_digest_of_the_content(self):
+        first, again = self.scenario({79}), self.scenario({79})
+        self.assertEqual(first["plan_id"], again["plan_id"])
+        self.assertNotEqual(first["plan_id"], self.scenario(set())["plan_id"])
+        changed = copy.deepcopy(first)
+        changed["rows"][0]["before"] = "À traiter"
+        self.assertNotEqual(plan_digest(changed), first["plan_id"])
+        self.assertEqual(filter_plan(first, skip_human_overrides=False)["plan_id"], first["plan_id"])
+        self.assertNotEqual(
+            filter_plan(first, skip_human_overrides=True)["plan_id"], first["plan_id"]
+        )
 
     def test_without_recette_refs_both_are_protected(self):
         plan = self.scenario(set())

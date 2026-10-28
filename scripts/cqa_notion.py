@@ -202,8 +202,15 @@ def _cmd_recette(args, client) -> int:
     notion = _notion_context(run_dir, "bot_id")
     counts = _read_copy(run_dir, client)
     rows = _read_rows(run_dir)
-    plan = _optional_json(run_dir / "notion" / "plan.json", warn=True)
-    applied = _optional_json(run_dir / "notion" / "applied.json", warn=True)
+    plan = _optional_json(
+        run_dir / "notion" / "plan.json",
+        "les valeurs du journal donnent encore le dernier statut écrit par le skill",
+    )
+    applied = _optional_json(
+        run_dir / "notion" / "applied.json",
+        "le dernier statut écrit par le skill se déduit du plan (statut d'avant l'audit), "
+        "ce qui peut proposer à tort des lignes",
+    )
     known = known_values_from_env()
     chosen = {item["ref"]: item for item in recette_candidates(rows, plan, applied)}
     candidates = rerun_candidates(run_dir, extra_refs=[], git_run=args.git_run)
@@ -259,17 +266,15 @@ def _parse_refs(text: str) -> list:
     return refs
 
 
-def _optional_json(path: Path, warn: bool = False):
+def _optional_json(path: Path, consequence: str = ""):
+    """Read a JSON file, None when it is missing; an unreadable one is reported with its effect."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as error:
-        if warn:
-            _log(
-                f"{path.name} est illisible ({error}) : le dernier statut écrit par le skill "
-                "est inconnu pour toutes les lignes."
-            )
+        if consequence:
+            _log(f"{path.name} est illisible ({error}) : {consequence}.")
         return None
 
 

@@ -1106,11 +1106,19 @@ class PlanTest(AuditCase):
     def test_plan_is_reproducible(self):
         run_dir = self.make_run()
         self.plan(run_dir)
-        first = self.read(run_dir, "notion/plan.json")
+        first = (run_dir / "notion" / "plan.json").read_text(encoding="utf-8")
         self.plan(run_dir)
-        second = self.read(run_dir, "notion/plan.json")
-        self.assertNotEqual(first.pop("plan_id"), second.pop("plan_id"))
-        self.assertEqual(second, first)
+        self.assertEqual((run_dir / "notion" / "plan.json").read_text(encoding="utf-8"), first)
+
+    def test_plan_id_follows_the_content_of_the_plan(self):
+        run_dir = self.make_run()
+        self.plan(run_dir)
+        first = self.read(run_dir, "notion/plan.json")["plan_id"]
+        self.edit_row(run_dir, 101, status="En standby")
+        self.plan(run_dir)
+        self.assertNotEqual(self.read(run_dir, "notion/plan.json")["plan_id"], first)
+        self.plan(run_dir, "--skip-human-overrides")
+        self.assertEqual(len(self.read(run_dir, "notion/plan.json")["plan_id"]), 64)
 
     def test_skip_human_overrides(self):
         run_dir = self.make_run()
@@ -1526,6 +1534,7 @@ class RecetteTest(AuditCase):
             for ref in refs
         ]
         self.write(run_dir, "notion/recette.json", {"rows": rows})
+        self.write(run_dir, "reruns.json", {"closed": ["01"]})
         for ref in refs:
             self.edit_row(run_dir, ref, status="Mis en place")
         for ref in judged:
@@ -1551,7 +1560,7 @@ class RecetteTest(AuditCase):
         self.assertEqual(self.status_ops(run_dir)[102], "Ok / Recetté")
         recette = self.read(run_dir, "notion/plan.json")["recette"]
         self.assertEqual(
-            recette, {"rerun": "01", "refs": [102], "judged": [102], "unjudged": []}
+            recette, {"rerun": "01", "refs": [102], "judged": [102], "unjudged": [], "kept": []}
         )
         self.run_json(["plan", run_dir, "--skip-human-overrides"])
         self.assertNotIn(102, self.status_ops(run_dir))
@@ -1591,9 +1600,47 @@ class RecetteTest(AuditCase):
         run_dir = self.make_run()
         code, out, err = self.run_main(["plan", run_dir, "--recette"])
         self.assertEqual(code, 2)
+        self.assertIn("le numéro de la relance", err)
+        self.write(run_dir, "reruns.json", {"closed": ["01"]})
         code, out, err = self.run_main(["plan", run_dir, "--recette", "01"])
         self.assertEqual(code, 2)
         self.assertIn("recette.json", err)
+
+    def test_plan_recette_must_name_the_last_closed_rerun(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        for closed in ([], ["01", "02"]):
+            self.write(run_dir, "reruns.json", {"closed": closed})
+            code, out, err = self.run_main(["plan", run_dir, "--recette", "01"])
+            self.assertEqual(code, 2)
+            self.assertIn("dernière relance close", err)
+
+    def test_judged_rows_keeping_a_human_status_have_their_own_line(self):
+        for status, change in (
+            ("Ok / Recetté", {"verdict": "ko", "todo": "Corriger."}),
+            ("Mise en place partielle", {"verdict": "ok", "todo": None}),
+        ):
+            with self.subTest(status=status):
+                run_dir = self.make_recette_run([102], judged=[102], changes={102: change})
+                self.edit_row(run_dir, 102, status=status)
+                self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+                plan = self.read(run_dir, "notion/plan.json")
+                self.assertEqual(
+                    plan["recette"]["kept"],
+                    [{"ref": 102, "verdict": change["verdict"], "status": status}],
+                )
+                text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+                section = text.split("## Recette")[1].split("\n## ")[0]
+                where = [part.split("\n")[0] for part in section.split("### ")[1:] if "CQ-102" in part]
+                self.assertEqual(where, ["Statut humain conservé"])
+                self.assertIn(f"statut conservé « {status} »", section)
+
+    def test_without_skipping_nothing_is_kept(self):
+        run_dir = self.make_recette_run(
+            [102], judged=[102], changes={102: {"verdict": "ko", "todo": "Corriger."}}
+        )
+        self.edit_row(run_dir, 102, status="Ok / Recetté")
+        self.run_json(["plan", run_dir, "--recette", "01"])
+        self.assertEqual(self.read(run_dir, "notion/plan.json")["recette"]["kept"], [])
 
     def test_recette_section_in_synthesis(self):
         run_dir = self.make_recette_run(
@@ -1616,14 +1663,16 @@ class RecetteTest(AuditCase):
         self.assertNotIn(EM_DASH, text)
 
     def test_recette_unjudged_row_is_not_a_human_validation(self):
-        run_dir = self.make_recette_run([102, 104], judged=[102])
+        run_dir = self.make_recette_run([102, 104], judged=[104])
         self.run_json(["plan", run_dir, "--recette", "01"])
+        plan = self.read(run_dir, "notion/plan.json")
+        self.assertNotIn(102, plan["summary"]["unknown"])
         text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
         section = text.split("## Recette")[1].split("\n## ")[0]
         unknown = section.split("### Non évaluées")[1].split("###")[0]
-        waiting = section.split("### Restées en validation humaine")[1].split("###")[0]
-        self.assertIn("CQ-104", unknown)
-        self.assertNotIn("CQ-104", waiting)
+        validated = section.split("### Validées")[1].split("###")[0]
+        self.assertIn("CQ-102", unknown)
+        self.assertNotIn("CQ-102", validated)
 
     def test_recette_unknown_outcome_goes_to_not_evaluated(self):
         run_dir = self.make_recette_run([102, 104], judged=[102, 104])

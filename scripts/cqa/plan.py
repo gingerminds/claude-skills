@@ -2,7 +2,6 @@
 import copy
 import hashlib
 import json
-import uuid
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -120,7 +119,8 @@ def build_plan(
 
     Operations come by ref. Besides the keys of the exchange format the plan carries "rows",
     the status of every row before and after the run, which filter_plan needs to recompute
-    the summary, and "plan_id", which scopes the journal of the writes to this plan. missing_in_copy is the list of rows of the model absent from the copy.
+    the summary, and "plan_id", a digest of the plan that scopes the journal of the writes to it.
+    missing_in_copy is the list of rows of the model absent from the copy.
     """
     notion = context["notion"]
     common = {
@@ -154,8 +154,7 @@ def build_plan(
                 deferred.append(ref)
         ops.extend(row_ops)
     states = _row_states(rows, ops)
-    return {
-        "plan_id": uuid.uuid4().hex,
+    plan = {
         "run_id": context["run_id"],
         "copy_data_source_id": notion["copy_data_source_id"],
         "copy_page_id": notion["copy_page_id"],
@@ -164,6 +163,19 @@ def build_plan(
         "summary": _summary(states, ops, unknown, deferred, missing_in_copy or []),
         "rows": states,
     }
+    plan["plan_id"] = plan_digest(plan)
+    return plan
+
+
+def plan_digest(plan: dict) -> str:
+    """Return the plan_id: the sha256 of the canonical JSON of the plan without its plan_id.
+
+    The same plan rebuilt gets the same id (so a resume skips what the journal holds); any
+    change of the rows, operations or recette scope gives another one.
+    """
+    body = {key: value for key, value in plan.items() if key != "plan_id"}
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def filter_plan(plan: dict, *, skip_human_overrides: bool) -> dict:
@@ -185,6 +197,8 @@ def filter_plan(plan: dict, *, skip_human_overrides: bool) -> dict:
     result["summary"] = _summary(
         result["rows"], result["ops"], old["unknown"], old["deferred"], old["missing_in_copy"]
     )
+    if "plan_id" in result:
+        result["plan_id"] = plan_digest(result)
     return result
 
 

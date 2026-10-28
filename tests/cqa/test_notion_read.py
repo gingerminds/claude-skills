@@ -892,6 +892,7 @@ class RecetteCommandTest(CliTestCase):
         code, _, err, _ = self.run_recette()
         self.assertEqual(code, 0)
         self.assertIn("applied.json est illisible", err)
+        self.assertIn("se déduit du plan", err)
         self.assertNotIn("plan.json est illisible", err)
 
     def test_recette_creates_the_notion_folder(self):

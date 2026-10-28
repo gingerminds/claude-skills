@@ -420,6 +420,13 @@ class SkillTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, section)
 
+    def test_every_rebuild_of_a_recette_plan_keeps_the_recette_option(self):
+        text = _text(SKILL)
+        self.assertIn("every rebuild of the plan keeps `--recette <NN>`", _section(text, "11. Recette").replace("Every", "every"))
+        self.assertIn("`--recette <NN>`", _section(text, "7. Plan and confirmation"))
+        self.assertIn("`--recette <that NN>`", _section(text, "3. Resume"))
+        self.assertIn("Statut humain conservé", _section(text, "11. Recette"))
+
     def test_recette_reads_the_copy_and_presents_before_any_dispatch(self):
         section = _section(_text(SKILL), "11. Recette")
         read = section.index('cqa_notion.py" recette')

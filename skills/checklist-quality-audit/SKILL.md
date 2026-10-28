@@ -63,7 +63,7 @@ A run is complete once its final scan has run: section 8 then writes `done.json`
    - `context` false: section 4, in this folder.
    - `lots` false: section 5 (the diagnostic is redone: the workstation may have changed).
    - `lots` true and `plan` false: section 6. A lot whose `cqa_plan.py validate` passes is not dispatched again. Toolbox: no `tools/` folder, launch it again; `tools/` without `tools/manifest.json`, rebuild the manifest with `cqa_plan.py manifest "$RUN"` and relaunch only the missing or failed tools (`references/lots.md`).
-   - `plan` true: section 7. `apply` skips the writes already listed in `notion/applied.json`.
+   - `plan` true: section 7. `apply` skips the writes already listed in `notion/applied.json` (the plan is rebuilt with the same content, so with the same `plan_id`). When `notion/plan.json` carries `recette.rerun`, every rebuild of the plan passes `--recette <that NN>`.
 
 An interrupted run may have left its inhibitor running: it runs in its own session and outlives the Claude session. `start` reuses a live one instead of launching another. When the run restarts at section 7, run `start` as at the beginning of section 6 (section 6 does it itself): it keeps the inhibitor still running or launches a new one.
 
@@ -238,7 +238,7 @@ python3 "$S/cqa_plan.py" plan "$RUN"
 3. Otherwise ask « Écrire le plan dans la copie Notion ? » with « Tout écrire », « Sans toucher aux statuts posés par un humain » (only when there are some) and « Ne rien écrire ».
    - « Tout écrire »: section 8, step 1.
    - « Ne rien écrire »: as with `--dry-run`, section 8, step 2.
-   - « Sans toucher aux statuts posés par un humain »: keep the list of those statuses, rebuild the plan with the command below so that the synthesis matches what is written, then section 8, step 1, with `--skip-human-overrides`.
+   - « Sans toucher aux statuts posés par un humain »: keep the list of those statuses, rebuild the plan with the command below so that the synthesis matches what is written, then section 8, step 1, with `--skip-human-overrides`. In a recette (`notion/plan.json` carries `recette.rerun`), the rebuild keeps `--recette <NN>`.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -495,7 +495,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" rerun-close "$RUN" <NN>
 ```
 
-7. Build the plan with the recette option and the rerun number `NN`: the rows of `notion/recette.json` that are « Mis en place » in the copy and were judged again in `findings/<lot>-rerun-<NN>.json` may change the status a dev set; the others (no new finding, or a status nobody set to « Mis en place ») stay protected and are listed as not evaluated. Then go through section 7 and section 8 as for an audit (confirmation, writing, synthesis, scan, `done.json`). Every other row follows the write mode the lead chose:
+7. Build the plan with the recette option and the rerun number `NN`: the rows of `notion/recette.json` that are « Mis en place » in the copy and were judged again in `findings/<lot>-rerun-<NN>.json` may change the status a dev set; the others (no new finding, or a status nobody set to « Mis en place ») stay protected. Every rebuild of the plan keeps `--recette <NN>` (the rebuild of section 7 and the resume of section 3); `<NN>` must be the last rerun closed. The synthesis lists the rows not judged as « Non évaluées », and the judged rows whose human status was kept (« Sans toucher ») as « Statut humain conservé ». Then go through section 7 and section 8 as for an audit (confirmation, writing, synthesis, scan, `done.json`). Every other row follows the write mode the lead chose:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

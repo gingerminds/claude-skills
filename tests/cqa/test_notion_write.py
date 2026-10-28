@@ -638,6 +638,19 @@ class PlanScopedJournalTest(ApplyTestCase):
         self.assertEqual(again, apply_report(0, 1))
         self.assertEqual(len(self.notion.writes), 1)
 
+    def test_rebuilt_identical_plan_skips_what_the_journal_holds(self):
+        from cqa.plan import plan_digest
+
+        def rebuilt():
+            plan = self.planned(None)
+            plan["plan_id"] = plan_digest(plan)
+            return plan
+
+        self.apply(plan=rebuilt())
+        again = self.apply(plan=rebuilt())
+        self.assertEqual(again, apply_report(0, 1))
+        self.assertEqual(len(self.notion.writes), 1)
+
     def test_legacy_plan_and_legacy_journal_still_skip(self):
         self.apply(plan=self.planned(None))
         self.assertNotIn("plan_id", self.applied()[0])

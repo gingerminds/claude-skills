@@ -150,11 +150,26 @@ def _recette_lines(recette: dict, summary: dict, titles: dict, after: dict) -> l
     judged = [ref for ref in recette.get("judged") or [] if isinstance(ref, int)]
     unjudged = [ref for ref in recette.get("unjudged") or [] if isinstance(ref, int)]
     refs = sorted(set(judged) | set(unjudged))
-    validated, waiting, refused, other, unknown = [], [], [], [], []
+    validated, waiting, refused, other, unknown, kept = [], [], [], [], [], []
+    held = {
+        item["ref"]: item
+        for item in recette.get("kept") or []
+        if isinstance(item, dict) and isinstance(item.get("ref"), int)
+    }
     for ref in refs:
         status = after.get(ref)
         if ref in unjudged or ref in summary["unknown"]:
             unknown.append(_ref_line(ref, titles))
+        elif ref in held:
+            item = held[ref]
+            kept.append(
+                _ref_line(
+                    ref,
+                    titles,
+                    f"constat de la recette : {item.get('verdict')}, "
+                    f"statut conservé « {item.get('status')} »",
+                )
+            )
         elif status == STATUS_OK:
             validated.append(_ref_line(ref, titles))
         elif status == STATUS_IMPLEMENTED:
@@ -168,6 +183,7 @@ def _recette_lines(recette: dict, summary: dict, titles: dict, after: dict) -> l
         (f"Validées ({STATUS_OK})", validated),
         ("Restées en validation humaine", waiting),
         ("Refusées", refused),
+        ("Statut humain conservé", kept),
         ("Non évaluées", unknown),
         ("Bloquantes restantes", blocking),
     ]

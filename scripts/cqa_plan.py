@@ -34,7 +34,7 @@ from cqa.git_tools import (
 from cqa.lots import TOOLS, build_lots, coverage, select_rows
 from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
-from cqa.plan import build_plan, filter_plan, load_history, operation_key
+from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_digest
 from cqa.rerun import latest_findings, rerun_candidates
 from cqa.project import parse_project_md, project_slug, sibling_repos
 from cqa.secrets import known_values_from_env, scan_tree
@@ -216,6 +216,8 @@ def _register_audit(commands) -> None:
         "--recette",
         type=_rerun_number,
         metavar="NN",
+        nargs="?",
+        const=0,
         default=None,
         help="plan d'une recette : NN est le numéro de la relance qui a jugé les lignes de "
         "notion/recette.json ; celles qui sont « Mis en place » et jugées peuvent changer "
@@ -660,7 +662,13 @@ def _cmd_plan(args, services) -> int:
     copy_ds_id = context["notion"]["copy_data_source_id"]
     history = load_history(run_dir.parent.parent, run_dir.parent.name, copy_ds_id, run_dir.name)
     recette = {"refs": frozenset(), "judged": [], "unjudged": []}
+    if args.recette == 0:
+        raise UsageError(
+            "--recette demande le numéro de la relance qui a jugé les lignes (par exemple "
+            "--recette 01) : celle que rerun-close vient de clore."
+        )
     if args.recette is not None:
+        _check_last_closed(run_dir, args.recette)
         recette = _recette_scope(run_dir, context, lots["lots"], rows, args.recette)
     plan = build_plan(
         rows=rows,
@@ -678,11 +686,40 @@ def _cmd_plan(args, services) -> int:
     if args.recette is not None:
         plan["recette"] = {**recette, "rerun": f"{args.recette:02d}"}
         plan["recette"]["refs"] = sorted(recette["refs"])
+    built = plan
     plan = filter_plan(plan, skip_human_overrides=args.skip_human_overrides)
+    if args.recette is not None:
+        plan["recette"]["kept"] = _kept_human_statuses(built, plan)
+    plan["plan_id"] = plan_digest(plan)
     (run_dir / "notion").mkdir(exist_ok=True)
     write_json(run_dir / "notion" / "plan.json", plan)
     _emit(plan["summary"])
     return EXIT_OK
+
+
+def _check_last_closed(run_dir: Path, number: int) -> None:
+    closed = sorted(int(item) for item in _closed_reruns(run_dir) if item.isdigit())
+    if not closed or closed[-1] != number:
+        last = f"{closed[-1]:02d}" if closed else "aucune"
+        raise UsageError(
+            f"--recette {number:02d} : la recette doit porter sur la dernière relance close "
+            f"({last} dans reruns.json). Clore la relance avec rerun-close d'abord."
+        )
+
+
+def _kept_human_statuses(built: dict, filtered: dict) -> list:
+    """Return the judged rows of the recette whose human status the filter kept, with the verdict."""
+    recette = built["recette"]
+    judged = set(recette["judged"]) - set(recette["refs"])
+    written = {op["key"] for op in filtered["ops"]}
+    return [
+        {"ref": op["ref"], "verdict": op["verdict"], "status": op["before"]}
+        for op in built["ops"]
+        if op["kind"] == "status"
+        and op["human_override"]
+        and op["ref"] in judged
+        and op["key"] not in written
+    ]
 
 
 def _recette_scope(run_dir: Path, context: dict, lots: list, rows: list, number: int) -> dict:
