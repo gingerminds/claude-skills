@@ -416,7 +416,7 @@ def _cmd_key_pages(args, services) -> int:
     soft = [
         {"url": entry["url"], "status": entry["status"]}
         for entry in pages
-        if entry["template"] == "404" and entry["checked"] and entry["status"] != 404
+        if _is_404_template(entry["template"]) and entry["checked"] and entry["status"] != 404
     ]
     _emit({"pages": pages, "home_links_404": dead, "soft_404": soft})
     return EXIT_OK
@@ -442,13 +442,17 @@ def _key_page_entries(key_pages) -> list:
     return entries
 
 
+def _is_404_template(template) -> bool:
+    return isinstance(template, str) and template.strip() == "404"
+
+
 def _page_entry(url: str, template, status, checked: bool, *, key: bool) -> dict:
     """One page of the report; "gap" is true for a checked page that should have answered."""
     if not checked:
         gap = False
     elif key:
         gap = not (isinstance(status, int) and status < 400)
-        gap = gap and template != "404"
+        gap = gap and not _is_404_template(template)
     else:
         gap = status == 404
     return {"url": url, "template": template, "status": status, "checked": checked, "gap": gap}
@@ -669,7 +673,7 @@ def _plugin_folders(files: set, linked: dict) -> list:
 
 
 def _project_domains(context: dict) -> set:
-    """Return the base domains (last two labels) of the preprod, the prod and the sites."""
+    """Return the base domains (last two labels) of the preprod, the prod, the sites and the repo host."""
     urls = []
     target = context.get("target")
     if isinstance(target, dict):
@@ -677,6 +681,16 @@ def _project_domains(context: dict) -> set:
     for site in context.get("sites") or []:
         if isinstance(site, dict):
             urls += [site.get("home"), f"https://{site.get('domain')}"]
+    for repo in context.get("repos") or []:
+        if not isinstance(repo, dict):
+            continue
+        urls.append(repo.get("web_url"))
+        remote = repo.get("remote")
+        if isinstance(remote, str) and remote:
+            try:
+                urls.append(remote_web_url(remote))
+            except ValueError:
+                pass
     return {_base_domain(_safe_hostname(url)) for url in urls if isinstance(url, str)} - {None}
 
 
@@ -862,7 +876,7 @@ def _cmd_crawl_estimate(args, services) -> int:
     pages = [
         mapped
         for template, page_url in _key_page_entries(context.get("key_pages"))
-        if template != "404"
+        if not _is_404_template(template)
         for mapped in [crawl_budget.on_target(page_url, origin, prod_origin)]
         if mapped
     ][:MAX_KEY_PAGES - 1]

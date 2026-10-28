@@ -2118,6 +2118,16 @@ class KeyPagesCheckTest(RunDirCase):
             [("Accueil", 200, False), ("404", 404, False), ("Liste", 404, True)],
         )
 
+    def test_the_404_template_is_compared_stripped(self):
+        err = HOME + "gm-cqa-404-0a1b2c3d"
+        opener = SiteOpener({HOME: (200, ""), err: (200, "")})
+        self.write_context(
+            key_pages=[{"template": "Accueil", "url": HOME}, {"template": "404 ", "url": err}]
+        )
+        result = self.run_json(["key-pages-check", self.run_dir], env=self.fast, opener=opener)
+        self.assertFalse(result["pages"][1]["gap"])
+        self.assertEqual(result["soft_404"], [{"url": err, "status": 200}])
+
     def test_key_pages_check_expects_404_on_the_error_page(self):
         err = HOME + "gm-cqa-404-0a1b2c3d"
         for status in (404, 200, 302, 500, 401):
@@ -2732,6 +2742,25 @@ class WpPluginsTest(RunDirCase):
             "sites": [],
         })
         self.assertEqual(set(self.plugins()), {"plugins/own"})
+
+    def test_the_repo_host_domain_is_a_project_domain(self):
+        header = "<?php\n/*\nPlugin Name: {}\n{}*/\n"
+        repo = self.make_wordpress({
+            "plugins/agency/a.php": header.format("A", "Author URI: https://www.example.dev/\n"),
+            "plugins/vendor/v.php": header.format("V", "Author URI: https://vendor.example.com/\n"),
+        })
+        self.context_for(repo)
+        context = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))
+        context["repos"][0]["web_url"] = "https://gitlab.example.dev/grp/wordpress"
+        context["repos"][0]["remote"] = "git@git.example.test:grp/wordpress.git"
+        self.write_context(context)
+        found = self.plugins()
+        self.assertFalse(found["plugins/agency"]["third_party"])
+        self.assertTrue(found["plugins/vendor"]["third_party"])
+        context["repos"][0]["web_url"] = None
+        context["repos"][0]["remote"] = "git@git.example.dev:grp/wordpress.git"
+        self.write_context(context)
+        self.assertFalse(self.plugins()["plugins/agency"]["third_party"])
 
     def test_unreadable_repo_is_reported_not_fatal(self):
         self.context_for(self.tmp_dir() / "missing")

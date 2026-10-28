@@ -58,5 +58,11 @@ class FirstContextContract(unittest.TestCase):
         self.assertIn("step 8 of the skill completes and checks it", body)
 
 
+class RepoHostDomainContract(unittest.TestCase):
+    def test_wp_plugins_doc_names_the_repo_host_among_project_domains(self):
+        body = section((REFS / "context.md").read_text(encoding="utf-8"), "## 6.1.1")
+        self.assertIn("the host of the repo", body)
+
+
 if __name__ == "__main__":
     unittest.main()
