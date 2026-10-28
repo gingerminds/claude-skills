@@ -2118,6 +2118,40 @@ class KeyPagesCheckTest(RunDirCase):
             [("Accueil", 200, False), ("404", 404, False), ("Liste", 404, True)],
         )
 
+    def test_key_pages_check_expects_404_on_the_error_page(self):
+        err = HOME + "gm-cqa-404-0a1b2c3d"
+        for status in (404, 200, 302, 500, 401):
+            with self.subTest(status=status):
+                opener = SiteOpener({HOME: (200, ""), err: (status, ""), HOME + "x": (404, "")})
+                self.write_context(
+                    key_pages=[
+                        {"template": "Accueil", "url": HOME},
+                        {"template": "404", "url": err},
+                        {"template": "Accueil", "url": HOME + "x"},
+                    ]
+                )
+                result = self.run_json(["key-pages-check", self.run_dir], env=self.fast, opener=opener)
+                error_page = result["pages"][1]
+                self.assertEqual((error_page["template"], error_page["gap"]), ("404", False))
+                self.assertTrue(result["pages"][2]["gap"])
+                expected = [] if status == 404 else [{"url": err, "status": status}]
+                self.assertEqual(result["soft_404"], expected)
+        self.write_context(
+            key_pages=[{"template": "404", "url": err}, {"template": "404", "url": "https://other.example.org/e"}]
+        )
+
+        class Down:
+            def open(self, request, timeout=None):
+                raise urllib.error.URLError("down")
+
+        result = self.run_json(["key-pages-check", self.run_dir], env=self.fast, opener=Down())
+        self.assertEqual(result["soft_404"], [{"url": err, "status": None}])
+        self.assertFalse(any(p["gap"] for p in result["pages"] if p["template"] == "404"))
+        opener = SiteOpener({HOME: (200, "")})
+        self.write_context(key_pages=[{"template": "404", "url": "https://other.example.org/e"}])
+        result = self.run_json(["key-pages-check", self.run_dir], env=self.fast, opener=opener)
+        self.assertEqual(result["soft_404"], [])
+
     def test_a_key_page_with_credentials_is_refused_and_never_printed(self):
         url = "https://leak-user:leak-pass@preprod.example.org/liste"
         opener = SiteOpener({HOME: (200, "")})

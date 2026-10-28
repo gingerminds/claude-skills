@@ -56,6 +56,8 @@ Read, in this order:
 | SSH serveur, BDD | In a `server` lot: the SSH guard (see "Server lot"). In other lots: `facts/server.json`. |
 | Navigateur | Not yours (a browser lot reaches you only when the browser is unavailable): judge what the code and the tools show, `unknown` for the rest. |
 | Comptes de test | `unknown` for the parts that need a logged-in session, with the steps in `human_check`. |
+
+The key page of the template `404` is the error page: its 404 answer is expected. An `unexpected-status` finding (orange) of a page tool (`lighthouse`, `a11y`, `nu`, `yellowlab`) on it proves the 404 page is missing or redirected (CQ-5). An `error-page-skipped` finding (info, Yellow Lab only) is not a defect: the page really answers 404.
 | Intervention humaine | Never above `ok_human`; `human_check` says what the human must do. |
 
 A tool that is missing, failed or skipped makes the parts that depend on it `unknown`, with the tool and its reason in `summary`. `not_applicable`: the tool had nothing to examine (its `reason` says why); it is not a failure: judge the row from the code and the other sources.

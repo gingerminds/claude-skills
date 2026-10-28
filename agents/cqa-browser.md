@@ -61,6 +61,7 @@ Read, in this order:
 ## Method: one template at a time
 
 1. For each row, list the key pages its test needs, and the other project pages it names (404 page, back-office, search results).
+   The key page of the template `404` is the error page: its 404 answer is expected, so judge the error page itself. An `unexpected-status` finding of a page tool on it proves the 404 page is missing or redirected (CQ-5). An `error-page-skipped` finding of Yellow Lab (info) is not a defect: the page really answers 404.
 2. Create your tab. Read the window size (`[window.outerWidth, window.outerHeight]`) to restore it at the end.
 3. Take the key pages in the order of `key_pages`. For each one: navigate, run the checks of every row that needs it, note the observations (row, page, what you saw), then go to the next one. Never come back to a page you are done with.
 4. Then the other pages, grouped the same way.

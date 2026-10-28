@@ -890,6 +890,18 @@ class SkillTest(unittest.TestCase):
         self.assertIn("site list --field=url", _text(REFERENCES / "server.md"))
         self.assertIn("site list --field=url", _text(AUDITOR))
 
+    def test_the_404_key_page_is_proposed_and_its_status_expected(self):
+        context = _text(REFERENCES / "context.md")
+        self.assertIn("gm-cqa-404-<8 random hex>", context)
+        self.assertNotIn("cqa-page-inexistante", context)
+        diagnostic = _text(REFERENCES / "diagnostic.md")
+        for needle in ("soft_404", "La page d'erreur répond <status> au lieu de 404", "unexpected-status"):
+            self.assertIn(needle, diagnostic)
+        for agent in (AUDITOR, BROWSER):
+            text = _text(agent)
+            self.assertIn("unexpected-status", text)
+            self.assertIn("error-page-skipped", text)
+
     def test_context_step_checks_pages_reuses_runs_and_asks_for_accounts(self):
         skill = _text(SKILL)
         context = _text(REFERENCES / "context.md")

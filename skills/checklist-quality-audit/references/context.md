@@ -162,7 +162,7 @@ python3 "$S/cqa_ssh_ro.py" <alias> -- wp post list --post_type=page --s=gravityf
 ```
 
   `<dossier>` is the WordPress folder found in section 6.1, step 1. Keep only the pages whose `post_status` is `publish`, and propose the `url` of one as the key page « Formulaire »; none found or a guard refusal: go on without it, never work around the guard.
-- 404: `<preprod_url>/cqa-page-inexistante-<4 chiffres>`.
+- 404: always proposed, counted in the 10, template written exactly `404`: `<preprod_url>/gm-cqa-404-<8 random hex>` (8 random hexadecimal characters, new for each run). On a prod run, the same path on the host of `prod_url`. A `404` page copied from an earlier run keeps its URL.
 - Other `access`: routes of the code only; the lead completes the URLs.
 
 Show the list (template, URL), then « Valider ces pages clés ? » with « Valider » and « Annuler l'audit »; corrections in « Autre », in one answer. Absolute URLs on the preprod host, or on the back-office host. On a prod run, the same pages on the host of `prod_url`.
@@ -206,7 +206,7 @@ The browser may only visit the hosts of `target.preprod_url`, of `sites` and of 
 
 ## 6.3 Earlier run
 
-`cqa_plan.py reuse-context` (SKILL.md, section 3) pre-fills `context.json` from a previous run. Ask again only: the probe of the target (section 3 above, `probe-target`, and the credentials); `prod_live` (the question of section 3 above, only with `--phase "MEL J0"` or `--phase "Post-MEL J+7"`), and on a prod run the key pages again on the host of `prod_url` (section 6); then `cqa_plan.py key-pages-check "$RUN"` (`--auth-env` with the credentials). Look only at the pages with `checked` true. A page with `gap` true and a `status` of 404: « La page <template> (<url>) répond 404. Quelle URL la remplace ? » with « Retirer cette page » and « Garder cette page » (the new URL in « Autre »). A `checked` page whose `status` is `null`: say « <url> ne répond pas » (not 404) and ask the same question. A page with `checked` false was not requested (another origin, or the time limit): it is neither a gap nor a 404. The page of the template « 404 » is expected to answer 404: it is never asked for a replacement because of it. Everything else is kept as copied.
+`cqa_plan.py reuse-context` (SKILL.md, section 3) pre-fills `context.json` from a previous run. Ask again only: the probe of the target (section 3 above, `probe-target`, and the credentials); `prod_live` (the question of section 3 above, only with `--phase "MEL J0"` or `--phase "Post-MEL J+7"`), and on a prod run the key pages again on the host of `prod_url` (section 6); then `cqa_plan.py key-pages-check "$RUN"` (`--auth-env` with the credentials). Look only at the pages with `checked` true. A page with `gap` true and a `status` of 404: « La page <template> (<url>) répond 404. Quelle URL la remplace ? » with « Retirer cette page » and « Garder cette page » (the new URL in « Autre »). A `checked` page whose `status` is `null`: say « <url> ne répond pas » (not 404) and ask the same question. A page with `checked` false was not requested (another origin, or the time limit): it is neither a gap nor a 404. The page of the template « 404 » is expected to answer 404: it is never asked for a replacement because of it, whatever it answers (a non-404 answer is reported by `soft_404`, never as a gap to replace). Everything else is kept as copied.
 
 ## 7. context.json
 

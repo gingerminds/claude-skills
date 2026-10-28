@@ -411,7 +411,12 @@ def _cmd_key_pages(args, services) -> int:
         pages.append(entry)
         if entry["status"] == 404:
             dead.append(url)
-    _emit({"pages": pages, "home_links_404": dead})
+    soft = [
+        {"url": entry["url"], "status": entry["status"]}
+        for entry in pages
+        if entry["template"] == "404" and entry["checked"] and entry["status"] != 404
+    ]
+    _emit({"pages": pages, "home_links_404": dead, "soft_404": soft})
     return EXIT_OK
 
 
@@ -441,7 +446,7 @@ def _page_entry(url: str, template, status, checked: bool, *, key: bool) -> dict
         gap = False
     elif key:
         gap = not (isinstance(status, int) and status < 400)
-        gap = gap and not (template == "404" and status == 404)
+        gap = gap and template != "404"
     else:
         gap = status == 404
     return {"url": url, "template": template, "status": status, "checked": checked, "gap": gap}
