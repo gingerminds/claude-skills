@@ -886,7 +886,12 @@ _SQL_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*|`[^`]+`")
 _SQL_LITERAL = re.compile(r"'(?:[^']|'')*'|\d+")
 _SQL_INTEGER = re.compile(r"\d+")
 _SQL_TOKEN = re.compile(r"\s+|'(?:[^']|'')*'|\"[^\"]*\"|`[^`]*`|[A-Za-z0-9_$]+|.")
-_SQL_SENSITIVE_TABLES = frozenset({"users", "wp_users", "users_field_data", "sessions"})
+# Tables of accounts, sessions, tokens and personal data (comment authors, WooCommerce orders and
+# customers), with or without a prefix (wp_, wp_2_, drupal_...): COUNT(...) only.
+_SQL_SENSITIVE_SUFFIXES = (
+    "users", "users_field_data", "sessions", "tokens", "comments", "comment_field_data",
+    "wc_orders", "wc_order_addresses", "wc_customer_lookup",
+)
 _SQL_ALIAS = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*|`[^`]*`|\"[^\"]*\"")
 _SQL_LIST_END = frozenset({
     "FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "UNION", "INTERSECT", "EXCEPT",
@@ -1171,7 +1176,9 @@ def _sql_name(token: str) -> str:
 
 def _is_sensitive(name: str) -> bool:
     lowered = name.lower()
-    return lowered in _SQL_SENSITIVE_TABLES or lowered.endswith("_tokens")
+    return any(
+        lowered == suffix or lowered.endswith("_" + suffix) for suffix in _SQL_SENSITIVE_SUFFIXES
+    )
 
 
 def build_sql_remote(

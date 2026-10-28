@@ -857,6 +857,32 @@ class SkillTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, context)
 
+    def test_count_only_tables_are_documented_with_their_prefixes(self):
+        for path in (REFERENCES / "server.md", AUDITOR):
+            text = _text(path)
+            for needle in ("`*users`", "`*users_field_data`", "`*sessions`", "`*_tokens`",
+                           "`*comments`", "`*comment_field_data`", "`*wc_orders`",
+                           "`*wc_order_addresses`", "`*wc_customer_lookup`"):
+                with self.subTest(file=path.name, needle=needle):
+                    self.assertIn(needle, text)
+        for query in ("SELECT comment_author_email FROM wp_comments LIMIT 5",
+                      "SELECT mail FROM drupal_users_field_data LIMIT 5",
+                      "SELECT billing_email FROM wp_wc_orders LIMIT 5"):
+            with self.subTest(query=query):
+                self.assertFalse(cqa_ssh_ro.check_sql(query)[0])
+
+    def test_every_inline_documented_query_passes_the_guard(self):
+        found = 0
+        for path in (*_skill_files(), AUDITOR, BROWSER):
+            for query in re.findall(r"`(SELECT [^`]+ FROM [^`]+)`", _text(path)):
+                if "<" in query:
+                    continue
+                found += 1
+                with self.subTest(file=path.name, query=query):
+                    allowed, reason = cqa_ssh_ro.check_sql(query.replace("\\$", "$"))
+                    self.assertTrue(allowed, reason)
+        self.assertGreaterEqual(found, 1)
+
     def test_session_files_and_temporary_folders_are_documented_as_refused(self):
         server = _text(REFERENCES / "server.md")
         auditor = _text(AUDITOR)

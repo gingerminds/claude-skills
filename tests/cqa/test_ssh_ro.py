@@ -1275,6 +1275,57 @@ class SessionFilesTest(unittest.TestCase):
         self.assertIn("/var/www/app/storage/framework/sessions:", masked)
 
 
+class SensitiveTableSuffixTest(unittest.TestCase):
+    """Prefixed user, session and token tables, comments and WooCommerce customer data (F3)."""
+
+    REFUSED = [
+        "SELECT user_email, user_login, display_name FROM abc_users LIMIT 100",
+        "SELECT mail, name FROM drupal_users_field_data LIMIT 100",
+        "SELECT ip_address, user_agent FROM abc_sessions LIMIT 10",
+        "SELECT uid FROM app_sessions LIMIT 10",
+        "SELECT name FROM tokens LIMIT 1",
+        "SELECT comment_author_email FROM wp_comments LIMIT 5",
+        "SELECT comment_author_IP FROM wp_2_comments LIMIT 5",
+        "SELECT comment_ID FROM comments LIMIT 5",
+        "SELECT mail, hostname FROM comment_field_data LIMIT 5",
+        "SELECT billing_email FROM wp_wc_orders LIMIT 5",
+        "SELECT id, status FROM wc_orders LIMIT 5",
+        "SELECT email, phone, address_1 FROM wp_wc_order_addresses LIMIT 5",
+        "SELECT email FROM wp_wc_customer_lookup LIMIT 5",
+        "SELECT p.ID FROM wp_posts p JOIN wp_comments c ON c.comment_post_ID = p.ID LIMIT 5",
+        "SELECT COUNT(*), comment_author FROM wp_comments",
+    ]
+    ALLOWED = [
+        "SELECT COUNT(*) FROM abc_users LIMIT 1",
+        "SELECT COUNT(*) FROM drupal_users_field_data WHERE status = 1 LIMIT 1",
+        "SELECT COUNT(*) FROM abc_sessions LIMIT 1",
+        "SELECT COUNT(*) FROM wp_comments WHERE comment_approved = 'spam' LIMIT 1",
+        "SELECT COUNT(comment_ID) FROM wp_comments WHERE comment_approved = '0' LIMIT 1",
+        "SELECT COUNT(*) FROM wp_wc_orders WHERE status = 'wc-pending' LIMIT 1",
+        "SELECT COUNT(*) FROM wp_wc_order_addresses LIMIT 1",
+        "SELECT COUNT(*) FROM wp_wc_customer_lookup LIMIT 1",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 34 LIMIT 1",
+        "SELECT id FROM users_roles_history LIMIT 5",
+        "SELECT order_id FROM wp_wc_order_stats LIMIT 5",
+        "SELECT meta_key FROM wp_commentmeta WHERE comment_id = 3 LIMIT 5",
+        "SHOW COLUMNS FROM wp_wc_orders",
+        "DESCRIBE abc_users",
+    ]
+
+    def test_suffixes_keep_the_count_only_rule(self):
+        for query in self.REFUSED:
+            with self.subTest(query=query):
+                allowed, reason = check_sql(query)
+                self.assertFalse(allowed, reason)
+                self.assertIn("COUNT", reason)
+
+    def test_counts_and_schema_stay_allowed(self):
+        for query in self.ALLOWED:
+            with self.subTest(query=query):
+                allowed, reason = check_sql(query)
+                self.assertTrue(allowed, reason)
+
+
 class CheckSqlTest(unittest.TestCase):
     def test_allowed(self):
         for query in SQL_OK:
