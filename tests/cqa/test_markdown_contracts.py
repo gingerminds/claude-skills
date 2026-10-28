@@ -139,6 +139,27 @@ def _section(text: str, heading: str) -> str:
 
 
 class SkillTest(unittest.TestCase):
+    def test_waves_recheck_target_and_ssh(self):
+        text = _text(SKILL)
+        start = text.index("## 6. Audit")
+        end = text.index("## 7. ")
+        section = text[start:end]
+        for needle in ("Before each new wave of lots", "steps 4, 5, 6 and 8",
+                       "cqa_plan.py probe-target", "ssh -o BatchMode=yes -o ConnectTimeout=10 <alias> true",
+                       "context.json", "« Reprendre »", "« Continuer quand même »",
+                       "remarques de la synthèse"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+
+    def test_browser_lots_recheck_chrome(self):
+        for path in (SKILL, REFERENCES / "browser.md", REFERENCES / "lots.md"):
+            with self.subTest(path=path.name):
+                self.assertIn("tabs_context_mcp", _text(path))
+        for path in (SKILL, REFERENCES / "browser.md"):
+            with self.subTest(path=path.name):
+                self.assertIn("Before each browser lot", _text(path))
+                self.assertIn("reconnect Claude in Chrome", _text(path))
+
     def test_skill_frontmatter(self):
         fields = _frontmatter(SKILL)
         self.assertEqual(fields.get("name"), "checklist-quality-audit")

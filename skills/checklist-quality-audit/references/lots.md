@@ -105,7 +105,8 @@ A sub-agent returns 10 lines at most: relay to the lead one short French line pe
 1. `server` first when there is one (always `gm:cqa-auditor`), with the `code-*` lots whose `needs_toolbox` is false: 4 sub-agents at most at once. Dispatch this first batch, then do the login pause (`references/browser.md`) while it runs.
 2. The `browser-*` lots, one at a time, once the `server` lot is done (its `facts/server.json` serves the mixed rows): `gm:cqa-browser`, or the fallback of `references/browser.md`. A browser lot may run beside code lots, within the limit of 4.
 3. The `-outils` lots once the toolbox has finished (its background task notified you), whatever its exit code. Toolbox not ready: dispatch them with the others; they read the skipped results and give `unknown` for those parts. `browser-*-outils` lots follow the browser rules.
-4. When resuming, skip every lot whose first-round file already passes `validate`.
+4. Before each wave, recheck the target and SSH, and before each browser lot call `tabs_context_mcp` (SKILL.md, section 6).
+5. When resuming, skip every lot whose first-round file already passes `validate`.
 
 ## 5. Validation
 
