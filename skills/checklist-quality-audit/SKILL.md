@@ -318,11 +318,14 @@ python3 "$S/cqa_plan.py" synthesis "$RUN"
 
 It writes `synthese.md` and `notion/page-comment.txt`.
 
-**3. Remarques**, on the same paths. Under a last heading « Remarques » of `synthese.md`, add with Edit what the scripts cannot know, or nothing (no heading) when there is none:
-- an alignment the lead confirmed without a known deployed commit;
+**3. Remarques**, on the same paths. Write what the scripts cannot know to `<run_dir>/remarques.md` (one bullet per line, no heading), or write nothing when there is none. Never edit `synthese.md`: the synthesis is regenerated, it injects `remarques.md` as its last section « Remarques » and never erases it, so run step 2 again after writing the file. Write:
+- an alignment the lead confirmed without a known deployed commit, and, in autonomous mode, an alignment not confirmed (the repo is treated as not aligned);
 - for « Sans toucher aux statuts posés par un humain », the human statuses kept: « CQ-<ref> : « <before> » conservé, l'audit proposait « <after> » »;
 - the operations blocked at step 1: « CQ-<ref> (<kind>) non écrit : <raison> »;
-- for `--dry-run` and « Ne rien écrire »: « Rien n'a été écrit dans Notion : le plan reste dans notion/plan.json. »
+- for `--dry-run` and « Ne rien écrire »: « Rien n'a été écrit dans Notion : le plan reste dans notion/plan.json. »;
+- the notes asked by section 6 (« Continuer quand même »).
+
+The entries set aside in autonomous mode (gaps, `ssh_refused`, questions, logins) need no remark: the synthesis itself lists every entry of `deferred.json` under « Décisions mises de côté », open or resolved.
 
 **4. Page comment**, only when step 1 ran and wrote or found something (`done` plus `skipped` above 0). Never with `--dry-run` or « Ne rien écrire ». When `cqa_plan.py deferred "$RUN"` lists open entries (in either mode), skip it now: it is written once, after the end block (step 5).
 

@@ -544,12 +544,54 @@ class ToRichTextTest(unittest.TestCase):
         for url in (
             "https://example.org:8443/a/b?x=1#y",
             "http://[2001:db8::1]/",
-            "https://bücher.example/",
             "http://localhost:8080/",
         ):
             with self.subTest(url=url):
                 rt = to_rich_text(f"voir {url} ok")
                 self.assertEqual(links(rt), [url])
+                self.assertEqual("".join(contents(rt)), f"voir {url} ok")
+
+    def test_link_url_is_ascii(self):
+        url = "https://bücher.example/été?q=ü#frag-é"
+        rt = to_rich_text(f"voir {url} ok")
+        target = links(rt)[0]
+        self.assertTrue(target.isascii(), target)
+        self.assertEqual(
+            target, "https://xn--bcher-kva.example/%C3%A9t%C3%A9?q=%C3%BC#frag-%C3%A9"
+        )
+        self.assertEqual("".join(contents(rt)), f"voir {url} ok")
+
+    def test_link_url_keeps_reserved_characters_and_never_double_encodes(self):
+        url = "https://bücher.example/a%20b/é:@!$&()*+,;=~?x=%C3%A9&y=é#é"
+        target = links(to_rich_text(url))[0]
+        self.assertTrue(target.isascii(), target)
+        self.assertEqual(
+            target,
+            "https://xn--bcher-kva.example/a%20b/%C3%A9:@!$&()*+,;=~?x=%C3%A9&y=%C3%A9#%C3%A9",
+        )
+        self.assertEqual(
+            links(to_rich_text("https://example.org/é/100%"))[0], "https://example.org/%C3%A9/100%25"
+        )
+
+    def test_link_url_keeps_port_and_ipv6(self):
+        self.assertEqual(
+            links(to_rich_text("https://bücher.example:8443/é"))[0],
+            "https://xn--bcher-kva.example:8443/%C3%A9",
+        )
+        self.assertEqual(
+            links(to_rich_text("http://[2001:db8::1]/é"))[0], "http://[2001:db8::1]/%C3%A9"
+        )
+
+    def test_url_with_credentials_is_never_linked(self):
+        for url in (
+            "https://user:pass@example.org/x",
+            "https://user@example.org/",
+            "https://bücher.example@example.org/é",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(is_linkable_url(url))
+                rt = to_rich_text(f"voir {url} ok")
+                self.assertEqual(links(rt), [])
                 self.assertEqual("".join(contents(rt)), f"voir {url} ok")
 
     def test_is_linkable_url(self):

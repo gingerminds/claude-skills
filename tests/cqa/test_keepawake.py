@@ -118,6 +118,27 @@ class KeepawakeTest(unittest.TestCase):
         self.assertIn("--why=", logged)
         self.assertIn("sleep infinity", logged)
 
+    def test_keepawake_falls_back_to_sleep_idle(self):
+        self.stub(
+            "systemd-inhibit",
+            INHIBITOR_STUB.replace(
+                'echo "$@" >> "$STUB_LOG"',
+                'echo "$@" >> "$STUB_LOG"\ncase "$*" in *handle-lid-switch*) exit 1 ;; esac',
+            ),
+        )
+        result = self.keepawake("start", str(self.run_dir))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.pid_file.exists())
+        time.sleep(0.3)
+        self.assertTrue(alive(self.pid()))
+        lines = self.log.read_text().splitlines()
+        self.assertEqual(len(lines), 2, lines)
+        self.assertIn("--what=sleep:idle:handle-lid-switch", lines[0])
+        self.assertIn("--what=sleep:idle ", lines[1])
+        self.assertNotIn("handle-lid-switch", lines[1])
+        self.assertIn("Rabattre l'écran", result.stderr)
+        self.assertIn("veille", result.stderr)
+
     def test_keepawake_start_uses_caffeinate_without_systemd(self):
         self.stub("caffeinate", CAFFEINATE_STUB)
         result = self.keepawake("start", str(self.run_dir))

@@ -51,6 +51,10 @@ def add(run_dir: Path, kind: str, detail: str, refs: str = "") -> dict:
     return entry
 
 
+def all_items(run_dir: Path) -> list:
+    return _read(run_dir)
+
+
 def open_items(run_dir: Path) -> list:
     return [item for item in _read(run_dir) if not item.get("resolved")]
 

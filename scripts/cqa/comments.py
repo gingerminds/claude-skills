@@ -3,7 +3,7 @@ import ipaddress
 import re
 from datetime import date
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from cqa.checklist import (
     STATUS_IMPLEMENTED,
@@ -143,10 +143,11 @@ def to_rich_text(text: str) -> list[dict]:
     start = 0
     for found in _URL.finditer(text):
         url = _trim_url(found.group())
-        if not is_linkable_url(url) or _units(url) > MAX_TEXT_LENGTH:
+        target = ascii_url(url) if is_linkable_url(url) else None
+        if target is None or _units(url) > MAX_TEXT_LENGTH or len(target) > MAX_TEXT_LENGTH:
             continue
         objects.extend(_plain_objects(text[start : found.start()]))
-        objects.append({"type": "text", "text": {"content": url, "link": {"url": url}}})
+        objects.append({"type": "text", "text": {"content": url, "link": {"url": target}}})
         start = found.start() + len(url)
     objects.extend(_plain_objects(text[start:]))
     return objects
@@ -164,6 +165,8 @@ def is_linkable_url(url: str) -> bool:
         return False
     if parts.scheme not in ("http", "https") or not host:
         return False
+    if "@" in parts.netloc:
+        return False
     try:
         ipaddress.ip_address(host)
         return True
@@ -173,6 +176,34 @@ def is_linkable_url(url: str) -> bool:
     if host != "localhost" and len(labels) < 2:
         return False
     return all(labels)
+
+
+def ascii_url(url: str) -> Optional[str]:
+    """Return url in pure ASCII (IDNA host, percent-encoded path, query and fragment), or None.
+
+    Existing %XX escapes and reserved characters are kept as they are.
+    """
+    if url.isascii():
+        return url
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname.encode("idna").decode("ascii")
+        port = parts.port
+    except (ValueError, UnicodeError, AttributeError):
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = host if port is None else f"{host}:{port}"
+    return (
+        f"{parts.scheme}://{netloc}{_encode(parts.path)}"
+        + (f"?{_encode(parts.query)}" if parts.query else "")
+        + (f"#{_encode(parts.fragment)}" if parts.fragment else "")
+    )
+
+
+def _encode(part: str) -> str:
+    part = re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", part)
+    return quote(part, safe="/:?#[]@!$&'()*+,;=%~-._")
 
 
 def parse_verdict(text: str) -> Optional[str]:

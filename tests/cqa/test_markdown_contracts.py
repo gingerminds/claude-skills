@@ -155,6 +155,16 @@ class SkillTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, section)
 
+    def test_remarks_go_to_remarques_md(self):
+        text = _text(SKILL)
+        start = text.index("**3. Remarques**")
+        step = text[start : text.index("**4. Page comment**")]
+        for needle in ("remarques.md", "Never edit `synthese.md`", "deferred.json",
+                       "ssh_refused", "autonomous mode"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, step)
+        self.assertNotIn("with Edit", step)
+
     def test_browser_lots_recheck_chrome(self):
         for path in (SKILL, REFERENCES / "browser.md", REFERENCES / "lots.md"):
             with self.subTest(path=path.name):

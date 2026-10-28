@@ -77,7 +77,7 @@ It gives `{"aligned", "missing", "reason"}`.
 - `aligned` false: list `missing` (`sha` and `title`, newest first) to the lead, then « La préprod n'a pas les <n> derniers commits de develop pour <name>. » with « Déployer puis relancer (recommandé) » and « Lancer quand même ».
   - Deploy: stop the skill; the lead deploys and relaunches. The skill never deploys.
   - Go on: `aligned` false. The sub-agents fill `divergence` row by row, which caps the verdict at « Mise en place partielle », and the synthesis reports the gap.
-- `aligned` null (`reason` `commit_inconnu`, `base_inconnue` or `base_non_a_jour`), or no sha at all: « Commit déployé introuvable pour <name>. Confirmez-vous que la préprod tourne sur develop à jour ? » with « Je confirme » and « Arrêter ». In autonomous mode (SKILL.md, section 5) do not ask: `defer --kind gap`, treat the repo as not aligned (`aligned` `null`) and go on. Confirmed: `aligned` stays `null`, `deployed_sha` the sha or `null`, and section 8 adds the remark to `synthese.md`. Otherwise stop.
+- `aligned` null (`reason` `commit_inconnu`, `base_inconnue` or `base_non_a_jour`), or no sha at all: « Commit déployé introuvable pour <name>. Confirmez-vous que la préprod tourne sur develop à jour ? » with « Je confirme » and « Arrêter ». In autonomous mode (SKILL.md, section 5) do not ask: `defer --kind gap`, treat the repo as not aligned (`aligned` `null`) and go on. Confirmed: `aligned` stays `null`, `deployed_sha` the sha or `null`, and section 8 adds the remark to `remarques.md`. Otherwise stop.
 
 With `diagnostic`, report the state only: no question about deploying.
 

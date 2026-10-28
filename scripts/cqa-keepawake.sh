@@ -67,6 +67,14 @@ is_running() {
   return 0
 }
 
+inhibit_with_systemd() {
+  launch systemd-inhibit "--what=$1" --mode=block \
+    --who=gm:cqa "--why=Audit qualité en cours : le poste ne doit pas se mettre en veille" \
+    sleep infinity
+  sleep 0.3
+  is_running "$LAUNCHED_PID"
+}
+
 start() {
   local run_dir="$1" file tool
   file="$run_dir/keepawake.pid"
@@ -76,18 +84,23 @@ start() {
   rm -f "$file"
   if command -v systemd-inhibit > /dev/null 2>&1; then
     tool="systemd-inhibit"
-    launch systemd-inhibit --what=sleep:idle:handle-lid-switch --mode=block \
-      --who=gm:cqa "--why=Audit qualité en cours : le poste ne doit pas se mettre en veille" \
-      sleep infinity
+    if ! inhibit_with_systemd sleep:idle:handle-lid-switch; then
+      # polkit may refuse handle-lid-switch to a normal user
+      if ! inhibit_with_systemd sleep:idle; then
+        warn_unprotected
+        return 0
+      fi
+      say "Avertissement : la veille à l'inactivité est empêchée, mais pas celle de la fermeture de l'écran. Rabattre l'écran mettra le poste en veille : gardez-le ouvert pendant l'audit."
+    fi
   elif command -v caffeinate > /dev/null 2>&1; then
     tool="caffeinate"
     launch caffeinate -dims
+    sleep 0.3
+    if ! is_running "$LAUNCHED_PID"; then
+      warn_unprotected
+      return 0
+    fi
   else
-    warn_unprotected
-    return 0
-  fi
-  sleep 0.3
-  if ! is_running "$LAUNCHED_PID"; then
     warn_unprotected
     return 0
   fi

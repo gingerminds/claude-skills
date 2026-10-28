@@ -2,7 +2,7 @@
 import json
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +15,7 @@ from cqa.checklist import (
     STATUS_TODO,
     ref_label,
 )
+from cqa import deferred
 from cqa.comments import format_page_summary
 
 _EM_DASH = chr(0x2014)
@@ -34,6 +35,13 @@ _UNKNOWN_STATUS = "statut inconnu"
 _UNKNOWN_WITHOUT_TEXT = "voir le commentaire déjà présent dans Notion"
 _CONSTAT = "Constat : "
 _HUMAN_SECTION = "Statuts posés par un humain et contredits par l'audit"
+_IDLE_LIMIT = timedelta(minutes=30)
+_DEFERRED_KINDS = {
+    "login": "connexion",
+    "ssh_refused": "commande SSH refusée",
+    "gap": "écart",
+    "question": "question",
+}
 _EMPTY = {
     "Décompte par statut": "Aucun.",
     _HUMAN_SECTION: "Aucun.",
@@ -79,7 +87,9 @@ def synthesis(run_dir: Path, *, now: Optional[datetime] = None) -> tuple[str, st
     lots = _read(run_dir, "lots.json", "cqa_plan.py lots")
     rows = _read(run_dir, "rows.json", "cqa_notion.py rows")
     try:
-        text = _synthesis(context, plan, lots, rows, manifest(run_dir), now or datetime.now())
+        text = _synthesis(
+            context, plan, lots, rows, manifest(run_dir), now or datetime.now(), run_dir
+        )
         start = run_start(context["run_id"])
         comment = format_page_summary(
             summary=plan["summary"], run_date=start.date(), lead_option=context["lead"]["option"]
@@ -91,7 +101,7 @@ def synthesis(run_dir: Path, *, now: Optional[datetime] = None) -> tuple[str, st
     return text.replace(_EM_DASH, "-"), comment
 
 
-def _synthesis(context, plan, lots, rows, tools, now) -> str:
+def _synthesis(context, plan, lots, rows, tools, now, run_dir) -> str:
     start = run_start(context["run_id"])
     summary = plan["summary"]
     row_list = rows["rows"]
@@ -102,7 +112,7 @@ def _synthesis(context, plan, lots, rows, tools, now) -> str:
         f"- Projet : {context['project']['name']}",
         f"- Run : {context['run_id']}, lancé par {context['lead']['option']}",
         _versions(context, tools),
-        f"- Durée de l'audit : {_duration(start, now)}",
+        f"- Durée active de l'audit : {_active_duration(run_dir, start, now)}",
     ]
     sections = [
         ("Couverture", _coverage_lines(lots["coverage"])),
@@ -131,6 +141,12 @@ def _synthesis(context, plan, lots, rows, tools, now) -> str:
         ("Écarts relevés", _gap_lines(context)),
         ("Outils", _tool_lines(tools)),
     ]
+    deferred = _deferred_lines(run_dir)
+    if deferred:
+        sections.append(("Décisions mises de côté", deferred))
+    remarks = _remarks(run_dir)
+    if remarks:
+        sections.append(("Remarques", remarks))
     recette = plan.get("recette")
     if isinstance(recette, dict):
         position = [title for title, _ in sections].index("Écarts relevés")
@@ -208,10 +224,57 @@ def _versions(context: dict, tools: dict) -> str:
     return line
 
 
-def _duration(start: datetime, end: datetime) -> str:
+def _remarks(run_dir: Path) -> list:
+    """Lines of remarques.md, the remarks the orchestrator writes by hand (empty when none)."""
+    try:
+        text = (run_dir / "remarques.md").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as error:
+        raise ValueError(f"remarques.md est illisible : {error}") from None
+    return text.splitlines() if text else []
+
+
+def _deferred_lines(run_dir: Path) -> list:
+    """One bullet per entry of deferred.json, open or resolved."""
+    lines = []
+    for item in deferred.all_items(run_dir):
+        kind = _DEFERRED_KINDS.get(item.get("kind"), item.get("kind") or "décision")
+        refs = ", ".join(f"CQ-{ref}" for ref in item.get("refs") or [] if isinstance(ref, int))
+        outcome = "traitée" if item.get("resolved") else "ouverte"
+        where = f" ({refs})" if refs else ""
+        lines.append(f"- {kind}{where} : {_line(item.get('detail'))} ({outcome})")
+    return lines
+
+
+def _active_duration(run_dir: Path, start: datetime, end: datetime) -> str:
+    """Active time of the run: the gaps shorter than 30 minutes between file modification dates.
+
+    Falls back to the elapsed time when no file of the run was modified between start and end.
+    """
     if end < start:
+        return _duration_text(0, measured=False)
+    dates = []
+    for path in Path(run_dir).rglob("*"):
+        try:
+            if path.is_file():
+                dates.append(datetime.fromtimestamp(path.stat().st_mtime))
+        except OSError:
+            continue
+    dates = sorted(date for date in dates if start <= date <= end)
+    if not dates:
+        return _duration_text(int((end - start).total_seconds() // 60))
+    points = [start, *dates, end]
+    active = sum(
+        (later - earlier for earlier, later in zip(points, points[1:]) if later - earlier < _IDLE_LIMIT),
+        timedelta(),
+    )
+    return _duration_text(int(active.total_seconds() // 60))
+
+
+def _duration_text(minutes: int, measured: bool = True) -> str:
+    if not measured:
         return "non mesurée"
-    minutes = int((end - start).total_seconds() // 60)
     if minutes < 1:
         return "moins d'une minute"
     hours, rest = divmod(minutes, 60)

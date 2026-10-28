@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1345,6 +1346,9 @@ class SynthesisTest(AuditCase):
     def make_planned_run(self):
         run_dir = self.make_run()
         self.run_json(["plan", run_dir])
+        for path in run_dir.rglob("*"):
+            if path.is_file():
+                os.utime(path, (1_790_000_000, 1_790_000_000))
         return run_dir
 
     def test_synthesis_texts(self):
@@ -1380,7 +1384,7 @@ class SynthesisTest(AuditCase):
             "## Outils",
         ):
             self.assertIn(heading, text)
-        self.assertIn("Durée de l'audit : 47 min", text)
+        self.assertIn("Durée active de l'audit : 47 min", text)
         self.assertIn("- À traiter : 3", text)
         self.assertIn("- PERFORMANCE : 2 lignes (À traiter : 1, Ok / Recetté : 1)", text)
         self.assertIn("- CQ-190 : Auditer les sauvegardes", text)
@@ -1490,8 +1494,65 @@ class SynthesisTest(AuditCase):
             (datetime(2026, 10, 20, 14, 0), "non mesurée"),
         ):
             text, _ = report.synthesis(run_dir, now=now)
-            self.assertIn(f"Durée de l'audit : {expected}", text, now)
+            self.assertIn(f"Durée active de l'audit : {expected}", text, now)
         self.assertEqual(report.run_start("2026-10-20-1430"), start)
+
+    def stamp(self, path, moment):
+        stamp = moment.timestamp()
+        os.utime(path, (stamp, stamp))
+
+    def test_active_duration_skips_idle_gaps(self):
+        run_dir = self.make_planned_run()
+        for path in run_dir.rglob("*"):
+            if path.is_file():
+                self.stamp(path, datetime(2026, 10, 20, 14, 30))
+        for name, moment in (
+            ("a.txt", datetime(2026, 10, 20, 14, 50)),
+            ("b.txt", datetime(2026, 10, 20, 15, 10)),
+            ("c.txt", datetime(2026, 10, 21, 1, 10)),
+            ("d.txt", datetime(2026, 10, 21, 1, 25)),
+        ):
+            (run_dir / name).write_text("x", encoding="utf-8")
+            self.stamp(run_dir / name, moment)
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 21, 1, 40))
+        self.assertIn("Durée active de l'audit : 1 h 10 min", text)
+        self.assertNotIn("Durée de l'audit", text)
+
+    def test_synthesis_keeps_remarks(self):
+        run_dir = self.make_planned_run()
+        (run_dir / "remarques.md").write_text(
+            "- CQ-101 (comment) non écrit : refusé par Notion\n", encoding="utf-8"
+        )
+        for _ in range(2):
+            self.run_json(["synthesis", run_dir])
+            text = (run_dir / "synthese.md").read_text(encoding="utf-8")
+            self.assertEqual(text.count("## Remarques"), 1)
+            tail = text.split("## Remarques")[1]
+            self.assertIn("- CQ-101 (comment) non écrit : refusé par Notion", tail)
+            self.assertNotIn("\n## ", tail)
+        self.assertLess(text.index("## Outils"), text.index("## Remarques"))
+
+    def test_synthesis_without_remarks_has_no_remarks_section(self):
+        run_dir = self.make_planned_run()
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 17))
+        self.assertNotIn("## Remarques", text)
+        self.assertNotIn("## Décisions mises de côté", text)
+
+    def test_synthesis_lists_deferred_decisions(self):
+        run_dir = self.make_planned_run()
+        self.write(run_dir, "deferred.json", {"items": [
+            {"id": 1, "kind": "gap", "detail": "Commit déployé introuvable", "refs": [101],
+             "at": "2026-10-20T14:40:00Z", "resolved": False},
+            {"id": 2, "kind": "ssh_refused", "detail": "Commande refusée par le garde-fou",
+             "refs": [], "at": "2026-10-20T14:41:00Z", "resolved": True},
+        ]})
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 17))
+        section = text.split("## Décisions mises de côté")[1].split("\n## ")[0]
+        self.assertIn("ouverte", section)
+        self.assertIn("traitée", section)
+        self.assertIn("Commit déployé introuvable", section)
+        self.assertIn("CQ-101", section)
+        self.assertIn("commande SSH refusée", section)
 
     def test_run_start_refuses_a_bad_run_id(self):
         for value in ("today", "2026-13-40-2599", "2026-10-20", None, 5):
