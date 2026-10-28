@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from cqa.checklist import ref_label
-from cqa.comments import to_rich_text
+from cqa.comments import parse_verdict, to_rich_text
 from cqa.notion_api import NotionError
 from cqa.notion_read import assignee_options, write_json
 from cqa.secrets import scan_text
@@ -38,8 +38,14 @@ def apply_plan(
 ) -> dict:
     """Write the operations of a plan to Notion and return its report.
 
-    The report is {"done", "skipped", "blocked", "errors"}: done and skipped are counts,
-    blocked lists {"key", "labels"} and errors {"key", "message"}.
+    The report is {"done", "skipped", "blocked", "errors", "replace_failed"}: done and skipped
+    are counts, blocked lists {"key", "labels"}, errors {"key", "message"} and replace_failed
+    {"key", "ref", "reason"}, the skill comments that Notion refused to edit or delete.
+
+    A row comment replaces the skill's own comment of the row (written by bot_id, with a
+    "Verdict : ..." line): the latest is edited in place, the others are deleted, human comments
+    are never touched. When Notion refuses (403) the edit, all skill comments are deleted and a
+    new one is created; when it refuses the deletion too, the comment is created anyway.
 
     A plan whose copy is the reference data source, or with an operation on reference_page_id
     (the page of the template), is refused with ReferenceWriteRefused, and a malformed plan or
@@ -71,7 +77,7 @@ def apply_plan(
     options = _live_options(client, plan, ops)
     journal.parent.mkdir(parents=True, exist_ok=True)
     recorded = {entry["key"] for entry in entries}
-    result = {"done": 0, "skipped": 0, "blocked": [], "errors": []}
+    result = {"done": 0, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []}
     failed_pages = set()
     for item in sorted(ops, key=_order):
         key, label = item["key"], _describe(item)
@@ -89,7 +95,7 @@ def apply_plan(
             log(f"{label} : {message}")
             continue
         try:
-            written = _send(client, item, bot_id)
+            sent = _send(client, item, bot_id)
         except NotionError as error:
             stop = error.status in _STOPPING_STATUSES or error.status >= 500
             message = str(error)
@@ -102,9 +108,12 @@ def apply_plan(
             failed_pages.add(item["page_id"])
             continue
         recorded.add(key)
-        entries.append(_entry(item))
+        entries.append(_entry(item, sent))
         write_json(journal, {"applied": entries})
-        if written:
+        for reason in (sent or {}).get("failed", []):
+            result["replace_failed"].append({"key": key, "ref": item.get("ref"), "reason": reason})
+            log(f"{label} : ancien commentaire conservé ({reason})")
+        if sent is not None:
             result["done"] += 1
             log(f"{label} : écrit")
         else:
@@ -199,8 +208,11 @@ def _outgoing_texts(item: dict) -> list:
     return texts
 
 
-def _send(client, item: dict, bot_id: Optional[str]) -> bool:
-    """Send one operation. Return False when a comment was already on the page."""
+def _send(client, item: dict, bot_id: Optional[str]) -> Optional[dict]:
+    """Send one operation. Return None when a comment was already on the page.
+
+    Otherwise return what a comment did: {"comment_id", "mode", "failed"} (empty for the rest).
+    """
     kind, page_id = item["kind"], item["page_id"]
     if kind == "status":
         client.update_page(page_id, {STATUS_PROPERTY: {"status": {"name": item["after"]}}})
@@ -208,21 +220,72 @@ def _send(client, item: dict, bot_id: Optional[str]) -> bool:
         names = [{"name": name} for name in item["after"]]
         client.update_page(page_id, {ASSIGNEE_PROPERTY: {"multi_select": names}})
     else:
-        if _already_commented(client, page_id, item["text"], bot_id):
-            return False
-        client.create_comment(page_id, to_rich_text(item["text"]))
-    return True
+        existing = client.comments(page_id)
+        if _shown_in(existing, item["text"], bot_id):
+            return None
+        own = _skill_comments(existing, bot_id) if kind == "comment" else []
+        return _write_comment(client, page_id, item["text"], own)
+    return {}
 
 
-def _already_commented(client, page_id: str, text: str, bot_id: Optional[str]) -> bool:
+def _write_comment(client, page_id: str, text: str, own: list) -> dict:
+    """Write a comment, replacing the skill's own ones (oldest first in own) when there are."""
+    rich_text = to_rich_text(text)
+    failed = []
+    if own:
+        *surplus, latest = own
+        try:
+            client.update_comment(latest["id"], rich_text)
+        except NotionError as error:
+            if error.status != 403:
+                raise
+            surplus = own
+        else:
+            failed = _delete_all(client, surplus)
+            return {"comment_id": latest["id"], "mode": "update", "failed": failed}
+        failed = _delete_all(client, surplus)
+    created = client.create_comment(page_id, rich_text)
+    mode = "recreate" if own and not failed else "create"
+    return {"comment_id": created.get("id"), "mode": mode, "failed": failed}
+
+
+def _delete_all(client, comments: list) -> list:
+    """Delete comments and return the reason of each deletion that Notion refused (403)."""
+    failed = []
+    for comment in comments:
+        try:
+            client.delete_comment(comment["id"])
+        except NotionError as error:
+            if error.status != 403:
+                raise
+            failed.append(str(error))
+    return failed
+
+
+def _skill_comments(comments: list, bot_id: Optional[str]) -> list:
+    """Return the comments the integration wrote with a verdict, the oldest first."""
+    if bot_id is None:
+        return []
+    own = [
+        comment
+        for comment in comments
+        if (comment.get("created_by") or {}).get("id") == bot_id
+        and parse_verdict(_plain_text(comment)) is not None
+    ]
+    return sorted(own, key=lambda comment: comment.get("created_time") or "")
+
+
+def _plain_text(comment: dict) -> str:
+    return "".join(part.get("plain_text", "") for part in comment.get("rich_text") or [])
+
+
+def _shown_in(comments: list, text: str, bot_id: Optional[str]) -> bool:
     wanted = text.strip()
-    for comment in client.comments(page_id):
-        if bot_id is not None and (comment.get("created_by") or {}).get("id") != bot_id:
-            continue
-        shown = "".join(part.get("plain_text", "") for part in comment.get("rich_text") or [])
-        if shown.strip() == wanted:
-            return True
-    return False
+    return any(
+        _plain_text(comment).strip() == wanted
+        for comment in comments
+        if bot_id is None or (comment.get("created_by") or {}).get("id") == bot_id
+    )
 
 
 def _load_journal(path: Path) -> list:
@@ -241,14 +304,18 @@ def _load_journal(path: Path) -> list:
     return entries
 
 
-def _entry(item: dict) -> dict:
-    return {
+def _entry(item: dict, sent: Optional[dict]) -> dict:
+    entry = {
         "key": item["key"],
         "kind": item["kind"],
         "ref": item.get("ref"),
         "verdict": item.get("verdict"),
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if sent and "comment_id" in sent:
+        entry["comment_id"] = sent["comment_id"]
+        entry["mode"] = sent["mode"]
+    return entry
 
 
 def _describe(item: dict) -> str:

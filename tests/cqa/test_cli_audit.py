@@ -2008,6 +2008,7 @@ class FakeNotion:
 
     def create_comment(self, page_id, rich_text):
         self.writes.append(("comment", page_id, rich_text))
+        return {"object": "comment", "id": f"c{len(self.writes)}"}
 
 
 class ApplyContractTest(AuditCase):
@@ -2033,7 +2034,7 @@ class ApplyContractTest(AuditCase):
         run_dir = self.make_run()
         self.run_json(["plan", run_dir])
         plan, result, client = self.apply(run_dir, "notion/plan.json")
-        self.assertEqual(result, {"done": 8, "skipped": 0, "blocked": [], "errors": []})
+        self.assertEqual(result, {"done": 8, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []})
         self.assertEqual(len(client.writes), 8)
 
     def test_assign_plan_is_applicable(self):
@@ -2041,7 +2042,7 @@ class ApplyContractTest(AuditCase):
         self.run_json(["assign", run_dir])
         self.run_json(["assign-plan", run_dir])
         plan, result, client = self.apply(run_dir, "notion/assign-plan.json")
-        self.assertEqual(result, {"done": 6, "skipped": 0, "blocked": [], "errors": []})
+        self.assertEqual(result, {"done": 6, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []})
         kinds = [write[0] for write in client.writes]
         self.assertEqual(kinds.count("update"), 5)
         self.assertEqual(client.writes[-1][:2], ("comment", "page-copy"))

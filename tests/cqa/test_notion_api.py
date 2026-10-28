@@ -258,6 +258,30 @@ class RetryTest(unittest.TestCase):
                     self.assertEqual(clock.sleeps, [1] if idempotent else [])
 
 
+class CommentChangeTest(unittest.TestCase):
+    RICH_TEXT = [{"type": "text", "text": {"content": "Contrôle validé"}}]
+    DONE = (200, {}, {"object": "comment", "id": "c1"})
+
+    def test_update_and_delete_comment_requests(self):
+        client, transport, _ = make_client([self.DONE, self.DONE])
+        client.update_comment("c1", self.RICH_TEXT)
+        client.delete_comment("c1")
+        update, delete = transport.calls
+        self.assertEqual((update.method, update.url), ("PATCH", API + "/comments/c1"))
+        self.assertEqual(update.body, {"rich_text": self.RICH_TEXT})
+        self.assertEqual((delete.method, delete.url), ("DELETE", API + "/comments/c1"))
+        self.assertIsNone(delete.body)
+
+    def test_delete_is_replayed_after_a_server_error_but_update_is_not(self):
+        client, transport, clock = make_client([failure(503), self.DONE])
+        client.delete_comment("c1")
+        self.assertEqual((len(transport.calls), clock.sleeps), (2, [1]))
+        client, transport, clock = make_client([failure(503), self.DONE])
+        with self.assertRaises(NotionError):
+            client.update_comment("c1", self.RICH_TEXT)
+        self.assertEqual((len(transport.calls), clock.sleeps), (1, []))
+
+
 class WriteRetryTest(unittest.TestCase):
     RICH_TEXT = [{"type": "text", "text": {"content": "Contrôle validé"}}]
     CREATED = (200, {}, {"object": "comment", "id": "c1"})

@@ -72,6 +72,7 @@ class FakeNotion:
         self.live_options = list(OPTIONS)
         self.data_source_error = None
         self.posts = 0
+        self.comment_errors = {}
 
     def __call__(self, method, url, headers, data):
         self.calls.append(Call(method, url, dict(headers), data))
@@ -88,6 +89,8 @@ class FakeNotion:
             )
         if method == "POST" and path == "/comments":
             return self._post_comment(body)
+        if path.startswith("/comments/") and method in ("PATCH", "DELETE"):
+            return self._change_comment(method, path.rsplit("/", 1)[1], body)
         if method == "PATCH" and path.startswith("/pages/"):
             return self._patch_page(path.rsplit("/", 1)[1], body["properties"])
         if method == "GET" and path.startswith("/data_sources/"):
@@ -122,6 +125,7 @@ class FakeNotion:
         text = "".join(item["text"]["content"] for item in body["rich_text"])
         entry = {
             "object": "comment",
+            "id": f"created-{self.posts}",
             "created_by": {"object": "user", "id": BOT},
             "rich_text": [{"plain_text": item["text"]["content"]} for item in body["rich_text"]],
         }
@@ -129,7 +133,25 @@ class FakeNotion:
         self.writes.append(("comment", page, text))
         if fault == "lost_response":
             raise URLError("connection reset")
-        return reply(200, {"object": "comment"})
+        return reply(200, {"object": "comment", "id": entry["id"]})
+
+    def _change_comment(self, method, comment_id, body):
+        action = "update" if method == "PATCH" else "delete"
+        if action in self.comment_errors:
+            status, payload = self.comment_errors[action]
+            return reply(status, payload)
+        for page, entries in self.comments.items():
+            for entry in entries:
+                if entry.get("id") != comment_id:
+                    continue
+                if action == "delete":
+                    entries.remove(entry)
+                else:
+                    text = "".join(item["text"]["content"] for item in body["rich_text"])
+                    entry["rich_text"] = [{"plain_text": text}]
+                self.writes.append((action, page, comment_id))
+                return reply(200, {"object": "comment", "id": comment_id})
+        return reply(*http_failure(404, "object_not_found", "Could not find comment"))
 
     def _patch_page(self, page, properties):
         if page in self.page_unreachable:
@@ -141,13 +163,21 @@ class FakeNotion:
         self.writes.append((label, page, properties))
         return reply(200, {"object": "page", "id": page})
 
-    def add_comment(self, page, text, author=BOT):
+    def add_comment(self, page, text, author=BOT, comment_id=None, created=None):
         entry = {
             "object": "comment",
+            "id": comment_id or f"seed-{len(self.comments.get(page, []))}",
+            "created_time": created or "2026-10-01T10:00:00.000Z",
             "created_by": {"object": "user", "id": author},
             "rich_text": [{"plain_text": text}],
         }
         self.comments.setdefault(page, []).append(entry)
+
+    def texts(self, page):
+        return [
+            "".join(part["plain_text"] for part in entry["rich_text"])
+            for entry in self.comments.get(page, [])
+        ]
 
     def stored(self, page):
         return [text for label, where, text in self.writes if label == "comment" and where == page]
@@ -157,6 +187,10 @@ class FakeNotion:
 
     def write_requests(self):
         return self.requests("PATCH") + self.requests("POST")
+
+
+def verdict_text(label, note="Constat"):
+    return f"{note}\nVerdict : {label}"
 
 
 class StubClient:
@@ -268,7 +302,7 @@ class ApplyTestCase(unittest.TestCase):
 class RequestBodiesTest(ApplyTestCase):
     def test_status_body(self):
         result = self.apply(status_op(PAGE_1, 1, after="Mise en place partielle"))
-        self.assertEqual(result, {"done": 1, "skipped": 0, "blocked": [], "errors": []})
+        self.assertEqual(result, {"done": 1, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []})
         [call] = self.notion.requests("PATCH")
         self.assertTrue(call.url.endswith(f"/v1/pages/{PAGE_1}"))
         self.assertEqual(
@@ -392,7 +426,7 @@ class AllowedPagesTest(ApplyTestCase):
 
     def test_page_comment_allowed_on_copy_page(self):
         result = self.apply(page_comment_op("Synthèse"))
-        self.assertEqual(result, {"done": 1, "skipped": 0, "blocked": [], "errors": []})
+        self.assertEqual(result, {"done": 1, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []})
         self.assertEqual(self.notion.stored(COPY_PAGE), ["Synthèse"])
 
     def test_page_comment_elsewhere_is_blocked(self):
@@ -593,8 +627,10 @@ class JournalTest(ApplyTestCase):
             [(entry["kind"], entry["ref"], entry["verdict"]) for entry in entries],
             [("status", 1, "ko"), ("comment", 1, "ko")],
         )
+        base = {"key", "kind", "ref", "verdict", "at"}
         for entry in entries:
-            self.assertEqual(set(entry), {"key", "kind", "ref", "verdict", "at"})
+            extra = {"comment_id", "mode"} if entry["kind"] == "comment" else set()
+            self.assertEqual(set(entry), base | extra)
             self.assertIsNotNone(datetime.fromisoformat(entry["at"]).tzinfo)
 
     def test_journal_is_written_atomically_after_each_success(self):
@@ -624,7 +660,7 @@ class JournalTest(ApplyTestCase):
         ]
         self.applied_path().write_text(json.dumps({"applied": earlier}), encoding="utf-8")
         result = self.apply(done, todo)
-        self.assertEqual(result, {"done": 1, "skipped": 1, "blocked": [], "errors": []})
+        self.assertEqual(result, {"done": 1, "skipped": 1, "blocked": [], "errors": [], "replace_failed": []})
         self.assertEqual([page for _, page, _ in self.notion.writes], [PAGE_2])
         self.assertEqual(self.applied_keys(), [done["key"], other, todo["key"]])
 
@@ -686,7 +722,7 @@ class ResumeTest(ApplyTestCase):
         self.assertEqual([item["key"] for item in first["errors"]], [ops[1]["key"]])
         self.assertEqual(self.notion.posts, 2)
         second = self.apply(*ops)
-        self.assertEqual(second, {"done": 2, "skipped": 1, "blocked": [], "errors": []})
+        self.assertEqual(second, {"done": 2, "skipped": 1, "blocked": [], "errors": [], "replace_failed": []})
         self.assert_each_comment_once(ops)
 
     def test_resume_after_a_lost_response_does_not_post_twice(self):
@@ -696,7 +732,7 @@ class ResumeTest(ApplyTestCase):
         self.assertEqual(first["done"], 1)
         self.assertEqual(len(first["errors"]), 1)
         second = self.apply(*ops)
-        self.assertEqual(second, {"done": 1, "skipped": 2, "blocked": [], "errors": []})
+        self.assertEqual(second, {"done": 1, "skipped": 2, "blocked": [], "errors": [], "replace_failed": []})
         self.assertEqual(self.notion.posts, 3)
         self.assert_each_comment_once(ops)
 
@@ -713,7 +749,7 @@ class ResumeTest(ApplyTestCase):
         self.assertEqual(self.notion.stored(PAGE_3), [])
         self.assertEqual(self.applied_keys(), [ops[0]["key"]])
         second = self.apply(*ops)
-        self.assertEqual(second, {"done": 2, "skipped": 1, "blocked": [], "errors": []})
+        self.assertEqual(second, {"done": 2, "skipped": 1, "blocked": [], "errors": [], "replace_failed": []})
         self.assertEqual(self.notion.posts, 8)
         self.assert_each_comment_once(ops)
 
@@ -721,7 +757,7 @@ class ResumeTest(ApplyTestCase):
         ops = self.comment_ops()
         self.notion.post_faults = {2: "rate_limited", 3: "rate_limited"}
         result = self.apply(*ops)
-        self.assertEqual(result, {"done": 3, "skipped": 0, "blocked": [], "errors": []})
+        self.assertEqual(result, {"done": 3, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []})
         self.assertEqual(self.clock.sleeps.count(2.0), 2)
         self.assert_each_comment_once(ops)
 
@@ -729,7 +765,7 @@ class ResumeTest(ApplyTestCase):
         item = comment_op(PAGE_1, 1, "Constat A")
         self.notion.add_comment(PAGE_1, "Constat A")
         result = self.apply(item)
-        self.assertEqual(result, {"done": 0, "skipped": 1, "blocked": [], "errors": []})
+        self.assertEqual(result, {"done": 0, "skipped": 1, "blocked": [], "errors": [], "replace_failed": []})
         self.assertEqual(self.notion.requests("POST"), [])
         self.assertEqual(self.applied_keys(), [item["key"]])
 
@@ -766,6 +802,87 @@ class ResumeTest(ApplyTestCase):
         self.notion.add_comment(PAGE_1, "Constat A", author="user-1")
         result = self.apply(comment_op(PAGE_1, 1, "Constat A"), bot_id=None)
         self.assertEqual(result["skipped"], 1)
+
+
+class CommentReplacementTest(ApplyTestCase):
+    def seed_pilot_state(self):
+        """Two skill comments (different verdicts and dates) and two human ones."""
+        self.notion.add_comment(
+            PAGE_1, verdict_text("À traiter"), comment_id="old", created="2026-10-01T10:00:00.000Z"
+        )
+        self.notion.add_comment(PAGE_1, "Note humaine A", author="user-1", comment_id="human-a")
+        self.notion.add_comment(
+            PAGE_1, verdict_text("Ok / Recetté"), comment_id="new", created="2026-10-10T10:00:00.000Z"
+        )
+        self.notion.add_comment(PAGE_1, "Note humaine B", author="user-2", comment_id="human-b")
+
+    def test_rewrite_keeps_one_skill_comment_and_all_human_ones(self):
+        self.seed_pilot_state()
+        text = verdict_text("À traiter", "Constat revu")
+        result = self.apply(comment_op(PAGE_1, 1, text))
+        self.assertEqual(result["done"], 1)
+        self.assertEqual(self.notion.requests("POST"), [])
+        [update] = self.notion.requests("PATCH")
+        self.assertTrue(update.url.endswith("/v1/comments/new"))
+        [delete] = self.notion.requests("DELETE")
+        self.assertTrue(delete.url.endswith("/v1/comments/old"))
+        self.assertEqual(
+            sorted(self.notion.texts(PAGE_1)), sorted([text, "Note humaine A", "Note humaine B"])
+        )
+        [entry] = self.applied()
+        self.assertEqual((entry["comment_id"], entry["mode"]), ("new", "update"))
+
+    def test_first_comment_is_created(self):
+        self.notion.add_comment(PAGE_1, "Note humaine", author="user-1")
+        text = verdict_text("Ok / Recetté")
+        result = self.apply(comment_op(PAGE_1, 1, text))
+        self.assertEqual(result["done"], 1)
+        self.assertEqual(self.notion.stored(PAGE_1), [text])
+        [entry] = self.applied()
+        self.assertEqual((entry["comment_id"], entry["mode"]), ("created-1", "create"))
+
+    def test_a_skill_comment_without_verdict_is_not_replaced(self):
+        self.notion.add_comment(PAGE_1, "Synthèse sans verdict")
+        self.apply(comment_op(PAGE_1, 1, verdict_text("Ok / Recetté")))
+        self.assertEqual(self.notion.requests("DELETE"), [])
+        self.assertEqual(len(self.notion.texts(PAGE_1)), 2)
+
+    def test_comment_replacement_fallbacks(self):
+        self.seed_pilot_state()
+        self.notion.comment_errors = {"update": http_failure(403, "restricted_resource", "No")}
+        text = verdict_text("À traiter", "Constat revu")
+        result = self.apply(comment_op(PAGE_1, 1, text))
+        self.assertEqual(result["replace_failed"], [])
+        self.assertEqual(len(self.notion.requests("DELETE")), 2)
+        self.assertEqual(
+            sorted(self.notion.texts(PAGE_1)), sorted([text, "Note humaine A", "Note humaine B"])
+        )
+        [entry] = self.applied()
+        self.assertEqual((entry["comment_id"], entry["mode"]), ("created-1", "recreate"))
+
+    def test_comment_replacement_fallbacks_when_delete_is_refused_too(self):
+        self.seed_pilot_state()
+        refused = http_failure(403, "restricted_resource", "No")
+        self.notion.comment_errors = {"update": refused, "delete": refused}
+        item = comment_op(PAGE_1, 1, verdict_text("À traiter", "Constat revu"))
+        result = self.apply(item)
+        self.assertEqual((result["done"], result["errors"]), (1, []))
+        self.assertEqual(len(self.notion.requests("POST")), 1)
+        self.assertEqual(len(self.notion.texts(PAGE_1)), 5)
+        self.assertEqual({entry["key"] for entry in result["replace_failed"]}, {item["key"]})
+        self.assertEqual({entry["ref"] for entry in result["replace_failed"]}, {1})
+        self.assertTrue(all(entry["reason"] for entry in result["replace_failed"]))
+        [entry] = self.applied()
+        self.assertEqual(entry["mode"], "create")
+
+    def test_delete_of_a_surplus_comment_refused_is_reported_after_the_update(self):
+        self.seed_pilot_state()
+        self.notion.comment_errors = {"delete": http_failure(403, "restricted_resource", "No")}
+        result = self.apply(comment_op(PAGE_1, 1, verdict_text("Ok / Recetté", "Revu")))
+        self.assertEqual(len(result["replace_failed"]), 1)
+        self.assertEqual(self.notion.requests("POST"), [])
+        [entry] = self.applied()
+        self.assertEqual(entry["mode"], "update")
 
 
 class ErrorHandlingTest(ApplyTestCase):
@@ -927,13 +1044,23 @@ class ApplyCommandTest(CliTestCase):
         code, out, err = self.run_main(["apply", self.run_dir])
         self.assertEqual(code, 0)
         self.assertEqual(
-            json.loads(out), {"done": 3, "skipped": 0, "blocked": [], "errors": []}
+            json.loads(out), {"done": 3, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []}
         )
         self.assertEqual(
             [label for label, _, _ in self.notion.writes], ["status", "comment", "comment"]
         )
         self.assertEqual(len(self.read_json("notion/applied.json")["applied"]), 3)
         self.assertIn("CQ-1", err)
+
+    def test_comment_replacement_refused_still_exits_zero(self):
+        self.notion.add_comment(PAGE_1, verdict_text("À traiter"))
+        refused = http_failure(403, "restricted_resource", "No")
+        self.notion.comment_errors = {"update": refused, "delete": refused}
+        self.write_plan(comment_op(PAGE_1, 1, verdict_text("Ok / Recetté", "Revu")))
+        code, out, _ = self.run_main(["apply", self.run_dir])
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertEqual((report["done"], len(report["replace_failed"])), (1, 1))
 
     def test_rerun_writes_nothing_more(self):
         self.write_plan(status_op(PAGE_1, 1), comment_op(PAGE_1, 1))
@@ -1068,7 +1195,7 @@ class ApplyCommandTest(CliTestCase):
         self.assertEqual(self.clock.sleeps.count(2.0), 4)
         code, out, _ = self.run_main(["apply", self.run_dir])
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), {"done": 2, "skipped": 1, "blocked": [], "errors": []})
+        self.assertEqual(json.loads(out), {"done": 2, "skipped": 1, "blocked": [], "errors": [], "replace_failed": []})
         for page, text in ((PAGE_1, "Constat A"), (PAGE_2, "Constat B"), (PAGE_3, "Constat C")):
             self.assertEqual(self.notion.stored(page), [text])
 
@@ -1147,7 +1274,7 @@ class ApplyCommandTest(CliTestCase):
         self.assertEqual(len(self.read_json("notion/applied.json")["applied"]), 1)
         code, out, _ = self.run_main(["apply", self.run_dir])
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), {"done": 1, "skipped": 2, "blocked": [], "errors": []})
+        self.assertEqual(json.loads(out), {"done": 1, "skipped": 2, "blocked": [], "errors": [], "replace_failed": []})
         for page, text in ((PAGE_1, "Constat A"), (PAGE_2, "Constat B"), (PAGE_3, "Constat C")):
             self.assertEqual(self.notion.stored(page), [text])
 
@@ -1216,7 +1343,7 @@ class CommentPageCommandTest(CliTestCase):
         path = self.write_text()
         code, out, _ = self.run_main(["comment-page", self.run_dir, path])
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out), {"done": 1, "skipped": 0, "blocked": [], "errors": []})
+        self.assertEqual(json.loads(out), {"done": 1, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []})
         self.assertEqual(
             self.notion.stored(COPY_PAGE),
             ["Audit PRE-MEL\nDécompte par statut :\n- Ok / Recetté : 3"],

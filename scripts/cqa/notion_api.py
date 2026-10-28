@@ -184,6 +184,14 @@ class NotionClient:
         body = {"parent": {"page_id": page_id}, "rich_text": rich_text}
         return self.request("POST", "/comments", body=body, idempotent=False)
 
+    def update_comment(self, comment_id: str, rich_text: list[dict]) -> dict:
+        """Replace the text of a comment. Not replayed after a 5xx: the edit may be stored."""
+        body = {"rich_text": rich_text}
+        return self.request("PATCH", f"/comments/{comment_id}", body=body, idempotent=False)
+
+    def delete_comment(self, comment_id: str) -> dict:
+        return self.request("DELETE", f"/comments/{comment_id}")
+
     def _wait_turn(self, delay: float) -> None:
         """Sleep until delay has passed and the interval since the previous send has too."""
         wait = delay
