@@ -558,6 +558,183 @@ SQL_REFUSED = [
     "SHOW CREATE USER root",
 ]
 
+# Counts by password hash format (CQ-121): a length or a prefix of 4 characters at most.
+SQL_HASH_COUNTS = [
+    "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 32",
+    "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 3) = '$P$'",
+    "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = '$wp$' LIMIT 1",
+    "SELECT COUNT(*) FROM users_field_data WHERE SUBSTRING(pass, 1, 3) = '$S$' LIMIT 1",
+    "SELECT COUNT(*) FROM users WHERE LENGTH(password) = 60 LIMIT 1;",
+    "select count(*) as total from wp_users where char_length(user_pass) = '34' "
+    "and user_login = 'admin' limit 1",
+    "SELECT COUNT(*) AS bcrypt, COUNT(ID) FROM wp_users WHERE LEFT(user_pass, 4) = '$2y$'",
+    "SELECT COUNT(*) FROM wp_users u WHERE LEFT(u.user_pass, 1) = '$' "
+    "AND CHAR_LENGTH(u.user_pass) = 60",
+    "SELECT COUNT(*) FROM wp_users AS u WHERE LEFT(u.user_pass, 2) = '$P' AND u.user_status = 0",
+    "SELECT COUNT(*) FROM `wp_users` WHERE CHAR_LENGTH(`user_pass`) = 34",
+    "SELECT COUNT(*) FROM appdb.users WHERE LEFT(PASSWORD, 4) = '$2y$' LIMIT 1",
+    "SELECT COUNT(*) total FROM wp_users WHERE ID = 1 AND LEFT(user_pass, 4) = '$wp$'",
+]
+
+# Every way around the count of hash formats, grouped by shape.
+SQL_HASH_REFUSED = {
+    "value or secret column outside a length or prefix function": [
+        "SELECT user_pass FROM wp_users",
+        "SELECT COUNT(*) FROM wp_users WHERE user_pass = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE user_pass LIKE 'a%'",
+        "SELECT LEFT(user_pass, 4) FROM wp_users",
+        "SELECT CHAR_LENGTH(user_pass) FROM wp_users",
+        "SELECT COUNT(user_pass) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 34",
+        "SELECT COUNT(DISTINCT user_pass) FROM wp_users",
+        "SELECT COUNT(*), user_login FROM wp_users WHERE CHAR_LENGTH(user_pass) = 34",
+        "SELECT COUNT(*) AS user_pass FROM wp_users WHERE CHAR_LENGTH(user_pass) = 34",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 34 AND user_pass = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 34 AND user_pass IS NULL",
+        "SELECT COUNT(*) FROM wp_users WHERE user_login = 'pass'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = 'pass'",
+        "SELECT COUNT(*) FROM wp_users pass WHERE CHAR_LENGTH(user_pass) = 34",
+        "SELECT COUNT(*) FROM wp_users u WHERE LEFT(pass.user_pass, 4) = '$2y$'",
+    ],
+    "other secret columns and tables": [
+        "SELECT COUNT(*) FROM users WHERE CHAR_LENGTH(remember_token) = 60",
+        "SELECT COUNT(*) FROM mysql.user WHERE CHAR_LENGTH(authentication_string) = 41",
+        "SELECT COUNT(*) FROM users WHERE LEFT(pwd, 4) = '$2y$'",
+        "SELECT COUNT(*) FROM users WHERE LEFT(api_key, 4) = 'sk_l'",
+        "SELECT COUNT(*) FROM password_reset_tokens WHERE CHAR_LENGTH(password) = 60",
+        "SELECT COUNT(*) FROM users WHERE CHAR_LENGTH(user_password_hash) = 60",
+    ],
+    "prefix longer than 4 or not an integer literal": [
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 5) = '$2y$1'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 0) = ''",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 40) = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 04) = '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, ID) = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 2+2) = '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, '4') = '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4.0) = '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, -1) = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass) = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4, 1) = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass, 4) = 60",
+    ],
+    "SUBSTRING that does not start at 1 or has no length": [
+        "SELECT COUNT(*) FROM wp_users WHERE SUBSTRING(user_pass, 5, 4) = 'abcd'",
+        "SELECT COUNT(*) FROM wp_users WHERE SUBSTRING(user_pass FROM 5 FOR 4) = 'abcd'",
+        "SELECT COUNT(*) FROM wp_users WHERE SUBSTRING(user_pass FROM 1 FOR 4) = '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE SUBSTRING(user_pass, 1) = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE SUBSTRING(user_pass, 2, 4) = 'abcd'",
+        "SELECT COUNT(*) FROM wp_users WHERE SUBSTRING(user_pass, 0, 4) = 'abcd'",
+        "SELECT COUNT(*) FROM wp_users WHERE SUBSTRING(user_pass, 1, 5) = '$2y$1'",
+        "SELECT COUNT(*) FROM wp_users WHERE SUBSTRING(user_pass, -4, 4) = 'abcd'",
+        "SELECT COUNT(*) FROM wp_users WHERE SUBSTRING(user_pass, ID, 4) = 'abcd'",
+    ],
+    "nested functions": [
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(REVERSE(user_pass), 4) = 'abcd'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(SUBSTRING(user_pass, 5), 4) = 'abcd'",
+        "SELECT COUNT(*) FROM wp_users WHERE UPPER(LEFT(user_pass, 4)) = '$2Y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(LEFT(user_pass, 4)) = 4",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(TRIM(user_pass), 4) = '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(CONCAT(user_pass, 'x')) = 61",
+        "SELECT COUNT(*) FROM wp_users WHERE SOUNDEX(LEFT(user_pass, 4)) = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(LEFT(user_pass, 4), 4) = '$2y$'",
+    ],
+    "other functions on the secret column": [
+        "SELECT COUNT(*) FROM wp_users WHERE RIGHT(user_pass, 4) = 'abcd'",
+        "SELECT COUNT(*) FROM wp_users WHERE MID(user_pass, 5, 4) = 'abcd'",
+        "SELECT COUNT(*) FROM wp_users WHERE SUBSTR(user_pass, 1, 4) = '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE INSTR(user_pass, 'a') = 5",
+        "SELECT COUNT(*) FROM wp_users WHERE LOCATE('a', user_pass) = 5",
+        "SELECT COUNT(*) FROM wp_users WHERE MD5(user_pass) = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE SHA1(user_pass) = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE HEX(user_pass) = '24'",
+        "SELECT COUNT(*) FROM wp_users WHERE ORD(user_pass) = 36",
+        "SELECT COUNT(*) FROM wp_users WHERE ASCII(user_pass) = 36",
+        "SELECT COUNT(*) FROM wp_users WHERE SOUNDEX(user_pass) = 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE CRC32(user_pass) = 1",
+        "SELECT COUNT(*) FROM wp_users WHERE STRCMP(user_pass, 'a') = 0",
+        "SELECT COUNT(*) FROM wp_users WHERE OCTET_LENGTH(user_pass) = 60",
+        "SELECT COUNT(*) FROM wp_users WHERE BIT_LENGTH(user_pass) = 480",
+        "SELECT COUNT(*) FROM wp_users WHERE CHARACTER_LENGTH(user_pass) = 60",
+    ],
+    "arithmetic on the secret column": [
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) + 0 = 60",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) * 2 = 120",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) DIV 2 = 30",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) - ID = 0",
+        "SELECT COUNT(*) FROM wp_users WHERE -CHAR_LENGTH(user_pass) = -60",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass + 0, 4) = '0'",
+        "SELECT COUNT(*) FROM wp_users WHERE user_pass + 0 = 0",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60 + 0",
+    ],
+    "comparison other than = with a literal": [
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) < '$2z'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) > '$2a'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) <= '$2z'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) >= '$2a'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) <> '$2a'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) != '$2a'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) <=> '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) BETWEEN 30 AND 70",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) LIKE '$2%'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) NOT LIKE '$2%'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) REGEXP '^a'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) RLIKE '^a'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) SOUNDS LIKE 'x'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) IN ('$2y$', '$P$B')",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = user_login",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = LEFT(user_login, 4)",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = (SELECT '$2y$')",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = \"$2y$\"",
+        "SELECT COUNT(*) FROM wp_users WHERE '$P$' = LEFT(user_pass, 3)",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = '$2y$' COLLATE utf8mb4_bin",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = BINARY '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = _utf8mb4'$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = x'24327924'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = '$2' '$'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = '$2y$' IS TRUE",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 0x3C",
+        "SELECT COUNT(*) FROM wp_users WHERE NOT LEFT(user_pass, 4) = '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE (LEFT(user_pass, 4) = '$2y$')",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = '$2y$' OR user_login = 'a'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = '$2y$' "
+        "AND user_login LIKE 'a%'",
+        "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 4) = '$2y$' AND user_login < 'm'",
+    ],
+    "GROUP BY, HAVING, ORDER BY": [
+        "SELECT COUNT(*) FROM wp_users GROUP BY LEFT(user_pass, 4)",
+        "SELECT COUNT(*) FROM wp_users GROUP BY CHAR_LENGTH(user_pass)",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60 GROUP BY user_login",
+        "SELECT COUNT(*) FROM wp_users HAVING LEFT(user_pass, 4) = '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60 "
+        "HAVING LEFT(user_pass, 4) = '$2y$'",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60 ORDER BY user_pass",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60 "
+        "ORDER BY LEFT(user_pass, 4)",
+    ],
+    "joins, subqueries, unions and other statements": [
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60 "
+        "UNION SELECT user_pass FROM wp_users",
+        "SELECT COUNT(*) FROM wp_users WHERE ID IN (SELECT ID FROM wp_users "
+        "WHERE user_pass = 'x')",
+        "SELECT COUNT(*) FROM wp_users JOIN wp_usermeta m ON m.user_id = ID "
+        "WHERE CHAR_LENGTH(user_pass) = 60",
+        "SELECT COUNT(*) FROM wp_users, wp_usermeta WHERE CHAR_LENGTH(user_pass) = 60",
+        "SELECT COUNT(*) FROM (SELECT user_pass FROM wp_users) t "
+        "WHERE CHAR_LENGTH(user_pass) = 60",
+        "SELECT (SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60)",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60 AND EXISTS (SELECT 1)",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60 LIMIT 1 OFFSET 0",
+        "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60 LIMIT 1 extra",
+        "SELECT COUNT(*) OVER (ORDER BY user_pass) FROM wp_users "
+        "WHERE CHAR_LENGTH(user_pass) = 60",
+        "SELECT DISTINCT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60",
+        "SELECT COUNT(*) FROM wp_users FORCE INDEX (PRIMARY) WHERE CHAR_LENGTH(user_pass) = 60",
+        "EXPLAIN SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 60",
+        "SHOW COLUMNS FROM wp_users LIKE 'user_pass'",
+        "DESCRIBE wp_users user_pass",
+    ],
+}
+
 
 class FakeRunner:
     """Stands in for subprocess.run: records each call and returns a scripted result."""
@@ -627,6 +804,84 @@ class CheckCommandTest(unittest.TestCase):
         check_command(argv)
         self.assertEqual(argv, ["docker", "exec", "app", "php", "-v"])
 
+    def test_date_and_ls_time_style_are_allowed(self):
+        for argv in (
+            ["date"],
+            ["date", "+%F"],
+            ["date", "+%Y-%m-%d %H:%M:%S"],
+            ["date", "-u"],
+            ["date", "-u", "+%s"],
+            ["date", "-R"],
+            ["date", "-I"],
+            ["date", "--utc", "--iso-8601=seconds"],
+            ["date", "--iso-8601"],
+            ["date", "--rfc-3339=seconds"],
+            ["date", "-d", "@1700000000", "+%F %T"],
+            ["date", "--date=2026-10-28 10:00", "+%s"],
+            ["docker", "exec", "app", "date", "+%F"],
+            ["ls", "-l", "--time-style=long-iso", "/app"],
+            ["ls", "-la", "--time-style=full-iso", "/var/www"],
+            ["ls", "-l", "--time-style", "iso", "/opt"],
+            ["ls", "-l", "--time-style=+%Y-%m-%d %H:%M", "/srv"],
+            ["docker", "compose", "exec", "-T", "app", "ls", "-l", "--time-style=long-iso", "/app"],
+        ):
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertTrue(allowed, reason)
+
+    def test_date_that_sets_the_clock_or_reads_a_file_is_refused(self):
+        for argv, needle in (
+            (["date", "-s", "2026-01-01"], "horloge"),
+            (["date", "--set=2026-01-01"], "horloge"),
+            (["date", "--set", "2026-01-01"], "horloge"),
+            (["date", "-us", "2026-01-01"], "horloge"),
+            (["date", "010100002026"], "horloge"),
+            (["date", "-u", "0101000026"], "horloge"),
+            (["date", "+%F", "010100002026"], "horloge"),
+            (["date", "-f", "/var/www/app/dates.txt"], "fichier"),
+            (["date", "--file=/etc/hostname"], "fichier"),
+            (["date", "--se", "2026-01-01"], "« --se »"),
+            (["date", "-r", "/var/www/app/index.php"], "« -r »"),
+            (["date", "--debug"], "« --debug »"),
+            (["date", "--rfc-3339=x"], "--rfc-3339"),
+            (["docker", "exec", "app", "date", "-s", "2026-01-01"], "horloge"),
+        ):
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertFalse(allowed)
+                self.assertIn(needle, reason)
+
+    def test_ls_time_style_value_is_checked(self):
+        for argv in (
+            ["ls", "-l", "--time-style=other", "/app"],
+            ["ls", "-l", "--time-style="],
+            ["ls", "-l", "--time-style"],
+            ["ls", "--time-style=long-iso", "/var/www/app/.env"],
+            ["ls", "--color=always", "/var/www"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertFalse(check_command(argv)[0])
+
+    def test_pilot_refusals_that_stay(self):
+        for argv, needle in (
+            (["docker", "exec", "app", "grep", "-E", "error|warning", "/var/log/app.log"],
+             "« | »"),
+            (["docker", "exec", "app", "grep", "a|b", "/var/log/app.log"], "« | »"),
+            (["docker", "compose", "exec", "-T", "app", "grep", "-E", "a|b", "/var/log/x.log"],
+             "« | »"),
+            (["grep", "-E", "error|warning", "/var/log/syslog"], "« | »"),
+            (["docker", "inspect", "app"], "docker inspect"),
+            (["docker", "inspect", "--format", "{{.Config.Image}}", "app"], "docker inspect"),
+            (["docker", "container", "inspect", "app"], "docker inspect"),
+            (["docker", "exec", "app", "docker", "inspect", "db"], "docker inspect"),
+            (["docker", "compose", "exec", "-T", "app", "docker", "inspect", "db"],
+             "docker inspect"),
+        ):
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertFalse(allowed)
+                self.assertIn(needle, reason)
+
 
 class CheckSqlTest(unittest.TestCase):
     def test_allowed(self):
@@ -658,6 +913,38 @@ class CheckSqlTest(unittest.TestCase):
 
     def test_non_text_refused(self):
         self.assertFalse(check_sql(None)[0])
+
+    def test_hash_format_counts_are_allowed(self):
+        for query in SQL_HASH_COUNTS:
+            with self.subTest(query=query):
+                allowed, reason = check_sql(query)
+                self.assertTrue(allowed, reason)
+
+    def test_password_values_stay_refused(self):
+        for query in (
+            "SELECT user_pass FROM wp_users",
+            "SELECT COUNT(*) FROM wp_users WHERE user_pass = 'x'",
+            "SELECT COUNT(*) FROM wp_users WHERE user_pass LIKE 'a%'",
+        ):
+            with self.subTest(query=query):
+                allowed, reason = check_sql(query)
+                self.assertFalse(allowed)
+                self.assertIn("mots de passe", reason)
+
+    def test_hash_count_refused_shapes(self):
+        for shape, queries in SQL_HASH_REFUSED.items():
+            for query in queries:
+                with self.subTest(shape=shape, query=query):
+                    allowed, reason = check_sql(query)
+                    self.assertFalse(allowed)
+                    self.assertTrue(reason)
+                    self.assertNotIn(chr(0x2014), reason)
+
+    def test_hash_count_refusal_names_the_allowed_form(self):
+        reason = check_sql("SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 5) = 'x'")[1]
+        self.assertIn("mots de passe", reason)
+        self.assertIn("CHAR_LENGTH", reason)
+        self.assertIn("1 à 4", reason)
 
 
 class BuildSqlRemoteTest(unittest.TestCase):
@@ -936,6 +1223,27 @@ class CliTest(unittest.TestCase):
         )
         self.assertEqual(code, 4)
         self.assertIn("lead", err)
+        self.assertEqual(runner.calls, [])
+
+    def test_sql_hash_format_count_in_a_container(self):
+        query = "SELECT COUNT(*) FROM wp_users WHERE LEFT(user_pass, 3) = '$P$' LIMIT 1"
+        runner = FakeRunner("COUNT(*)\n4\n")
+        code, out, _ = self.run_main(
+            [ALIAS, "--sql", "wp", "--app-dir", "/app/web/wp", "--container", "app", query],
+            runner,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "COUNT(*)\n4\n")
+        self.assertEqual(runner.remote, "docker exec -i app sh -c 'wp db query --path=/app/web/wp'")
+        self.assertEqual(runner.options["input"], f"SET SESSION TRANSACTION READ ONLY;\n{query};\n")
+        runner = FakeRunner()
+        code, _, err = self.run_main(
+            [ALIAS, "--sql", "wp", "--app-dir", "/app/web/wp", "--container", "app",
+             "SELECT COUNT(*) FROM wp_users WHERE SUBSTRING(user_pass, 5, 4) = 'abcd' LIMIT 1"],
+            runner,
+        )
+        self.assertEqual(code, 4)
+        self.assertIn("mots de passe", err)
         self.assertEqual(runner.calls, [])
 
     def test_cli_compose_file(self):

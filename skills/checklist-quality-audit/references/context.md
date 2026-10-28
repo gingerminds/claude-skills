@@ -130,7 +130,7 @@ grep -iE '^[[:space:]]*(Host|Include)[[:space:]]' ~/.ssh/config
 
 - Show only alias names (also from the included files), never `HostName`, user or key.
 - Question « Alias SSH » : « Quel alias SSH utiliser pour la préprod (ou saisir l'alias dans « Autre ») ? » with up to 2 aliases whose name contains a word of the project slug, then always « Autre alias » and « Aucun »; another alias in « Autre ». « Autre alias » chosen without a typed value: ask the alias as a plain message.
-- `ssh.alias` is the choice, or `null`. `ssh.app_dirs` (`{"<repo name>": "<folder on the server>"}`) is filled during the diagnostic. `ssh.sql_skip_ssl` (optional boolean, default `false`) is set to `true` by the diagnostic when SQL queries only work with `--skip-ssl`.
+- `ssh.alias` is the choice, or `null`. `ssh.app_dirs` is filled during the diagnostic: `{"<repo name>": "<folder on the server>"}`, or, for an application in a container, `{"<repo name>": {"host": "<folder on the server>", "container": "<folder inside the container>"}}`. Use `container` for `--app-dir` of the SQL queries in a container, `host` otherwise. `ssh.sql_skip_ssl` (optional boolean, default `false`) is set to `true` by the diagnostic when SQL queries only work with `--skip-ssl`.
 
 ## 5. Test accounts
 
@@ -177,17 +177,17 @@ Detection of the other domains, in this order:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
-python3 "$S/cqa_ssh_ro.py" <alias> -- find /var/www /srv -maxdepth 3 -name wp-load.php
+python3 "$S/cqa_ssh_ro.py" <alias> -- find /var/www /srv /app /opt -maxdepth 3 -name wp-load.php
 ```
 
-Then, with the folder:
+A root missing on the server makes `find` exit 1: keep the paths it printed (the lines starting with `find:` are the missing roots). Then, with the folder:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 python3 "$S/cqa_ssh_ro.py" <alias> -- wp site list --field=url --path=<dossier>
 ```
 
-   The folder is the one holding `wp-load.php` (`wp-config.php` is refused by the guard as a secret carrier) (`ssh.app_dirs`, when already known, is reused); several candidates or none: ask « Dossier de WordPress sur le serveur (ou saisir le chemin dans « Autre ») ? » with the candidates and « Je ne sais pas ». `wp site list --field=url` is the only `wp site` command the guard allows, and a guard refusal is never worked around (the guard is not widened). One URL per line. Any failure (no alias, no folder found, not a multisite, wp error) falls through to step 2, keeping the domains already found.
+   The folder is the one holding `wp-load.php` (`wp-config.php` is refused by the guard as a secret carrier) (`ssh.app_dirs`, when already known, is reused). WordPress in a container: run both commands through `docker exec <conteneur>` (`-- docker exec <conteneur> find ...`, `-- docker exec <conteneur> wp site list ...`), with the folder inside the container as `--path`. Several candidates or none: ask « Dossier de WordPress sur le serveur (ou saisir le chemin dans « Autre ») ? » with the candidates and « Je ne sais pas ». `wp site list --field=url` is the only `wp site` command the guard allows, and a guard refusal is never worked around (the guard is not widened). One URL per line. Any failure (no alias, no folder found, not a multisite, wp error) falls through to step 2, keeping the domains already found.
 2. Otherwise the domains listed in the `CLAUDE.md` or `PROJECT.md` of the project.
 3. Otherwise ask « Autres domaines du projet en préprod ? » with « Aucun, un seul site » and « Saisir les domaines » (hosts in « Autre », separated by commas).
 

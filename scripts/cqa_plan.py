@@ -1343,6 +1343,7 @@ def validate_context(context: dict) -> list:
     _check_list(errors, "repos", context, _REPO_FIELDS, minimum=1)
     _check_list(errors, "key_pages", context, _PAGE_FIELDS, maximum=MAX_KEY_PAGES)
     _check_repo_names(errors, context.get("repos"))
+    _check_app_dirs(errors, context.get("ssh"))
     if "sites" in context:
         _check_list(errors, "sites", context, _SITE_FIELDS, maximum=MAX_SITES)
         _check_sites(errors, context["sites"])
@@ -1402,6 +1403,42 @@ def _check_repo_names(errors: list, repos) -> None:
     ]
     for name in sorted({name for name in names if names.count(name) > 1}):
         errors.append(_invalid("repos", f"contient deux fois le nom « {name} »"))
+
+
+_APP_DIR_KEYS = ("host", "container")
+
+
+def _check_app_dirs(errors: list, ssh) -> None:
+    """Check each folder of ssh.app_dirs: a host path, or {"host": ..., "container": ...}."""
+    app_dirs = ssh.get("app_dirs") if isinstance(ssh, dict) else None
+    if not isinstance(app_dirs, dict):
+        return
+    for name, value in app_dirs.items():
+        label = f"ssh.app_dirs.{name}"
+        if isinstance(value, str):
+            problem = _absolute_path(value)
+            if problem:
+                errors.append(_invalid(label, problem))
+        elif isinstance(value, dict):
+            unknown = sorted(str(key) for key in value if key not in _APP_DIR_KEYS)
+            if unknown:
+                errors.append(_invalid(label, (
+                    "contient une clé inconnue : "
+                    + ", ".join(f"« {key} »" for key in unknown)
+                    + " (seules « host » et « container » sont permises)"
+                )))
+            _check_fields(errors, label, value, {key: _absolute_path for key in _APP_DIR_KEYS})
+        else:
+            errors.append(_invalid(label, (
+                'doit être un chemin absolu sur le serveur, ou un objet {"host": "<chemin>", '
+                '"container": "<chemin>"} pour une application en conteneur'
+            )))
+
+
+def _absolute_path(value) -> Optional[str]:
+    if isinstance(value, str) and value.startswith("/") and _path(value) is None:
+        return None
+    return "doit être un chemin absolu (commençant par « / »), sans tabulation ni retour à la ligne"
 
 
 def _check_sites(errors: list, sites) -> None:

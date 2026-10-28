@@ -225,6 +225,7 @@ _OPTION_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 _WP_SECRET_OPTION = re.compile(
     r"pass|pwd|secret|token|key|salt|auth|nonce|licen[cs]e|credential|private|api", re.I
 )
+_TIME_STYLE = re.compile(r"(?:posix-)?(?:full-iso|long-iso|iso|locale)|\+.+")
 
 _FOLLOW = "suivi continu refusé (-f, --follow) : la commande ne se terminerait pas"
 _RECURSIVE = "grep récursif refusé : il lirait aussi les fichiers porteurs de secrets"
@@ -258,7 +259,7 @@ _SIMPLE = {
         ),
         "content",
     ),
-    "ls": (_Options(flags="laAhtrSd1inR"), "paths"),
+    "ls": (_Options(flags="laAhtrSd1inR", long_valued={"--time-style": _TIME_STYLE}), "paths"),
     "stat": (_Options(flags="Lt", valued={"c": None}, long_valued={"--format": None}), "paths"),
     "df": (_Options(flags="hHTilPk"), "paths"),
     "du": (
@@ -300,6 +301,20 @@ _FIND_VALUED = frozenset({
 })
 _FIND_PATH_VALUED = frozenset({"-newer", "-anewer", "-cnewer", "-samefile"})
 _FIND_FORBIDDEN = ("-exec", "-ok", "-delete", "-fprint", "-fls")
+
+_CLOCK = "date : réglage de l'horloge refusé (-s, --set ou une date en argument)"
+_DATE_FILE = "date : -f refusé, il lit un fichier dont les lignes s'affichent dans les erreurs"
+_DATE = _Options(
+    flags="uRI",
+    valued={"d": None},
+    long_flags=frozenset({"--utc", "--universal", "--rfc-email", "--iso-8601"}),
+    long_valued={
+        "--date": None,
+        "--iso-8601": re.compile(r"date|hours|minutes|seconds|ns"),
+        "--rfc-3339": re.compile(r"date|seconds|ns"),
+    },
+    forbidden={"-s": _CLOCK, "--set": _CLOCK, "-f": _DATE_FILE, "--file": _DATE_FILE},
+)
 
 _PS = _Options(
     flags="AefFHjlwy",
@@ -491,6 +506,15 @@ def _find(args: list) -> None:
         if token.startswith(_FIND_FORBIDDEN):
             raise Refused(f"find : {token} refusé (exécute, supprime ou écrit des fichiers)")
         raise Refused(f"find : prédicat non autorisé « {token} »")
+
+
+def _date(args: list) -> None:
+    """Allow date to print the time only: an operand without "+" would set the clock."""
+    _, operands = _parse("date", args, _DATE)
+    if any(not operand.startswith("+") for operand in operands):
+        raise Refused(_CLOCK)
+    if len(operands) > 1:
+        raise Refused("date : un seul format « +FORMAT » est permis")
 
 
 def _ps(args: list) -> None:
@@ -698,6 +722,7 @@ def _check_name(name) -> None:
 _HANDLERS = {
     "grep": _grep,
     "find": _find,
+    "date": _date,
     "ps": _ps,
     "systemctl": _systemctl,
     "journalctl": _journalctl,
@@ -729,6 +754,19 @@ _SQL_WRITE = re.compile(
 _SQL_CREDENTIAL = re.compile(
     r"pass|pwd|secret|token|salt|authentication_string|api_?key|\bCREATE\s+USER\b", re.I
 )
+_SQL_SECRET = (
+    "requête refusée : elle vise des mots de passe, jetons ou secrets ; seul le comptage par "
+    "format de hash est permis, sur user_pass, pass ou password : SELECT COUNT(*) FROM <table> "
+    "WHERE CHAR_LENGTH(<colonne>) = <entier> (ou LENGTH), ou LEFT(<colonne>, n) = '<préfixe>' "
+    "(ou SUBSTRING(<colonne>, 1, n)), n de 1 à 4, plus des conditions <colonne> = <constante> "
+    "jointes par AND et un LIMIT"
+)
+_HASH_COLUMNS = frozenset({"user_pass", "pass", "password"})
+_HASH_FUNCTIONS = frozenset({"CHAR_LENGTH", "LENGTH", "LEFT", "SUBSTRING"})
+_HASH_PREFIX_LENGTHS = ("1", "2", "3", "4")
+_SQL_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*|`[^`]+`")
+_SQL_LITERAL = re.compile(r"'(?:[^']|'')*'|\d+")
+_SQL_INTEGER = re.compile(r"\d+")
 _SQL_TOKEN = re.compile(r"\s+|'(?:[^']|'')*'|\"[^\"]*\"|`[^`]*`|[A-Za-z0-9_$]+|.")
 _SQL_SENSITIVE_TABLES = frozenset({"users", "wp_users", "users_field_data", "sessions"})
 _SQL_ALIAS = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*|`[^`]*`|\"[^\"]*\"")
@@ -777,9 +815,10 @@ def _sql_body(query) -> str:
     write = _SQL_WRITE.search(body)
     if write:
         raise Refused(f"mot-clé d'écriture ou de verrou refusé : « {write.group(1).upper()} »")
+    tokens = _sql_tokens(body)
     if _SQL_CREDENTIAL.search(body):
-        raise Refused("requête refusée : elle vise des mots de passe, jetons ou secrets")
-    _check_select_lists(_sql_tokens(body))
+        _check_hash_count(tokens)
+    _check_select_lists(tokens)
     return body
 
 
@@ -790,6 +829,99 @@ def _sql_tokens(body: str) -> list:
         if token in ("'", '"', "`"):
             raise Refused(f"guillemet « {token} » non fermé dans la requête")
     return tokens
+
+
+class _Cursor:
+    """Reads SQL tokens in order for _check_hash_count; any mismatch refuses the query."""
+
+    def __init__(self, tokens: list):
+        self.tokens, self.index = tokens, 0
+
+    def peek(self, offset: int = 0) -> str:
+        position = self.index + offset
+        return self.tokens[position] if position < len(self.tokens) else ""
+
+    def accept(self, *words) -> bool:
+        if self.peek() and self.peek().upper() in words:
+            self.index += 1
+            return True
+        return False
+
+    def expect(self, *words) -> None:
+        if not self.accept(*words):
+            raise Refused(_SQL_SECRET)
+
+    def match(self, pattern) -> None:
+        if not pattern.fullmatch(self.peek()):
+            raise Refused(_SQL_SECRET)
+        self.index += 1
+
+    def name(self) -> int:
+        """Read [<qualifier>.]<name>; return the index of the name."""
+        self.match(_SQL_IDENTIFIER)
+        if self.accept("."):
+            self.match(_SQL_IDENTIFIER)
+        return self.index - 1
+
+    def alias(self, *ends) -> None:
+        if self.accept("AS") or self.peek().upper() not in ends:
+            self.match(_SQL_IDENTIFIER)
+
+
+def _check_hash_count(tokens: list) -> None:
+    """Refuse a query that names a secret, unless it only counts password hashes by format.
+
+    Only this shape passes: SELECT COUNT(*|<column>) [[AS] <alias>][, ...] FROM <table>
+    [[AS] <alias>] WHERE <condition> [AND <condition>]... [LIMIT <integer>]. A condition is
+    <column> = <literal>, or CHAR_LENGTH(<hash>), LENGTH(<hash>), LEFT(<hash>, n) or
+    SUBSTRING(<hash>, 1, n) = <literal> with n from 1 to 4, <hash> being user_pass, pass or
+    password. No other token may name a secret, so at most the length and the first 4
+    characters (the algorithm prefix) of a hash can be learned.
+    """
+    cursor, allowed, hashed = _Cursor(tokens), set(), False
+    cursor.expect("SELECT")
+    while True:
+        cursor.expect("COUNT")
+        cursor.expect("(")
+        if not cursor.accept("*"):
+            cursor.name()
+        cursor.expect(")")
+        cursor.alias(",", "FROM")
+        if not cursor.accept(","):
+            break
+    cursor.expect("FROM")
+    cursor.name()
+    cursor.alias("WHERE")
+    cursor.expect("WHERE")
+    while True:
+        function = cursor.peek().upper()
+        if function in _HASH_FUNCTIONS and cursor.peek(1) == "(":
+            cursor.index += 2
+            column = cursor.name()
+            if _sql_name(tokens[column]).lower() not in _HASH_COLUMNS:
+                raise Refused(_SQL_SECRET)
+            allowed.add(column)
+            if function == "SUBSTRING":
+                cursor.expect(",")
+                cursor.expect("1")
+            if function in ("LEFT", "SUBSTRING"):
+                cursor.expect(",")
+                cursor.expect(*_HASH_PREFIX_LENGTHS)
+            cursor.expect(")")
+            hashed = True
+        else:
+            cursor.name()
+        cursor.expect("=")
+        cursor.match(_SQL_LITERAL)
+        if not cursor.accept("AND"):
+            break
+    if cursor.accept("LIMIT"):
+        cursor.match(_SQL_INTEGER)
+    if cursor.peek() or not hashed:
+        raise Refused(_SQL_SECRET)
+    for index, token in enumerate(tokens):
+        if index not in allowed and _SQL_CREDENTIAL.search(token):
+            raise Refused(_SQL_SECRET)
 
 
 def _check_select_lists(tokens: list) -> None:

@@ -28,10 +28,12 @@ For each repo, take the first source that answers.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
-python3 "$S/cqa_ssh_ro.py" <alias> -- find /var/www /srv -maxdepth 3 -name artisan
+python3 "$S/cqa_ssh_ro.py" <alias> -- find /var/www /srv /app /opt -maxdepth 3 -name artisan
 ```
 
-Record it in `ssh.app_dirs` (`{"<repo name>": "<folder>"}`), then:
+A root missing on the server makes `find` exit 1: keep the paths it printed (the lines starting with `find:` are the missing roots). For an application in a container (Docker deployments often sit under `/app` or `/opt`), also find the folder inside the container with the same `find` after `-- docker exec <conteneur>` (or `-- docker compose -f <dossier sur l'hôte>/docker-compose.yml exec -T <service>`).
+
+Record it in `ssh.app_dirs`: `{"<repo name>": "<dossier>"}`, or for an application in a container `{"<repo name>": {"host": "<dossier sur l'hôte>", "container": "<dossier dans le conteneur>"}}`. Use `container` for `--app-dir` of the SQL queries in a container, `host` otherwise (the commands below run on the server). Then:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -175,7 +177,7 @@ S="${CLAUDE_SKILL_DIR}/../../scripts"
 python3 "$S/cqa_ssh_ro.py" <alias> -- php <dossier>/artisan --version
 ```
 
-Exit 0 for each repo concerned: the application CLI is there. That does not prove the database answers (`wp core version` never touches it), so then test "BDD" with a real query. `--app-dir` is the folder of step 2 for an application on the host; for an application in a container (`--container <conteneur>` or `--compose-service <service>`), it is the folder inside the container, and `--compose-file` is the absolute path of the compose file on the host:
+Exit 0 for each repo concerned: the application CLI is there. That does not prove the database answers (`wp core version` never touches it), so then test "BDD" with a real query. `--app-dir` is the folder of step 2 for an application on the host; for an application in a container (`--container <conteneur>` or `--compose-service <service>`), it is the folder inside the container (the `container` of its `ssh.app_dirs` entry), and `--compose-file` is the absolute path of the compose file on the host:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

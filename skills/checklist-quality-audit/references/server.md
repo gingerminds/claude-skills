@@ -40,31 +40,40 @@ python3 "$S/cqa_ssh_ro.py" <alias> --php-ini display_errors expose_php
 
 - `--`: one command of the allowlist, run over SSH; the output comes back masked.
 - `--check --`: says whether a command would pass, without SSH (`{"allowed", "reason"}`).
-- `--sql drush|wp|artisan --app-dir <dossier>`, plus `--container <conteneur>` or `--compose-service <service>` (with `--compose-file <absolute path of the compose file on the server>`, needed because the SSH command does not run in the project folder) for an application in a container: one read-only query, sent on standard input through the CLI of the application, which already knows the credentials. In a container, `--app-dir` is the folder inside the container.
+- `--sql drush|wp|artisan --app-dir <dossier>`, plus `--container <conteneur>` or `--compose-service <service>` (with `--compose-file <absolute path of the compose file on the server>`, needed because the SSH command does not run in the project folder) for an application in a container: one read-only query, sent on standard input through the CLI of the application, which already knows the credentials. In a container, `--app-dir` is the folder inside the container: with an `ssh.app_dirs` entry that has `host` and `container`, use `container` for `--app-dir` of the SQL queries in a container, `host` otherwise.
 - `--skip-ssl` (with `--sql drush|wp`, not artisan): the database client connects without TLS (encryption off, not only the certificate check), for a database with a self-signed certificate: the query and its answer travel in clear between the server and the database, often like the connection of the application itself. When `ssh.sql_skip_ssl` is `true` in `context.json`, add `--skip-ssl` to every `--sql` query.
 - `--env-keys <fichier> KEY...`: reads a `.env` or `wp-config.php`. Only `APP_ENV`, `APP_DEBUG`, `APP_URL`, `WP_DEBUG`, `WP_ENVIRONMENT_TYPE`, `LOG_LEVEL` and `SESSION_SECURE_COOKIE` show their value; any other key shows only its presence and length.
 - `--php-ini KEY...`: reads `expose_php`, `display_errors`, `memory_limit`, `upload_max_filesize`, `post_max_size`, `max_execution_time`, `session.cookie_secure`, `session.cookie_httponly`, `session.cookie_samesite`, `opcache.enable`. It reads the configuration of the PHP command line, which can differ from PHP-FPM: say so when it matters.
 
 ## Allowlist (default deny)
 
-- Files: `cat`, `head`, `tail` (never `-f`), `grep` (never recursive), `ls`, `stat`, `find` (never `-exec`, `-ok`, `-delete`, `-fprint`, `-fls`).
-- System: `ps` (no `e` modifier), `df`, `du`, `free`, `uptime`, `systemctl status`, `is-active` and `list-timers`, `journalctl -n <500 au plus> --no-pager`, `crontab -l`.
+- Files: `cat`, `head`, `tail` (never `-f`), `grep` (never recursive), `ls` (`--time-style=<format>` allowed), `stat`, `find` (never `-exec`, `-ok`, `-delete`, `-fprint`, `-fls`).
+- System: `date` (to print the time only: never `-s`, `--set`, `-f` or a date as argument, which would set the clock), `ps` (no `e` modifier), `df`, `du`, `free`, `uptime`, `systemctl status`, `is-active` and `list-timers`, `journalctl -n <500 au plus> --no-pager`, `crontab -l`.
 - PHP: `php -v`, `php -m`, `php --ini`. `php -i` is refused (it prints the environment): use `--php-ini`.
 - Git, to read the deployed commit: `git -C <dossier> rev-parse HEAD` and `git -C <dossier> log -1 --format=<format>`.
 - Web servers: `nginx -v`, `apachectl -v`.
 - Applications: `drush status`, `pm:list`, `pm:security`, `--version`; `wp core version`, `plugin list`, `theme list`, `cron event list`, `site list --field=url` (no other form), `option get <nom>` (names that look like a secret refused), `--version`; `php artisan about`, `route:list`, `schedule:list`, `--version`. Binary forms: `drush`, `vendor/bin/drush` or an absolute `<dossier>/vendor/bin/drush`; `wp` alone; `php artisan` or `php <dossier absolu>/artisan`. An absolute path under `/tmp`, `/var/tmp`, `/dev/shm`, `/home`, `/root` or `/run/user` is refused (a file planted there would run).
 - Containers: `docker ps`, `docker compose ps`, and `docker exec` or `docker compose exec` of an allowed command. `-T` goes only with `docker compose exec`, never with `docker exec`. `docker inspect`, `env`, `printenv`, `set` and `/proc/<x>/environ` are refused: they show secrets.
-- Always refused: `sudo`, `su`, `sh`, `bash`, any shell metacharacter (`;`, `|`, `&`, `>`, `<`, backquote), `$`, globs, `~`, `..`, non-ASCII characters, reads in `/proc`, `/sys`, `/dev`.
+- Always refused: `sudo`, `su`, `sh`, `bash`, any shell metacharacter (`;`, `|`, `&`, `>`, `<`, backquote), `$`, globs, `~`, `..`, non-ASCII characters, reads in `/proc`, `/sys`, `/dev`. So `grep -E 'a|b'` is refused, in `docker exec` too: run one `grep` per pattern.
 - Files that carry secrets (`.env*`, `wp-config.php`, `settings*.php`, `.htpasswd`, `auth.json`, keys and certificates, `.git/config`, shell histories): raw read refused, use `--env-keys`.
 
-Folder of an application (diagnostic): ask the lead, with the candidates of `ls /var/www` and of `find /var/www /srv -maxdepth 3 -name <repère>`, the marker being `artisan` (Laravel), `wp-content` (WordPress) or `drush` with `-maxdepth 4` (Drupal, in `vendor/bin`).
+Folder of an application (diagnostic): ask the lead, with the candidates of `ls /var/www` and of `find /var/www /srv /app /opt -maxdepth 3 -name <repère>`, the marker being `artisan` (Laravel), `wp-content` (WordPress) or `drush` with `-maxdepth 4` (Drupal, in `vendor/bin`). A root missing on the server makes `find` exit 1: keep the paths it printed (the lines starting with `find:` are the missing roots). For an application in a container, run the same `find` through `docker exec <conteneur>` to get the folder inside the container, and record both (`ssh.app_dirs`, `references/context.md` section 4).
 
 ## Database
 
 - Through `--sql` only, via the CLI of the application: `drush sql:query`, `wp db query`, `php artisan db`. The guard sends the query on standard input; never pipe it yourself.
-- One statement: `SELECT`, `SHOW`, `DESCRIBE`, `DESC` or `EXPLAIN`, at most one final `;`, no comment, no `INTO`, no `\`, no function that reads a file, waits or has a side effect, no write or lock keyword, nothing that targets passwords, tokens or secrets, no `*` in a select list (`COUNT(*)` allowed). A query that names `users`, `wp_users`, `users_field_data`, `sessions` or a `*_tokens` table selects only `COUNT(...)`; `SHOW` and `DESCRIBE` stay allowed on them. Prefer counts, always with `LIMIT`.
+- One statement: `SELECT`, `SHOW`, `DESCRIBE`, `DESC` or `EXPLAIN`, at most one final `;`, no comment, no `INTO`, no `\`, no function that reads a file, waits or has a side effect, no write or lock keyword, nothing that targets passwords, tokens or secrets (except the count of hash formats below), no `*` in a select list (`COUNT(*)` allowed). A query that names `users`, `wp_users`, `users_field_data`, `sessions` or a `*_tokens` table selects only `COUNT(...)`; `SHOW` and `DESCRIBE` stay allowed on them. Prefer counts, always with `LIMIT`.
 - The guard first puts the session in read-only mode with `SET SESSION TRANSACTION READ ONLY`, which targets MySQL and MariaDB. PostgreSQL is not supported in v1: the query is refused or fails, and the row part is `unknown`.
 - The connection credentials are never read.
+
+Password hash formats (CQ-121): the only query allowed on `user_pass`, `pass` or `password` counts rows by length or by prefix, never a value. Shape: `SELECT COUNT(*) FROM <table> WHERE <condition> [AND <condition>...] LIMIT <n>`, a condition being `CHAR_LENGTH(<colonne>) = <n>` or `LENGTH(...)`, `LEFT(<colonne>, n) = '<préfixe>'` or `SUBSTRING(<colonne>, 1, n) = '<préfixe>'` with `n` from 1 to 4, or `<autre colonne> = <constante>` (for one user: `user_login = 'admin'`). Anything else is refused: `<`, `>`, `LIKE`, `IN`, `BETWEEN`, `GROUP BY`, `ORDER BY`, other functions, nested functions, `SUBSTRING` not starting at 1. Inside the double quotes of the shell, write each `$` of a prefix as `\$`, or the shell expands it:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+python3 "$S/cqa_ssh_ro.py" <alias> --sql wp --app-dir <dossier> "SELECT COUNT(*) FROM wp_users WHERE CHAR_LENGTH(user_pass) = 34 AND LEFT(user_pass, 3) = '\$P\$' LIMIT 1"
+```
+
+Usual formats: WordPress (`wp_users.user_pass`) `$P$` (phpass, 34 characters), `$wp$` (bcrypt of WordPress 6.8 and later), 32 characters without `$` (old MD5); Drupal (`users_field_data.pass`) `$2y$` (bcrypt, 60 characters, Drupal 10.1 and later) or `$S$` (55 characters, earlier); Laravel (`users.password`) `$2y$` (bcrypt, 60 characters).
 
 ## PHP in an uploads folder (CQ-97, CQ-144)
 

@@ -770,6 +770,56 @@ class SkillTest(unittest.TestCase):
         self.assertNotIn("--kind login --detail \"La ligne", diagnostic)
         self.assertNotIn("gravityform", diagnostic)
 
+    def test_app_folder_lookup_covers_the_four_roots(self):
+        roots = "find /var/www /srv /app /opt -maxdepth"
+        for path in (REFERENCES / "context.md", REFERENCES / "diagnostic.md",
+                     REFERENCES / "server.md", AUDITOR):
+            text = _text(path)
+            with self.subTest(file=path.name):
+                self.assertIn(roots, text)
+                self.assertNotIn("find /var/www /srv -maxdepth", text)
+                self.assertNotIn("find <dir> -maxdepth", text)
+                self.assertIn("keep the paths it printed", text)
+        lookup = _section(_text(REFERENCES / "context.md"), "6.1 Other sites (multisite)")
+        self.assertIn("find /var/www /srv /app /opt -maxdepth 3 -name wp-load.php", lookup)
+        argv = ["find", "/var/www", "/srv", "/app", "/opt", "-maxdepth", "3", "-name", "wp-load.php"]
+        self.assertTrue(cqa_ssh_ro.check_command(argv)[0])
+        self.assertTrue(cqa_ssh_ro.check_command(["docker", "exec", "app", *argv])[0])
+
+    def test_container_folder_feeds_the_sql_app_dir(self):
+        rule = "`container` for `--app-dir` of the SQL queries in a container, `host` otherwise"
+        for path in (REFERENCES / "context.md", REFERENCES / "diagnostic.md",
+                     REFERENCES / "server.md", AUDITOR):
+            with self.subTest(file=path.name):
+                self.assertIn(rule, _text(path))
+        self.assertIn('{"host": "<folder on the server>", "container": "<folder inside the '
+                      'container>"}', _text(REFERENCES / "context.md"))
+        self.assertIn('"container":', _section(_text(REFERENCES / "diagnostic.md"),
+                                               "2. Deployed commit and alignment (launch condition)"))
+
+    def test_documented_sql_queries_pass_the_guard(self):
+        found = 0
+        for path in (*_skill_files(), AUDITOR):
+            for query in _SQL_QUERY.findall(_text(path)):
+                found += 1
+                with self.subTest(file=path.name, query=query):
+                    allowed, reason = cqa_ssh_ro.check_sql(query.replace("\\$", "$"))
+                    self.assertTrue(allowed, reason)
+        self.assertGreaterEqual(found, 4)
+
+    def test_hash_format_counts_are_documented(self):
+        for path in (REFERENCES / "server.md", AUDITOR):
+            text = _text(path)
+            with self.subTest(file=path.name):
+                self.assertIn("CHAR_LENGTH(user_pass) = 34", text)
+                self.assertIn("LEFT(user_pass, 3) = '\\$P\\$'", text)
+                self.assertIn("1 to 4", text)
+                self.assertIn("`\\$`", text)
+        server = _text(REFERENCES / "server.md")
+        for needle in ("`date`", "`--set`", "`--time-style=<format>`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, server)
+
     def test_the_guard_allows_only_the_post_list_form_the_skill_uses(self):
         for argv, allowed in (
             (["wp", "post", "list", "--post_type=page", "--s=gravityform",

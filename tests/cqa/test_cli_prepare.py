@@ -899,6 +899,42 @@ class ContextCheckTest(RunDirCase):
                 self.assertTrue(report["errors"])
                 self.assertIn(dotted.replace(".0.", "[0]."), report["errors"][0])
 
+    def test_app_dirs_take_a_host_path_or_host_and_container(self):
+        context = valid_context()
+        context["ssh"]["app_dirs"] = {
+            "laravel": "/srv/app",
+            "nuxt-3": {"host": "/opt/shop/front", "container": "/app"},
+        }
+        code, report, _ = self.check(context)
+        self.assertEqual((code, report["errors"]), (0, []))
+
+    def test_app_dirs_invalid_forms_are_reported(self):
+        for value, path, needle in (
+            ("", "ssh.app_dirs.laravel", "chemin absolu"),
+            ("srv/app", "ssh.app_dirs.laravel", "chemin absolu"),
+            ("/srv/app\n", "ssh.app_dirs.laravel", "retour à la ligne"),
+            (3, "ssh.app_dirs.laravel", '{"host"'),
+            (None, "ssh.app_dirs.laravel", '{"host"'),
+            (["/srv/app"], "ssh.app_dirs.laravel", '{"host"'),
+            ({"host": "/srv/app"}, "ssh.app_dirs.laravel.container", "absent"),
+            ({"container": "/app"}, "ssh.app_dirs.laravel.host", "absent"),
+            ({"host": "/srv/app", "container": "app"}, "ssh.app_dirs.laravel.container",
+             "chemin absolu"),
+            ({"host": "", "container": "/app"}, "ssh.app_dirs.laravel.host", "chemin absolu"),
+            ({"host": None, "container": "/app"}, "ssh.app_dirs.laravel.host", "chemin absolu"),
+            ({"host": "/srv/app", "container": "/app", "service": "php"},
+             "ssh.app_dirs.laravel", "« service »"),
+        ):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["ssh"]["app_dirs"] = {"laravel": value}
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                self.assertIn(f"« {path} »", report["errors"][0])
+                self.assertIn(needle, report["errors"][0])
+                self.assertNotIn(chr(0x2014), report["errors"][0])
+
     def test_duplicate_repo_names_are_rejected(self):
         context = valid_context()
         context["repos"][1]["name"] = "laravel"
