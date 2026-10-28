@@ -99,7 +99,8 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" defer "$RUN" --kind ssh_refused --detail "Le garde-fou SSH a refusé : <commande> (<raison>). Impact : <lecture seule, ce qu'elle affiche, ou ce qu'elle modifierait>." --refs CQ-3,CQ-12
 ```
 
-5. In a sub-agent, the part becomes `unknown`, with « Commande à faire confirmer par le lead : <commande> (lecture seule, <ce qu'elle affiche>) » in `human_check`: the lead sees it in the Notion comment.
+5. In autonomous mode, each refusal a sub-agent reports in its return (the command, its refs, its impact) becomes one `defer --kind ssh_refused --refs <its refs> --detail "<commande> Impact : <impact>"`, as above; in interactive mode, relay it to the lead.
+6. In a sub-agent, the part becomes `unknown`, with « Commande à faire confirmer par le lead : <commande> (lecture seule, <ce qu'elle affiche>) » in `human_check`: the lead sees it in the Notion comment.
 
 ## Facts for the browser lots
 

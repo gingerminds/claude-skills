@@ -9,7 +9,7 @@ disable-model-invocation: true
 
 You orchestrate the audit of a project's quality checklist before launch. You decide and you write. The sub-agents `gm:cqa-auditor` and `gm:cqa-browser` analyse, the Docker toolbox measures, and all of them exchange through files in the run directory `~/.cache/gm-audit/<slug>/<AAAA-MM-JJ-HHMM>/`.
 
-The lead is needed at the start (questions, login in Chrome) and at the end (confirmation of the Notion writes). Everything in between runs without them. In autonomous mode (section 4) the lead may leave after the questions of section 4: the audit never stops to ask, it sets aside what needs them (`cqa_plan.py defer`) and handles it with them at the end (section 8, step 5).
+The lead is needed at the start (questions, login in Chrome). Everything in between runs without them. In autonomous mode (section 4) the lead may leave once the questions of section 4 are answered: the audit, diagnostic included, never stops to ask, it sets aside what needs them (`cqa_plan.py defer`) and handles it with them at the end (section 8, step 5).
 
 Load each reference with Read when its section starts, not before.
 
@@ -56,7 +56,7 @@ python3 "$S/cqa_plan.py" runs "<slug>"
 A run is complete once its final scan has run: section 8 then writes `done.json` in it, and `runs` reports it as `done`. A run of today (`run_id` starting with today's date) whose `done` is false is incomplete. Ask « Le run <run_id> du jour n'est pas terminé. » with « Reprendre ce run » and « Lancer un nouveau run ». To resume:
 
 1. `RUN` is its `path`.
-2. The current invocation wins over what the run stored. A `--phase` other than its `phase_filter` cannot reuse its lots and findings: say « Ce run a été lancé pour une autre phase : nouveau run. » and start a new run. Otherwise write the current `dry_run` in `context.json`. `mode` and `notion_write` are kept as the lead answered them (a run without them is interactive and section 7 asks the consent); `deferred.json` keeps its open entries, which section 8, step 5 handles.
+2. The current invocation wins over what the run stored. A `--phase` other than its `phase_filter` cannot reuse its lots and findings: say « Ce run a été lancé pour une autre phase : nouveau run. » and start a new run. Otherwise write the current `dry_run` in `context.json`. `mode` and `notion_write` are those of the invocation being resumed and are reused as stored, without asking again (a new invocation asks both questions again: section 4, section 10 step 6, section 11 step 4; a run without them is interactive and section 7 asks the consent); `deferred.json` keeps its open entries, which section 8, step 5 handles.
 3. Run `cqa_plan.py context "$RUN" --check`. On errors, ask « Le contexte du run <run_id> est invalide (<erreurs>). » with « Lancer un nouveau run » and « Arrêter ».
 4. If `target.access` is `basic_auth`, ask the Basic Auth credentials again (they are never stored) and check them with `probe-target --auth-env`, as in section 4.
 5. Restart at the first stage it lacks:
@@ -92,7 +92,7 @@ Read `references/context.md`. In order, one question at a time:
 4. SSH alias, from the list of `~/.ssh/config`, or none.
 5. Test accounts (front, back-office).
 6. Key pages: one per template, 10 at most, proposed from the sitemap, the links of the home page and the routes of the code, validated by the lead.
-7. Mode and Notion consent, two questions, one at a time, with AskUserQuestion (the second one is not asked with `--dry-run`, which writes nothing):
+7. Mode and Notion consent, two questions, one at a time, with AskUserQuestion (neither is asked with `diagnostic`, which runs only sections 3 to 5; the second one is not asked with `--dry-run`, which writes nothing). Each invocation asks them again and overwrites both keys: a value stored by an earlier invocation never counts (a resume reuses its own):
    - « Mode 100 % autonome ? » with « Oui, je m'absente » and « Non, je reste disponible ». Store `mode` to `"autonome"` for the first, `"interactif"` for the second.
    - « Écrire dans la copie Notion à la fin de l'audit ? » with « Tout écrire », « Sans toucher aux statuts posés par un humain » and « Ne rien écrire ». Store `notion_write` to `"all"`, `"keep_human"` or `"none"` (`null` when not asked). The copy does not change during the audit, so this consent holds for section 7.
 8. Write `context.json`, then check it until it passes:
@@ -124,6 +124,8 @@ Read `references/diagnostic.md`. It gives the exact command of each check:
 
 Preprod behind `develop`: list the missing commits and ask « Déployer puis relancer (recommandé) » or « Lancer quand même ». Never deploy. Deployed commit not found: the audit goes on only if the lead confirms the alignment.
 
+In autonomous mode (`mode` is `autonome`) the diagnostic asks nothing: a launch-condition gap (preprod behind `develop`, deployed commit not found) is recorded with `cqa_plan.py defer --kind gap --detail "<texte en français>"` and the audit goes on as with « Lancer quand même » (never deploy); an alignment that would need the lead's confirmation is recorded the same way and treated as not aligned; « Lancer l'audit » is implied. Interactive mode is unchanged.
+
 Then write `available_tools` and the repo facts in `context.json`, and check it:
 
 ```bash
@@ -148,7 +150,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" coverage "$RUN"
 ```
 
-Show the table of checks, the coverage and the gains as `references/diagnostic.md` words them. `evaluable` already includes `evaluable_human`: never add them. With `diagnostic`, stop here. Otherwise ask « Lancer l'audit » or « Compléter mon poste d'abord » (then stop: a later launch the same day offers to resume).
+Show the table of checks, the coverage and the gains as `references/diagnostic.md` words them. `evaluable` already includes `evaluable_human`: never add them. With `diagnostic`, stop here. Otherwise ask « Lancer l'audit » or « Compléter mon poste d'abord » (then stop: a later launch the same day offers to resume); in autonomous mode do not ask, the audit starts.
 
 ## 6. Audit
 
@@ -226,8 +228,8 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" defer "$RUN" --kind <login|ssh_refused|gap|question> --detail "<texte en français pour le lead>" --refs CQ-3,CQ-12
 ```
 
-- `--kind ssh_refused`: a command refused by the guard (exit 4) or needing the lead's confirmation. Never run it. The rows concerned stay `unknown`.
-- `--kind gap`: a deviation found on the way (preprod behind `develop`, access that changed at the check before a wave, SSH that fails): note it, launch the wave anyway with what is still possible; the rows concerned may end `unknown` and the synthesis remarks say so. Chrome disconnected at `tabs_context_mcp`: `--kind gap`, and the browser lots go to `gm:cqa-auditor` as with « Continuer sans navigateur ».
+- `--kind ssh_refused`: a command refused by the guard (exit 4) or needing the lead's confirmation. Never run it. The rows concerned stay `unknown`. A refusal a sub-agent reports in its return (the command, its refs, its impact) is recorded the same way, one entry per refused command: `--refs <its refs> --detail "<commande> Impact : <impact>"`. In interactive mode, relay it to the lead as before.
+- `--kind gap`: a deviation found on the way (access that changed at the check before a wave, SSH that fails; the preprod behind `develop` is checked in section 5): note it, launch the wave anyway with what is still possible; the rows concerned may end `unknown` and the synthesis remarks say so. Chrome disconnected at `tabs_context_mcp`: `--kind gap`, and the browser lots go to `gm:cqa-auditor` as with « Continuer sans navigateur ».
 - `--kind login`: the login pause, recorded once (preprod and back-office in the same entry) with the refs of the held session lots. Those lots have no finding yet: they are dispatched at the end of the audit as normal first-round lots (section 8, step 5), after the lead's login or, if they decline, without a session.
 - `--kind question`: any other question the orchestrator would have asked.
 - `--detail` is short, in French, without any secret; `--refs` lists the rows left `unknown` because of it, when known.
@@ -252,7 +254,7 @@ python3 "$S/cqa_plan.py" plan "$RUN"
 
 1. Interactive mode: show the summary: count per final status, blocking rows not compliant, rows not evaluated, and the explicit list of statuses set by a human that the audit would change. When `mode` is `autonome` there is no presentation: go on to the write mode, the summary comes as a recap after the write (section 8, step 1).
 2. With `--dry-run`: no question, no Notion write. Go to section 8, step 2.
-3. Otherwise the write mode is the consent given at launch (section 4), kept in `notion_write`: `all` is « Tout écrire », `keep_human` is « Sans toucher aux statuts posés par un humain », `none` is « Ne rien écrire ». Never ask when `notion_write` is set: the copy does not change during the audit. Ask « Écrire le plan dans la copie Notion ? » with « Tout écrire », « Sans toucher aux statuts posés par un humain » (only when there are some) and « Ne rien écrire », only when `notion_write` is `null` (a run created before the consent question existed), and store the answer in `notion_write`. In interactive mode the summary of step 1 is shown first even when the consent is known.
+3. Otherwise the write mode is the consent given by the current invocation at its start (section 4, section 10 step 6, section 11 step 4), kept in `notion_write`; a value left by an earlier invocation never counts, and a resume reuses the stored one: `all` is « Tout écrire », `keep_human` is « Sans toucher aux statuts posés par un humain », `none` is « Ne rien écrire ». Never ask when `notion_write` is set: the copy does not change during the audit. Ask « Écrire le plan dans la copie Notion ? » with « Tout écrire », « Sans toucher aux statuts posés par un humain » (only when there are some) and « Ne rien écrire », only when `notion_write` is `null` (a run created before the consent question existed), and store the answer in `notion_write`. In interactive mode the summary of step 1 is shown first even when the consent is known.
    - « Tout écrire »: section 8, step 1.
    - « Ne rien écrire »: as with `--dry-run`, section 8, step 2.
    - « Sans toucher aux statuts posés par un humain »: keep the list of those statuses, rebuild the plan with the command below so that the synthesis matches what is written, then section 8, step 1, with `--skip-human-overrides`. In a recette (`notion/plan.json` carries `recette.rerun`), the rebuild keeps `--recette <NN>`.
@@ -311,7 +313,7 @@ It writes `synthese.md` and `notion/page-comment.txt`.
 - the operations blocked at step 1: « CQ-<ref> (<kind>) non écrit : <raison> »;
 - for `--dry-run` and « Ne rien écrire »: « Rien n'a été écrit dans Notion : le plan reste dans notion/plan.json. »
 
-**4. Page comment**, only when step 1 ran and wrote or found something (`done` plus `skipped` above 0). Never with `--dry-run` or « Ne rien écrire ».
+**4. Page comment**, only when step 1 ran and wrote or found something (`done` plus `skipped` above 0). Never with `--dry-run` or « Ne rien écrire ». In autonomous mode, when `cqa_plan.py deferred "$RUN"` lists open entries, skip it now: it is written once, after the end block (step 5).
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -329,14 +331,14 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" deferred "$RUN"
 ```
 
-It prints `{"items"}`, the open entries (`id`, `kind`, `detail`, `refs`). Go through them with the lead, one question at a time, in French, with AskUserQuestion. The `login` entry comes first, then the others:
+It prints `{"items"}`, the open entries (`id`, `kind`, `detail`, `refs`). The lead is back at this point: the interactive rules of section 6 apply to what is dispatched here (the checks before a wave, the `tabs_context_mcp` call before a browser lot, the answers « Reprendre » and « Continuer sans navigateur »). Go through the entries with the lead, one question at a time, in French, with AskUserQuestion. The `login` entry comes first, then the others:
 
-- `login`: open the preprod (and the back-office) in new Chrome tabs (`references/browser.md`), then ask « Connectez-vous dans Chrome (onglets ouverts), puis répondez. » with « C'est fait » and « Passer ». Then dispatch the held session lots as normal first-round lots (`Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no.`, no `Rerun:`), validate each with `cqa_plan.py validate "$RUN" <lot_id>`, relaunch once on errors as in section 6, step 7. On « Passer », or when the lead cannot log in, dispatch them the same way without a session: the agents write `unknown` with the reason, so every row still has a finding. Close the tabs afterwards.
+- `login`: call `tabs_context_mcp` first (it fails: ask the lead to reconnect Claude in Chrome, as in section 6), open the preprod (and the back-office) in new Chrome tabs (`references/browser.md`), then ask « Connectez-vous dans Chrome, dans les onglets ouverts : Basic Auth de la préprod si elle le demande, puis vos comptes de test. N'utilisez pas cette fenêtre Chrome pendant les lots navigateur. » with « C'est fait » and « Passer ». Then dispatch the held session lots as normal first-round lots (`Run dir: <run_dir>. Lot: <lot_id>. Follow-up: no.`, no `Rerun:`), validate each with `cqa_plan.py validate "$RUN" <lot_id>`, relaunch once on errors as in section 6, step 7, then run the probe follow-up for them (section 6, step 8). On « Passer », or when the lead cannot log in, dispatch them the same way without a session: the agents write `unknown` with the reason, so every row still has a finding. Close the tabs afterwards.
 - `ssh_refused`: as `references/server.md` (exit 4): the command, its impact, « Passer » and the lead's result in « Autre ». The command is never run by the skill; a result the lead gives is a short fact for the dispatch, never raw output in the run directory.
 - `gap`: say what was noted and ask « Relancer les lignes concernées » or « Passer ».
 - `question`: ask the question as recorded.
 
-Close each entry once answered:
+Close an entry only once it is settled: a `login` entry when its held lots are validated, the others when their rerun is closed (an entry passed by the lead is closed at once):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -344,7 +346,13 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" deferred "$RUN" --resolve <id>
 ```
 
-Then rerun automatically, without presenting the list to the lead, the rows whose entry was answered (« C'est fait », a result, « Relancer »): the `refs` of those entries, none for a `login` entry: its held lots were dispatched as first-round lots, so go straight to the plan. Use the mechanism of section 10, steps 4 and 7 to 10, in this order, with those rows in `rerun-candidates --refs` (a row without a lot is dropped, say so).
+Then rerun automatically, without presenting the list to the lead, the rows whose entry was answered (« C'est fait », a result, « Relancer »): the `refs` of those entries, none for a `login` entry: its held lots were dispatched as first-round lots, so go straight to the plan. Use the mechanism of section 10, steps 4 and 7 to 10, in this order. List the rows with the command below, then keep only the candidates whose reasons include `lead` (the refs you gave); a row without a lot is dropped, say so:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" rerun-candidates "$RUN" --refs CQ-3,CQ-12
+```
 
 1. Open the rerun, relaunch the tools that need it (section 10, step 7):
 
@@ -376,7 +384,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" plan "$RUN"
 ```
 
-4. Write it again without presenting it (`all` or `keep_human`; the comments of the rewritten rows are replaced), run steps 2 to 4 again, and show a second recap:
+4. Write it again without presenting it (`all` or `keep_human`; the comments of the rewritten rows are replaced), run steps 2 to 4 again (the page comment is written here, once), and show a second recap:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -480,7 +488,7 @@ python3 "$S/cqa_plan.py" rerun-candidates "$RUN"
 
 It prints `{"candidates", "lots", "tools", "estimate_min", "notes"}`. Each candidate has a `ref`, its `lot` (null when no lot can take the row: it cannot be rerun, say so), its `reasons` (`cause_levee`, `outil_relance`, `code_modifie`, `lead`) and their `details`. Show the `notes` too.
 
-6. Present before anything is dispatched, in French: the rows grouped by reason (ref, title, detail), the lots and the tools that would run, and the estimated time (`estimate_min` minutes). Ask « Lancer cette relance ? » with « Lancer », « Modifier la liste » and « Annuler ». « Modifier la liste »: the lead removes refs (drop them from the list) or adds some in « Autre » (run the command again with `--refs CQ-12,CQ-40`, which adds them with the reason `lead`), then present again. « Annuler »: stop, nothing is written to Notion (the snapshot stays).
+6. Present before anything is dispatched, in French: the rows grouped by reason (ref, title, detail), the lots and the tools that would run, and the estimated time (`estimate_min` minutes). Ask « Lancer cette relance ? » with « Lancer », « Modifier la liste » and « Annuler ». « Modifier la liste »: the lead removes refs (drop them from the list) or adds some in « Autre » (run the command again with `--refs CQ-12,CQ-40`, which adds them with the reason `lead`), then present again. « Annuler »: stop, nothing is written to Notion (the snapshot stays). Once the list is accepted (« Lancer »), ask the two launch questions of section 4, step 7, one at a time, and overwrite `mode` and `notion_write` in `context.json`: this invocation's answers rule sections 7 and 8, whatever an earlier invocation stored.
 7. Start the workstation inhibitor as at the beginning of section 6 and stop it on every path that ends the rerun. Then relaunch the tools of `tools` that the lead kept (one call each, credentials inline only when the session holds the Basic Auth credentials). Each call rewrites `tools/manifest.json`. Toolbox not ready: `cqa_plan.py skip` for those tools and say so.
 
 ```bash
@@ -554,7 +562,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" rerun-candidates "$RUN" --refs CQ-3,CQ-12
 ```
 
-4. Present before anything is dispatched, in French: for each row, ref, title, the status the skill had written (`skill_last`) and the devs' comments (with the merge request link), then the lots, the tools and the estimated time. Rows with a code change get a reminder that the preprod must run that code (the check of section 5). Ask « Lancer cette recette ? » with « Lancer », « Modifier la liste » and « Annuler », and handle the answers as in section 10, step 6. To drop or add rows, run the command of step 2 again with `--without CQ-3,CQ-12` (drops rows) and `--refs CQ-40` (adds rows the lead names, even if they are not candidates): it re-reads the copy and rewrites `notion/recette.json`. The options are not cumulative between runs: repeat every earlier `--without` and `--refs`. Then run `rerun-candidates` again with the refs of the rewritten file, and present again. « Annuler »: stop, nothing is written to Notion.
+4. Present before anything is dispatched, in French: for each row, ref, title, the status the skill had written (`skill_last`) and the devs' comments (with the merge request link), then the lots, the tools and the estimated time. Rows with a code change get a reminder that the preprod must run that code (the check of section 5). Ask « Lancer cette recette ? » with « Lancer », « Modifier la liste » and « Annuler », and handle the answers as in section 10, step 6. To drop or add rows, run the command of step 2 again with `--without CQ-3,CQ-12` (drops rows) and `--refs CQ-40` (adds rows the lead names, even if they are not candidates): it re-reads the copy and rewrites `notion/recette.json`. The options are not cumulative between runs: repeat every earlier `--without` and `--refs`. Then run `rerun-candidates` again with the refs of the rewritten file, and present again. « Annuler »: stop, nothing is written to Notion. Once the list is accepted (« Lancer »), ask the two launch questions of section 4, step 7, one at a time, and overwrite `mode` and `notion_write` in `context.json`: this invocation's answers rule sections 7 and 8, whatever an earlier invocation stored.
 5. Relaunch the tools the lead kept and dispatch the lots as in section 10, steps 7 and 8, with the line, exactly (the kept rows of that lot only):
 
 ```

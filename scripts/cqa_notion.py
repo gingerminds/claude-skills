@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cqa.checklist import validate_schema
+from cqa.checklist import parse_refs, validate_schema
 from cqa.comments import MAX_COMMENT_LENGTH
 from cqa.notion_api import NotionClient, NotionError, extract_id
 from cqa.notion_read import (
@@ -254,16 +254,7 @@ def _cmd_recette(args, client) -> int:
 
 
 def _parse_refs(text: str) -> list:
-    refs = []
-    for part in text.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        found = re.fullmatch(r"(?:CQ-)?([0-9]+)", part, re.IGNORECASE)
-        if not found:
-            raise UsageError(f"« {part} » n'est pas une Réf (attendu : CQ-12 ou 12).")
-        refs.append(int(found.group(1)))
-    return refs
+    return parse_refs(text)
 
 
 def _optional_json(path: Path, consequence: str = ""):
@@ -278,7 +269,19 @@ def _optional_json(path: Path, consequence: str = ""):
         return None
 
 
+def _refuse_when_none(run_dir: Path) -> None:
+    """Refuse the audit writes when the lead declined them at launch (notion_write "none")."""
+    context = _read_json(run_dir / "context.json")
+    if isinstance(context, dict) and context.get("notion_write") == "none":
+        raise UsageError(
+            "context.json : notion_write vaut « none » (le lead a refusé l'écriture dans "
+            "Notion au lancement) : rien n'est écrit."
+        )
+
+
 def _cmd_apply(args, client) -> int:
+    if args.plan == Path("notion/plan.json"):
+        _refuse_when_none(args.run_dir)
     plan = _read_json(args.run_dir / args.plan, "lancer d'abord cqa_plan.py plan")
     if not isinstance(plan, dict):
         raise UsageError(f"{args.plan.name} : un objet JSON est attendu.")
@@ -300,6 +303,7 @@ def _cmd_apply(args, client) -> int:
 
 
 def _cmd_comment_page(args, client) -> int:
+    _refuse_when_none(args.run_dir)
     context = _read_json(args.run_dir / "context.json")
     section = context.get("notion") if isinstance(context, dict) else None
     if isinstance(section, dict) and "copy_page_id" in section and section["copy_page_id"] is None:

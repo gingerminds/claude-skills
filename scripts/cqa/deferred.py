@@ -1,14 +1,13 @@
 """Queue of the decisions an unattended audit sets aside for the lead (deferred.json)."""
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cqa.checklist import parse_refs
 from cqa.notion_read import write_json
 
 KINDS = ("login", "ssh_refused", "gap", "question")
 FILE = "deferred.json"
-_REF = re.compile(r"(?:CQ-)?([0-9]+)", re.IGNORECASE)
 
 
 def _read(run_dir: Path) -> list:
@@ -21,21 +20,15 @@ def _read(run_dir: Path) -> list:
     items = document.get("items") if isinstance(document, dict) else None
     if not isinstance(items, list):
         raise ValueError(f"{FILE} est illisible : « items » doit être une liste.")
+    for item in items:
+        valid = (
+            isinstance(item, dict)
+            and isinstance(item.get("id"), int)
+            and not isinstance(item.get("id"), bool)
+        )
+        if not valid:
+            raise ValueError(f"{FILE} est illisible : chaque entrée doit être un objet avec un « id » entier.")
     return items
-
-
-def parse_refs(text: str) -> list:
-    """Return the sorted unique refs of "CQ-5, 12"; raise ValueError on anything else."""
-    refs = set()
-    for part in (text or "").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        found = _REF.fullmatch(part)
-        if not found:
-            raise ValueError(f"« {part} » n'est pas une Réf (attendu : CQ-12 ou 12).")
-        refs.add(int(found.group(1)))
-    return sorted(refs)
 
 
 def add(run_dir: Path, kind: str, detail: str, refs: str = "") -> dict:

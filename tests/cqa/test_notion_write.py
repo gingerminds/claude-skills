@@ -1165,6 +1165,31 @@ class CliTestCase(unittest.TestCase):
 
 
 class ApplyCommandTest(CliTestCase):
+    def set_notion_write(self, value):
+        context = self.read_json("context.json")
+        context["notion_write"] = value
+        self.write_json("context.json", context)
+
+    def test_notion_write_none_refuses_the_audit_writes(self):
+        self.write_plan(status_op(PAGE_1, 1), page_comment_op())
+        self.set_notion_write("none")
+        code, out, err = self.run_main(["apply", self.run_dir])
+        self.assertEqual(code, 2)
+        self.assertIn("notion_write", err)
+        self.assertEqual(self.notion.writes, [])
+        path = self.run_dir / "comment.txt"
+        path.write_text("texte", encoding="utf-8")
+        code, out, err = self.run_main(["comment-page", self.run_dir, path])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.notion.writes, [])
+
+    def test_notion_write_set_or_null_does_not_block(self):
+        for value in ("all", "keep_human", None):
+            with self.subTest(value=value):
+                self.write_plan(status_op(PAGE_1, 1))
+                self.set_notion_write(value)
+                code, out, err = self.run_main(["apply", self.run_dir])
+                self.assertEqual(code, 0, err)
     def test_applies_the_plan(self):
         self.write_plan(status_op(PAGE_1, 1), comment_op(PAGE_1, 1), page_comment_op())
         code, out, err = self.run_main(["apply", self.run_dir])

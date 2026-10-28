@@ -38,6 +38,15 @@ class DeferredModuleTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             deferred.open_items(self.run_dir)
 
+    def test_malformed_items_are_an_error_not_a_traceback(self):
+        for text in ('{"items": ["x"]}', '{"items": [{"id": "1"}]}', '{"items": [{"id": true}]}'):
+            with self.subTest(text=text):
+                (self.run_dir / "deferred.json").write_text(text, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "illisible"):
+                    deferred.open_items(self.run_dir)
+                with self.assertRaisesRegex(ValueError, "illisible"):
+                    deferred.add(self.run_dir, "gap", "x")
+
 
 class DeferredCommandTest(AuditCase):
     def test_deferred_queue_roundtrip(self):
@@ -69,10 +78,20 @@ class DeferredCommandTest(AuditCase):
         self.assertEqual(code, 2)
         self.assertIn("9", err)
 
+    def test_a_damaged_queue_exits_with_a_usage_error(self):
+        run_dir = self.make_run()
+        (run_dir / "deferred.json").write_text('{"items": ["x"]}', encoding="utf-8")
+        code, out, err = self.run_main(["deferred", run_dir])
+        self.assertEqual(code, 2)
+        self.assertIn("illisible", err)
+        self.assertNotIn("Traceback", err)
+
     def test_unknown_kind_and_bad_ref_exit_with_usage_errors(self):
         run_dir = self.make_run()
         code, out, err = self.run_main(["defer", run_dir, "--kind", "nope", "--detail", "x"])
         self.assertEqual(code, 2)
+        self.assertIn("n'est pas un type connu", err)
+        self.assertNotIn("Traceback", err)
         code, out, err = self.run_main(
             ["defer", run_dir, "--kind", "gap", "--detail", "x", "--refs", "CQ-1,abc"]
         )

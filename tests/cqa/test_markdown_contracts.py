@@ -576,6 +576,66 @@ class SkillTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, section)
         self.assertIn("Never ask when `notion_write` is set", section)
+        self.assertIn("current invocation", section)
+        self.assertIn("never counts", section)
+
+    def test_each_invocation_asks_the_launch_questions_again(self):
+        skill = _text(SKILL)
+        for heading in ("10. Rerun", "11. Recette"):
+            section = _section(skill, heading)
+            with self.subTest(section=heading):
+                self.assertIn("ask the two launch questions of section 4, step 7", section)
+                self.assertIn("overwrite `mode` and `notion_write`", section)
+                self.assertLess(
+                    section.index("« Lancer"), section.index("ask the two launch questions")
+                )
+        self.assertIn("reused as stored", _section(skill, "3. Resume"))
+        context = _section(skill, "4. Context")
+        self.assertIn("neither is asked with `diagnostic`", context)
+        self.assertIn("Each invocation asks them again and overwrites both keys", context)
+        intro = skill.split("\n## 1.")[0]
+        self.assertNotIn("confirmation of the Notion writes", intro)
+
+    def test_autonomous_diagnostic_never_stops(self):
+        section = _section(_text(SKILL), "5. Diagnostic")
+        for needle in (
+            "In autonomous mode (`mode` is `autonome`) the diagnostic asks nothing",
+            "defer --kind gap",
+            "never deploy",
+            "treated as not aligned",
+            "« Lancer l'audit » is implied",
+            "do not ask, the audit starts",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        self.assertIn("defer --kind gap", _text(REFERENCES / "diagnostic.md"))
+
+    def test_guard_refusals_of_sub_agents_reach_the_queue(self):
+        self.assertIn("with its refs and its impact", _text(AUDITOR))
+        for path in (SKILL, REFERENCES / "lots.md", REFERENCES / "server.md"):
+            text = _text(path)
+            with self.subTest(file=path.name):
+                self.assertIn('--kind ssh_refused', text)
+                self.assertIn("--refs <its refs>", text)
+                self.assertIn("Impact : <impact>", text)
+
+    def test_autonomous_end_block_details(self):
+        skill = _text(SKILL)
+        writing = _section(skill, "8. Writing and synthesis")
+        page = writing[writing.index("**4. Page comment**") : writing.index("**5. Deferred")]
+        self.assertIn("skip it now", page)
+        end = writing[writing.index("**5. Deferred") : writing.index("**6. Final scan**")]
+        for needle in (
+            "section 6, step 8",
+            "Close an entry only once it is settled",
+            'cqa_plan.py" rerun-candidates "$RUN" --refs',
+            "`lead`",
+            "`tabs_context_mcp`",
+            "N'utilisez pas cette fenêtre Chrome pendant les lots navigateur.",
+            "Basic Auth de la préprod",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, end)
 
     def test_no_em_dash_in_skill(self):
         for path in [*_skill_files(), ALIAS]:

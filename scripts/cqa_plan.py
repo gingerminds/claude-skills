@@ -22,7 +22,7 @@ from typing import Callable, NamedTuple, Optional
 from urllib.parse import urlsplit
 
 from cqa import deferred, probes, report
-from cqa.checklist import STATUS_IMPLEMENTED, ref_label
+from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
 from cqa.findings import apply_guardrails, validate_document
 from cqa.git_tools import (
     alignment,
@@ -244,7 +244,9 @@ def _register_audit(commands) -> None:
     sub = _run_command(
         commands, "defer", "met une décision de côté pour le lead (deferred.json)", _cmd_defer
     )
-    sub.add_argument("--kind", required=True, choices=deferred.KINDS, help="type de décision")
+    sub.add_argument(
+        "--kind", required=True, help="type de décision : " + ", ".join(deferred.KINDS)
+    )
     sub.add_argument("--detail", required=True, help="texte pour le lead, en français")
     sub.add_argument("--refs", default="", help="Réf concernées, séparées par des virgules")
     sub = _run_command(
@@ -617,16 +619,7 @@ def _cmd_rerun_close(args, services) -> int:
 
 
 def _parse_rows(text: str) -> set:
-    refs = set()
-    for part in text.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        found = re.fullmatch(r"(?:CQ-)?([0-9]+)", part, re.IGNORECASE)
-        if not found:
-            raise UsageError(f"« {part} » n'est pas une Réf (attendu : CQ-12 ou 12).")
-        refs.add(int(found.group(1)))
-    return refs
+    return set(parse_refs(text))
 
 
 def _rerun_errors(run_dir, context, lot, name, rows) -> list:
@@ -771,15 +764,7 @@ def _recette_scope(run_dir: Path, context: dict, lots: list, rows: list, number:
 
 
 def _cmd_rerun(args, services) -> int:
-    refs = []
-    for part in args.refs.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        found = re.fullmatch(r"(?:CQ-)?([0-9]+)", part, re.IGNORECASE)
-        if not found:
-            raise UsageError(f"« {part} » n'est pas une Réf (attendu : CQ-12 ou 12).")
-        refs.append(int(found.group(1)))
+    refs = parse_refs(args.refs)
     run_dir = args.run_dir.resolve()
     context = _checked_context(run_dir)
     _emit(
