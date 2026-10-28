@@ -565,10 +565,16 @@ def _wp(args: list) -> None:
         name = words[2]
         if not _OPTION_NAME.fullmatch(name) or _WP_SECRET_OPTION.search(name):
             raise Refused(f"wp option get : nom d'option refusé (motif de secret) : « {name} »")
+    elif words == ("site", "list"):
+        if "--field=url" not in options:
+            raise Refused("wp site list : seule la forme --field=url est autorisée")
+        options = [option for option in options if option != "--field=url"]
+        if any(option.partition("=")[0] in ("--field", "--format", "--fields") for option in options):
+            raise Refused("wp site list : seule la forme --field=url est autorisée")
     elif words not in _WP_COMMANDS:
         raise Refused(
-            "wp : seuls core version, plugin list, theme list, cron event list, option get "
-            "et --version sont autorisés"
+            "wp : seuls core version, plugin list, theme list, cron event list, option get, "
+            "site list --field=url et --version sont autorisés"
         )
     _check_app_options("wp", options, _WP_VALUED, _WP_FLAGS)
 

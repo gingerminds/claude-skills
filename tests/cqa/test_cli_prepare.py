@@ -722,6 +722,80 @@ class ContextCheckTest(RunDirCase):
         context["notion_write"] = "tout"
         self.assertIn("keep_human", self.check(context)[1]["errors"][0])
 
+    def _site(self, domain_name="shop.example.org", **changes):
+        domain = domain_name
+        site = {
+            "domain": domain,
+            "backoffice": "commun",
+            "sso": False,
+            "home": f"https://{domain}/",
+        }
+        site.update(changes)
+        return site
+
+    def test_sites_are_optional_and_validated(self):
+        code, report, _ = self.check(valid_context())
+        self.assertEqual((code, report["errors"]), (0, []))
+        context = valid_context()
+        context["sites"] = [
+            self._site("a.example.org"),
+            self._site("b.example.org", backoffice="propre", sso=True),
+        ]
+        self.assertEqual(self.check(context)[:2][1]["errors"], [])
+        context["sites"] = []
+        self.assertEqual(self.check(context)[0], 0)
+
+    def test_sites_refuse_bad_shapes(self):
+        cases = {
+            "not a list": ({"domain": "a.example.org"}, "sites"),
+            "not objects": (["a.example.org"], "sites[0]"),
+        }
+        for label, (value, path) in cases.items():
+            with self.subTest(label=label):
+                context = valid_context()
+                context["sites"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertIn(f"« {path} »", report["errors"][0])
+        for field, value, needle in (
+            ("backoffice", "partagé", "commun"),
+            ("backoffice", None, "propre"),
+            ("sso", "oui", "booléen"),
+            ("sso", None, "booléen"),
+            ("domain", "https://a.example.org", "nom d'hôte"),
+            ("domain", "a.example.org/blog", "nom d'hôte"),
+            ("domain", "", "nom d'hôte"),
+            ("home", "", "URL"),
+            ("home", "a.example.org", "URL"),
+            ("home", "https://autre.example.org/", "a.example.org"),
+        ):
+            with self.subTest(field=field, value=value):
+                context = valid_context()
+                context["sites"] = [self._site("a.example.org", **{field: value})]
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                self.assertIn(f"sites[0].{field}", report["errors"][0])
+                self.assertIn(needle, report["errors"][0])
+        context = valid_context()
+        site = self._site("a.example.org")
+        del site["sso"]
+        context["sites"] = [site]
+        self.assertIn("sites[0].sso", self.check(context)[1]["errors"][0])
+
+    def test_sites_refuse_duplicates_and_more_than_ten(self):
+        context = valid_context()
+        context["sites"] = [self._site("a.example.org"), self._site("A.example.org")]
+        code, report, _ = self.check(context)
+        self.assertEqual(code, 6)
+        self.assertIn("deux fois", report["errors"][0])
+        context["sites"] = [self._site(f"s{n}.example.org") for n in range(10)]
+        self.assertEqual(self.check(context)[0], 0)
+        context["sites"] = [self._site(f"s{n}.example.org") for n in range(11)]
+        code, report, _ = self.check(context)
+        self.assertEqual(code, 6)
+        self.assertIn("10 éléments au plus", report["errors"][0])
+
     def test_nullable_values_are_accepted(self):
         context = valid_context()
         context["lead"]["option"] = None

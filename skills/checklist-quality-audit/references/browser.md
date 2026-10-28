@@ -5,7 +5,8 @@ The browser checks run in the lead's Chrome, through Claude in Chrome. This page
 ## Rules (every browser use, the orchestrator's included)
 
 - **Template by template.** For each key page, every row that needs it is checked before the next page.
-- **New tabs only**, on the project domains: the hosts of `target.preprod_url` and of `key_pages`, plus the host of `target.prod_url` on a prod run. Never read, use or close a tab the skill did not create.
+- **New tabs only**, on the project domains: the hosts of `target.preprod_url`, of the `domain` of each entry of `sites` and of `key_pages`, plus the host of `target.prod_url` on a prod run. Never read, use or close a tab the skill did not create.
+- **Every site.** The `home` of each entry of `sites` is visited in addition to the 10 key pages.
 - **Manual login.** The skill opens the preprod and the back-office, then waits for the lead to log in (Basic Auth, test accounts). It never types a password, nor anything else.
 - **Read-only.** Allowed: navigation, reading the DOM, Tab and Escape, resizing, zoom. No form is ever submitted, even on the preprod: the rows that need one get `ok_human` or `unknown`, with the test in `human_check`. No click or URL that changes state (save, delete, publish, log out, run cron, clear a cache). No interaction with a cookie or consent banner.
 - **Prod.** On a prod run (`phase_filter` with J0 or J+7 and `target.prod_live` true): navigation, reading, Tab and Escape only.
@@ -30,6 +31,7 @@ The Chrome tools may be deferred. Load them in one ToolSearch call:
 Only when "Navigateur" is available, after the first batch of lots is dispatched (`references/lots.md`):
 
 1. Create a tab on `target.preprod_url` (on the prod URL for a prod run) and, with `test_accounts.backoffice`, one on the key page « Back-office ».
+   With `sites`, open one tab per back-office of its own (`backoffice` is `propre`): its `home` host, or its login page when the lead gave it. A `commun` back-office needs no tab of its own. For a site with `sso` true, do not open a login tab: tell the lead « <domaine> : connexion par SSO, à faire vous-même ».
 2. Ask « Connectez-vous dans Chrome, dans les onglets ouverts : Basic Auth de la préprod si elle le demande, puis vos comptes de test. N'utilisez pas cette fenêtre Chrome pendant les lots navigateur. » with « C'est fait » and « Continuer sans connexion ».
 3. Without login, the rows that need a session end `unknown`, with the steps in `human_check`.
 4. After the last browser lot, close these tabs with `tabs_close_mcp`.

@@ -159,6 +159,25 @@ curl -q -sS --max-time 20 -A "GingermindsAudit/<plugin_version>" "<preprod_url>/
 
 Show the list (template, URL), then « Valider ces pages clés ? » with « Valider » and « Annuler l'audit »; corrections in « Autre », in one answer. Absolute URLs on the preprod host, or on the back-office host. On a prod run, the same pages on the host of `prod_url`.
 
+## 6.1 Other sites (multisite)
+
+A project can serve several sites. The back-office is usually shared by all of them, but a site can have one of its own, so the questions are asked here, in the context step, never asked after the audit starts (the lead is present now, and the launch questions of the next step come later). One question at a time, in French.
+
+Detection of the other domains, in this order:
+
+1. WordPress with an SSH alias: `python3 "$S/cqa_ssh_ro.py" <alias> -- wp site list --field=url --path=<dossier>` through the guard (the only `wp site` command it allows; a guard refusal is not worked around). One URL per line. `<dossier>` is the WordPress folder on the server; when it is not known yet (`ssh.app_dirs` is filled by the diagnostic), go to step 2.
+2. Otherwise the domains listed in the `CLAUDE.md` or `PROJECT.md` of the project.
+3. Otherwise ask « Autres domaines du projet en préprod ? » with « Aucun, un seul site » and « Saisir les domaines » (hosts in « Autre », separated by commas).
+
+No other domain: no `sites` key, the project is a single site. Otherwise show the domains and ask, for each one that is not the host of `target.preprod_url` (that one is the first site), one question at a time:
+
+- « Back-office commun ou propre à ce site ? » with « Commun » and « Propre à ce site ».
+- « Connexion par SSO ? » with « Oui » and « Non ».
+
+`sites` (optional top-level list, 10 at most, unique domains) is `[{"domain": "<host>", "backoffice": "commun" or "propre", "sso": <bool>, "home": "<URL of the home page>"}]`, the preprod site included. `home` is an absolute URL on the host `domain`. More than 10 domains: keep the 10 the lead picks and say so. A `context.json` without `sites` is a single site.
+
+The browser may only visit the hosts of `target.preprod_url`, of `sites` and of `key_pages` (plus `target.prod_url` on a prod run). Each `home` is visited in addition to the 10 key pages, so the sites never use their places.
+
 ## 7. context.json
 
 Write `$RUN/context.json` with Write. Example (values to replace):
@@ -181,6 +200,7 @@ Write `$RUN/context.json` with Write. Example (values to replace):
   "ssh": {"alias": "acme-preprod", "app_dirs": {}},
   "test_accounts": {"front": false, "backoffice": true},
   "key_pages": [{"template": "Accueil", "url": "https://preprod.example.org/"}],
+  "sites": [{"domain": "preprod.example.org", "backoffice": "commun", "sso": false, "home": "https://preprod.example.org/"}],
   "notion": {"copy_page_id": "<page_id de la copie ou null>", "copy_data_source_id": "<data_source_id de la copie>",
              "reference_data_source_id": "<data_source_id du modèle>", "reference_page_id": "<page_id du modèle ou null>",
              "bot_id": "<bot_id de whoami>",
@@ -196,6 +216,7 @@ Write `$RUN/context.json` with Write. Example (values to replace):
 - `run_id`: the name of the run folder. `plugin_version`: the `version` of `.claude-plugin/plugin.json`, two folders above this skill.
 - `project`: `slug` and `name` from `project`; `protection`: `project_md.protection`, else `null`.
 - `repos[]`: `name` from `project` (letters, digits, `.`, `-`, `_`; unique), `path` absolute (no tab, no line break), `remote`, `web_url`, `stack`, `techno` from `project`. `preprod_branch`: `project_md.branches.preprod`, else `release`. `audited_sha`, `deployed_sha` and `aligned` stay `null` until the diagnostic.
+- `sites`: optional, see section 6.1; leave it out for a single site.
 - `target.access`: `open`, `basic_auth`, `ip_filtered` or `unreachable`.
 - `notion`: `copy_page_id` from the resolve of the copy (`null` for a database URL), `copy_data_source_id`, `reference_data_source_id` and `reference_page_id` (`null` for a database URL) from the resolve of `GM_CQA_REFERENCE`: the writes refuse this page and this data source (exit 8), `bot_id` from `whoami`, `assignee_options` from `schema.json`.
 - `available_tools`: `[]` until the diagnostic. `phase_filter`: the value of `--phase`, else `null`. `dry_run`: true with `--dry-run`.

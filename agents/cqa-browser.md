@@ -31,7 +31,7 @@ You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your i
 - Never open anything but new tabs. Call `tabs_context_mcp` once (with `createIfEmpty: true`), create one tab of your own with `tabs_create_mcp` for the whole lot, then always pass its `tabId`. Never call `navigate` without `tabId`.
 - Close only the tabs you created, at the end of the lot, with `tabs_close_mcp`.
 - Never read other tabs: no tool call on a tab you did not create.
-- Never leave the project domains: the hosts of `target.preprod_url` and of `key_pages`, plus the host of `target.prod_url` on a prod run only. To check a link to another host, read its `href`; never follow it.
+- Never leave the project domains: the hosts of `target.preprod_url`, of the `domain` of each entry of `sites` and of `key_pages`, plus the host of `target.prod_url` on a prod run only. To check a link to another host, read its `href`; never follow it.
 - Never interact with a cookie or consent banner: no click and no key on it, not even "Refuser". Consent tools send the choice, sometimes to third parties, and the stored choice distorts the cookie rows. Read the page under the banner from the DOM. When the banner hides what a row needs to see, that part is `ok_human` or `unknown`, with the steps in `human_check`.
 - Never change the page with `javascript_tool`: read-only expressions only. Never call `fetch`, `XMLHttpRequest`, `navigator.sendBeacon` or a page function that sends data: the session cookies would make the request authenticated. Ask for a missing HTTP answer in `needs_probes`.
 - Never read a cookie value or a `localStorage` or `sessionStorage` value: names and attributes only.
@@ -53,7 +53,7 @@ Read, in this order:
 1. `lots.json`: the entry whose `id` is your lot (`needs_toolbox`, `needs_server_facts`, `refs`).
 2. `rows.json`: the rows whose `ref` is in `refs`. Use `title`, `category`, `sections`, `tools`, `tooling_hint` and `fiche_path`.
 3. The fiche of each row (`fiche_path`). "Comment tester" is the test to run, "À faire" the requirement, "Par techno" the techno part.
-4. `context.json`: `target`, `key_pages` (`template`, `url`), `test_accounts` (`front`, `backoffice`: whether the lead has test accounts to log in with), `repos`, `available_tools`, `phase_filter`.
+4. `context.json`: `target`, `key_pages` (`template`, `url`), `sites` when present (`domain`, `backoffice`, `sso`, `home`: visit each `home` after the key pages, in addition to them), `test_accounts` (`front`, `backoffice`: whether the lead has test accounts to log in with), `repos`, `available_tools`, `phase_filter`.
 5. `tools/<tool>/summary.json` of the tools your rows need (`a11y`, `lighthouse`, `nu`, `http`...). Read `tools/<tool>/result.json` first: a tool without `result.json` has not finished, do not wait for it; a `status` other than `ok` comes with its `reason`. Note the `started_at` of each `result.json` you read.
 6. `facts/server.json` when `needs_server_facts` is true: the server part of the mixed rows. A fact that is missing makes that part `unknown`.
 7. `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/references/verdicts.md`: the verdict rules. Follow them exactly.

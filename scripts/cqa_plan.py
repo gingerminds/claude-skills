@@ -47,6 +47,7 @@ EXIT_CONTEXT = 6
 EXIT_SECRET = 7
 
 MAX_KEY_PAGES = 10
+MAX_SITES = 10
 TOOLBOX_RATE = "2"
 
 _SEPARATOR = " - "
@@ -1116,6 +1117,9 @@ def validate_context(context: dict) -> list:
     _check_list(errors, "repos", context, _REPO_FIELDS, minimum=1)
     _check_list(errors, "key_pages", context, _PAGE_FIELDS, maximum=MAX_KEY_PAGES)
     _check_repo_names(errors, context.get("repos"))
+    if "sites" in context:
+        _check_list(errors, "sites", context, _SITE_FIELDS, maximum=MAX_SITES)
+        _check_sites(errors, context["sites"])
     target = context.get("target")
     if isinstance(target, dict) and target.get("prod_live") is True and not target.get("prod_url"):
         errors.append(_invalid("target.prod_url", "est vide alors que target.prod_live est vrai"))
@@ -1174,6 +1178,23 @@ def _check_repo_names(errors: list, repos) -> None:
         errors.append(_invalid("repos", f"contient deux fois le nom « {name} »"))
 
 
+def _check_sites(errors: list, sites) -> None:
+    if not isinstance(sites, list):
+        return
+    domains = []
+    for index, site in enumerate(sites):
+        if not isinstance(site, dict):
+            continue
+        domain, home = site.get("domain"), site.get("home")
+        if _hostname(domain) is not None:
+            continue
+        domains.append(domain.lower())
+        if _url(home) is None and urlsplit(home).hostname != domain.lower():
+            errors.append(_invalid(f"sites[{index}].home", f"doit être une URL du domaine {domain}"))
+    for domain in sorted({name for name in domains if domains.count(name) > 1}):
+        errors.append(_invalid("sites", f"contient deux fois le domaine « {domain} »"))
+
+
 def _absent(path: str) -> str:
     return f"context.json : « {path} » est absent."
 
@@ -1221,6 +1242,22 @@ def _boolean(value) -> Optional[str]:
 
 def _boolean_or_null(value) -> Optional[str]:
     return None if value is None or isinstance(value, bool) else "doit être un booléen ou null"
+
+
+def _hostname(value) -> Optional[str]:
+    if isinstance(value, str) and _HOSTNAME.fullmatch(value):
+        return None
+    return "doit être un nom d'hôte, sans schéma ni chemin"
+
+
+def _url(value) -> Optional[str]:
+    try:
+        parts = urlsplit(value) if isinstance(value, str) else None
+        if parts and parts.scheme in ("http", "https") and parts.hostname:
+            return None
+    except ValueError:
+        pass
+    return "doit être une URL http ou https"
 
 
 def _object(value) -> Optional[str]:
@@ -1312,6 +1349,13 @@ _REPO_FIELDS = {
     "aligned": _boolean_or_null,
 }
 _PAGE_FIELDS = {"template": _text, "url": _text}
+_SITE_FIELDS = {
+    "domain": _hostname,
+    "backoffice": _choice("commun", "propre"),
+    "sso": _boolean,
+    "home": _url,
+}
+_HOSTNAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*")
 
 
 def _read_run_json(run_dir: Path, relative: str, hint: str):
