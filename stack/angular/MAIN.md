@@ -11,7 +11,7 @@ Nature → section:
 | `/gm:security` | core + security |
 | `/gm:archi-c4` | core + archi |
 
-Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md` (anchored on the calling skill's base dir).
+Cross-stack resources: `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`, `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md` (anchored on the calling skill's base dir).
 
 ---
 
@@ -22,8 +22,8 @@ Shared baseline (all natures):
 - **Standalone components** as the default for new code (Angular 15+ standalone APIs, `bootstrapApplication`) — only follow an `NgModule` structure when the codebase is already organized that way; match the surrounding style rather than migrating mid-ticket.
 - TypeScript strict mode; typed inputs/outputs via `@Input()`/`@Output()` or the newer signal-based `input()`/`output()` APIs (Angular 17+) — pick whichever the codebase already uses.
 - `OnPush` change detection by default on new components unless there's a concrete reason not to.
-- Lint via the project runner (see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`): `angular-eslint`, `tsc` (via `ng build`/`ng lint`).
-- Detection: `@angular/core` in `package.json` (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
+- Lint via the project runner (see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`): `angular-eslint`, `tsc` (via `ng build`/`ng lint`).
+- Detection: `@angular/core` in `package.json` (see `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`).
 
 ---
 

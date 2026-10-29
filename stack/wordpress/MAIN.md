@@ -11,7 +11,7 @@ Nature → section:
 | `/gm:security` | core + security |
 | `/gm:archi-c4` | core + archi |
 
-Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`.
+Cross-stack resources: `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`, `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`.
 
 ---
 
@@ -21,7 +21,7 @@ Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_S
 - Extend through **hooks** (`add_action`/`add_filter`) — never edit core or a third-party plugin/theme directly.
 - Custom code lives in a **custom plugin** and/or the **(child) theme**; prefix functions/classes/handles to avoid collisions.
 - User-facing strings through the i18n API (`__()`, `_e()`, `esc_html__()`) with a text domain.
-- Detection: `roots/wordpress` in `composer.json`, or a `wp-content/` tree (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
+- Detection: `roots/wordpress` in `composer.json`, or a `wp-content/` tree (see `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`).
 
 ---
 
@@ -33,7 +33,7 @@ Consumed by `/gm:wordpress`.
 - **Data access**: use the WP APIs (`WP_Query`, `get_posts`, options/transients, `$wpdb->prepare()` for custom SQL) — never string-built SQL.
 - **Assets**: enqueue via `wp_enqueue_script`/`wp_enqueue_style`, never hardcoded `<script>`/`<link>`.
 - **Custom content**: register CPTs/taxonomies/meta properly; use the Settings API for options screens.
-- **Testing**: WP-CLI + PHPUnit (WP test suite) via the runner (`${CLAUDE_SKILL_DIR}/../../shared/runner.md`) where the project supports it.
+- **Testing**: WP-CLI + PHPUnit (WP test suite) via the runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`) where the project supports it.
 
 ---
 

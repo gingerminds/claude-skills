@@ -11,7 +11,7 @@ Nature → section:
 | `/gm:security` | core + security |
 | `/gm:archi-c4` | core + archi |
 
-Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`.
+Cross-stack resources: `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`, `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`.
 
 ---
 
@@ -21,7 +21,7 @@ Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_S
 - Type hints on new functions; mypy where the project runs it.
 - Split by **app** (one Django app per bounded domain), not one monolith app.
 - User-facing strings through `gettext` (`_()`), never hardcoded.
-- Detection: `manage.py` or `django` in `requirements*.txt` / `pyproject.toml` (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
+- Detection: `manage.py` or `django` in `requirements*.txt` / `pyproject.toml` (see `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`).
 
 ---
 
@@ -33,7 +33,7 @@ Consumed by `/gm:django`.
 - **ORM**: avoid N+1 with `select_related` (FK) / `prefetch_related` (M2M); push filtering into querysets, not Python loops.
 - **Views**: thin — validate via forms/serializers, delegate logic to services or model methods. DRF serializers/viewsets for APIs.
 - **Settings**: split per environment; secrets from env, never committed.
-- **Testing**: `pytest`/`manage.py test` via the runner (`${CLAUDE_SKILL_DIR}/../../shared/runner.md`); use factories; test querysets and permissions, not just happy-path views.
+- **Testing**: `pytest`/`manage.py test` via the runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`); use factories; test querysets and permissions, not just happy-path views.
 
 ---
 

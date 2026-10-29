@@ -9,7 +9,7 @@ Entry point for React (and Next.js) frontend development. This skill carries the
 
 ## Load the React knowledge
 
-Load `${CLAUDE_SKILL_DIR}/../../stack/react/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (conventions, hooks, component design, state/data fetching, Next.js specifics, testing). Apply that discipline throughout the work below.
+Load `${CLAUDE_PLUGIN_ROOT}/stack/react/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (conventions, hooks, component design, state/data fetching, Next.js specifics, testing). Apply that discipline throughout the work below.
 
 ## Start from the ticket
 

@@ -24,7 +24,7 @@ Read the changed lines **and** enough surrounding code to judge them. Never revi
 Judge content against intent. Extract the Mantis id from the MR description or the branch name (`feature|fix/<id>-slug`, also legacy `feat/`), then:
 
 ```bash
-bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, notes
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, notes
 ```
 
 **Read the whole ticket, not just the opening request** — the initial description *and* every note/exchange. The real intent often drifts in the discussion: a note narrows the scope, corrects the expected behaviour, drops a requirement, or settles a question raised mid-thread. Judge **Contenu** against the *latest agreed* intent across all notes, not the first description. If notes contradict each other, flag the ambiguity in the review rather than guessing.
@@ -34,12 +34,12 @@ Needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If unset or it exits non-zero (2
 If the digest lists an `## Attachments` section, **ask the user before loading them** ("Il y a des pièces jointes, dois-je les charger ?"). A mockup or a before/after screenshot is often the real acceptance criterion — download the relevant ones and read them in:
 
 ```bash
-bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id> --file <file-id> "$SCRATCHPAD/<filename>"
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "$SCRATCHPAD/<filename>"
 ```
 
 ## Review axes
 
-Apply the **`gm:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Tests — the **Blocker/Major/Minor/Nit** severity scale, and that skill's **Noise control** rule (Nits folded, Minor one-liners, full Why/Action for Blocker/Major only). `gm:review` handles **stack detection** and loads the stack's review specifics (e.g. Drupal cacheability/`t()`/`Drupal,DrupalPractice`, Vue reactivity/hydration) — reuse them here. If `gm:review` reports no stack resource for the detected stack, carry that note into the review and rely on the generic dimensions. Run the project's linters when present, via the runner in `${CLAUDE_SKILL_DIR}/../../shared/runner.md` (`make` → `docker compose` → `lando`). Below are the axes specific to reviewing someone else's MR:
+Apply the **`gm:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Tests — the **Blocker/Major/Minor/Nit** severity scale, and that skill's **Noise control** rule (Nits folded, Minor one-liners, full Why/Action for Blocker/Major only). `gm:review` handles **stack detection** and loads the stack's review specifics (e.g. Drupal cacheability/`t()`/`Drupal,DrupalPractice`, Vue reactivity/hydration) — reuse them here. If `gm:review` reports no stack resource for the detected stack, carry that note into the review and rely on the generic dimensions. Run the project's linters when present, via the runner in `${CLAUDE_PLUGIN_ROOT}/shared/runner.md` (`make` → `docker compose` → `lando`). Below are the axes specific to reviewing someone else's MR:
 
 - **Contenu** — Does the diff deliver what the ticket asks, end to end? Root cause vs symptom. This is `gm:review` Correctness, judged against the loaded ticket.
 - **Forme** — Commit & MR hygiene:

@@ -9,7 +9,7 @@ Entry point for Vue/Nuxt frontend development. This skill carries the **workflow
 
 ## Load the Vue knowledge
 
-Load `${CLAUDE_SKILL_DIR}/../../stack/vue/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (conventions, Composition API, composables, Pinia, SSR/SSG specifics, component design, testing). Apply that discipline throughout the work below.
+Load `${CLAUDE_PLUGIN_ROOT}/stack/vue/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (conventions, Composition API, composables, Pinia, SSR/SSG specifics, component design, testing). Apply that discipline throughout the work below.
 
 ## Start from the ticket
 

@@ -12,7 +12,7 @@ Turn a ticket into a working understanding *before* any code is written. The out
 Accept any of: a Mantis id, a Mantis URL, a branch name (`feature|fix/<id>-slug`, also legacy `feat/` → extract the id), or a ticket pasted inline. With an id:
 
 ```bash
-bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, additional info, notes, attachment list
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, additional info, notes, attachment list
 ```
 
 It needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If they're unset or it exits non-zero (exit 2 = no creds, 3 = API error), **ask the user to paste the ticket** rather than guessing the intent. A pasted ticket is a first-class input — digest it the same way.
@@ -31,7 +31,7 @@ Act on the choice:
 
 - **Oui** — download each relevant file into the scratchpad and read it into context (images especially — a mockup or a screenshot of the bug often *is* the spec). Use the file ids from the list:
   ```bash
-  bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id> --file <file-id> "$SCRATCHPAD/<filename>"
+  bash ${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "$SCRATCHPAD/<filename>"
   ```
   Then `Read` each downloaded file and fold what it shows into the brief (e.g. the expected UI, the error in the screenshot). Prefer the images and anything the discussion refers to; skip large binaries with no bearing on the change.
 - **Non** — note in the brief that attachments exist but weren't loaded, and carry on.
@@ -41,7 +41,7 @@ For a **pasted** ticket, ask the same way — the user can paste or drop the ima
 
 ## Detect the stack
 
-Before framing the brief, identify the project's stack so the hand-off points at the right dev skill and the brief uses the right vocabulary. Apply `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`: **actually read** the root manifests (`composer.json`, `package.json`, `pyproject.toml`/`requirements*.txt`, `manage.py`) — don't guess from the repo name. This stays lightweight — no code survey (that's the dev skill's job).
+Before framing the brief, identify the project's stack so the hand-off points at the right dev skill and the brief uses the right vocabulary. Apply `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`: **actually read** the root manifests (`composer.json`, `package.json`, `pyproject.toml`/`requirements*.txt`, `manage.py`) — don't guess from the repo name. This stays lightweight — no code survey (that's the dev skill's job).
 
 Resolve the dev skill from that file's **Dev skill routing** table (drupal→`/gm:drupal`, vue→`/gm:vue`, laravel→`/gm:laravel`, django→`/gm:django`, python→`/gm:python`, wordpress→`/gm:wordpress`). Note the detected stack and the resolved skill — the brief and the hand-off use them. If detection is ambiguous (monorepo, multiple stacks), note the candidates and let the "À regarder" reflect each; if the stack is generic `php`/`js` or has no dedicated skill yet, say so and plan a generic dev hand-off.
 
@@ -49,8 +49,8 @@ Resolve the dev skill from that file's **Dev skill routing** table (drupal→`/g
 
 Determine whether the ticket is a **bug** or a **feature/refactor** — this decides which pre-code discipline to apply before writing the brief. A ticket with a reproducible error, or an explicit expected-vs-observed behavior, is a bug; otherwise treat it as feature/refactor. When genuinely ambiguous, ask rather than guess.
 
-- **Bug** → apply `${CLAUDE_SKILL_DIR}/../../shared/root-cause.md`: read it, then run its targeted investigation against this ticket to reach a single, stated hypothesis (never a fix).
-- **Feature / refactor** → apply `${CLAUDE_SKILL_DIR}/../../shared/scope-classification.md`: classify bounded vs architectural, and sketch approaches only if the ticket doesn't already point to one.
+- **Bug** → apply `${CLAUDE_PLUGIN_ROOT}/shared/root-cause.md`: read it, then run its targeted investigation against this ticket to reach a single, stated hypothesis (never a fix).
+- **Feature / refactor** → apply `${CLAUDE_PLUGIN_ROOT}/shared/scope-classification.md`: classify bounded vs architectural, and sketch approaches only if the ticket doesn't already point to one.
 - **Mixed** (a bug ticket that also asks for an improvement) → apply both, reusing the reading you've already done rather than re-reading the ticket twice.
 
 ## Understand it

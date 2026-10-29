@@ -18,8 +18,8 @@ Produce living, interactive architecture docs under the target project's `.archi
 
 ## Detect the stack
 
-1. Apply `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`.
-2. Any stack whose `MAIN.md` exposes an **archi** section → load `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` for the **archi** nature (where custom lives, source of truth, black box) — `MAIN.md` routes to the right content whatever its form. E.g.:
+1. Apply `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`.
+2. Any stack whose `MAIN.md` exposes an **archi** section → load `${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md` for the **archi** nature (where custom lives, source of truth, black box) — `MAIN.md` routes to the right content whatever its form. E.g.:
    - Drupal → `stack/drupal/archi.md`.
    - Vue / Nuxt → the `core` + `archi` sections of `stack/vue/MAIN.md`.
 3. Stack with no archi resource/section → **generic method**: ask the user where custom code lives and what the wiring source of truth is (entry points + custom→custom imports/instantiations, stop at the third-party boundary). Never `Read` a non-existent stack resource.

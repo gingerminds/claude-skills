@@ -133,7 +133,7 @@ claude-skills/
     └── swiper-migration/SKILL.md  # point d'entrée : charge stack/vue/MAIN.md (swiper-migration)
 ```
 
-Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh` — une seule copie, pas de duplication. `ticket-refine` y ajoute l'écriture : il publie sa note privée via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-note.sh`.
+Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh` — une seule copie, pas de duplication. `ticket-refine` y ajoute l'écriture : il publie sa note privée via `${CLAUDE_PLUGIN_ROOT}/scripts/mantis-note.sh`.
 
 ### Architecture stack-agnostique
 

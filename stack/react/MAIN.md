@@ -11,7 +11,7 @@ Nature → section:
 | `/gm:security` | core + security |
 | `/gm:archi-c4` | core + archi |
 
-Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md` (anchored on the calling skill's base dir).
+Cross-stack resources: `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`, `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md` (anchored on the calling skill's base dir).
 
 ---
 
@@ -22,8 +22,8 @@ Shared baseline (all natures):
 - **Function components + hooks** as the default; no class components in new code unless the codebase is legacy class-based (match the surrounding style rather than fighting it).
 - TypeScript strict mode (`.tsx`), no `any` unless interfacing an untyped third-party API. Typed props via an interface/type, never `React.FC` with implicit `children` (prefer explicit `children?: React.ReactNode`).
 - Follow the [Rules of Hooks](https://react.dev/warnings/invalid-hook-call-warning): only call hooks at the top level, only from React functions/custom hooks.
-- Lint via the project runner (see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`): eslint (`eslint-plugin-react`, `eslint-plugin-react-hooks` — `exhaustive-deps` as an error, not a warning), `tsc --noEmit` for type checks.
-- Detection: `react` / `react-dom` in `package.json` (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`). Next.js is detected the same way — `next` is itself a dependency; treat a Next.js app as React with the Next-specific dev/review notes below layered on top.
+- Lint via the project runner (see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`): eslint (`eslint-plugin-react`, `eslint-plugin-react-hooks` — `exhaustive-deps` as an error, not a warning), `tsc --noEmit` for type checks.
+- Detection: `react` / `react-dom` in `package.json` (see `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`). Next.js is detected the same way — `next` is itself a dependency; treat a Next.js app as React with the Next-specific dev/review notes below layered on top.
 
 ---
 

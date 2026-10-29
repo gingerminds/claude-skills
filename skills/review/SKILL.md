@@ -27,8 +27,8 @@ Read the changed lines **and** enough surrounding code to judge them (the functi
 
 This skill stays stack-agnostic; the technology-specific review checklist comes from a loaded resource.
 
-1. Apply `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md` to identify the project's stack(s).
-2. Load `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` for the **review** nature (it pulls `core` + `review`). E.g. Drupal → cacheability/N+1/`Drupal,DrupalPractice`/`t()` checks; Vue → reactivity/hydration checks.
+1. Apply `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md` to identify the project's stack(s).
+2. Load `${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md` for the **review** nature (it pulls `core` + `review`). E.g. Drupal → cacheability/N+1/`Drupal,DrupalPractice`/`t()` checks; Vue → reactivity/hydration checks.
 3. **Graceful degradation** — if the detected stack has no `stack/` resource, or its `MAIN.md` doesn't expose a `review`/`core` section, apply the generic dimensions below and **say so** in the verdict ("pas de resource review pour la stack `<x>` — dimensions génériques uniquement"). Never `Read` a non-existent resource and never fail silently.
 4. Apply those specifics on top of the generic dimensions below.
 
@@ -37,7 +37,7 @@ This skill stays stack-agnostic; the technology-specific review checklist comes 
 Correctness is judged against intent, so get the ticket. Extract the Mantis id from the MR description or the branch name (`feature|fix/<id>-slug`, also legacy `feat/`), then:
 
 ```bash
-bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id>    # prints summary, description, steps-to-reproduce, notes
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id>    # prints summary, description, steps-to-reproduce, notes
 ```
 
 **Read the whole ticket, not just the opening request** — the initial description *and* every note/exchange. The real intent often drifts in the discussion: a note narrows the scope, corrects the expected behaviour, drops a requirement, or settles a question raised mid-thread. Judge the change against the *latest agreed* intent across all notes, not the first description. If notes contradict each other, flag the ambiguity rather than guessing.
@@ -47,7 +47,7 @@ The script needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If they're unset or i
 If the digest lists an `## Attachments` section, **ask the user before loading them** ("Il y a des pièces jointes, dois-je les charger ?"). A mockup or a before/after screenshot is often the real acceptance criterion — download the relevant ones and read them in:
 
 ```bash
-bash ${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh <id> --file <file-id> "$SCRATCHPAD/<filename>"
+bash ${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "$SCRATCHPAD/<filename>"
 ```
 
 ## Review dimensions
@@ -62,7 +62,7 @@ Assess each, and only report what applies:
 
 ## Run what you can
 
-Prefer real signals over opinion. Prefix linters and quick probes with the project's runner — see `${CLAUDE_SKILL_DIR}/../../shared/runner.md` for the priority order (`make` → `docker compose` → `lando`). The exact linter command comes from the loaded stack (e.g. Drupal `phpcs --standard=Drupal,DrupalPractice`, `php -l`; Vue `vue-tsc`, eslint), run through that runner:
+Prefer real signals over opinion. Prefix linters and quick probes with the project's runner — see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md` for the priority order (`make` → `docker compose` → `lando`). The exact linter command comes from the loaded stack (e.g. Drupal `phpcs --standard=Drupal,DrupalPractice`, `php -l`; Vue `vue-tsc`, eslint), run through that runner:
 
 ```bash
 make lint                                   # if the project exposes it
