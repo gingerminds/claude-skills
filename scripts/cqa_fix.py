@@ -419,6 +419,8 @@ def _cmd_validate(args, services: Services) -> int:
             summary[entry["outcome"]].append(entry["ref"])
         key["step"] = "fixed"
         key["pass"] = max(key.get("pass") or 0, args.number)
+        if _every_pass_reviewed(key):
+            _raise_step(key, "reviewed")
         fix_state.save(run_dir, state)
     _emit({
         "ok": not errors, "errors": errors,

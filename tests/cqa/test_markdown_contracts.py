@@ -1510,7 +1510,8 @@ class FixAgentsTest(unittest.TestCase):
         for section, needles in (
             ("1. Keys", ("`cqa_fix.py pass-start <run_dir> <key> --pass <N>`",
                          "Every fixer pass N that leaves rows fixed is followed by its own review N",
-                         "review p is recorded and blocks none of them")),
+                         "review p is recorded and blocks none of them",
+                         "a pass that fixes no row needs no review")),
             ("5. Questions", ("its own review",)),
             ("6. Correction pass", ("once the reviews of the passes in progress are written",)),
         ):

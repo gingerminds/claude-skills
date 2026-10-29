@@ -811,6 +811,36 @@ class PassReviewTest(GitCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.key()["step"], "reviewed")
 
+    def test_a_pass_without_fixed_rows_is_reviewed_at_once(self):
+        """R15: validate report applies the R14 rule, so such a key never waits for a review."""
+        self.start_ok()
+        self.assertEqual(self.pass_start(1)[0], 0)
+        question = {"text": "Quel contact ?", "options": ["Équipe", "Client"], "default": "Client"}
+        self.report(1, {"ref": 3, "outcome": "skipped", "reason": "Hors du repo."},
+                    {"ref": 5, "outcome": "question", "question": question},
+                    {"ref": 12, "outcome": "skipped", "reason": "Déjà corrigé sur develop."})
+        self.assertEqual(self.key()["step"], "reviewed")
+        self.assertEqual(self.pass_start(2)[0], 0)
+        self.report(2, {"ref": 5, "outcome": "skipped", "reason": "Laissée aux devs par le lead."})
+        self.assertEqual(self.key()["step"], "reviewed")
+
+    def test_a_pass_without_fixed_rows_waits_for_earlier_reviews(self):
+        self.first_pass()
+        self.assertEqual(self.key()["step"], "fixed")
+        self.assertEqual(self.pass_start(2)[0], 0)
+        self.report(2, {"ref": 5, "outcome": "skipped", "reason": "Laissée aux devs par le lead."})
+        self.assertEqual(self.key()["step"], "fixed")
+        self.review(1, r3="ok", r12="ok")
+        self.assertEqual(self.key()["step"], "reviewed")
+
+    def test_a_pass_with_new_fixed_rows_still_waits_for_its_review(self):
+        self.first_pass()
+        self.review(1, r3="ok", r12="ok")
+        self.assertEqual(self.pass_start(2)[0], 0)
+        third = self.fixer_commit(self.worktree, "c5.txt", "fix(CQ-5): add the contact")
+        self.report(2, self.fixed(5, third))
+        self.assertEqual(self.key()["step"], "fixed")
+
     def test_a_pending_row_keeps_the_key_from_reviewed(self):
         self.worktree = Path(self.start_ok()["worktree"])
         state = self.state()
