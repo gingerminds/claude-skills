@@ -37,10 +37,12 @@ NO_PASS = "Aucune passe fix en cours : lancez d'abord cqa_fix.py open."
 NEED_BODY = "Lancez d'abord cqa_fix.py mr-body."
 DIVERGED = "La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé."
 NOTHING_TO_PUBLISH = "Aucun commit sur la branche : ni push ni MR."
+STALE_BODY = "Description de MR périmée : relancez mr-body."
 LINKS_FILE = "fix/mr-links.json"
-# Push settings of the dev's config that could send more than the branch, or prompt.
+# Push settings of the dev's config that could send more than the branch, trigger GitLab
+# push options (ci.skip, merge_request.*) or prompt. An empty pushOption resets the list.
 _PUSH_CONFIG = ("-c", "push.followTags=false", "-c", "push.recurseSubmodules=no",
-                "-c", "push.gpgSign=false")
+                "-c", "push.gpgSign=false", "-c", "push.pushOption=")
 
 
 class UsageError(Exception):
@@ -133,6 +135,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = _command(commands, "finish", "retire le worktree d'une clé publiée", _cmd_finish)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("--keep-local", action="store_true",
+                     help="garde la branche en local après un push refusé ou en échec")
     sub = _command(commands, "abandon", "abandonne la passe en cours", _cmd_abandon)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     return parser
@@ -320,7 +324,8 @@ def _cmd_start(args, services: Services) -> int:
     else:
         fix_git.reopen(path, services.run, branch=key["branch"], push=state["push"], worktree=worktree)
     done_refs = fix_git.refs_between(
-        path, services.run, f"refs/remotes/origin/{key['base']}", key["start_sha"]
+        path, services.run, f"refs/remotes/origin/{key['base']}",
+        key.get("taken_head") or key["start_sha"],
     )
     for ref in done_refs:
         row = key["rows"].get(str(ref))
@@ -396,12 +401,7 @@ def _cmd_guard(args, services: Services) -> int:
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
     worktree = _key_worktree(run_dir, key, services.run)
-    repo = _repo(run_dir, key["repo"])
-    _third_party(repo)
-    problems = fix_guard.check_commits(
-        worktree, key["start_sha"], {int(ref) for ref in key["rows"]}, repo,
-        known_values_from_env(), services.run,
-    )
+    problems = _guard_problems(run_dir, key, worktree, services.run)
     _emit({"ok": not problems, "problems": problems})
     if problems:
         print(f"Garde-fou : {len(problems)} problème(s) sur la branche {key['branch']}, "
@@ -562,6 +562,8 @@ def _cmd_mr_body(args, services: Services) -> int:
     write_text(folder / name, text)
     if (folder / stale).exists():
         (folder / stale).unlink()
+    key["mr_body"] = _body_stamp(run_dir, key, worktree, services.run)
+    fix_state.save(run_dir, state)
     _emit({
         "title": title, "file": f"fix/{key['repo']}/{key['slug']}/{name}", "kind": kind,
         "fixed": [row["ref"] for row in found["fixed"]],
@@ -600,6 +602,7 @@ def _cmd_publish(args, services: Services) -> int:
         return EXIT_OK
     host, project, user = _gitlab_of(run_dir, key["repo"])
     encoded = quote(project, safe="")
+    project_ref = f"{host}/{project}"
     folder = _key_folder(run_dir, key)
     current, adopted = None, False
     if key.get("mr") is not None:
@@ -609,7 +612,9 @@ def _cmd_publish(args, services: Services) -> int:
         if found is not None:
             key["mr"] = {"iid": found["iid"], "url": found["web_url"]}
             ours = _read_text(folder / "mr.md")
-            adopted = ours is not None and (found.get("description") or "").strip() == ours.strip()
+            adopted = ours is not None and fix_mr.same_description(
+                found.get("description") or "", ours
+            )
             if not adopted:
                 fix_state.save(run_dir, state)
                 raise UsageError(
@@ -622,13 +627,14 @@ def _cmd_publish(args, services: Services) -> int:
         text = _read_text(folder / "mr-addition.md")
         if text is None:
             raise UsageError(NEED_BODY)
-        _refuse_secrets(text, "rien n'a été poussé")
     else:
         text, title = _read_text(folder / "mr.md"), _read_text(folder / "mr-title.txt")
         if text is None or not (title or "").strip():
             raise UsageError(NEED_BODY)
         title = title.strip()
-        _refuse_secrets(f"{title}\n{text}", "rien n'a été poussé")
+    if key.get("mr_body") != _body_stamp(run_dir, key, worktree, run):
+        raise UsageError(STALE_BODY)
+    _refuse_secrets(text if title is None else f"{title}\n{text}", "rien n'a été poussé")
     problems = _guard_problems(run_dir, key, worktree, run)
     if problems:
         _emit({"ok": False, "problems": problems})
@@ -644,13 +650,15 @@ def _cmd_publish(args, services: Services) -> int:
         _push(worktree, run, branch)
     created = updated = False
     if key.get("mr") is None:
-        key["mr"] = _create_mr(run, host, encoded, worktree, branch=branch, base=key["base"],
-                               title=title, text=text, user=user)
+        # The state is written once, with the MR and the step: after a failure from here,
+        # a rerun finds this MR on GitLab and adopts it instead of describing it twice.
+        key["mr"] = _create_mr(run, host, encoded, worktree, project_ref, branch=branch,
+                               base=key["base"], title=title, text=text, user=user)
         created = True
-        fix_state.save(run_dir, state)
     elif current is not None:
-        updated = _add_to_mr(run, host, worktree, key["mr"]["iid"], current, text)
-    refs = sorted(int(ref) for ref, row in key["rows"].items() if row.get("outcome") == "fixed")
+        updated = _add_to_mr(run, host, worktree, project_ref, key["mr"]["iid"], current, text)
+    refs = sorted(int(ref) for ref, row in key["rows"].items()
+                  if row.get("outcome") in ("fixed", "done_before"))
     write_json(run_dir / LINKS_FILE, fix_mr.merge_links(links, key["repo"], key["mr"], refs))
     _published(run_dir, state, key)
     _emit({"branch": branch, "head": head, "pushed": pushed, "mr": key["mr"], "created": created,
@@ -659,16 +667,23 @@ def _cmd_publish(args, services: Services) -> int:
 
 
 def _cmd_finish(args, services: Services) -> int:
-    """Remove the worktree of a published key, or of a reviewed one whose branch stays local."""
+    """Remove the worktree of a published key, or of a reviewed one whose branch stays local.
+
+    --keep-local lets a reviewed key of a pushing pass end without publication (push refused,
+    glab failure, lead's choice): its branch stays in the dev's repo, kept_local in the state.
+    """
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
     step = key.get("step")
-    kept_local = state["push"] in ("local", "dry_run") or not key.get("push_ready")
+    if args.keep_local and step == "published":
+        raise UsageError(f"La clé {args.key} est déjà publiée : lancez finish sans --keep-local.")
+    kept_local = (state["push"] in ("local", "dry_run") or not key.get("push_ready")
+                  or args.keep_local)
     if step != "published" and not (step == "reviewed" and kept_local):
         raise UsageError(
             f"La clé {args.key} est à l'étape « {step} » : finish attend « published », ou "
-            "« reviewed » quand la branche reste en local."
+            "« reviewed » quand la branche reste en local (--keep-local après un push refusé)."
         )
     path = _repo_path(run_dir, key["repo"])
     worktree = _worktree_path(run_dir, key)
@@ -686,6 +701,7 @@ def _cmd_finish(args, services: Services) -> int:
         fix_git.remove_worktree(path, services.run, worktree)
         removed = str(worktree)
     key["step"] = "done"
+    key["kept_local"] = kept_local
     fix_state.save(run_dir, state)
     _emit({"removed": removed, "branch": key["branch"], "kept_local": kept_local,
            "unpushed": fix_git.unpushed(path, services.run, key["branch"])})
@@ -848,12 +864,33 @@ def _find_open_mr(run, host: str, encoded: str, branch: str) -> Optional[dict]:
 
 
 def _guard_problems(run_dir: Path, key: dict, worktree: Path, run) -> list:
+    """Run the guard on <start_sha>..HEAD of the key.
+
+    The refs of the key's rows are allowed, and so are those of the commits a taken-over
+    branch carried between start_sha and its head (never pushed, judged all the same).
+    """
     repo = _repo(run_dir, key["repo"])
     _third_party(repo)
+    refs = {int(ref) for ref in key["rows"]}
+    taken = key.get("taken_head")
+    if taken and taken != key["start_sha"]:
+        refs.update(fix_git.refs_between(worktree, run, key["start_sha"], taken))
     return fix_guard.check_commits(
-        worktree, key["start_sha"], {int(ref) for ref in key["rows"]}, repo,
-        known_values_from_env(), run,
+        worktree, key["start_sha"], refs, repo, known_values_from_env(), run,
     )
+
+
+def _body_stamp(run_dir: Path, key: dict, worktree: Path, run) -> dict:
+    """Return what a description is built from: pass, last review, head and row outcomes."""
+    reviews = [int(found.group(1)) for found in (
+        _REVIEW_FILE.fullmatch(path.name) for path in _key_folder(run_dir, key).glob("review-*.json")
+    ) if found]
+    return {
+        "pass": key.get("pass") or 0,
+        "review": max(reviews, default=0),
+        "head": fix_git.rev(worktree, run, "HEAD"),
+        "outcomes": {ref: row.get("outcome") for ref, row in key["rows"].items()},
+    }
 
 
 def _ahead_of_base(worktree: Path, run, base: str) -> int:
@@ -865,15 +902,9 @@ def _ahead_of_base(worktree: Path, run, base: str) -> int:
 
 def _remote_head(worktree: Path, run, branch: str) -> Optional[str]:
     """Fetch origin/<branch> when GitLab has it and return its head, else None."""
-    ref = f"refs/heads/{branch}"
-    listing = fix_names.git(worktree, run, "ls-remote", "--heads", "origin", ref)
-    if listing.returncode != 0:
-        raise fix_git.GitRefused(
-            f"git ls-remote origin a échoué : {listing.stderr.strip()}. Rien n'a été poussé."
-        )
-    if not any(line.split("\t", 1)[-1] == ref for line in listing.stdout.splitlines()):
+    if not fix_git.remote_has(worktree, run, branch):
         return None
-    if not fix_git.fetch(worktree, run, f"+{ref}:refs/remotes/origin/{branch}"):
+    if not fix_git.fetch(worktree, run, f"+refs/heads/{branch}:refs/remotes/origin/{branch}"):
         raise fix_git.GitRefused(f"git fetch origin {branch} a échoué : rien n'a été poussé.")
     return fix_git.rev(worktree, run, f"refs/remotes/origin/{branch}")
 
@@ -889,11 +920,15 @@ def _push(worktree: Path, run, branch: str) -> None:
         )
 
 
-def _create_mr(run, host: str, encoded: str, worktree: Path, *, branch: str, base: str, title: str,
-               text: str, user) -> dict:
-    """Create the draft MR, assigned to the lead, and return {"iid", "url"}."""
-    args = ["mr", "create", "--source-branch", branch, "--target-branch", base, "--title", title,
-            f"--description={text}", "--draft"]
+def _create_mr(run, host: str, encoded: str, worktree: Path, project_ref: str, *, branch: str,
+               base: str, title: str, text: str, user) -> dict:
+    """Create the draft MR, assigned to the lead, and return {"iid", "url"}.
+
+    -R names the project that the reads checked, whatever remote glab would pick in the
+    worktree.
+    """
+    args = ["mr", "create", "-R", project_ref, "--source-branch", branch, "--target-branch", base,
+            "--title", title, f"--description={text}", "--draft"]
     if user:
         args += ["--assignee", user]
     created = fix_gitlab.glab(run, host, *args, "--yes", cwd=str(worktree))
@@ -914,7 +949,8 @@ def _create_mr(run, host: str, encoded: str, worktree: Path, *, branch: str, bas
     return mr
 
 
-def _add_to_mr(run, host: str, worktree: Path, iid: int, current: dict, text: str) -> bool:
+def _add_to_mr(run, host: str, worktree: Path, project_ref: str, iid: int, current: dict,
+               text: str) -> bool:
     """Add mr-addition.md to the description GitLab has; return True when it changed."""
     old = current.get("description") or ""
     addition, hors_scope = fix_mr.split_addition(text)
@@ -923,8 +959,8 @@ def _add_to_mr(run, host: str, worktree: Path, iid: int, current: dict, text: st
     merged = fix_mr.merge_description(old, addition, hors_scope, date.today())
     if merged == old:
         return False
-    updated = fix_gitlab.glab(run, host, "mr", "update", str(iid), f"--description={merged}",
-                              cwd=str(worktree))
+    updated = fix_gitlab.glab(run, host, "mr", "update", str(iid), "-R", project_ref,
+                              f"--description={merged}", cwd=str(worktree))
     if updated.returncode != 0:
         raise fix_git.GitRefused(
             f"glab mr update !{iid} a échoué : {(updated.stderr or updated.stdout).strip()}. "

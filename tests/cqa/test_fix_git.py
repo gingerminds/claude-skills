@@ -305,14 +305,21 @@ class StartTest(GitCase):
         self.write_run(flight(branches=[{"branch": branch, "where": "local", "refs": [3]}]))
         self.open_pass()
         result = self.start_ok()
+        base = self.head(self.repo, "refs/remotes/origin/develop")
         self.assertEqual(
             (result["branch"], result["reused"], result["start_sha"], result["done_refs"]),
-            (branch, "branch", local, [3]),
+            (branch, "branch", base, [3]),
         )
         key = self.key()
+        self.assertEqual(key["taken_head"], local)
+        self.assertEqual(self.head(result["worktree"]), local)
         self.assertEqual(key["rows"]["3"]["outcome"], "done_before")
         self.assertEqual(key["rows"]["5"]["outcome"], "pending")
         self.assertIsNone(key["mr"])
+        self.assertEqual(self.run_main(["abandon", self.run_dir])[0], 0)
+        self.open_pass(push="local")
+        result = self.start_ok()
+        self.assertEqual((result["start_sha"], result["done_refs"]), (local, [3]))
 
     def test_start_fast_forwards_a_stale_local_branch(self):
         branch = PREFIX + "securite"

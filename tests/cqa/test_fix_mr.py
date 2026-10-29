@@ -4,13 +4,18 @@ import subprocess
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest import mock
 from urllib.parse import unquote
 
+import cqa_fix
 from cqa import fix_mr, fix_state
 from tests.cqa.test_fix_git import GitCase, HOST, PREFIX, flight, mr
-from tests.cqa.test_git_tools import git as real_git
+from tests.cqa.test_git_tools import commit, git as real_git
 
 KEY = "front/securite"
+REPO = f"{HOST}/acme/shop"
+STALE = "Description de MR périmée : relancez mr-body."
+BAD_MESSAGE = "message de commit hors convention"
 RUN_ID = "2026-10-29-0930"
 ROW_ID = "01234567-89ab-cdef-0123-456789abcdef"
 ROW_URL = "https://www.notion.so/0123456789abcdef0123456789abcdef"
@@ -120,6 +125,16 @@ class TitleAndBodyTest(unittest.TestCase):
         text = full_body(fixed=[fixed_row(title="Cookies \u2014 bannière")])
         self.assertIn("### CQ-107 : Cookies - bannière", text)
         self.assertNotIn("\u2014", text)
+        added = fix_mr.addition(
+            fixed=[], checks=None, not_run=[], attention=[], waiting=[],
+            left=[{"ref": 41, "title": "Bannière \u2014 cookies", "reason": "Manuel \u2014 UI/UX",
+                   "url": None}],
+        )
+        self.assertEqual(added, "## Hors-scope\n\n- CQ-41 : Bannière - cookies : Manuel - UI/UX\n")
+
+    def test_same_description_ignores_line_endings_and_trailing_spaces(self):
+        self.assertTrue(fix_mr.same_description("## A\r\n\r\nTexte.  \r\n", "## A\n\nTexte.\n"))
+        self.assertFalse(fix_mr.same_description("## A\n\nTexte.\n", "## A\n\nAutre.\n"))
 
     def test_semi_auto_rows_are_flagged(self):
         text = full_body(fixed=[
@@ -336,14 +351,16 @@ def done(command, out="", code=0, err=""):
 
 
 def allowed(args):
-    """glab may only read the API, create a draft MR and update a description."""
+    """glab may only read the API, create a draft MR and update a description, on REPO."""
     if args[:1] == ["api"]:
         return len(args) == 2 and not args[1].startswith("-")
     if args[:2] == ["mr", "create"]:
         forbidden = ("--push", "--reviewer", "--label", "-l", "--remove-source-branch", "--fill")
-        return "--draft" in args and not any(flag in args for flag in forbidden)
+        return ("--draft" in args and args[2:4] == ["-R", REPO]
+                and not any(flag in args for flag in forbidden))
     if args[:2] == ["mr", "update"]:
-        return len(args) == 4 and args[2].isdigit() and args[3].startswith("--description=")
+        return (len(args) == 6 and args[2].isdigit() and args[3:5] == ["-R", REPO]
+                and args[5].startswith("--description="))
     return False
 
 
@@ -389,7 +406,8 @@ class FakeGitLab:
                 out = f"\n!{iid} Draft: correctifs ({self.mrs[iid]['source_branch']})\n {self.url(iid)}\n\n"
             return done(command, out)
         if args[:2] == ["mr", "update"]:
-            self.mrs[int(args[2])]["description"] = args[3][len("--description="):]
+            description = next(a for a in args if a.startswith("--description="))
+            self.mrs[int(args[2])]["description"] = description[len("--description="):]
             return done(command, self.url(int(args[2])) + "\n")
         return done(command, "", 1, "unexpected glab call")
 
@@ -402,6 +420,10 @@ class MrCase(GitCase):
         self.run_dir = target
         self.folder = self.run_dir / "fix" / "front" / "securite"
         self.gitlab = FakeGitLab()
+
+    def tearDown(self):
+        self.assert_allowed()
+        super().tearDown()
 
     def cli(self, *argv):
         code, out, err = self.run_main([argv[0], self.run_dir, *argv[1:]], run=self.gitlab)
@@ -552,6 +574,7 @@ class PublishTest(MrCase):
     def test_publish_creates_a_draft_mr_assigned_to_the_lead(self):
         self.reviewed()
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        real_git(self.repo, "config", "push.pushOption", "ci.skip")
         code, out, err = self.cli("publish", KEY)
         self.assertEqual(code, 0, err)
         head = self.head(self.worktree)
@@ -560,6 +583,7 @@ class PublishTest(MrCase):
         self.assertEqual(len(pushes), 1)
         push = pushes[0]
         self.assertIn("core.hooksPath=/dev/null", push)
+        self.assertIn("push.pushOption=", push)
         self.assertEqual(push[-2:], ["origin", f"HEAD:refs/heads/{self.branch}"])
         for flag in ("--force", "-f", "-u", "--set-upstream", "--force-with-lease", "--mirror",
                      "--all", "--tags", "--delete", "--follow-tags"):
@@ -570,6 +594,7 @@ class PublishTest(MrCase):
         args, kwargs = creates[0]
         self.assertIn("--draft", args)
         self.assertIn("--yes", args)
+        self.assertEqual(args[args.index("-R") + 1], REPO)
         self.assertEqual(args[args.index("--source-branch") + 1], self.branch)
         self.assertEqual(args[args.index("--target-branch") + 1], "develop")
         self.assertEqual(args[args.index("--assignee") + 1], "camille")
@@ -638,7 +663,7 @@ class PublishTest(MrCase):
         self.assertEqual(self.glab_args("mr", "create"), [])
         self.assertIn(["api", "projects/acme%2Fshop/merge_requests/12"], self.glab_args("api"))
         updates = self.glab_args("mr", "update")
-        self.assertEqual([args[2] for args in updates], ["12"])
+        self.assertEqual([args[2:5] for args in updates], [["12", "-R", REPO]])
         new = self.gitlab.mrs[12]["description"]
         today = date.today().strftime("%d/%m/%Y")
         self.assertTrue(new.startswith(
@@ -749,14 +774,102 @@ class PublishTest(MrCase):
 
     def test_publish_reruns_the_guard(self):
         self.reviewed()
-        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         self.fixer_commit(self.worktree, "b.txt", "fix: forgot the ref")
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         code, out, err = self.cli("publish", KEY)
         self.assertEqual(code, 5)
         self.assertEqual([problem["reason"] for problem in json.loads(out)["problems"]],
-                         ["message de commit hors convention"])
+                         [BAD_MESSAGE])
         self.assertEqual(self.remote(self.branch), "")
         self.assertEqual(self.glab_args("mr"), [])
+        self.assertEqual(self.key()["step"], "reviewed")
+
+    def test_publish_refuses_a_stale_description(self):
+        self.reviewed()
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
+        self.write_doc("report-2.json", {"key": KEY, "pass": 2, "rows": [
+            {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.",
+             "commits": [self.head(self.worktree)]}]})
+        self.assertEqual(self.cli("validate", KEY, "report", "--pass", "2")[0], 0)
+        self.write_doc("review-2.json", {"key": KEY, "pass": 2, "attention": [],
+                                         "rows": [{"ref": 5, "verdict": "ok", "notes": None}]})
+        self.assertEqual(self.cli("validate", KEY, "review", "--pass", "2")[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 2)
+        self.assertIn(STALE, err)
+        self.assertEqual(self.remote(self.branch), "")
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.assertEqual(self.cli("drop", KEY, "--refs", "CQ-5", "--reason", "Retirée.")[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 2)
+        self.assertIn(STALE, err)
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertIn("- CQ-5 : Ligne 5 : Retirée.", self.gitlab.mrs[12]["description"])
+        self.assertEqual(self.glab_args("mr", "update"), [])
+
+    def test_publish_checks_a_taken_over_branch_never_pushed(self):
+        branch = PREFIX + "securite"
+        real_git(self.repo, "checkout", "-q", "-b", branch)
+        commit(self.repo, "s3.txt", "fix(CQ-3): earlier fix")
+        commit(self.repo, "s40.txt", "fix(CQ-40): earlier fix of another row")
+        oops = commit(self.repo, "oops.txt", "oops: no ref")
+        real_git(self.repo, "checkout", "-q", "develop")
+        base = self.head(self.repo, "refs/remotes/origin/develop")
+        self.write_run(flight(branches=[{"branch": branch, "where": "local", "refs": [3, 40]}]))
+        self.open_pass()
+        started = self.start_ok()
+        self.assertEqual((started["reused"], started["start_sha"], started["done_refs"]),
+                         ("branch", base, [3, 40]))
+        key = self.key()
+        self.assertEqual((key["taken_head"], key["rows"]["3"]["outcome"]), (oops, "done_before"))
+        self.worktree, self.branch = Path(started["worktree"]), started["branch"]
+        self.fix_row_5()
+        code, out, err = self.cli("guard", KEY)
+        self.assertEqual(code, 5)
+        expected = [{"sha": oops, "ref": None, "path": None, "reason": BAD_MESSAGE}]
+        self.assertEqual(json.loads(out)["problems"], expected)
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 5)
+        self.assertEqual(json.loads(out)["problems"], expected)
+        self.assertEqual(self.remote(branch), "")
+        self.assertEqual(self.glab_args("mr"), [])
+
+    def test_publish_links_the_rows_already_on_the_branch(self):
+        branch = PREFIX + "securite"
+        real_git(self.repo, "checkout", "-q", "-b", branch)
+        commit(self.repo, "s3.txt", "fix(CQ-3): earlier fix")
+        real_git(self.repo, "checkout", "-q", "develop")
+        self.write_run(flight(branches=[{"branch": branch, "where": "local", "refs": [3]}]))
+        self.open_pass()
+        started = self.start_ok()
+        self.worktree, self.branch = Path(started["worktree"]), started["branch"]
+        self.fix_row_5()
+        code, out, err = self.cli("mr-body", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["title"], "Checklist PRE-MEL : correctifs SECURITE (2 lignes)")
+        text = (self.folder / "mr.md").read_text(encoding="utf-8")
+        self.assertIn("La branche porte aussi des correctifs d'une passe précédente : CQ-3 (Ligne 3).",
+                      text)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.remote(branch), self.head(self.worktree))
+        link = [{"repo": "front", "url": MR_URL, "iid": 12}]
+        self.assertEqual(self.links(), {"links": {"3": link, "5": link}})
+        self.assertEqual(json.loads(out)["links"], [3, 5])
+
+    def fix_row_5(self):
+        """Fix CQ-5 in pass 1 of a key whose CQ-3 is done_before, then review: reviewed."""
+        sha = self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
+        self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [
+            {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.", "commits": [sha]}]})
+        self.assertEqual(self.cli("validate", KEY, "report", "--pass", "1")[0], 0)
+        self.write_doc("review-1.json", {"key": KEY, "pass": 1, "attention": [],
+                                         "rows": [{"ref": 5, "verdict": "ok", "notes": None}]})
+        self.assertEqual(self.cli("validate", KEY, "review", "--pass", "1")[0], 0)
         self.assertEqual(self.key()["step"], "reviewed")
 
     def test_publish_and_finish_follow_the_steps(self):
@@ -819,14 +932,40 @@ class PublishTest(MrCase):
         state["keys"][KEY].update(step="reviewed", mr=None)
         fix_state.save(self.run_dir, state)
         (self.run_dir / "fix" / "mr-links.json").unlink()
+        ours = (self.folder / "mr.md").read_text(encoding="utf-8")
+        stored = ours.replace("\n", "  \r\n")
+        self.gitlab.mrs[12]["description"] = stored
         code, out, err = self.cli("publish", KEY)
         self.assertEqual(code, 0, err)
         self.assertEqual(len(self.glab_args("mr", "create")), 1)
         self.assertEqual(self.glab_args("mr", "update"), [])
         self.assertEqual(self.key()["mr"], {"iid": 12, "url": MR_URL})
         self.assertEqual(self.links(), {"links": {"3": [{"repo": "front", "url": MR_URL, "iid": 12}]}})
-        self.assertEqual(self.gitlab.mrs[12]["description"],
-                         (self.folder / "mr.md").read_text(encoding="utf-8"))
+        self.assertEqual(self.gitlab.mrs[12]["description"], stored)
+
+    def test_publish_resumes_after_a_failure_once_the_mr_exists(self):
+        self.reviewed()
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        real_write = cqa_fix.write_json
+
+        def failing(path, value):
+            if Path(path).name == "mr-links.json":
+                raise OSError("disque plein")
+            real_write(path, value)
+
+        with mock.patch.object(cqa_fix, "write_json", failing):
+            code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 2)
+        self.assertIn("disque plein", err)
+        key = self.key()
+        self.assertEqual((key["mr"], key["step"]), (None, "reviewed"))
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.glab_args("mr", "create")), 1)
+        self.assertEqual(self.glab_args("mr", "update"), [])
+        self.assertEqual(self.gitlab.mrs[12]["description"].count("### CQ-3 : Ligne 3"), 1)
+        self.assertEqual((self.key()["mr"], self.key()["step"]), ({"iid": 12, "url": MR_URL}, "published"))
+        self.assertEqual(self.links(), {"links": {"3": [{"repo": "front", "url": MR_URL, "iid": 12}]}})
 
     def test_publish_without_any_commit_publishes_nothing(self):
         self.reviewed(fix=False)
@@ -857,6 +996,38 @@ class FinishTest(MrCase):
         self.assertNotIn(self.worktree.resolve(), self.worktree_paths())
         self.assertEqual(self.head(self.repo, f"refs/heads/{self.branch}"), self.fixed)
         self.assertEqual(self.key()["step"], "done")
+
+    def test_finish_keep_local_after_a_refused_publish(self):
+        self.reviewed()
+        self.fixer_commit(self.worktree, "b.txt", "fix: forgot the ref")
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.assertEqual(self.cli("publish", KEY)[0], 5)
+        code, out, err = self.cli("finish", KEY)
+        self.assertEqual(code, 2)
+        self.assertIn("--keep-local", err)
+        head = self.head(self.worktree)
+        code, out, err = self.cli("finish", KEY, "--keep-local")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual((result["removed"], result["kept_local"], result["unpushed"]),
+                         (str(self.worktree), True, 2))
+        self.assertFalse(self.worktree.exists())
+        self.assertEqual(self.head(self.repo, f"refs/heads/{self.branch}"), head)
+        self.assertEqual(self.remote(self.branch), "")
+        key = self.key()
+        self.assertEqual((key["step"], key["kept_local"]), ("done", True))
+
+    def test_finish_keep_local_refuses_a_published_key(self):
+        self.reviewed()
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.assertEqual(self.cli("publish", KEY)[0], 0)
+        code, out, err = self.cli("finish", KEY, "--keep-local")
+        self.assertEqual(code, 2)
+        self.assertIn("déjà publiée", err)
+        self.assertTrue(self.worktree.is_dir())
+        code, out, err = self.cli("finish", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.key()["kept_local"], False)
 
     def test_finish_after_the_worktree_is_gone(self):
         self.reviewed(push="local")

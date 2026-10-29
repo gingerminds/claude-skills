@@ -38,7 +38,12 @@ def open_new(path, run, *, slug: str, flight: dict, push: str, base: str, worktr
 
     A real pass takes over the branch of an open MR of the category, else an unmerged branch
     without MR, else creates the first free name from origin/<base>. A dry run always creates
-    a dry-run/ branch. Returns branch, start_sha, reused (None, "mr" or "branch") and mr.
+    a dry-run/ branch. Returns branch, start_sha, reused (None, "mr" or "branch"), mr and
+    taken_head (the head of a taken-over branch, None for a new one).
+
+    start_sha is the head of the taken-over branch, except for a branch without MR that origin
+    does not have in a pass that pushes: its merge-base with origin/<base>, so that the guard
+    also judges the commits that were never pushed.
     """
     if not fetch(path, run):
         raise GitRefused(
@@ -52,10 +57,17 @@ def open_new(path, run, *, slug: str, flight: dict, push: str, base: str, worktr
         prefix = fix_names.DRY_RUN_PREFIX if push == "dry_run" else fix_names.BRANCH_PREFIX
         branch = free_branch(path, run, prefix, slug, flight)
         _add_worktree(path, run, worktree, "--no-track", "-b", branch, str(worktree), base_sha)
-        return {"branch": branch, "start_sha": base_sha, "reused": None, "mr": None}
+        return {"branch": branch, "start_sha": base_sha, "reused": None, "mr": None,
+                "taken_head": None}
     reused, branch, mr = choice
+    start = None
+    if push == "mr" and reused == "branch" and not remote_has(path, run, branch):
+        local = rev(path, run, f"refs/heads/{branch}")
+        if local is not None:
+            start = _merge_base(path, run, local, base_sha, branch, base)
     head = _checkout(path, run, branch, push, worktree, first=True)
-    return {"branch": branch, "start_sha": head, "reused": reused, "mr": mr}
+    return {"branch": branch, "start_sha": start or head, "reused": reused, "mr": mr,
+            "taken_head": head}
 
 
 def reopen(path, run, *, branch: str, push: str, worktree: Path) -> None:
@@ -126,6 +138,22 @@ def free_branch(path, run, prefix: str, slug: str, flight: dict) -> str:
         if name not in taken:
             return name
     raise GitRefused(f"Aucun nom de branche libre pour {prefix}{slug}.")
+
+
+def remote_has(path, run, branch: str) -> bool:
+    """Return True when origin has the branch (asked to origin, not read from stale refs)."""
+    ref = f"refs/heads/{branch}"
+    listing = fix_names.git(path, run, "ls-remote", "--heads", "origin", ref)
+    if listing.returncode != 0:
+        raise GitRefused(f"git ls-remote origin a échoué dans {path} : {listing.stderr.strip()}")
+    return any(line.split("\t", 1)[-1] == ref for line in listing.stdout.splitlines())
+
+
+def _merge_base(path, run, local: str, base_sha: str, branch: str, base: str) -> str:
+    found = git_out(path, run, "merge-base", local, base_sha)
+    if not is_sha(found):
+        raise GitRefused(f"La branche {branch} n'a aucun commit commun avec origin/{base}.")
+    return found
 
 
 def fetch(path, run, *refspecs: str) -> bool:

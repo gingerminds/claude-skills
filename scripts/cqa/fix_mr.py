@@ -79,7 +79,16 @@ def addition(*, fixed: list, checks, not_run: list, attention: list, waiting: li
     text = _render(3, parts).rstrip("\n") if parts else ""
     if left:
         text = (text + "\n\n" if text else "") + f"## {HORS_SCOPE}\n\n{hors_scope(left)}"
-    return text + "\n" if text else ""
+    return _clean(text + "\n") if text else ""
+
+
+def same_description(first: str, second: str) -> bool:
+    """Return True when two descriptions differ at most by line endings and trailing spaces."""
+    def normal(text: str) -> str:
+        lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        return "\n".join(line.rstrip() for line in lines).strip()
+
+    return normal(first) == normal(second)
 
 
 def split_addition(text: str) -> tuple:
