@@ -740,11 +740,16 @@ def notes(*items):
 
 class ReplayCase(GitCase):
     """A started key with three sections (securite CQ-3, qualite CQ-5, seo CQ-12); develop
-    already has the documentation file and robots.txt."""
+    already has the documentation file and robots.txt, and ATTRIBUTES as .gitattributes."""
+
+    ATTRIBUTES = None
 
     def setUp(self):
         super().setUp()
         (self.repo / "docs").mkdir()
+        if self.ATTRIBUTES:
+            (self.repo / ".gitattributes").write_text(self.ATTRIBUTES, encoding="utf-8")
+            real_git(self.repo, "add", ".gitattributes")
         for path in (DOC, ROBOTS):
             (self.repo / path).write_text(notes(), encoding="utf-8")
             real_git(self.repo, "add", path)
@@ -795,12 +800,6 @@ class ReplayCase(GitCase):
         code, out, err = self.run_main([argv[0], self.run_dir, KEY, *argv[1:]])
         return code, json.loads(out) if out else None, err
 
-    def in_branch(self, sha):
-        return subprocess.run(["git", "-C", str(self.worktree), "merge-base", "--is-ancestor",
-                               sha, "HEAD"]).returncode == 0
-
-
-class ReplayTest(ReplayCase):
     def three_notes(self, path):
         one = self.commit_files("docs(securite CQ-3): add the first note", {path: notes("one")})
         two = self.commit_files("docs(qualite CQ-5): add the second note",
@@ -809,6 +808,12 @@ class ReplayTest(ReplayCase):
                                   {path: notes("one", "two", "three")})
         return one, two, three
 
+    def in_branch(self, sha):
+        return subprocess.run(["git", "-C", str(self.worktree), "merge-base", "--is-ancestor",
+                               sha, "HEAD"]).returncode == 0
+
+
+class ReplayTest(ReplayCase):
     def test_replay_keeps_only_the_replayed_doc_additions(self):
         one, two, three = self.three_notes(DOC)
         self.record(r3=[one], r5=[two], r12=[three])
@@ -855,6 +860,66 @@ class ReplayTest(ReplayCase):
         self.assertEqual(self.head(self.repo, f"refs/heads/{self.branch}"), second)
 
 
+class UnionDriverTest(ReplayCase):
+    """The repo asks git to merge its docs and robots.txt by union: a replay never lets that
+    keep the lines of a dropped commit."""
+
+    ATTRIBUTES = "*.md merge=union\nrobots.txt merge=union\n"
+
+    def plain_pick_keeps_the_dropped_line(self, path, commit):
+        """What a plain cherry-pick of commit on start_sha does with the repo's attributes."""
+        real_git(self.worktree, "checkout", "-q", "--detach", self.start_sha)
+        picked = subprocess.run(["git", "-C", str(self.worktree), "cherry-pick", commit],
+                                capture_output=True, text=True)
+        content = (self.worktree / path).read_text(encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.worktree), "cherry-pick", "--abort"],
+                       capture_output=True)
+        real_git(self.worktree, "checkout", "-q", "--force", self.branch)
+        return picked.returncode == 0 and "- one" in content
+
+    def test_docs_get_only_their_own_lines_back(self):
+        one, two, three = self.three_notes(DOC)
+        self.assertTrue(self.plain_pick_keeps_the_dropped_line(DOC, two))
+        result = fix_git.replay(self.worktree, subprocess.run, self.start_sha,
+                                [(two, None), (three, None)])
+        self.assertEqual((result["conflicts"], result["resolved"]), ([], [two]))
+        self.assertEqual(real_git(self.worktree, "show", f"{result['mapping'][three]}:{DOC}"),
+                         notes("two", "three").strip())
+        self.assertEqual(real_git(self.worktree, "status", "--porcelain", "-uall"), "")
+        self.record(r3=[one], r5=[two], r12=[three])
+        real_git(self.worktree, "checkout", "-q", self.branch)
+        code, result, err = self.main_json("drop", "--refs", "CQ-3", "--reason", "Note fausse.")
+        self.assertEqual((code, result["also_dropped"]), (0, []), err)
+        self.assertEqual((self.worktree / DOC).read_text(encoding="utf-8"), notes("two", "three"))
+        self.assert_clean_on_branch()
+
+    def test_a_served_file_gives_a_real_conflict(self):
+        one, two, three = self.three_notes(ROBOTS)
+        self.assertTrue(self.plain_pick_keeps_the_dropped_line(ROBOTS, two))
+        result = fix_git.replay(self.worktree, subprocess.run, self.start_sha,
+                                [(two, None), (three, None)])
+        self.assertEqual((result["mapping"], result["conflicts"]), ({}, [two]))
+        self.assertEqual(real_git(self.worktree, "status", "--porcelain", "-uall"), "")
+        self.record(r3=[one], r5=[two], r12=[three])
+        real_git(self.worktree, "checkout", "-q", self.branch)
+        code, result, err = self.main_json("drop", "--refs", "CQ-3", "--reason", "Ligne fausse.")
+        self.assertEqual((code, result["also_dropped"]), (0, [5, 12]), err)
+        self.assertEqual((self.worktree / ROBOTS).read_text(encoding="utf-8"), notes())
+        self.assertEqual(self.head(self.worktree), self.start_sha)
+        self.assert_clean_on_branch()
+
+
+class CustomDriverTest(UnionDriverTest):
+    """Same with a merge driver of the repo's config, and a default driver."""
+
+    ATTRIBUTES = "*.md merge=keepall\nrobots.txt merge=keepall\n"
+
+    def setUp(self):
+        super().setUp()
+        real_git(self.repo, "config", "merge.keepall.driver", "git merge-file --union %A %O %B")
+        real_git(self.repo, "config", "merge.default", "keepall")
+
+
 class ReorderTest(ReplayCase):
     def reorder(self):
         return self.main_json("reorder")
@@ -869,6 +934,7 @@ class ReorderTest(ReplayCase):
         tree = real_git(self.worktree, "rev-parse", "HEAD^{tree}")
         code, result, err = self.reorder()
         self.assertEqual(code, 0, err)
+        rewritten = result.pop("rewritten")
         self.assertEqual(result, {"reordered": True, "conflicts": []})
         self.assertEqual(self.subjects(), [
             "fix(securite CQ-3): add a", "fix(securite CQ-3): answer d",
@@ -879,13 +945,15 @@ class ReorderTest(ReplayCase):
         log = real_git(self.worktree, "log", "--reverse", "--format=%H", f"{self.start_sha}..HEAD")
         new = log.splitlines()
         self.assertEqual(new[0], a)
+        self.assertEqual(rewritten, {d: new[1], b: new[2], e: new[3], c: new[4]})
         rows = self.key()["rows"]
         self.assertEqual(rows["3"]["commits"], [a, new[1]])
         self.assertEqual(rows["5"]["commits"], [new[2], new[3]])
         self.assertEqual(rows["12"]["commits"], [new[4]])
         self.assertNotIn("reorder_conflicts", self.key())
         code, result, err = self.reorder()
-        self.assertEqual((code, result), (0, {"reordered": False, "conflicts": []}), err)
+        self.assertEqual((code, result), (0, {"reordered": False, "conflicts": [],
+                                              "rewritten": {}}), err)
         self.assertEqual(self.head(self.worktree), new[4])
 
     def test_reorder_never_moves_pushed_commits(self):
@@ -897,7 +965,8 @@ class ReorderTest(ReplayCase):
         self.record(r3=[a, d], r5=[b], r12=[c])
         code, result, err = self.reorder()
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"reordered": True, "conflicts": []})
+        self.assertEqual((result["reordered"], result["conflicts"], sorted(result["rewritten"])),
+                         (True, [], sorted([c, d])))
         self.assertEqual(self.subjects(), [
             "fix(qualite CQ-5): add b", "fix(securite CQ-3): add a",
             "fix(securite CQ-3): answer d", "fix(seo CQ-12): add c",
@@ -912,17 +981,18 @@ class ReorderTest(ReplayCase):
         self.assert_clean_on_branch()
         self.push()
         code, result, err = self.reorder()
-        self.assertEqual((code, result), (0, {"reordered": False, "conflicts": []}), err)
+        self.assertEqual((code, result), (0, {"reordered": False, "conflicts": [],
+                                              "rewritten": {}}), err)
 
     def test_reorder_conflict_changes_nothing(self):
         a = self.commit_files("fix(securite CQ-3): add x", {"x.txt": "one\n"})
         b = self.commit_files("fix(qualite CQ-5): change x", {"x.txt": "two\n"})
         d = self.commit_files("fix(securite CQ-3): change x again", {"x.txt": "three\n"})
-        self.record(r3=[a, d], r5=[b], bases={"1": self.start_sha, "2": a})
+        self.record(r3=[a, d], r5=[b], bases={"1": self.start_sha, "2": a}, **{"pass": 2})
         before = self.key()
         code, result, err = self.reorder()
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"reordered": False, "conflicts": [d]})
+        self.assertEqual(result, {"reordered": False, "conflicts": [d], "rewritten": {}})
         self.assertEqual(self.head(self.worktree), d)
         self.assert_clean_on_branch()
         after = self.key()
@@ -939,7 +1009,7 @@ class ReorderTest(ReplayCase):
         d = self.commit_files("fix(securite CQ-3): answer d", {"d3.txt": "d"})
         reviews = {"1": {"blocking": []}, "2": {"blocking": [5]}, "3": {"blocking": []}}
         self.record(r3=[a, d], r5=[b], bases={"1": self.start_sha, "2": a, "3": b},
-                    reviews=reviews)
+                    reviews=reviews, **{"pass": 3})
         code, result, err = self.reorder()
         self.assertEqual((code, result["reordered"]), (0, True), err)
         new = real_git(self.worktree, "log", "--reverse", "--format=%H",
@@ -974,7 +1044,8 @@ class RewordTest(ReplayCase):
         bad = self.commit_files("fix(qualite CQ-5): add b\n\nCo-Authored-By: Bot <bot@example.test>",
                                 {"b5.txt": "b"})
         c = self.commit_files("fix(seo CQ-12): add c", {"c12.txt": "c"})
-        self.record(r3=[a], r5=[bad], r12=[c], bases={"1": self.start_sha, "2": bad})
+        self.record(r3=[a], r5=[bad], r12=[c], bases={"1": self.start_sha, "2": bad},
+                    **{"pass": 2})
         tree = real_git(self.worktree, "rev-parse", "HEAD^{tree}")
         code, result, err = self.main_json("guard")
         self.assertEqual(code, 5, err)
@@ -988,6 +1059,7 @@ class RewordTest(ReplayCase):
         self.assertNotIn(bad, new)
         self.assertEqual(result["reworded"], True)
         self.assertEqual(result["commit"], new[1])
+        self.assertEqual(result["rewritten"], {bad: new[1], c: new[2]})
         self.assertEqual(real_git(self.worktree, "log", "-1", "--format=%B", new[1]),
                          "fix(qualite CQ-5): add b")
         self.assertEqual(self.subjects(), ["fix(securite CQ-3): add a", "fix(qualite CQ-5): add b",
@@ -1004,6 +1076,11 @@ class RewordTest(ReplayCase):
         self.assertEqual(code, 5, err)
         self.assertIn("origin", err)
         self.assertEqual(self.head(self.worktree), head)
+        code, result, err = self.reword(new[1], "fix(seo CQ-12): add b\n")
+        self.assertEqual((code, result), (5, None), err)
+        self.assertIn("CQ-12", err)
+        self.assertIn("CQ-5", err)
+        self.assertEqual(self.head(self.worktree), head)
         for text in ("fix(securite CQ-5): add b\n",
                      "fix(qualite CQ-5): add b\n\n$password = 'hunter2hunter2';\n"):
             with self.subTest(message=text):
@@ -1017,6 +1094,37 @@ class RewordTest(ReplayCase):
         self.assertEqual(code, 2, err)
         self.assertEqual(self.key(), key)
         self.assert_clean_on_branch()
+
+
+    def test_reword_moves_a_stray_ref_to_a_row_only(self):
+        """A subject without a row of the key (form problem) may take the ref of a row; a
+        commit of a taken-over branch, at or before its head, is never reworded."""
+        inherited = self.commit_files("fix(securite CQ-3): inherited", {"i3.txt": "i"})
+        stray = self.commit_files("fix(qualite CQ-99): add b", {"b5.txt": "b"})
+        self.record(r5=[], taken_head=inherited)
+        code, result, err = self.reword(stray, "fix(qualite CQ-5): add b\n")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.subjects(), ["fix(securite CQ-3): inherited",
+                                           "fix(qualite CQ-5): add b"])
+        self.assertEqual(self.key()["taken_head"], inherited)
+        code, result, err = self.reword(inherited, "fix(securite CQ-3): inherited fix\n")
+        self.assertEqual(code, 5, err)
+        self.assertIn("reprise", err)
+        self.assertEqual(self.subjects()[0], "fix(securite CQ-3): inherited")
+
+    def test_reword_and_reorder_wait_for_the_pass_in_progress(self):
+        first = self.commit_files("fix(securite CQ-3): add a", {"a3.txt": "a"})
+        self.record(bases={"1": self.start_sha})
+        head = self.head(self.worktree)
+        for argv in (["reorder"], ["reword", "--commit", first, "--message-file",
+                                   self.root / "message.txt"]):
+            with self.subTest(command=argv[0]):
+                (self.root / "message.txt").write_text("fix(securite CQ-3): add the a file\n",
+                                                       encoding="utf-8")
+                code, result, err = self.main_json(*argv)
+                self.assertEqual(code, 2, err)
+                self.assertIn("passe 1", err)
+                self.assertEqual(self.head(self.worktree), head)
 
 
 class FailedSectionTest(ReplayCase):
@@ -1045,7 +1153,7 @@ class FailedSectionTest(ReplayCase):
         self.pass_start(2, "qualite")
         return first
 
-    def fail(self, alias="qualite", *extra):
+    def give_up(self, alias="qualite", *extra):
         return self.main_json("section-end", "--section", alias, "--failed", "--reason", FAILED,
                               *extra)
 
@@ -1061,7 +1169,7 @@ class FailedSectionTest(ReplayCase):
         (self.worktree / "img.bin").write_bytes(binary)
         folder = self.run_dir / "fix" / "front"
         (folder / "report-2.json").write_text("{not json", encoding="utf-8")
-        code, result, err = self.fail()
+        code, result, err = self.give_up()
         self.assertEqual(code, 0, err)
         patch = "fix/front/leftover-1.patch"
         self.assertEqual(result, {
@@ -1082,7 +1190,7 @@ class FailedSectionTest(ReplayCase):
         self.assertEqual((section["state"], section["reason"]), ("failed", FAILED))
         self.assertEqual(key["bases"], {"1": self.start_sha})
         self.assertEqual(key["pass_sections"], {"1": "securite"})
-        self.assertEqual(section["leftover"], patch)
+        self.assertEqual(section["leftover"], result["leftover"])
         self.assertFalse((folder / "report-2.json").exists())
         self.assertEqual((folder / "report-2.failed.json").read_text(encoding="utf-8"), "{not json")
         self.assertTrue((folder / "report-1.json").is_file())
@@ -1105,14 +1213,14 @@ class FailedSectionTest(ReplayCase):
         self.settle_securite()
         (self.run_dir / "fix" / "front" / "leftover-1.patch").write_text("old", encoding="utf-8")
         (self.worktree / "draft.txt").write_text("draft\n", encoding="utf-8")
-        code, result, err = self.fail()
+        code, result, err = self.give_up()
         self.assertEqual(code, 0, err)
         self.assertEqual(result["leftover"]["patch"], "fix/front/leftover-2.patch")
         self.assertEqual((self.run_dir / "fix" / "front" / "leftover-1.patch").read_text(
             encoding="utf-8"), "old")
         self.section_start("seo")
         self.pass_start(2, "seo")
-        code, result, err = self.fail("seo")
+        code, result, err = self.give_up("seo")
         self.assertEqual(code, 0, err)
         self.assertIsNone(result["leftover"])
         self.assertEqual((result["next"], result["dropped"]), (None, [12]))
@@ -1123,7 +1231,7 @@ class FailedSectionTest(ReplayCase):
         head = self.push()
         (self.worktree / "draft.txt").write_text("draft\n", encoding="utf-8")
         before = self.key()
-        code, result, err = self.fail()
+        code, result, err = self.give_up()
         self.assertEqual(code, 5, err)
         self.assertIn("origin", err)
         self.assertEqual(self.head(self.worktree), head)
@@ -1140,6 +1248,99 @@ class FailedSectionTest(ReplayCase):
                 self.assertEqual(code, 2, err)
                 self.assertIn(needle, err)
         self.assertEqual(self.key(), before)
+
+
+    def test_a_failed_section_rerun_gives_its_recorded_leftover(self):
+        self.settle_securite()
+        self.commit_files("fix(qualite CQ-5): add b", {"b5.txt": "b\n"})
+        (self.worktree / "draft.txt").write_text("draft\n", encoding="utf-8")
+
+        def stuck(command, **kwargs):
+            if "update-ref" in command:
+                return subprocess.CompletedProcess(command, 1, "", "error: simulated lock")
+            return subprocess.run(command, **kwargs)
+
+        code, out, err = self.run_main(["section-end", self.run_dir, KEY, "--section", "qualite",
+                                        "--failed", "--reason", FAILED], run=stuck)
+        self.assertEqual(code, 5, err)
+        self.assert_clean_on_branch()
+        key = self.key()
+        section = next(item for item in key["sections"] if item["alias"] == "qualite")
+        self.assertEqual(section["state"], "active")
+        recorded = section["leftover"]
+        self.assertEqual((recorded["patch"], recorded["untracked"]),
+                         ("fix/front/leftover-1.patch", ["draft.txt"]))
+        code, result, err = self.give_up()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(result["leftover"], recorded)
+        self.assertFalse((self.run_dir / "fix" / "front" / "leftover-2.patch").exists())
+
+    def test_failed_section_drops_covered_rows_only_with_their_fix(self):
+        first = self.settle_securite()
+        state = self.state()
+        key = state["keys"][KEY]
+        key["sections"][1]["refs"] = [5, 7, 8]
+        own = self.commit_files("fix(qualite CQ-7): add g", {"g7.txt": "g\n"})
+        for ref, row in (("5", {"outcome": "skipped", "reason": "corrigé par le commit de CQ-7"}),
+                         ("7", {"outcome": "fixed", "commits": [own]}),
+                         ("8", {"outcome": "skipped", "reason": "corrigé par le commit de CQ-3"})):
+            key["rows"][ref] = {"outcome": "pending", "reason": None, "commits": [], "pass": 2,
+                                "attention": None, "section": "qualite", **row}
+        fix_state.save(self.run_dir, state)
+        code, result, err = self.give_up()
+        self.assertEqual(code, 0, err)
+        self.assertEqual((result["dropped"], result["also_dropped"]), ([5, 7], []))
+        rows = self.key()["rows"]
+        self.assertEqual([rows[ref]["outcome"] for ref in ("5", "7", "8")],
+                         ["dropped", "dropped", "skipped"])
+        self.assertEqual(rows["8"]["reason"], "corrigé par le commit de CQ-3")
+        self.assertEqual(self.head(self.worktree), first)
+
+    def test_failed_section_takes_along_rows_of_other_sections(self):
+        """A commit of the failed section made before it started (here in securite) leaves too:
+        the commits after it that no longer replay take their rows along, for good in a settled
+        section, with a retry in a section still to come."""
+        self.section_start("securite")
+        prepare = self.commit_files("fix(qualite CQ-5): prepare shared", {"shared.txt": "a\n"})
+        use = self.commit_files("fix(securite CQ-3): use shared", {"shared.txt": "a\nb\n"})
+        extend = self.commit_files("fix(seo CQ-12): extend shared", {"shared.txt": "a\nb\nc\n"})
+        state = self.state()
+        key = state["keys"][KEY]
+        key["rows"]["3"].update(outcome="fixed", commits=[use], **{"pass": 1})
+        key["sections"][0]["state"] = "settled"
+        key["sections"][1]["state"] = "active"
+        fix_state.save(self.run_dir, state)
+        code, result, err = self.give_up()
+        self.assertEqual(code, 0, err)
+        self.assertEqual((result["dropped"], result["also_dropped"], result["retry"]),
+                         ([5], [3, 12], [12]))
+        rows = self.key()["rows"]
+        self.assertEqual((rows["3"]["outcome"], rows["12"]["outcome"], rows["12"]["retry"]),
+                         ("dropped", "pending", True))
+        self.assertIn("section qualite", rows["3"]["reason"])
+        self.assertEqual(self.head(self.worktree), self.start_sha)
+        self.assert_clean_on_branch()
+        self.assertNotIn(prepare, real_git(self.worktree, "log", "--format=%H"))
+        self.assertNotIn(extend, real_git(self.worktree, "log", "--format=%H"))
+
+
+class InterruptTest(ReplayCase):
+    def test_an_interrupt_during_a_replay_restores_the_worktree(self):
+        first = self.commit_files("fix(securite CQ-3): add a", {"a3.txt": "a"})
+        head = self.commit_files("fix(qualite CQ-5): add b", {"b5.txt": "b"})
+
+        def interrupted(command, **kwargs):
+            result = subprocess.run(command, **kwargs)
+            if "cherry-pick" in command and "--abort" not in command:
+                raise KeyboardInterrupt
+            return result
+
+        with self.assertRaises(KeyboardInterrupt):
+            fix_git.drop_commits(self.worktree, interrupted, branch=self.branch,
+                                 start_sha=self.start_sha, refs={3}, linked={3: [first]},
+                                 allowed={3, 5})
+        self.assertEqual(self.head(self.worktree), head)
+        self.assert_clean_on_branch()
 
 
 class V2PassTest(GitCase):

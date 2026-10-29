@@ -585,20 +585,21 @@ def _fail_section(run_dir: Path, state: dict, key: dict, section: dict, reason: 
     """Give up the section in progress (section-end --failed): it could not reach a valid
     review, or the workstation failed.
 
-    Its rows still open (pending, fixed, question, or skipped as covered by a fix) leave with
-    reason; skipped, dropped and done_before rows keep theirs. Their commits leave the branch
-    with drop_commits, with every commit made since the first pass of the section
-    (reported or not). Nothing changes when one of them is already on a remote. The
-    uncommitted changes of the worktree are first saved in fix/<repo>/leftover-<N>.patch,
-    then the worktree is reset and cleaned (fix_git.save_leftovers). The passes of the
-    section whose report is not validated are closed: their base and section are forgotten,
-    so that the next section may use their number, and their report, review and notes files
-    are renamed <name>-<N>.failed.json, as is a review that was never recorded.
+    Its rows still open (pending, fixed, question) leave with reason, and so does a skipped
+    row covered by the fix of one of them; other skipped, dropped and done_before rows keep
+    theirs. Their commits leave the branch with drop_commits, with every commit made since
+    the first pass of the section (reported or not). Nothing changes when one of them is
+    already on a remote. The uncommitted changes of the worktree are first saved in
+    fix/<repo>/leftover-<N>.patch, then the worktree is reset and cleaned
+    (fix_git.save_leftovers); the section records them at once in « leftover », which a
+    later run prints when it saves no new patch. The passes of the section whose report is
+    not validated are closed: their base and section are forgotten, so that the next
+    section may use their number, and their report, review and notes files are renamed
+    <name>-<N>.failed.json, as is a review that was never recorded.
     """
     worktree = _key_worktree(run_dir, key, run)
     rows, alias = key["rows"], section["alias"]
-    covered = fix_mr.covered_refs(rows)
-    refs = [ref for ref in section["refs"] if _gives_up(rows.get(str(ref)) or {}, ref, covered)]
+    refs = _failing_refs(section, rows)
     allowed, linked = _drop_scope(rows)
     passes = sorted(int(number) for number, owner in _recorded(key, "pass_sections").items()
                     if owner == alias)
@@ -611,7 +612,7 @@ def _fail_section(run_dir: Path, state: dict, key: dict, section: dict, reason: 
     if leftover is not None:
         saved = {"patch": leftover["path"].relative_to(run_dir).as_posix(),
                  "base": leftover["base"], "untracked": leftover["untracked"]}
-        section["leftover"] = saved["patch"]
+        section["leftover"] = saved
         fix_state.save(run_dir, state)
     before = _range_shas(worktree, run, key)
     result = fix_git.drop_commits(worktree, run, allowed=allowed, **scope)
@@ -628,15 +629,18 @@ def _fail_section(run_dir: Path, state: dict, key: dict, section: dict, reason: 
     if result["unattached"]:
         raise fix_git.GitRefused(result["unattached"])
     _emit({"section": alias, "state": "failed", "next": _next_section(key), "dropped": refs,
-           "also_dropped": also, "retry": retry, "leftover": saved})
+           "also_dropped": also, "retry": retry,
+           "leftover": saved or section.get("leftover")})
     return EXIT_OK
 
 
-def _gives_up(row: dict, ref: int, covered: dict) -> bool:
-    """True for a row that a failed section drops: still open, or skipped as covered by a fix."""
-    outcome = row.get("outcome")
-    return outcome in ("pending", "fixed", "question") or (outcome == "skipped"
-                                                           and ref in covered)
+def _failing_refs(section: dict, rows: dict) -> list:
+    """Return the rows a failed section drops, in its order: those still open, and the skipped
+    ones covered by the fix of one of those (fix_mr.covered_refs)."""
+    opened = {ref for ref in section["refs"]
+              if (rows.get(str(ref)) or {}).get("outcome") in ("pending", "fixed", "question")}
+    covered = fix_mr.covered_refs(rows)
+    return [ref for ref in section["refs"] if ref in opened or covered.get(ref) in opened]
 
 
 def _commits_since_pass(worktree: Path, run, key: dict, passes: list) -> set:
@@ -1119,11 +1123,13 @@ def _cmd_reorder(args, services: Services) -> int:
 
     A conflict changes nothing in git: the subjects of the commits that did not replay go to
     reorder_conflicts in the state, for the summary; a reorder that goes through, or finds
-    nothing to move, clears it.
+    nothing to move, clears it. rewritten maps the old SHAs to the new ones. Never while a
+    pass is in progress.
     """
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
+    _no_pass_in_progress(key, "ranger les commits")
     worktree = _key_worktree(run_dir, key, services.run)
     commits = fix_git.commits_in_range(worktree, services.run, key["start_sha"])
     result = fix_git.reorder_commits(
@@ -1140,8 +1146,17 @@ def _cmd_reorder(args, services: Services) -> int:
     fix_state.save(run_dir, state)
     if result["unattached"]:
         raise fix_git.GitRefused(result["unattached"])
-    _emit({"reordered": result["reordered"], "conflicts": result["conflicts"]})
+    _emit({"reordered": result["reordered"], "conflicts": result["conflicts"],
+           "rewritten": result["rewritten"]})
     return EXIT_OK
+
+
+def _no_pass_in_progress(key: dict, what: str) -> None:
+    """Exit 2 while a pass is started without a validated report (_pass_in_progress)."""
+    started = _pass_in_progress(key)
+    if started is not None:
+        raise UsageError(f"La passe {started} est commencée sans rapport validé : validez-le "
+                         f"avant de {what}. Rien n'a changé.")
 
 
 def _section_rank(key: dict):
@@ -1176,7 +1191,10 @@ def _cmd_reword(args, services: Services) -> int:
     The new message (--message-file, read as git commit -F would) goes through the guard's
     checks of a message first (fix_guard.check_message: convention, section, length,
     attribution, secrets, gitleaks): a problem exits 5 with {"ok", "problems", "note"} and
-    nothing changes.
+    nothing changes. The subject keeps the ref of its row: only a subject without a ref of
+    the key (a form problem) may take another one. A commit of a taken-over branch (up to
+    taken_head) is never reworded, and nothing is while a pass is in progress. rewritten maps
+    the old SHAs to the new ones.
     """
     try:
         message = _commit_message(args.message_file.read_text(encoding="utf-8"))
@@ -1189,15 +1207,24 @@ def _cmd_reword(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
+    _no_pass_in_progress(key, "réécrire un message")
     run = services.run
     worktree = _key_worktree(run_dir, key, run)
     commits = fix_git.commits_in_range(worktree, run, key["start_sha"])
     sha = fix_names.git_out(worktree, run, "rev-parse", "--verify", "--quiet",
                             f"{args.commit}^{{commit}}")
-    if sha not in {item["sha"] for item in commits}:
+    old = next((item for item in commits if item["sha"] == sha), None)
+    if old is None:
         raise UsageError(f"--commit {args.commit} : ce n'est pas un commit de "
                          f"{key['start_sha'][:12]}..HEAD de la branche {key['branch']}. "
                          "Rien n'a changé.")
+    new_ref = fix_names.ref_of_subject(message.split("\n", 1)[0])
+    if str(old["ref"]) in key["rows"] and new_ref != old["ref"]:
+        raise fix_git.Refused(
+            f"Le nouveau sujet porte {ref_label(new_ref) if new_ref else 'aucune Réf'} au lieu "
+            f"de {ref_label(old['ref'])} : le message réécrit garde la Réf de sa ligne (seule une "
+            "Réf hors de la clé peut changer). Rien n'a changé."
+        )
     scanner = fix_gitleaks.Gitleaks(run, LAUNCHER)
     problems = fix_guard.check_message(message, _row_sections(key), known_values_from_env(),
                                        gitleaks=scanner)
@@ -1208,13 +1235,14 @@ def _cmd_reword(args, services: Services) -> int:
               "« problems ». Rien n'a été réécrit.", file=sys.stderr)
         return EXIT_REFUSED
     result = fix_git.reword_commit(worktree, run, branch=key["branch"],
-                                   start_sha=key["start_sha"], sha=sha, message=message)
+                                   start_sha=key["start_sha"], sha=sha, message=message,
+                                   keep=key.get("taken_head"))
     _remap(worktree, run, key, [item["sha"] for item in commits], result["rewritten"])
     fix_state.save(run_dir, state)
     if result["unattached"]:
         raise fix_git.GitRefused(result["unattached"])
     _emit({"reworded": bool(result["rewritten"]), "commit": result["commit"],
-           "note": scanner.note})
+           "rewritten": result["rewritten"], "note": scanner.note})
     return EXIT_OK
 
 

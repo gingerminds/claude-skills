@@ -954,7 +954,7 @@ g. Publication. In autonomous mode the key stops at `reviewed`, with its branch 
 - `push` `local` or `dry_run`, or a key whose `push_ready` is false: no publication, only `finish` (below), which keeps the branch in the dev's repo.
 - Otherwise `mr-body`, `publish`, then `finish`.
 
-Before `mr-body`, group the unpushed commits by section: `reorder` prints `{"reordered", "conflicts"}`, and a conflict leaves the order as it was (the summary says so). Then rewrite the message of each commit that a guard problem of `kind` `form` names; the new message goes through the guard first (exit 5 with its `problems`, nothing changed). Run `guard` again afterwards.
+Before `mr-body`, no pass in progress, group the unpushed commits by section: `reorder` prints `{"reordered", "conflicts", "rewritten"}`, and a conflict leaves the order as it was (the summary says so). Then rewrite the message of each commit that a guard problem of `kind` `form` names, keeping the ref of its row: `reword` prints `{"reworded", "commit", "rewritten", "note"}`, and the new message goes through the guard first (exit 5 with its `problems`, nothing changed). Run `guard` again after `reorder` and after each `reword`: `rewritten` maps the old SHAs to the new ones, and the SHAs of the later commits change.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

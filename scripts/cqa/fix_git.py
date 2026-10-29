@@ -23,6 +23,9 @@ CHECKED_OUT = (
 DIVERGED = "La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé."
 _MAX_SUFFIX = 1000
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+# The merge a replay runs for every path, whatever merge driver the repo's attributes or
+# config name: git's text merge, through git merge-file, whose conflict stops the cherry-pick.
+_TEXT_MERGE = "git merge-file -q --marker-size=%L %A %O %B"
 
 
 class GitRefused(Exception):
@@ -291,7 +294,7 @@ def drop_commits(worktree: Path, run, *, branch: str, start_sha: str, refs: set,
     try:
         rewritten = _rebuild(worktree, run, branch, commits, dropped, linked, allowed, extra)
         _move(worktree, run, branch, old_head, "drop", "le retrait")
-    except Exception:
+    except BaseException:
         _restore(worktree, run, branch)
         raise
     return {"dropped": dropped, "rewritten": rewritten,
@@ -358,7 +361,7 @@ def reorder_commits(worktree: Path, run, *, branch: str, start_sha: str, keep: O
             _restore(worktree, run, branch)
             return {**unchanged, "conflicts": conflicts}
         _move(worktree, run, branch, old_head, "reorder", "le rangement")
-    except Exception:
+    except BaseException:
         _restore(worktree, run, branch)
         raise
     return {"reordered": True, "conflicts": [], "rewritten": result["mapping"],
@@ -366,13 +369,14 @@ def reorder_commits(worktree: Path, run, *, branch: str, start_sha: str, keep: O
 
 
 def reword_commit(worktree: Path, run, *, branch: str, start_sha: str, sha: str,
-                  message: str) -> dict:
+                  message: str, keep: Optional[str] = None) -> dict:
     """Give commit sha of <start_sha>..HEAD the message message, then replay the commits after
     it: the content of every commit stays the same.
 
     Returns {"commit": the new SHA (sha itself when the message is already that one),
     "rewritten": {old: new}, "unattached"}. Raises GitRefused for a commit outside the range
-    or any git failure, Refused for a rewritten history, a merge in the range, uncommitted
+    or any git failure, Refused for a commit at or before keep (the head of a taken-over
+    branch, as for reorder_commits), a rewritten history, a merge in the range, uncommitted
     changes or a commit already on a remote; the branch is then unchanged and the worktree
     back on it.
     """
@@ -381,6 +385,10 @@ def reword_commit(worktree: Path, run, *, branch: str, start_sha: str, sha: str,
     if index is None:
         raise GitRefused(f"Le commit {sha[:12]} n'est pas dans {start_sha[:12]}..HEAD de la "
                          f"branche {branch} : rien n'a changé.")
+    kept = next((i for i, commit in enumerate(commits) if commit["sha"] == keep), None)
+    if kept is not None and index <= kept:
+        raise Refused(f"Le commit {sha[:12]} ({_subject(commits[index])}) vient de la branche "
+                      "reprise, avant cette passe : son message ne change pas. Rien n'a changé.")
     if commits[index]["message"].strip("\n") == message.strip("\n"):
         return {"commit": sha, "rewritten": {}, "unattached": None}
     _linear(worktree, run, branch, start_sha, commits)
@@ -395,7 +403,7 @@ def reword_commit(worktree: Path, run, *, branch: str, start_sha: str, sha: str,
             raise GitRefused(f"Le commit {sha[:12]} ne se rejoue pas à l'identique avec son "
                              "nouveau message : rien n'a changé.")
         _move(worktree, run, branch, old_head, "reword", "la réécriture")
-    except Exception:
+    except BaseException:
         _restore(worktree, run, branch)
         raise
     return {"commit": result["mapping"][sha], "rewritten": result["mapping"],
@@ -447,9 +455,12 @@ def replay(worktree: Path, run, onto: str, commits: list) -> dict:
     nothing is replayed after a conflict. The worktree ends clean, detached on the last
     replayed commit (the caller moves the branch or restores it). Raises Refused when the
     worktree has uncommitted changes (nothing is done), GitRefused for any other git
-    failure (signing, identity, lock, filter), after putting the worktree back clean.
+    failure (signing, identity, lock, filter), after putting the worktree back clean. Every
+    merge is git's text merge (_merge_options): a merge driver of the repo (union, or one of
+    its config) never settles a conflict.
     """
     _clean(worktree, run)
+    merging = _merge_options(worktree, run)
     detached = fix_names.git(worktree, run, "checkout", "-q", "--detach", onto)
     if detached.returncode != 0:
         raise GitRefused(
@@ -459,7 +470,8 @@ def replay(worktree: Path, run, onto: str, commits: list) -> dict:
     try:
         for sha, message in commits:
             picked = fix_names.git(
-                worktree, run, "-c", "rerere.enabled=false", "cherry-pick", "--allow-empty", sha,
+                worktree, run, "-c", "rerere.enabled=false", *merging, "cherry-pick",
+                "--allow-empty", sha,
             )
             if picked.returncode != 0:
                 if not _conflicted(worktree, run):
@@ -476,7 +488,7 @@ def replay(worktree: Path, run, onto: str, commits: list) -> dict:
                         "-q", "--no-verify", "--allow-empty", "--cleanup=whitespace", "-m",
                         message)
             mapping[sha] = _head(worktree, run)
-    except Exception:
+    except BaseException:
         _abort(worktree, run)
         raise
     return {"mapping": mapping, "conflicts": [], "resolved": resolved}
@@ -609,6 +621,33 @@ def _rebuild(worktree: Path, run, branch: str, commits: list, dropped: set, link
             )
         dropped.add(failed["ref"])
         removed = _left_out(commits, dropped, linked, extra)
+
+
+def _merge_options(worktree: Path, run) -> list:
+    """Return the -c options that make every merge of a replay git's text merge.
+
+    The built-in union driver and each driver of the config (merge.<name>.driver) run
+    _TEXT_MERGE instead, and merge.default is emptied so that a path without a merge
+    attribute gets git's text merge: a driver could otherwise settle a conflict by keeping
+    the lines of a removed commit. An attribute naming a driver that the config lacks
+    already gets git's text merge. The repo's attributes and config are never edited.
+    """
+    listing = fix_names.git(worktree, run, "config", "--name-only", "--get-regexp",
+                            r"^merge\..+\.driver$")
+    if listing.returncode not in (0, 1):
+        raise GitRefused(f"git config a échoué dans {worktree} : {listing.stderr.strip()}")
+    names = {"union"}
+    for line in listing.stdout.splitlines() if listing.returncode == 0 else ():
+        if line.startswith("merge.") and line.endswith(".driver"):
+            names.add(line[len("merge."):-len(".driver")])
+    unusable = sorted(name for name in names if not name or "=" in name)
+    if unusable:
+        raise GitRefused(f"Pilote de fusion au nom inutilisable dans la configuration git "
+                         f"({', '.join(unusable)}) : renommez-le, puis relancez. Rien n'a changé.")
+    options = ["-c", "merge.default="]
+    for name in sorted(names):
+        options += ["-c", f"merge.{name}.driver={_TEXT_MERGE}"]
+    return options
 
 
 def _linear(worktree: Path, run, branch: str, start_sha: str, commits: list) -> None:
