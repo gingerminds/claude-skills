@@ -137,6 +137,7 @@ def new_state(candidates: dict, *, mode: str, push: str, notion: bool) -> dict:
             "dev_fingerprint": None,
             "bases": {},
             "reviews": {},
+            "reports": [],
             "rows": rows,
         }
     return {

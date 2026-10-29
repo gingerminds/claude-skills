@@ -1511,9 +1511,13 @@ class FixAgentsTest(unittest.TestCase):
             ("1. Keys", ("`cqa_fix.py pass-start <run_dir> <key> --pass <N>`",
                          "Every fixer pass N that leaves rows fixed is followed by its own review N",
                          "review p is recorded and blocks none of them",
-                         "a pass that fixes no row needs no review")),
+                         "a pass that fixes no row needs no review",
+                         "keeps the base it recorded first",
+                         "« commit hors de la passe N : <sha> »",
+                         "a review needs the validated report of its pass")),
             ("5. Questions", ("its own review",)),
-            ("6. Correction pass", ("once the reviews of the passes in progress are written",)),
+            ("6. Correction pass", ("once the reviews of the passes in progress are written",
+                                    "judges only the rows of its pass")),
         ):
             for needle in needles:
                 with self.subTest(section=section, needle=needle):
@@ -1527,7 +1531,7 @@ class FixAgentsTest(unittest.TestCase):
         for needle in ("reviewed on its own", "--no-ext-diff --no-textconv",
                        "« Abandon : » wins over « À valider avec soin : »",
                        "repeats its `covered_by`", "never « déjà corrigé sur develop »",
-                       "`index.lock`"):
+                       "`index.lock`", "« commit hors de la passe N : <sha> »"):
             with self.subTest(agent="fixer", needle=needle):
                 self.assertIn(needle, fixer)
         self.assertIn("--no-ext-diff --no-textconv", _section(fixer, "Hard rules"))

@@ -440,6 +440,7 @@ class MrCase(GitCase):
         started = self.start_ok()
         self.worktree = Path(started["worktree"])
         self.branch = started["branch"]
+        self.assertEqual(self.cli("pass-start", KEY, "--pass", "1")[0], 0)
         rows = [{"ref": 5, "outcome": "skipped", "reason": "Demande une décision de l'équipe UI/UX."}]
         if fix:
             self.fixed = self.fixer_commit(self.worktree, "a3.txt", "fix(CQ-3): add a")
@@ -690,6 +691,7 @@ class PublishTest(MrCase):
         self.assertEqual(self.key()["mr"], {"iid": 12, "url": MR_URL})
         self.assertEqual(self.cli("finish", KEY)[0], 0)
         self.assertEqual(self.start_ok()["branch"], self.branch)
+        self.assertEqual(self.cli("pass-start", KEY, "--pass", "2")[0], 0)
         self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
         self.write_doc("report-2.json", {"key": KEY, "pass": 2, "rows": [
             {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.",
@@ -789,6 +791,7 @@ class PublishTest(MrCase):
     def test_publish_refuses_a_stale_description(self):
         self.reviewed()
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.assertEqual(self.cli("pass-start", KEY, "--pass", "2")[0], 0)
         self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
         self.write_doc("report-2.json", {"key": KEY, "pass": 2, "rows": [
             {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.",
@@ -927,6 +930,7 @@ class PublishTest(MrCase):
 
     def fix_row_5(self):
         """Fix CQ-5 in pass 1 of a key whose CQ-3 is done_before, then review: reviewed."""
+        self.assertEqual(self.cli("pass-start", KEY, "--pass", "1")[0], 0)
         sha = self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
         self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [
             {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.", "commits": [sha]}]})

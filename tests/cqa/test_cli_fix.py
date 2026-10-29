@@ -233,7 +233,7 @@ class PassTest(FixCase):
             "repo": "front", "category": "SÉCURITÉ", "slug": "securite", "push_ready": False,
             "branch": None, "base": None, "start_sha": None, "worktree": None, "reused": None,
             "mr": None, "step": "selected", "pass": 0, "dev_fingerprint": None,
-            "bases": {}, "reviews": {}, "rows": {"3": row, "12": row},
+            "bases": {}, "reviews": {}, "reports": [], "rows": {"3": row, "12": row},
         }})
         result = json.loads(out)
         self.assertEqual(result["keys"], ["front/securite"])

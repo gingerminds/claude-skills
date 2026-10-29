@@ -244,7 +244,13 @@ class ValidateTest(GitCase):
         started = self.start_ok()
         self.worktree = Path(started["worktree"])
         self.start_sha = started["start_sha"]
+        self.pass_start(1)
         return started
+
+    def pass_start(self, number):
+        code, out, err = self.run_main(["pass-start", self.run_dir, KEY, "--pass", str(number)])
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
 
     def write_doc(self, name, document):
         (self.folder / name).write_text(json.dumps(document), encoding="utf-8")
@@ -322,6 +328,7 @@ class ValidateTest(GitCase):
         self.assertEqual((code, result["blocking"]), (0, []))
         self.assertEqual(self.key()["step"], "reviewed")
 
+        self.pass_start(2)
         second = {"key": KEY, "pass": 2, "rows": [{
             "ref": 5, "outcome": "question",
             "question": {"text": "Quel contact pour security.txt ?",
@@ -355,6 +362,7 @@ class ValidateTest(GitCase):
         first = self.fixer_commit(self.worktree, "a.php", "fix(CQ-3): add the header")
         self.write_doc("report-1.json", self.report(first))
         self.assertEqual(self.validate("report")[0], 0)
+        self.pass_start(2)
         second = self.fixer_commit(self.worktree, "b.php", "fix(CQ-3): cover the 404 page")
         correction = self.report(second, number=2)
         correction["rows"] = correction["rows"][:1]
@@ -663,6 +671,7 @@ class DropSafetyTest(DropTest):
     def test_drop_moves_the_key_to_reviewed_once_every_blocking_row_is_dropped(self):
         started = self.start_ok()
         worktree = Path(started["worktree"])
+        self.assertEqual(self.run_main(["pass-start", self.run_dir, KEY, "--pass", "1"])[0], 0)
         first = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
         second = self.fixer_commit(worktree, "b12.txt", "fix(CQ-12): add b")
         folder = self.run_dir / "fix" / "front" / "securite"
@@ -752,10 +761,11 @@ class PassReviewTest(GitCase):
         self.assertEqual(code, 2, err)
         code, result, err = self.pass_start(1)
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"pass": 1, "base": self.head(worktree)})
+        first = self.head(worktree)
+        self.assertEqual(result, {"pass": 1, "base": first})
         moved = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
         code, result, err = self.pass_start(1)
-        self.assertEqual((code, result), (0, {"pass": 1, "base": moved}), err)
+        self.assertEqual((code, result), (0, {"pass": 1, "base": first}), err)
         self.report(1, self.fixed(3, moved), {"ref": 5, "outcome": "skipped", "reason": "Hors du repo."},
                     {"ref": 12, "outcome": "skipped", "reason": "Hors du repo."})
         code, result, err = self.pass_start(1)
@@ -765,7 +775,112 @@ class PassReviewTest(GitCase):
         code, result, err = self.pass_start(2)
         self.assertEqual(code, 2, err)
         self.assertIn("passe 3", err)
-        self.assertEqual(self.key()["bases"], {"1": moved, "3": moved})
+        self.assertEqual(self.key()["bases"], {"1": first, "3": moved})
+
+    def test_an_interrupted_pass_keeps_its_base_so_its_commits_stay_in_range(self):
+        """N1: commits of an interrupted run stay inside bases[N]..HEAD once pass-start reruns."""
+        worktree = Path(self.start_ok()["worktree"])
+        base = self.pass_start(1)[1]["base"]
+        interrupted = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
+        self.assertEqual(self.pass_start(1)[1], {"pass": 1, "base": base})
+        resumed = self.fixer_commit(worktree, "b12.txt", "fix(CQ-12): add b")
+        self.report(1, self.fixed(3, interrupted), self.fixed(12, resumed),
+                    {"ref": 5, "outcome": "skipped", "reason": "Hors du repo."})
+        self.assertEqual(self.key()["rows"]["3"]["commits"], [interrupted])
+
+    def test_pass_start_moves_a_base_that_left_the_branch(self):
+        worktree = Path(self.start_ok()["worktree"])
+        base = self.pass_start(1)[1]["base"]
+        gone = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
+        state = self.state()
+        state["keys"][KEY]["bases"]["1"] = gone
+        fix_state.save(self.run_dir, state)
+        real_git(worktree, "reset", "-q", "--hard", base)
+        self.assertEqual(self.pass_start(1)[1], {"pass": 1, "base": base})
+
+    def test_validate_report_refuses_a_commit_outside_its_pass(self):
+        worktree = Path(self.start_ok()["worktree"])
+        before = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
+        self.assertEqual(self.pass_start(1)[0], 0)
+        self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [
+            self.fixed(3, before),
+            {"ref": 5, "outcome": "skipped", "reason": "Hors du repo."},
+            {"ref": 12, "outcome": "skipped", "reason": "Hors du repo."},
+        ]})
+        code, out, err = self.run_main(["validate", self.run_dir, KEY, "report", "--pass", "1"])
+        self.assertEqual(code, 6, err)
+        self.assertIn(f"ligne CQ-3 : commit hors de la passe 1 : {before[:12]}",
+                      json.loads(out)["errors"])
+        self.assertEqual(self.key()["rows"]["3"]["outcome"], "pending")
+
+    def test_validate_ties_reports_and_reviews_to_their_pass(self):
+        """N2: no report without pass-start, no report of a closed pass, no review before its report."""
+        worktree = Path(self.start_ok()["worktree"])
+        skipped = [{"ref": ref, "outcome": "skipped", "reason": "Hors du repo."} for ref in (3, 5, 12)]
+        self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": skipped})
+        code, out, err = self.run_main(["validate", self.run_dir, KEY, "report", "--pass", "1"])
+        self.assertEqual(code, 6, err)
+        self.assertTrue(any("pass-start" in error for error in json.loads(out)["errors"]), out)
+        self.first_pass_from(worktree)
+        self.review(1, r3="ok", r12="ok")
+        code, out, err = self.run_main(["validate", self.run_dir, KEY, "report", "--pass", "1"])
+        self.assertEqual(code, 6, err)
+        self.assertIn("la passe 1 est close : sa revue est enregistrée", json.loads(out)["errors"])
+        self.assertEqual(self.pass_start(2)[0], 0)
+        self.write_doc("review-2.json", {"key": KEY, "pass": 2, "rows": [], "attention": []})
+        code, out, err = self.run_main(["validate", self.run_dir, KEY, "review", "--pass", "2"])
+        self.assertEqual(code, 6, err)
+        self.assertIn("le rapport de la passe 2 n'est pas validé : validez-le avant la revue",
+                      json.loads(out)["errors"])
+        self.assertNotIn("2", self.key()["reviews"])
+        self.report(2, {"ref": 5, "outcome": "skipped", "reason": "Laissée aux devs par le lead."})
+        self.assertEqual(self.key()["reports"], [1, 2])
+        self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": skipped})
+        code, out, err = self.run_main(["validate", self.run_dir, KEY, "report", "--pass", "1"])
+        self.assertEqual(code, 6, err)
+        self.assertIn("la passe 1 est close : le rapport de la passe 2 est déjà validé",
+                      json.loads(out)["errors"])
+        self.validate("review", 2)
+        self.write_doc("review-3.json", {"key": KEY, "pass": 3, "rows": [], "attention": []})
+        code, out, err = self.run_main(["validate", self.run_dir, KEY, "review", "--pass", "3"])
+        self.assertEqual(code, 6, err)
+        self.assertTrue(any("pass-start" in error for error in json.loads(out)["errors"]), out)
+
+    def first_pass_from(self, worktree):
+        """The commits and report of first_pass, on a worktree already started."""
+        self.worktree = worktree
+        self.assertEqual(self.pass_start(1)[0], 0)
+        first = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
+        second = self.fixer_commit(worktree, "b12.txt", "fix(CQ-12): add b")
+        question = {"text": "Quel contact ?", "options": ["Équipe", "Client"], "default": "Client"}
+        self.report(1, self.fixed(3, first), self.fixed(12, second),
+                    {"ref": 5, "outcome": "question", "question": question})
+
+    def test_drop_remaps_the_bases_through_its_rewrite(self):
+        """N4: a kept base follows its new SHA, a dropped one its nearest kept ancestor."""
+        worktree = Path(self.start_ok()["worktree"])
+        start = self.pass_start(1)[1]["base"]
+        a3 = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
+        b12 = self.fixer_commit(worktree, "b12.txt", "fix(CQ-12): add b")
+        c5 = self.fixer_commit(worktree, "c5.txt", "fix(CQ-5): add c")
+        state = self.state()
+        key = state["keys"][KEY]
+        for ref, sha in (("3", a3), ("12", b12), ("5", c5)):
+            key["rows"][ref].update(outcome="fixed", commits=[sha], **{"pass": 1})
+        key["bases"] = {"1": start, "2": b12, "3": c5}
+        fix_state.save(self.run_dir, state)
+        drop = ["drop", self.run_dir, KEY, "--reason", "Revue bloquante."]
+        self.assertEqual(self.run_main(drop + ["--refs", "CQ-12"])[0], 0)
+        new_c5 = self.head(worktree)
+        self.assertNotEqual(new_c5, c5)
+        self.assertEqual(self.key()["bases"], {"1": start, "2": a3, "3": new_c5})
+        self.assertEqual(self.run_main(drop + ["--refs", "CQ-3"])[0], 0)
+        self.assertEqual(self.key()["bases"], {"1": start, "2": start, "3": self.head(worktree)})
+        for number, base in self.key()["bases"].items():
+            with self.subTest(base=number):
+                self.assertEqual(
+                    subprocess.run(["git", "-C", str(worktree), "merge-base", "--is-ancestor",
+                                    base, "HEAD"]).returncode, 0)
 
     def test_a_later_pass_needs_its_own_review(self):
         self.first_pass()

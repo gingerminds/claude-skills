@@ -28,6 +28,7 @@ OUT_OF_KEY = "Réf hors de cette MR"
 MERGE = "commit de fusion"
 ATTRIBUTION = "ligne d'attribution dans le message"
 REWRITTEN = "historique réécrit : le départ de la passe n'est plus dans la branche"
+OUT_OF_PASS = "commit hors de la passe {number} : {sha}"
 
 # Core and contributed code of each stack (repos[].stack of context.json). Patterns are
 # matched segment by segment, case aside: "**" stands for any number of folders, and a
@@ -127,11 +128,14 @@ def check_commits(worktree: Path, start_sha: str, rows: set, repo: dict, known: 
     return problems
 
 
-def validate_report(document, *, key: str, number: int, rows: dict, commits: list) -> tuple:
+def validate_report(document, *, key: str, number: int, rows: dict, commits: list,
+                    pass_commits: Optional[set] = None) -> tuple:
     """Return (rows for the state, errors in French) for fix/<repo>/<slug>/report-<number>.json.
 
     rows are the state rows of the key ({"3": {...}}), commits those of <start_sha>..HEAD
-    (fix_git.commits_in_range). Every problem is reported in one pass, because the fixer
+    (fix_git.commits_in_range). pass_commits, when given, holds the SHAs of
+    bases[number]..HEAD: a commit a fixed row reports for the first time (not yet among its
+    state commits) must be one of them, so that the review of the pass reads it. Every problem is reported in one pass, because the fixer
     rewrites its file once. The rows come back only when there is no error, each as
     {"ref", "outcome", "reason", "commits" (full SHAs), "attention"}; a question keeps its
     text in reason.
@@ -155,6 +159,13 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
             errors.append(f"ligne {ref_label(ref)} : {settled}")
             continue
         problems, entry = _report_row(item, ref, known, subjects)
+        if entry is not None and pass_commits is not None:
+            recorded = set(rows[str(ref)].get("commits") or [])
+            problems = [
+                OUT_OF_PASS.format(number=number, sha=sha[:12]) for sha in entry["commits"]
+                if sha not in recorded and sha not in pass_commits
+            ]
+            entry = None if problems else entry
         errors.extend(f"ligne {ref_label(ref)} : {problem}" for problem in problems)
         if entry is not None:
             entries.append(entry)

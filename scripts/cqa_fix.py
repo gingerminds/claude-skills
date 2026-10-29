@@ -357,7 +357,9 @@ def _cmd_pass_start(args, services: Services) -> int:
     """Record the head of the key's branch just before fixer pass N: the Base of review N.
 
     N must not be lower than a pass already started, and no report of pass N or later may be
-    validated yet; starting the same pass again before its report overwrites its base.
+    validated yet. Starting the same pass again before its report keeps its first base, so that
+    the commits of an interrupted run stay in bases[N]..HEAD; the base moves to HEAD only when
+    it is no longer in the branch.
     """
     run_dir = args.run_dir.resolve()
     if args.number < 1:
@@ -377,6 +379,10 @@ def _cmd_pass_start(args, services: Services) -> int:
             f"déjà validé ; la passe suivante est la passe {reported + 1}."
         )
     worktree = _key_worktree(run_dir, key, services.run)
+    kept = bases.get(str(args.number))
+    if fix_git.is_sha(kept) and fix_git.is_ancestor(worktree, services.run, kept, "HEAD"):
+        _emit({"pass": args.number, "base": kept})
+        return EXIT_OK
     head = fix_names.git_out(worktree, services.run, "rev-parse", "--verify", "--quiet", "HEAD")
     if not fix_git.is_sha(head):
         raise fix_git.GitRefused(f"git rev-parse HEAD a échoué dans {worktree}.")
@@ -398,12 +404,19 @@ def _cmd_validate(args, services: Services) -> int:
         return _validate_review(run_dir, state, key, args, document, errors)
     worktree = _key_worktree(run_dir, key, services.run)
     changed = _dev_checkout_changed(run_dir, key, services.run)
+    closed, base = _report_pass_errors(key, args.number, worktree, services.run)
     entries = []
     if document is not None:
         commits = fix_git.commits_in_range(worktree, services.run, key["start_sha"])
+        pass_commits = None
+        if base is not None:
+            pass_commits = {item["sha"] for item in fix_git.commits_in_range(
+                worktree, services.run, base)}
         entries, errors = fix_guard.validate_report(
-            document, key=args.key, number=args.number, rows=key["rows"], commits=commits
+            document, key=args.key, number=args.number, rows=key["rows"], commits=commits,
+            pass_commits=pass_commits,
         )
+    errors = closed + errors
     summary = {outcome: [] for outcome in fix_guard.REPORT_OUTCOMES}
     if not errors:
         for entry in entries:
@@ -419,6 +432,7 @@ def _cmd_validate(args, services: Services) -> int:
             summary[entry["outcome"]].append(entry["ref"])
         key["step"] = "fixed"
         key["pass"] = max(key.get("pass") or 0, args.number)
+        key["reports"] = sorted(set(_reports(key)) | {args.number})
         if _every_pass_reviewed(key):
             _raise_step(key, "reviewed")
         fix_state.save(run_dir, state)
@@ -437,6 +451,7 @@ def _validate_review(run_dir: Path, state: dict, key: dict, args, document, erro
         blocking, errors = fix_guard.validate_review(
             document, key=args.key, number=args.number, rows=key["rows"]
         )
+    errors = _review_pass_errors(key, args.number) + errors
     if not errors:
         reviews = _recorded(key, "reviews")
         reviews[str(args.number)] = {"blocking": blocking}
@@ -529,6 +544,10 @@ def _cmd_drop(args, services: Services) -> int:
     worktree = _key_worktree(run_dir, key, services.run)
     allowed = {int(ref) for ref, row in rows.items() if row.get("outcome") != "done_before"}
     linked = {int(ref): rows[ref].get("commits") or [] for ref in rows if int(ref) in allowed}
+    bases = _recorded(key, "bases")
+    before = ([item["sha"] for item in fix_git.commits_in_range(worktree, services.run,
+                                                                key["start_sha"])]
+              if bases else [])
     result = fix_git.drop_commits(
         worktree, services.run, branch=key["branch"], start_sha=key["start_sha"], refs=set(refs),
         linked=linked, allowed=allowed,
@@ -541,6 +560,12 @@ def _cmd_drop(args, services: Services) -> int:
                 f"retirée avec {_labels(refs)} : son correctif dépend d'un commit retiré"))
         else:
             row["commits"] = [rewritten.get(sha, sha) for sha in row.get("commits") or []]
+    if bases:
+        after = _branch_commits(worktree, services.run, key["start_sha"], key["branch"])
+        key["bases"] = {
+            number: _remapped(base, before, after, rewritten, key["start_sha"])
+            for number, base in bases.items()
+        }
     if _every_pass_reviewed(key):
         _raise_step(key, "reviewed")
     fix_state.save(run_dir, state)
@@ -548,6 +573,87 @@ def _cmd_drop(args, services: Services) -> int:
         raise fix_git.GitRefused(result["unattached"])
     _emit({"dropped": refs, "also_dropped": also})
     return EXIT_OK
+
+
+def _branch_commits(worktree: Path, run, start_sha: str, branch: str) -> set:
+    """Return the SHAs of <start_sha>..<branch>, read on the branch itself."""
+    listing = fix_names.git(worktree, run, "rev-list", f"{start_sha}..refs/heads/{branch}")
+    if listing.returncode != 0:
+        raise fix_git.GitRefused(f"git rev-list a échoué dans {worktree} : {listing.stderr.strip()}")
+    return set(listing.stdout.split())
+
+
+def _remapped(base: str, before: list, after: set, rewritten: dict, start_sha: str) -> str:
+    """Return where a pass base lands after a drop.
+
+    before lists <start_sha>..HEAD before the drop, oldest first (linear: drop refuses merges);
+    after holds the commits of the rebuilt branch. A kept commit maps to its new SHA (or stays);
+    a dropped one to the new SHA of its nearest kept first-parent ancestor, else start_sha. A
+    base outside the range (start_sha or older) does not move.
+    """
+    position = {sha: index for index, sha in enumerate(before)}
+    index = position.get(base)
+    if index is None:
+        return rewritten.get(base, base)
+    while index >= 0:
+        sha = before[index]
+        if sha in rewritten:
+            return rewritten[sha]
+        if sha in after:
+            return sha
+        index -= 1
+    return start_sha
+
+
+def _report_pass_errors(key: dict, number: int, worktree: Path, run) -> tuple:
+    """Return (errors, base) for report <number>: the pass must be started (pass-start), its
+    base still in the branch, and the pass still open (no later report, no review of it).
+    base is None when the pass cannot bound the commits of the report.
+    """
+    errors = []
+    base = _recorded(key, "bases").get(str(number))
+    if not fix_git.is_sha(base):
+        errors.append(f"passe {number} non commencée : lancez d'abord cqa_fix.py pass-start "
+                      f"--pass {number}")
+        base = None
+    elif not fix_git.is_ancestor(worktree, run, base, "HEAD"):
+        errors.append(f"la base de la passe {number} ({base[:12]}) n'est plus dans la branche : "
+                      f"relancez cqa_fix.py pass-start --pass {number}")
+        base = None
+    reported = key.get("pass") or 0
+    if number < reported:
+        errors.append(f"la passe {number} est close : le rapport de la passe {reported} est "
+                      "déjà validé")
+    if str(number) in _recorded(key, "reviews"):
+        errors.append(f"la passe {number} est close : sa revue est enregistrée")
+    return errors, base
+
+
+def _review_pass_errors(key: dict, number: int) -> list:
+    """Return why review <number> may not be recorded: its pass started, its report validated."""
+    errors = []
+    if not fix_git.is_sha(_recorded(key, "bases").get(str(number))):
+        errors.append(f"passe {number} non commencée : lancez d'abord cqa_fix.py pass-start "
+                      f"--pass {number}")
+    reported = number in _reports(key) or any(
+        isinstance(row, dict) and row.get("pass") == number for row in key["rows"].values()
+    )
+    if number > (key.get("pass") or 0) or not reported:
+        errors.append(f"le rapport de la passe {number} n'est pas validé : validez-le avant la "
+                      "revue")
+    return errors
+
+
+def _reports(key: dict) -> list:
+    """Return the passes whose report is validated ("reports" of the key, [] when absent)."""
+    value = key.get("reports")
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, int) for item in value):
+        raise fix_state.StateError(
+            f"{fix_state.STATE_FILE} : « reports » doit être une liste de numéros de passe."
+        )
+    return list(value)
 
 
 def _every_pass_reviewed(key: dict) -> bool:

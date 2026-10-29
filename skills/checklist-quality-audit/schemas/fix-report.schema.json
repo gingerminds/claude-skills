@@ -47,7 +47,7 @@
         "commits": {
           "type": "array",
           "items": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
-          "description": "Required for fixed, at least one: SHAs (full or abbreviated) of commits of <start_sha>..HEAD whose subject carries the ref of the row, or the covered_by ref."
+          "description": "Required for fixed, at least one: SHAs (full or abbreviated) of commits of <start_sha>..HEAD whose subject carries the ref of the row, or the covered_by ref. A commit not yet recorded for the row in fix/state.json must lie in bases[N]..HEAD (made during pass N, after pass-start), else « commit hors de la passe N »."
         },
         "reason": {
           "type": ["string", "null"],
