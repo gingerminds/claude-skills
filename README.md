@@ -13,6 +13,8 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `ticket` | `/gm:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation, pièces jointes chargées à la demande — pour amorcer le contexte avant une session dev spécifique à la stack. Détecte la stack du projet pour router vers le bon skill dev, et classe le ticket en bug ou feature/refactor pour appliquer la discipline adaptée (hypothèse de cause racine, ou esquisse d'ampleur/approches). Orienté Mantis + GitLab. |
 | `drupal` | `/gm:drupal` | Expertise backend Drupal 10/11 — architecture, services, plugins, events, entités, cache, sécurité. |
 | `vue` | `/gm:vue` | Expertise frontend Vue 3 / Nuxt 3 — Composition API, composables, Pinia, SSR/SSG, TypeScript, architecture de composants. |
+| `react` | `/gm:react` | Expertise frontend React (dont Next.js) — hooks, architecture de composants, state client/serveur, data fetching, TypeScript. |
+| `angular` | `/gm:angular` | Expertise frontend Angular — composants standalone, RxJS, injection de dépendances, signals, formulaires réactifs. |
 | `laravel` | `/gm:laravel` | Expertise backend Laravel — Eloquent, migrations, form requests, services, queues, events, tests. |
 | `django` | `/gm:django` | Expertise backend Django — apps, modèles, ORM, migrations, DRF, forms/serializers, tests. |
 | `python` | `/gm:python` | Expertise Python générique (hors framework web) — packaging, typing, structure, erreurs, tests. |
@@ -94,12 +96,18 @@ claude-skills/
 │   │   ├── MAIN.md          #   route vers core + la nature (dev | review | security)
 │   │   ├── core.md  dev.md  review.md  security.md
 │   │   └── …
-│   └── vue/
-│       └── MAIN.md          # Forme 1 : fichier unique sectionné (## core / dev / review / security)
+│   ├── vue/
+│   │   └── MAIN.md          # Forme 1 : fichier unique sectionné (## core / dev / review / security)
+│   ├── react/
+│   │   └── MAIN.md
+│   └── angular/
+│       └── MAIN.md
 └── skills/
     ├── ticket/SKILL.md
     ├── drupal/SKILL.md      # point d'entrée : charge stack/drupal/MAIN.md (dev)
     ├── vue/SKILL.md         # point d'entrée : charge stack/vue/MAIN.md (dev)
+    ├── react/SKILL.md       # point d'entrée : charge stack/react/MAIN.md (dev)
+    ├── angular/SKILL.md     # point d'entrée : charge stack/angular/MAIN.md (dev)
     ├── laravel/SKILL.md     # point d'entrée : charge stack/laravel/MAIN.md (dev)
     ├── django/SKILL.md      # point d'entrée : charge stack/django/MAIN.md (dev)
     ├── python/SKILL.md      # point d'entrée : charge stack/python/MAIN.md (dev)
