@@ -5,6 +5,7 @@ import re
 import stat
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from cqa import fix_names
 from cqa.notion_read import write_json
@@ -140,6 +141,22 @@ def dev_fingerprint(repo_path, run) -> dict:
             for path, code in _status_entries(status)
         },
     }
+
+
+def fingerprint_changes(before: dict, after: dict) -> Optional[dict]:
+    """Return what changed between two fingerprints of the dev's checkout, or None.
+
+    paths lists the paths whose status entry changed, appeared or disappeared; head, branch
+    and stash say whether those moved.
+    """
+    old, new = before.get("status") or {}, after.get("status") or {}
+    changes = {
+        "paths": sorted(path for path in set(old) | set(new) if old.get(path) != new.get(path)),
+        "head": before.get("head") != after.get("head"),
+        "branch": before.get("branch") != after.get("branch"),
+        "stash": before.get("stash") != after.get("stash"),
+    }
+    return changes if any(changes.values()) else None
 
 
 def _checked(repo_path, run, label: str, *args: str) -> str:

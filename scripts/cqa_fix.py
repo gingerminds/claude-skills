@@ -16,10 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
 
-from cqa import fix_git, fix_gitlab, fix_names, fix_rows, fix_state
-from cqa.checklist import parse_refs
+from cqa import fix_git, fix_gitlab, fix_guard, fix_names, fix_rows, fix_state
+from cqa.checklist import parse_refs, ref_label
 from cqa.notion_read import write_json
 from cqa.rerun import latest_findings, read_grounded_findings
+from cqa.secrets import known_values_from_env
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -58,6 +59,9 @@ def main(argv, *, run=subprocess.run) -> int:
     except (ContextError, fix_state.StateError) as error:
         print(error, file=sys.stderr)
         return EXIT_CONTEXT
+    except fix_git.Refused as error:
+        print(error, file=sys.stderr)
+        return EXIT_REFUSED
     except (UsageError, fix_git.GitRefused, ValueError, OSError) as error:
         print(error, file=sys.stderr)
         return EXIT_USAGE
@@ -85,6 +89,19 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = _command(commands, "start", "branche et worktree d'une clé", _cmd_start)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help="clé <repo>/<slug> de fix/candidates.json")
+    sub = _command(commands, "validate", "contrôle un rapport ou une revue", _cmd_validate)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("kind", choices=("report", "review"), help="report-<N> ou review-<N>.json")
+    sub.add_argument("--pass", dest="number", type=int, required=True, help="numéro de la passe")
+    sub = _command(commands, "guard", "garde-fou sur les commits d'une clé", _cmd_guard)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub = _command(commands, "drop", "retire des lignes de la branche d'une clé", _cmd_drop)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("--refs", required=True, help="Réf à retirer, séparées par des virgules")
+    sub.add_argument("--reason", required=True, help="raison, en français, donnée dans la MR")
     sub = _command(commands, "abandon", "abandonne la passe en cours", _cmd_abandon)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     return parser
@@ -249,10 +266,7 @@ def _cmd_stage(args, services: Services) -> int:
 def _cmd_start(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
-    key = state["keys"].get(args.key)
-    if key is None:
-        known = ", ".join(state["keys"]) or "aucune"
-        raise UsageError(f"Clé inconnue : {args.key} (clés de la passe : {known}).")
+    key = _key(state, args.key)
     path = _repo_path(run_dir, key["repo"])
     worktree = _worktree_path(run_dir, key)
     if key.get("branch") is None:
@@ -288,6 +302,115 @@ def _cmd_start(args, services: Services) -> int:
         "branch": key["branch"], "worktree": str(worktree), "base": key["base"],
         "start_sha": key["start_sha"], "reused": key["reused"], "done_refs": done_refs,
     })
+    return EXIT_OK
+
+
+def _cmd_validate(args, services: Services) -> int:
+    run_dir = args.run_dir.resolve()
+    if args.number < 1:
+        raise UsageError("--pass : un numéro de passe à partir de 1 est attendu.")
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    document, errors = _read_key_file(run_dir, key, f"{args.kind}-{args.number}.json")
+    if args.kind == "review":
+        return _validate_review(run_dir, state, key, args, document, errors)
+    worktree = _key_worktree(run_dir, key, services.run)
+    changed = _dev_checkout_changed(run_dir, key, services.run)
+    entries = []
+    if document is not None:
+        commits = fix_git.commits_in_range(worktree, services.run, key["start_sha"])
+        entries, errors = fix_guard.validate_report(
+            document, key=args.key, number=args.number, rows=key["rows"], commits=commits
+        )
+    summary = {outcome: [] for outcome in fix_guard.REPORT_OUTCOMES}
+    if not errors:
+        for entry in entries:
+            key["rows"][str(entry["ref"])].update(
+                outcome=entry["outcome"], reason=entry["reason"], commits=entry["commits"],
+                attention=entry["attention"], **{"pass": args.number},
+            )
+            summary[entry["outcome"]].append(entry["ref"])
+        key["step"] = "fixed"
+        key["pass"] = max(key.get("pass") or 0, args.number)
+        fix_state.save(run_dir, state)
+    _emit({
+        "ok": not errors, "errors": errors,
+        "rows": {outcome: sorted(refs) for outcome, refs in summary.items()},
+        "dev_checkout_changed": changed,
+    })
+    return EXIT_CONTEXT if errors else EXIT_OK
+
+
+def _validate_review(run_dir: Path, state: dict, key: dict, args, document, errors: list) -> int:
+    """Check review-<N>.json; a review without blocking verdict moves the key to reviewed."""
+    blocking = []
+    if document is not None:
+        blocking, errors = fix_guard.validate_review(
+            document, key=args.key, number=args.number, rows=key["rows"]
+        )
+    if not errors and not blocking:
+        key["step"] = "reviewed"
+        fix_state.save(run_dir, state)
+    _emit({"ok": not errors, "errors": errors, "blocking": blocking})
+    return EXIT_CONTEXT if errors else EXIT_OK
+
+
+def _cmd_guard(args, services: Services) -> int:
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    worktree = _key_worktree(run_dir, key, services.run)
+    problems = fix_guard.check_commits(
+        worktree, key["start_sha"], {int(ref) for ref in key["rows"]}, _repo(run_dir, key["repo"]),
+        known_values_from_env(), services.run,
+    )
+    _emit({"ok": not problems, "problems": problems})
+    if problems:
+        print(f"Garde-fou : {len(problems)} problème(s) sur la branche {key['branch']}, "
+              "détail dans « problems ».", file=sys.stderr)
+        return EXIT_REFUSED
+    return EXIT_OK
+
+
+def _cmd_drop(args, services: Services) -> int:
+    run_dir = args.run_dir.resolve()
+    refs = parse_refs(args.refs)
+    reason = args.reason.strip()
+    if not refs:
+        raise UsageError("--refs : au moins une Réf est attendue (CQ-3).")
+    if not reason or len(reason) > fix_guard.MAX_REASON:
+        raise UsageError(
+            f"--reason : une raison en français de {fix_guard.MAX_REASON} caractères au plus "
+            "est attendue."
+        )
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    rows = key["rows"]
+    unknown = [ref for ref in refs if str(ref) not in rows]
+    if unknown:
+        raise UsageError(f"Réf absentes de la clé {args.key} : {_labels(unknown)}.")
+    before = [ref for ref in refs if rows[str(ref)].get("outcome") == "done_before"]
+    if before:
+        raise fix_git.Refused(
+            f"{_labels(before)} : déjà sur la branche avant cette passe, rien n'a été retiré."
+        )
+    worktree = _key_worktree(run_dir, key, services.run)
+    allowed = {int(ref) for ref, row in rows.items() if row.get("outcome") != "done_before"}
+    linked = {int(ref): rows[ref].get("commits") or [] for ref in rows if int(ref) in allowed}
+    result = fix_git.drop_commits(
+        worktree, services.run, branch=key["branch"], start_sha=key["start_sha"], refs=set(refs),
+        linked=linked, allowed=allowed,
+    )
+    rewritten = result["rewritten"]
+    also = sorted(set(result["dropped"]) - set(refs))
+    for ref, row in rows.items():
+        if int(ref) in result["dropped"]:
+            row.update(outcome="dropped", commits=[], reason=reason if int(ref) in refs else (
+                f"retirée avec {_labels(refs)} : son correctif dépend d'un commit retiré"))
+        else:
+            row["commits"] = [rewritten.get(sha, sha) for sha in row.get("commits") or []]
+    fix_state.save(run_dir, state)
+    _emit({"dropped": refs, "also_dropped": also})
     return EXIT_OK
 
 
@@ -327,16 +450,83 @@ def _pass_state(run_dir: Path) -> dict:
     return state
 
 
+def _key(state: dict, name: str) -> dict:
+    key = state["keys"].get(name)
+    if key is None:
+        known = ", ".join(state["keys"]) or "aucune"
+        raise UsageError(f"Clé inconnue : {name} (clés de la passe : {known}).")
+    return key
+
+
+def _started_key(state: dict, name: str) -> dict:
+    """Return a key that has its branch and worktree; exit 2 before its first start."""
+    key = _key(state, name)
+    if key.get("step") == "selected" or not key.get("branch"):
+        raise UsageError(
+            f"La clé {name} n'a pas encore de branche ni de worktree : "
+            "lancez d'abord cqa_fix.py start."
+        )
+    if not fix_git.is_sha(key.get("start_sha")):
+        raise fix_state.StateError(
+            f"{fix_state.STATE_FILE} : « start_sha » de la clé {name} est invalide."
+        )
+    return key
+
+
+def _key_worktree(run_dir: Path, key: dict, run) -> Path:
+    """Return the worktree of a started key, checked to be a worktree on the key's branch."""
+    worktree = _worktree_path(run_dir, key)
+    top = None
+    if worktree.is_dir():
+        top = fix_names.git_out(worktree, run, "rev-parse", "--show-toplevel")
+    if top is None or Path(top).resolve() != worktree.resolve():
+        raise UsageError(f"Le worktree {worktree} est absent : relancez cqa_fix.py start.")
+    branch = fix_names.git_out(worktree, run, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch != key["branch"]:
+        raise UsageError(
+            f"Le worktree {worktree} n'est plus sur la branche {key['branch']} : remettez-l'y, "
+            "puis relancez."
+        )
+    return worktree
+
+
+def _read_key_file(run_dir: Path, key: dict, name: str) -> tuple:
+    """Return (document, []) for a file of the key folder, or (None, [error])."""
+    relative = f"fix/{key['repo']}/{key['slug']}/{name}"
+    try:
+        return json.loads((run_dir / relative).read_text(encoding="utf-8")), []
+    except FileNotFoundError:
+        return None, [f"{relative} est introuvable : le sous-agent n'a pas écrit son fichier."]
+    except (OSError, ValueError) as error:
+        return None, [f"{relative} est illisible : {error}"]
+
+
+def _dev_checkout_changed(run_dir: Path, key: dict, run):
+    before = key.get("dev_fingerprint")
+    if not isinstance(before, dict):
+        return None
+    after = fix_state.dev_fingerprint(_repo_path(run_dir, key["repo"]), run)
+    return fix_state.fingerprint_changes(before, after)
+
+
+def _labels(refs) -> str:
+    return ", ".join(ref_label(ref) for ref in refs)
+
+
 def _worktree_path(run_dir: Path, key: dict) -> Path:
     return run_dir / "fix" / key["repo"] / key["slug"] / "wt"
 
 
-def _repo_path(run_dir: Path, name: str) -> str:
+def _repo(run_dir: Path, name: str) -> dict:
     for repo in _load_context(run_dir).get("repos") or []:
         if isinstance(repo, dict) and repo.get("name") == name:
             if isinstance(repo.get("path"), str) and repo["path"]:
-                return repo["path"]
+                return repo
     raise ContextError(f"context.json : le repo « {name} » est absent ou sans chemin (« path »).")
+
+
+def _repo_path(run_dir: Path, name: str) -> str:
+    return _repo(run_dir, name)["path"]
 
 
 def _base(run_dir: Path, name: str) -> str:

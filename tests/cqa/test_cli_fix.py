@@ -17,9 +17,9 @@ REMOTE = "git@gitlab.example.org:acme/shop.git"
 
 
 class FixCase(unittest.TestCase):
-    def run_main(self, argv, run=subprocess.run):
+    def run_main(self, argv, run=subprocess.run, env=None):
         out, err = io.StringIO(), io.StringIO()
-        with clean_environ():
+        with clean_environ(env):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = cqa_fix.main([str(item) for item in argv], run=run)
         return code, out.getvalue(), err.getvalue()
@@ -319,6 +319,24 @@ class PassTest(FixCase):
         (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
         self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 6)
 
+    def test_key_commands_need_a_started_key(self):
+        self.assertEqual(self.open()[0], 0)
+        key = "front/securite"
+        for argv in (
+            ["validate", self.run_dir, key, "report", "--pass", "1"],
+            ["validate", self.run_dir, key, "review", "--pass", "1"],
+            ["guard", self.run_dir, key],
+            ["drop", self.run_dir, key, "--refs", "CQ-3", "--reason", "Hors-scope."],
+        ):
+            with self.subTest(command=argv[0]):
+                code, out, err = self.run_main(argv)
+                self.assertEqual(code, 2, err)
+                self.assertIn("cqa_fix.py start", err)
+        self.assertEqual(self.state()["keys"][key]["rows"]["3"]["outcome"], "pending")
+        code, out, err = self.run_main(["guard", self.run_dir, "front/nothing"])
+        self.assertEqual(code, 2)
+        self.assertIn("front/nothing", err)
+
     def test_abandon_without_a_pass_exits_2(self):
         code, out, err = self.run_main(["abandon", self.run_dir])
         self.assertEqual(code, 2)
@@ -340,7 +358,8 @@ class PassTest(FixCase):
 
 class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
-        for name in ("doctor", "candidates", "open", "stage", "start", "abandon"):
+        for name in ("doctor", "candidates", "open", "stage", "start", "validate", "guard", "drop",
+                     "abandon"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)
 

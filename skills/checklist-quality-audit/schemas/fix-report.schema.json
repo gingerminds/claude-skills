@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Report of the fixer for one key and one pass of the fix mode",
+  "description": "Content of fix/<repo>/<slug>/report-<N>.json, checked by cqa_fix.py validate <run_dir> <key> report --pass <N> (exit 6 with the list of errors). One row per row of the dispatch; every row still pending in the state must be there. Texts a reviewer or a lead dev reads (change, uat, reason, question, attention) are written in French. A valid report updates the rows of fix/state.json.",
+  "type": "object",
+  "required": ["key", "pass", "rows"],
+  "properties": {
+    "key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Key <repo>/<slug>, as in the Fix: field of the dispatch."
+    },
+    "pass": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of the pass, as in the Pass: field of the dispatch."
+    },
+    "rows": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/row"},
+      "description": "One entry per row. A ref that is not a row of the key, or that appears twice, is rejected."
+    }
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "required": ["ref", "outcome"],
+      "properties": {
+        "ref": {
+          "type": "integer",
+          "description": "Ref of the checklist row, as an integer (107 for CQ-107)."
+        },
+        "outcome": {
+          "enum": ["fixed", "skipped", "question"],
+          "description": "fixed: corrected by commits of the branch. skipped: not attempted or given up, with the reason. question: a decision is missing, the row waits for the answer."
+        },
+        "change": {
+          "type": ["string", "null"],
+          "maxLength": 600,
+          "description": "Required for fixed: what changed, in French, 1 to 600 characters."
+        },
+        "uat": {
+          "type": ["string", "null"],
+          "maxLength": 600,
+          "description": "Required for fixed: the manual acceptance test a reviewer runs, in French, 1 to 600 characters."
+        },
+        "commits": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
+          "description": "Required for fixed, at least one: SHAs (full or abbreviated) of commits of <start_sha>..HEAD whose subject carries the ref of the row, or the covered_by ref."
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "maxLength": 300,
+          "description": "Required for skipped: why, in French, 1 to 300 characters (for example: déjà corrigé sur develop)."
+        },
+        "question": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/question"}],
+          "description": "Required for question."
+        },
+        "covered_by": {
+          "type": ["integer", "null"],
+          "description": "fixed only: the ref of another row of the key whose commit also fixes this row (a commit carries one row only)."
+        },
+        "attention": {
+          "type": ["string", "null"],
+          "maxLength": 400,
+          "description": "Optional: what the reviewer should look at closely, in French (for a Semi-auto row, the À valider of the finding)."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"outcome": {"const": "fixed"}}},
+          "then": {
+            "required": ["change", "uat", "commits"],
+            "properties": {
+              "change": {"type": "string", "minLength": 1},
+              "uat": {"type": "string", "minLength": 1},
+              "commits": {"minItems": 1}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "skipped"}}},
+          "then": {
+            "required": ["reason"],
+            "properties": {"reason": {"type": "string", "minLength": 1}}
+          }
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "question"}}},
+          "then": {
+            "required": ["question"],
+            "properties": {"question": {"$ref": "#/$defs/question"}}
+          }
+        }
+      ]
+    },
+    "question": {
+      "type": "object",
+      "required": ["text", "options", "default"],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600,
+          "description": "The question for the lead, in French. Its text is kept as the reason of the row in the state."
+        },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 200},
+          "description": "The possible answers, in French, 2 to 4."
+        },
+        "default": {
+          "type": "string",
+          "description": "What the fixer would do without an answer: one of the options."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "key": "front/securite",
+      "pass": 1,
+      "rows": [
+        {
+          "ref": 107,
+          "outcome": "fixed",
+          "change": "Ajoute les en-têtes de sécurité dans la configuration du serveur web du thème.",
+          "uat": "Ouvrir la page d'accueil et vérifier l'en-tête X-Content-Type-Options dans les outils du navigateur.",
+          "commits": ["1a2b3c4d5e6f"],
+          "reason": null,
+          "question": null,
+          "covered_by": null,
+          "attention": null
+        },
+        {
+          "ref": 112,
+          "outcome": "question",
+          "change": null,
+          "uat": null,
+          "commits": [],
+          "reason": null,
+          "question": {
+            "text": "Quel contact mettre dans security.txt ?",
+            "options": ["L'adresse de l'équipe technique", "L'adresse du client"],
+            "default": "L'adresse de l'équipe technique"
+          },
+          "covered_by": null,
+          "attention": null
+        }
+      ]
+    }
+  ]
+}

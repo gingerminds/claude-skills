@@ -156,7 +156,7 @@ claude-skills/
     ├── checklist-quality-audit/
     │   ├── SKILL.md         # orchestrateur de l'audit PRE-MEL
     │   ├── references/      # lues au fil des étapes de l'audit
-    │   └── schemas/         # finding.schema.json (contrat des sous-agents)
+    │   └── schemas/         # finding, fix-report et fix-review (contrats des sous-agents)
     ├── cqa/SKILL.md         # alias /gm:cqa de checklist-quality-audit
     └── archi-c4/
         ├── SKILL.md

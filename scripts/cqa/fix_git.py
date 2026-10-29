@@ -2,8 +2,10 @@
 
 Every command goes through fix_names.git (hooks of the repo disabled). Nothing here checks
 out, resets, stashes or deletes anything in the dev's own working tree, and no branch gets
-an upstream: a new branch is created with --no-track.
+an upstream: a new branch is created with --no-track. Only drop_commits rewrites a branch,
+inside the key's own worktree, and never a commit that a remote already has.
 """
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -14,10 +16,15 @@ CHECKED_OUT = (
     "La branche {branch} est extraite dans votre dossier : changez de branche, puis relancez."
 )
 _MAX_SUFFIX = 1000
+_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
 class GitRefused(Exception):
     """A git situation the fix mode does not change on its own, worded for the lead."""
+
+
+class Refused(Exception):
+    """A change of a fix branch that a guard refuses, worded for the lead (exit 5)."""
 
 
 def open_new(path, run, *, slug: str, flight: dict, push: str, base: str, worktree: Path) -> dict:
@@ -125,6 +132,12 @@ def rev(path, run, ref: str) -> Optional[str]:
     return git_out(path, run, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
 
 
+def is_ancestor(path, run, ancestor: str, descendant: str) -> bool:
+    """Return True when ancestor is descendant or one of its ancestors."""
+    found = fix_names.git(path, run, "merge-base", "--is-ancestor", ancestor, descendant)
+    return found.returncode == 0
+
+
 def worktrees(path, run) -> list:
     """Return the worktrees of the repo, main one first: [{"path", "branch"}]."""
     result = fix_names.git(path, run, "worktree", "list", "--porcelain")
@@ -169,6 +182,126 @@ def refs_between(path, run, base_ref: str, tip: str) -> list:
     return sorted(ref for ref in refs if ref is not None)
 
 
+def is_sha(text) -> bool:
+    """Return True for a full commit SHA (40 or 64 lowercase hex digits)."""
+    return isinstance(text, str) and _SHA.fullmatch(text) is not None
+
+
+def commits_in_range(path, run, start_sha: str) -> list:
+    """Return the commits of <start_sha>..HEAD, parents before children.
+
+    Each is {"sha", "parents", "message", "ref"}: ref is the checklist ref of the first line
+    of the message, or None.
+    """
+    log = fix_names.git(
+        path, run, "log", "-z", "--reverse", "--topo-order", "--no-show-signature",
+        "--format=%H%x00%P%x00%B", f"{start_sha}..HEAD",
+    )
+    if log.returncode != 0:
+        raise GitRefused(
+            f"git log {start_sha[:12]}..HEAD a échoué dans {path} : {log.stderr.strip()}"
+        )
+    fields = log.stdout.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    commits = []
+    for index in range(0, len(fields), 3):
+        record = fields[index:index + 3]
+        if len(record) != 3 or not is_sha(record[0]):
+            raise GitRefused(f"git log {start_sha[:12]}..HEAD : sortie illisible dans {path}.")
+        sha, parents, message = record
+        commits.append({
+            "sha": sha,
+            "parents": parents.split(),
+            "message": message,
+            "ref": fix_names.ref_of_subject(message.split("\n", 1)[0]),
+        })
+    return commits
+
+
+def drop_commits(worktree: Path, run, *, branch: str, start_sha: str, refs: set, linked: dict,
+                 allowed: set) -> dict:
+    """Rebuild the branch of worktree without the commits of refs, from <start_sha>..HEAD.
+
+    Left out: the commits whose subject carries a dropped ref, then the rows whose recorded
+    commits (linked: ref -> SHAs) include a left-out commit, until nothing changes. The
+    commits kept after the first left-out one are replayed by cherry-pick on a detached HEAD;
+    a commit that does not replay drops its ref as well (when it is in allowed) and the replay
+    starts again. The branch then moves to the new head, only if it has not moved meanwhile.
+
+    Returns {"dropped": refs dropped (refs included), "rewritten": {old SHA: new SHA}}.
+    Raises Refused, with the branch and the worktree unchanged, for a rewritten history or a
+    merge in the range, uncommitted changes, a left-out commit already on a remote, or a
+    commit without an allowed ref that does not replay.
+    """
+    if not is_ancestor(worktree, run, start_sha, "HEAD"):
+        raise Refused(
+            f"La branche {branch} ne contient plus le départ de la passe ({start_sha[:12]}) : "
+            "son historique a été réécrit, rien n'a changé."
+        )
+    commits = commits_in_range(worktree, run, start_sha)
+    merge = next((commit for commit in commits if len(commit["parents"]) > 1), None)
+    if merge is not None:
+        raise Refused(
+            f"La branche {branch} contient le commit de fusion {merge['sha'][:12]} depuis le "
+            "départ de la passe : retirez-le à la main, rien n'a changé."
+        )
+    dropped = set(refs)
+    removed = _left_out(commits, dropped, linked)
+    if not removed:
+        return {"dropped": dropped, "rewritten": {}}
+    status = fix_names.git(worktree, run, "status", "--porcelain=v1", "-uall")
+    if status.returncode != 0 or status.stdout.strip():
+        raise Refused(
+            f"Le worktree {worktree} a des modifications non commitées : commitez-les ou "
+            "retirez-les, puis relancez. Rien n'a changé."
+        )
+    old_head = rev(worktree, run, "HEAD")
+    checked = len(commits)
+    while True:
+        index = next(i for i, commit in enumerate(commits) if commit["sha"] in removed)
+        if index < checked:
+            remote = _remote_with(worktree, run, branch, commits[index]["sha"])
+            if remote is not None:
+                if checked < len(commits):
+                    _restore(worktree, run, branch)
+                raise Refused(
+                    f"Le commit {commits[index]['sha'][:12]} ({_subject(commits[index])}) est "
+                    f"déjà sur {remote} : il ne peut plus être retiré de la branche. "
+                    "Rien n'a changé."
+                )
+            checked = index
+        kept = [commit for commit in commits[index:] if commit["sha"] not in removed]
+        rewritten, failed = _replay(worktree, run, branch, commits[index]["parents"][0], kept)
+        if failed is None:
+            break
+        if failed["ref"] not in allowed:
+            _restore(worktree, run, branch)
+            raise Refused(
+                f"Le commit {failed['sha'][:12]} ({_subject(failed)}) ne se rejoue pas sans les "
+                "commits retirés et n'appartient à aucune ligne retirable : retirez-le à la "
+                "main. Rien n'a changé."
+            )
+        dropped.add(failed["ref"])
+        removed = _left_out(commits, dropped, linked)
+    new_head = rev(worktree, run, "HEAD")
+    moved = fix_names.git(
+        worktree, run, "update-ref", "-m", "cqa_fix drop", f"refs/heads/{branch}", new_head,
+        old_head,
+    )
+    if moved.returncode != 0:
+        _restore(worktree, run, branch)
+        raise Refused(
+            f"La branche {branch} a bougé pendant le retrait : rien n'a changé, relancez."
+        )
+    attached = fix_names.git(worktree, run, "checkout", "-q", branch)
+    if attached.returncode != 0:
+        raise GitRefused(
+            f"Le worktree {worktree} n'a pas pu revenir sur {branch} : {attached.stderr.strip()}"
+        )
+    return {"dropped": dropped, "rewritten": rewritten}
+
+
 def _checkout(path, run, branch: str, push: str, worktree: Path, *, first: bool) -> str:
     """Add the worktree on an existing branch and return its head.
 
@@ -188,12 +321,12 @@ def _checkout(path, run, branch: str, push: str, worktree: Path, *, first: bool)
         _add_worktree(path, run, worktree, "--no-track", "-b", branch, str(worktree), source)
         return source
     if remote is not None and remote != local:
-        if _is_ancestor(path, run, local, remote):
+        if is_ancestor(path, run, local, remote):
             moved = fix_names.git(path, run, "branch", "--no-track", "-f", branch, remote)
             if moved.returncode != 0:
                 raise GitRefused(f"La branche {branch} n'a pas pu avancer : {moved.stderr.strip()}")
             local = remote
-        elif first or not _is_ancestor(path, run, remote, local):
+        elif first or not is_ancestor(path, run, remote, local):
             raise GitRefused(_ahead_message(path, run, branch, remote, local))
     _add_worktree(path, run, worktree, str(worktree), branch)
     return local
@@ -231,8 +364,69 @@ def _add_worktree(path, run, worktree: Path, *args: str) -> None:
         raise GitRefused(f"git worktree add a échoué pour {worktree} : {result.stderr.strip()}")
 
 
-def _is_ancestor(path, run, ancestor: str, descendant: str) -> bool:
-    return fix_names.git(path, run, "merge-base", "--is-ancestor", ancestor, descendant).returncode == 0
+def _left_out(commits: list, dropped: set, linked: dict) -> set:
+    """Grow dropped with the rows whose recorded commits are left out; return the left-out SHAs."""
+    while True:
+        removed = {commit["sha"] for commit in commits if commit["ref"] in dropped}
+        more = {
+            ref for ref, shas in linked.items()
+            if ref not in dropped and removed.intersection(shas or ())
+        }
+        if not more:
+            return removed
+        dropped.update(more)
+
+
+def _remote_with(worktree: Path, run, branch: str, sha: str) -> Optional[str]:
+    """Return a remote branch that has the commit, or None.
+
+    The rebuild rewrites every commit from the first left-out one, and a remote that has a
+    commit has all its ancestors, so checking that first commit is enough. The remote branch
+    is fetched first when it exists; a failed fetch leaves the known remote refs to decide.
+    """
+    fetch(worktree, run, f"+refs/heads/{branch}:refs/remotes/origin/{branch}")
+    found = fix_names.git(
+        worktree, run, "for-each-ref", f"--contains={sha}", "--format=%(refname:short)",
+        "refs/remotes/",
+    )
+    if found.returncode != 0:
+        raise GitRefused(f"git for-each-ref a échoué dans {worktree} : {found.stderr.strip()}")
+    remotes = found.stdout.split()
+    return remotes[0] if remotes else None
+
+
+def _replay(worktree: Path, run, branch: str, base: str, kept: list) -> tuple:
+    """Cherry-pick kept on a detached base; return (old -> new SHAs, first commit that failed).
+
+    A failed cherry-pick is aborted, so the worktree is clean on a detached HEAD.
+    """
+    detached = fix_names.git(worktree, run, "checkout", "-q", "--detach", base)
+    if detached.returncode != 0:
+        _restore(worktree, run, branch)
+        raise GitRefused(
+            f"git checkout --detach a échoué dans {worktree} : {detached.stderr.strip()}"
+        )
+    rewritten = {}
+    for commit in kept:
+        picked = fix_names.git(
+            worktree, run, "-c", "rerere.enabled=false", "cherry-pick", "--allow-empty",
+            commit["sha"],
+        )
+        if picked.returncode != 0:
+            fix_names.git(worktree, run, "cherry-pick", "--abort")
+            return rewritten, commit
+        rewritten[commit["sha"]] = rev(worktree, run, "HEAD")
+    return rewritten, None
+
+
+def _restore(worktree: Path, run, branch: str) -> None:
+    """Put the worktree back on its branch, which a failed rebuild has not moved."""
+    fix_names.git(worktree, run, "cherry-pick", "--abort")
+    fix_names.git(worktree, run, "checkout", "-q", "--force", branch)
+
+
+def _subject(commit: dict) -> str:
+    return commit["message"].split("\n", 1)[0]
 
 
 def _entries(flight: dict, name: str) -> list:
