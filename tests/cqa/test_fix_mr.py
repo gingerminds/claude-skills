@@ -478,9 +478,9 @@ class MrCase(GitCase):
     def write_doc(self, name, document):
         (self.folder / name).write_text(json.dumps(document), encoding="utf-8")
 
-    def reviewed(self, push="mr", fix=True):
+    def reviewed(self, push="mr", fix=True, mode="present"):
         """Open a pass, fix CQ-3 and skip CQ-5 in pass 1, then review: the key is reviewed."""
-        self.open_pass(push=push)
+        self.open_pass(push=push, mode=mode)
         started = self.start_ok()
         self.worktree = Path(started["worktree"])
         self.branch = started["branch"]
@@ -1106,6 +1106,31 @@ class PublishTest(MrCase):
         self.assertEqual(self.gitlab.calls, [])
         self.assertEqual(self.key()["step"], "published")
         self.assertFalse((self.run_dir / "fix" / "mr-links.json").exists())
+
+    def test_publish_refuses_during_an_autonomous_pass(self):
+        """I1: an autonomous pass pushes nothing during its key loop (stage keys)."""
+        for fix in (True, False):
+            with self.subTest(fix=fix):
+                self.reviewed(mode="autonomous", fix=fix)
+                self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+                code, out, err = self.cli("publish", KEY)
+                self.assertEqual(code, 5, err)
+                self.assertIn("Mode autonome : publication seulement à la fin de la passe "
+                              "(stage questions), rien n'a été poussé.", err)
+                self.assertEqual(self.remote(self.branch), "")
+                self.assertEqual(self.gitlab.calls, [])
+                self.assertEqual(self.key()["step"], "reviewed")
+                self.assertFalse((self.run_dir / "fix" / "mr-links.json").exists())
+                self.assertEqual(self.run_main(["abandon", self.run_dir])[0], 0)
+
+    def test_publish_of_an_autonomous_pass_passes_once_the_questions_stage_is_reached(self):
+        self.reviewed(mode="autonomous")
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.assertEqual(self.cli("stage", "questions")[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.remote(self.branch), self.head(self.worktree))
+        self.assertEqual(self.key()["step"], "published")
 
 
 class FinishTest(MrCase):

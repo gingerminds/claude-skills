@@ -91,7 +91,7 @@ class DoctorTest(FixCase):
             code, out, err = self.run_main(["doctor", run_dir], run=down)
             self.assertEqual(code, 0, err)
             entry = json.loads(out)["repos"][0]
-            self.assertEqual(entry["status"], "unauthenticated")
+            self.assertEqual(entry["status"], "unreachable")
             self.assertIsNone(entry["ahead"])
 
     def test_doctor_repo_without_path_exits_6(self):

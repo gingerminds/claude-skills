@@ -13,6 +13,7 @@ from cqa import fix_guard, fix_names
 
 NOT_RUN_WHY = "à lancer dans l'environnement du projet (shared/runner.md)"
 TOOLBOX_DOWN = "boîte à outils indisponible"
+STYLELINT_FAILED = "stylelint a échoué dans la boîte à outils"
 UNSUPPORTED = "Nom de fichier"
 STYLELINT = "stylelint (configuration du projet)"
 CHECKLIST_RULES = ("selector-class-pattern", "max-nesting-depth")
@@ -186,7 +187,9 @@ def run_checks(run, launcher: Path, check_dir: Path, worktree: Path, repo: str, 
         if toolbox and done.returncode == 0:
             checks.append(_stylelint_check(check_dir, repo, files, added))
         else:
-            checks.append(_check(STYLELINT, "not_run", [], TOOLBOX_DOWN))
+            # syntax.tsv is there only when the syntax ran: then the stylelint container failed
+            why = STYLELINT_FAILED if toolbox else TOOLBOX_DOWN
+            checks.append(_check(STYLELINT, "not_run", [], why))
     return checks + unsupported
 
 

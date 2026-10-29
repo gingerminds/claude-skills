@@ -87,6 +87,7 @@ class RunChecksTest(unittest.TestCase):
         self.configs = []
         self.report = []
         self.code = 0
+        self.after_syntax = 0
 
     def fake(self, command, **kwargs):
         self.calls.append(command)
@@ -101,7 +102,7 @@ class RunChecksTest(unittest.TestCase):
             for index, config in enumerate(self.configs, 1):
                 (raw / f"config-{index}.json").write_text(json.dumps(config), encoding="utf-8")
             (raw / "report.json").write_text(json.dumps(self.report), encoding="utf-8")
-            return done()
+            return done(self.after_syntax)
         raise AssertionError(command)
 
     def checks(self, files, added=None, third_party=None):
@@ -219,6 +220,15 @@ class RunChecksTest(unittest.TestCase):
                         "severity": "error", "text": "x"}]
         check = self.by_name(self.checks(["a.css"], {"a.css": {1}}))[STYLE]
         self.assertEqual(check, {"name": STYLE, "status": "not_run", "files": [], "detail": NO_CONFIG})
+
+    def test_a_stylelint_failure_in_the_toolbox_is_not_a_missing_toolbox(self):
+        """M6: the syntax ran in the toolbox, then its stylelint container failed."""
+        self.tsv = "ok\tphp -l\ta.php\t\n"
+        self.after_syntax = 1
+        checks = self.by_name(self.checks(["a.php", "s.css"], {"s.css": {1}}))
+        self.assertEqual(checks[PHP]["status"], "passed")
+        self.assertEqual(checks[STYLE], {"name": STYLE, "status": "not_run", "files": [],
+                                         "detail": "stylelint a échoué dans la boîte à outils"})
 
     def test_check_falls_back_to_host_binaries(self):
         self.code = 2

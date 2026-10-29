@@ -199,7 +199,7 @@ class SelectTest(unittest.TestCase):
 
     def test_repo_access_shapes_the_keys(self):
         for status, ready in (("no_push", False), ("unauthenticated", False),
-                              ("glab_missing", False), ("ok", True)):
+                              ("unreachable", False), ("glab_missing", False), ("ok", True)):
             result = select([row(1)], {1: finding(1)}, access=[{"repo": "front", "status": status}])
             self.assertEqual(result["keys"][0]["push_ready"], ready, status)
         result = select([row(1)], {1: finding(1)},

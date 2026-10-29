@@ -122,7 +122,10 @@ class AccessTest(unittest.TestCase):
                 return done(command, out=out)
             api = command[2]
             if api == "user":
-                return done(command, 0, '{"username": "camille"}') if user else done(command, 1)
+                if user is True:
+                    return done(command, 0, '{"username": "camille"}')
+                refused = user if isinstance(user, str) else "glab: 401 Unauthorized (HTTP 401)"
+                return done(command, 1, "", refused)
             if api == "version":
                 return done(command, out=version)
             body = {"default_branch": "main", "permissions": {"project_access": {"access_level": level}}}
@@ -154,6 +157,24 @@ class AccessTest(unittest.TestCase):
         self.assertEqual((ok["host"], ok["project"], ok["repo"]), (HOST, "acme/shop", "shop"))
         main = fix_gitlab.repo_access(self.fake(develop=False), self.repo())
         self.assertEqual(main["base"], "main")
+
+    def test_a_network_failure_is_not_an_authentication_failure(self):
+        """M5: only an HTTP 401 or 403 of glab api user means the lead is not logged in."""
+        for stderr, status in (
+            ("glab: 401 Unauthorized (HTTP 401)", "unauthenticated"),
+            ("glab: 403 Forbidden (HTTP 403)", "unauthenticated"),
+            ("Get \"https://gitlab.example.org/api/v4/user\": dial tcp: lookup "
+             "gitlab.example.org: no such host", "unreachable"),
+            ("Get \"https://gitlab.example.org/api/v4/user\": net/http: TLS handshake "
+             "timeout", "unreachable"),
+            ("", "unreachable"),
+        ):
+            with self.subTest(stderr=stderr):
+                calls = []
+                found = fix_gitlab.repo_access(self.fake(user=stderr, calls=calls), self.repo())
+                self.assertEqual(found["status"], status)
+                self.assertIsNone(found["user"])
+                self.assertEqual([command[2] for command in calls], ["user"])
 
     def test_group_access_level_counts(self):
         def run(command, **kwargs):

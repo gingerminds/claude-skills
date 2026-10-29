@@ -35,8 +35,10 @@ UNFINISHED = "Une passe fix est inachevée : reprenez-la ou abandonnez-la (cqa_f
 _REVIEW_FILE = re.compile(r"review-([0-9]+)\.json")
 NO_PASS = "Aucune passe fix en cours : lancez d'abord cqa_fix.py open."
 NEED_BODY = "Lancez d'abord cqa_fix.py mr-body."
-DIVERGED = "La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé."
+DIVERGED = fix_git.DIVERGED
 NOTHING_TO_PUBLISH = "Aucun commit sur la branche : ni push ni MR."
+AUTONOMOUS_KEYS = ("Mode autonome : publication seulement à la fin de la passe (stage questions), "
+                   "rien n'a été poussé.")
 STALE_BODY = "Description de MR périmée : relancez mr-body."
 NOTHING_PUSHED = "Rien n'a été poussé."
 UNREPORTED = "commit non rapporté par le fixer : {sha} {subject}"
@@ -762,10 +764,10 @@ def _cmd_mr_body(args, services: Services) -> int:
 def _cmd_publish(args, services: Services) -> int:
     """Push the key's branch, then create its draft MR or add to the description of its MR.
 
-    Nothing leaves the machine before every check passed: local pass, step, branch name,
-    state of the MR on GitLab, fresh description files, secrets, guard, every new commit
-    reported by the fixer, and a remote branch that HEAD contains. The push is a fast-forward
-    of that one branch, never forced.
+    Nothing leaves the machine before every check passed: local pass, autonomous pass still
+    in its key loop, step, branch name, state of the MR on GitLab, fresh description files,
+    secrets, guard, every new commit reported by the fixer, and a remote branch that HEAD
+    contains. The push is a fast-forward of that one branch, never forced.
     """
     run = services.run
     run_dir = args.run_dir.resolve()
@@ -773,6 +775,8 @@ def _cmd_publish(args, services: Services) -> int:
     key = _started_key(state, args.key)
     branch = key["branch"]
     _refuse_local(state, key)
+    if state.get("mode") == "autonomous" and state["stage"] == "keys":
+        raise fix_git.Refused(AUTONOMOUS_KEYS)
     _need_reviewed(key, args.key, "publish")
     if not fix_names.branch_matches(branch, fix_names.BRANCH_PREFIX, key["slug"]):
         raise fix_git.Refused(

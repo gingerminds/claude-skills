@@ -12,6 +12,7 @@ from tests.cqa.test_git_tools import commit, git as real_git
 
 PREFIX = fix_names.BRANCH_PREFIX
 DRY = fix_names.DRY_RUN_PREFIX
+DIVERGED = "La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé."
 HOST = "gitlab.example.org"
 HOOKS = ("post-checkout", "pre-commit", "commit-msg", "pre-push", "post-commit",
          "reference-transaction")
@@ -78,9 +79,9 @@ class GitCase(FixCase):
     def write_json(self, relative, value):
         (self.run_dir / relative).write_text(json.dumps(value), encoding="utf-8")
 
-    def open_pass(self, push="mr"):
+    def open_pass(self, push="mr", mode="present"):
         code, out, err = self.run_main(
-            ["open", self.run_dir, "--mode", "autonomous", "--push", push, "--notion", "no"])
+            ["open", self.run_dir, "--mode", mode, "--push", push, "--notion", "no"])
         self.assertEqual(code, 0, err)
         return json.loads(out)
 
@@ -386,6 +387,37 @@ class StartTest(GitCase):
         self.assertEqual(again, local)
         self.assertEqual(self.head(again["worktree"]), fixed)
         self.assertEqual(again["start_sha"], self.head(self.repo, "refs/remotes/origin/develop"))
+
+    def test_start_names_a_remote_branch_that_diverged(self):
+        """M1: a remote that moved while the branch has its own commits is a divergence, not
+        local commits to push: the lead integrates the remote commits by hand."""
+        branch = PREFIX + "securite"
+        self.push_branch(branch, "fix(CQ-107): x")
+        diverged = PREFIX + "qualite"
+        self.push_branch(diverged, "fix(CQ-20): remote")
+        real_git(self.repo, "fetch", "-q", "origin")
+        real_git(self.repo, "branch", "-q", "--no-track", diverged, f"origin/{diverged}")
+        real_git(self.repo, "checkout", "-q", diverged)
+        commit(self.repo, "local.txt", "fix(CQ-21): local only")
+        real_git(self.repo, "checkout", "-q", "develop")
+        self.push_branch(diverged, "fix(CQ-22): remote too", start=f"origin/{diverged}")
+        self.write_run(flight(open=[mr(12, branch, [107]), mr(14, diverged, [20, 22])]),
+                       slugs=("securite", "qualite"))
+        self.open_pass()
+        first = self.start_ok()
+        local = self.fixer_commit(first["worktree"], "f.txt", "fix(CQ-3): local")
+        self.finish()
+        self.push_branch(branch, "Apply 1 suggestion(s) to 1 file(s)", start=f"origin/{branch}")
+        for key, subject in (("front/securite", "fix(CQ-3): local"),
+                             ("front/qualite", "fix(CQ-21): local only")):
+            with self.subTest(key=key):
+                code, out, err = self.start(key)
+                self.assertEqual(code, 2, err)
+                self.assertIn(DIVERGED, err)
+                self.assertIn(subject, err)
+                self.assertNotIn("Poussez-les", err)
+        self.assertIn(local[:7], self.start()[2])
+        self.assertEqual(self.head(self.repo, f"refs/heads/{branch}"), local)
 
     def test_start_never_takes_over_a_branch_when_gitlab_is_unreadable(self):
         branch = PREFIX + "securite"

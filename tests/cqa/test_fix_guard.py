@@ -1125,6 +1125,24 @@ class ValidateReportTest(unittest.TestCase):
         self.assertEqual((errors, len(entries)), ([], 2))
 
 
+class ValidateReviewTest(unittest.TestCase):
+    """fix_guard.validate_review alone: review N judges the rows fixed in pass N only."""
+
+    def test_a_verdict_on_a_row_of_another_pass_is_an_error(self):
+        rows = {"3": {"outcome": "fixed", "commits": ["a" * 40], "pass": 1},
+                "5": {"outcome": "fixed", "commits": ["b" * 40], "pass": 2}}
+        document = {"key": KEY, "pass": 2, "attention": [], "rows": [
+            {"ref": 3, "verdict": "blocking", "notes": "L'en-tête manque sur les 404."},
+            {"ref": 5, "verdict": "ok", "notes": None},
+        ]}
+        blocking, errors = fix_guard.validate_review(document, key=KEY, number=2, rows=rows)
+        self.assertEqual((blocking, errors),
+                         ([], ["ligne CQ-3 : verdict sur une ligne d'une autre passe (1)"]))
+        document["rows"] = document["rows"][1:]
+        self.assertEqual(fix_guard.validate_review(document, key=KEY, number=2, rows=rows),
+                         ([], []))
+
+
 class SchemaTest(unittest.TestCase):
     def test_schemas_document_the_values_the_validator_accepts(self):
         report = json.loads((SCHEMAS / "fix-report.schema.json").read_text(encoding="utf-8"))

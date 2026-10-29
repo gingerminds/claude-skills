@@ -1,6 +1,7 @@
 """GitLab reading of the fix mode: access diagnostic and fixes already in flight."""
 import json
 import os
+import re
 from typing import Optional
 from urllib.parse import quote
 
@@ -9,6 +10,8 @@ from cqa.git_tools import _parse_remote
 
 _PUSH_LEVEL = 30
 NO_API_NOTE = "GitLab illisible : les MR existantes ne sont pas connues."
+# What glab prints when GitLab refuses the token; any other failure never reached GitLab.
+_REFUSED = re.compile(r"\b40[13]\b|unauthori[sz]ed|forbidden|glab auth login", re.IGNORECASE)
 
 
 def host_and_path(remote: str) -> tuple:
@@ -69,8 +72,10 @@ def _parse_pages(text: str, paginate: bool):
 def repo_access(run, repo: dict) -> dict:
     """Return the GitLab access diagnostic of a repo.
 
-    status is ok, not_gitlab, glab_missing, unauthenticated or no_push. user and base are
-    set when status is ok (base: develop when the remote has it, else the default branch).
+    status is ok, not_gitlab, glab_missing, unauthenticated (GitLab answered 401 or 403),
+    unreachable (glab api user failed without such an answer: network, VPN, proxy, DNS) or
+    no_push. user and base are set when status is ok (base: develop when the remote has it,
+    else the default branch).
     """
     result = {"repo": repo.get("name"), "host": None, "project": None,
               "status": "not_gitlab", "user": None, "base": None}
@@ -87,7 +92,8 @@ def repo_access(run, repo: dict) -> dict:
         result["status"] = "glab_missing"
         return result
     if user.returncode != 0:
-        result["status"] = "unauthenticated"
+        refused = _REFUSED.search(f"{user.stdout or ''}\n{user.stderr or ''}")
+        result["status"] = "unauthenticated" if refused else "unreachable"
         return result
     if glab_json(run, host, "version") is None:
         return result

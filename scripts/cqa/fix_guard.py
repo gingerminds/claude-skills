@@ -188,8 +188,9 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
 def validate_review(document, *, key: str, number: int, rows: dict) -> tuple:
     """Return (blocking refs, errors in French) for fix/<repo>/<slug>/review-<number>.json.
 
-    Every row the fixer reported fixed in this pass needs a verdict, and only fixed rows may
-    get one; a blocking verdict needs notes, which tell the fixer what to change.
+    Every row the fixer reported fixed in this pass needs a verdict, and only those rows may
+    get one (a row fixed in another pass belongs to that pass's review); a blocking verdict
+    needs notes, which tell the fixer what to change.
     """
     if not isinstance(document, dict):
         return [], ['la revue doit être un objet JSON {"key", "pass", "rows", "attention"}']
@@ -215,6 +216,12 @@ def validate_review(document, *, key: str, number: int, rows: dict) -> tuple:
         if outcome != "fixed":
             errors.append(
                 f"ligne {ref_label(ref)} : verdict sur une ligne non corrigée ({outcome})"
+            )
+            continue
+        other = rows[str(ref)].get("pass")
+        if other != number:
+            errors.append(
+                f"ligne {ref_label(ref)} : verdict sur une ligne d'une autre passe ({other})"
             )
             continue
         verdict = item.get("verdict")

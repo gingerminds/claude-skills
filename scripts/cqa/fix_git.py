@@ -15,6 +15,7 @@ from cqa.fix_names import git_out
 CHECKED_OUT = (
     "La branche {branch} est extraite dans votre dossier : changez de branche, puis relancez."
 )
+DIVERGED = "La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé."
 _MAX_SUFFIX = 1000
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
@@ -324,7 +325,8 @@ def _checkout(path, run, branch: str, push: str, worktree: Path, *, first: bool)
 
     With push mr the local branch first catches up with origin: created from it when absent,
     fast-forwarded when behind. Local commits that origin lacks stop the first start; on a
-    later start they are the pass's own unpublished commits and are kept.
+    later start they are the pass's own unpublished commits and are kept. A remote that moved
+    too (not contained in the local branch) stops any start: the branches diverged.
     """
     _refuse_if_checked_out(path, run, branch, worktree)
     remote = None
@@ -343,7 +345,9 @@ def _checkout(path, run, branch: str, push: str, worktree: Path, *, first: bool)
             if moved.returncode != 0:
                 raise GitRefused(f"La branche {branch} n'a pas pu avancer : {moved.stderr.strip()}")
             local = remote
-        elif first or not is_ancestor(path, run, remote, local):
+        elif not is_ancestor(path, run, remote, local):
+            raise GitRefused(_ahead_message(path, run, branch, remote, local, diverged=True))
+        elif first:
             raise GitRefused(_ahead_message(path, run, branch, remote, local))
     _add_worktree(path, run, worktree, str(worktree), branch)
     return local
@@ -366,9 +370,11 @@ def _refuse_if_checked_out(path, run, branch: str, worktree: Path) -> None:
         )
 
 
-def _ahead_message(path, run, branch: str, remote: str, local: str) -> str:
+def _ahead_message(path, run, branch: str, remote: str, local: str, *, diverged=False) -> str:
     log = fix_names.git(path, run, "log", "--format=%h %s", f"{remote}..{local}")
     commits = "; ".join(line for line in log.stdout.splitlines() if line.strip())
+    if diverged:
+        return f"{DIVERGED} Branche {branch}, commits locaux absents de origin/{branch} : {commits}."
     return (
         f"La branche locale {branch} porte des commits absents de origin/{branch} : {commits}. "
         "Poussez-les ou retirez-les vous-même, puis relancez."
