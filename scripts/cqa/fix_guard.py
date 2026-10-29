@@ -4,11 +4,14 @@ reports and the reviewer's verdicts.
 The guard judges only the commits of <start_sha>..HEAD: what a reused branch carried before
 the pass (a reviewer's suggestion, a merge of develop) is never judged again; before a commit,
 it judges the index and the planned message the same way. It names the labels of the secrets
-it finds and their line, never their values, with the same strict rules as the audit. Each
-problem has a kind: "form" (the message: convention, section, length, attribution, ref) is
-fixed by rewriting the message; "content" (paths, secrets, merge, rewritten history) drops the
-row; "suspect" is a heuristic secret alert (HEURISTIC_SECRET_LABELS) that the lead may waive
-for one line of a file (waivable, see cqa_fix.py waive-secret) or treat as content.
+it finds and their line, never their values, with the same strict rules as the audit: every
+changed file is scanned whole, as committed (bytes, no newline translation), and a secret is
+reported when one of its lines is added. Each problem has a kind: "form" (the message:
+convention, section, length, attribution, ref) is fixed by rewriting the message; "content"
+(paths, secrets, merge, rewritten history) drops the row; "suspect" is a heuristic secret
+alert (HEURISTIC_SECRET_LABELS) that the lead may waive for one line of a file (waivable, see
+cqa_fix.py waive-secret) or treat as content. A waiver is keyed on the content of the file
+(its blob): it holds while the file is unchanged, whatever its commit.
 """
 import fnmatch
 import json
@@ -17,9 +20,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-from cqa import fix_git, fix_names
+from cqa import fix_git, fix_names, fix_state
 from cqa.checklist import ref_label
-from cqa.secrets import scan_lines
+from cqa.secrets import scan_lines, scan_spans
 
 THIRD_PARTY = "code tiers (third_party_paths)"
 DEPENDENCY_DIR = "dossier de dépendances"
@@ -43,8 +46,9 @@ CONTENT = "content"
 SUSPECT = "suspect"
 # Secret labels found by a pattern on code, which a legitimate line can trigger (a password
 # read from a request, a constant read from the environment): the lead may waive them. A
-# known value, a private key or a provider token is never waived.
-HEURISTIC_SECRET_LABELS = frozenset({"credential_assignment", "credential_define"})
+# known value, a private key or a provider token is never waived. The state checks the
+# waivers it loads against the same set.
+HEURISTIC_SECRET_LABELS = fix_state.WAIVABLE_LABELS
 
 # Core and contributed code of each stack (repos[].stack of context.json). Patterns are
 # matched segment by segment, case aside: "**" stands for any number of folders, and a
@@ -113,7 +117,8 @@ _AS_IS = re.compile(
 )
 _DIFF = ("-U0", "--text", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
          "--src-prefix=a/", "--dst-prefix=b/")
-_HUNK = re.compile(r"@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,[0-9]+)? @@")
+# A hunk header of a patch without context: the added lines of the new file are +start,count.
+_HUNK = re.compile(rb"@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@")
 _C_ESCAPE = re.compile(r'\\([0-7]{3}|[abtnvfr"\\])')
 _C_ESCAPED = {"a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r",
               '"': '"', "\\": "\\"}
@@ -148,8 +153,10 @@ def check_commits(worktree: Path, start_sha: str, rows: dict, repo: dict, known:
     "reason", "kind", "waivable"}: ref is the ref of the commit subject (the stray one for
     "Réf hors de cette MR"), path is None for a problem of the whole commit; a secret has its
     label and its line (in the file, or in the message when path is None), other problems
-    None; kind is FORM, CONTENT or SUSPECT, and only a suspect of a file is waivable. Only the
-    added lines of the diffs, and the messages, are scanned for secrets.
+    None; kind is FORM, CONTENT or SUSPECT, and only a suspect of a file is waivable. Every
+    file a commit changes is scanned whole, as committed; a secret is reported, at the line
+    where it starts, when one of its lines is added by the commit. The messages are scanned
+    whole.
     """
     worktree = Path(worktree)
     problems = []
@@ -164,8 +171,9 @@ def check_commits(worktree: Path, start_sha: str, rows: dict, repo: dict, known:
             sha, ref, commit["message"], rows, repo, known,
             _changed_paths(worktree, run, f"git diff-tree {sha[:12]}", "diff-tree", "-r", "-z",
                            "--raw", "--root", "--no-renames", "--no-commit-id", sha),
-            _added_lines(worktree, run, f"git show {sha[:12]}", "-c", "core.quotePath=true",
-                         "show", "--format=", "--no-show-signature", *_DIFF, sha),
+            _added_ranges(worktree, run, f"git show {sha[:12]}", "-c", "core.quotePath=true",
+                          "show", "--format=", "--no-show-signature", *_DIFF, sha),
+            lambda path, sha=sha: _blob_text(worktree, run, f"{sha}:{path}"),
         )
     return problems
 
@@ -183,8 +191,9 @@ def check_staged(worktree: Path, message: str, rows: dict, repo: dict, known: li
         None, ref, message, rows, repo, known,
         _changed_paths(worktree, run, "git diff --cached", "diff", "--cached", "-z", "--raw",
                        "--no-renames"),
-        _added_lines(worktree, run, "git diff --cached", "-c", "core.quotePath=true", "diff",
-                     "--cached", *_DIFF),
+        _added_ranges(worktree, run, "git diff --cached", "-c", "core.quotePath=true", "diff",
+                      "--cached", *_DIFF),
+        lambda path: _blob_text(worktree, run, f":{path}"),
     )
     blobs = _staged_blobs(worktree, run)
     for item in problems:
@@ -196,19 +205,21 @@ def check_staged(worktree: Path, message: str, rows: dict, repo: dict, known: li
 def unwaived(problems: list, waivers: list, blob_of) -> list:
     """Return the problems that no waiver covers.
 
-    A waiver {"sha", "path", "line", "label"} covers a waivable problem with the same path,
-    line and label whose sha is the waiver's, or whose path has the waiver's sha as its blob
-    in that commit (blob_of(sha, path), None when unknown): a waiver given on the index still
-    covers the commit made from it.
+    A waiver {"blob", "path", "line", "label"} covers a waivable problem with the same path,
+    line and label whose file has that content: blob_of(sha, path) gives the blob of the
+    problem's path in its commit (the index blob itself for a staged problem), None when
+    unknown, and a problem without a blob is never covered. The waiver thus holds whatever the
+    commit (a drop replays it) and ends with any change of the file.
     """
     kept = []
     for item in problems:
-        matching = [waiver for waiver in waivers if item["waivable"] and (
-            waiver.get("path"), waiver.get("line"), waiver.get("label")
-        ) == (item["path"], item["line"], item["label"])]
-        shas = {waiver.get("sha") for waiver in matching}
-        if matching and (item["sha"] in shas or blob_of(item["sha"], item["path"]) in shas):
-            continue
+        if item["waivable"]:
+            blob = blob_of(item["sha"], item["path"])
+            if blob is not None and any(
+                (waiver.get("blob"), waiver.get("path"), waiver.get("line"), waiver.get("label"))
+                == (blob, item["path"], item["line"], item["label"]) for waiver in waivers
+            ):
+                continue
         kept.append(item)
     return kept
 
@@ -395,19 +406,29 @@ def _secret(sha, ref, path, label: str, line: int) -> dict:
 
 
 def _change_problems(sha, ref, message: str, rows: dict, repo: dict, known: list, paths: list,
-                     added: dict) -> list:
-    """Return the problems of one change: its message, its paths, the secrets of its lines."""
+                     added: dict, read) -> list:
+    """Return the problems of one change: its message, its paths, the secrets of its files.
+
+    added maps every changed path to the lines it adds in the new file; read(path) gives the
+    whole new content of a path (a gitlink has none and is a path problem already). A secret
+    whose span meets an added line is reported at the line where it starts.
+    """
     problems = [_problem(sha, ref, None, reason, kind)
                 for reason, kind in _message_reasons(message, rows)]
     problems += [_secret(sha, ref, None, label, line) for label, line in scan_lines(message, known)]
+    gitlinks = set()
     for path, gitlink in paths:
         reason = path_reason(path, repo, gitlink=gitlink)
         if reason:
             problems.append(_problem(sha, ref, path, reason, CONTENT))
+        if gitlink:
+            gitlinks.add(path)
     for path, lines in added.items():
-        text = "\n".join(content for _, content in lines)
-        problems += [_secret(sha, ref, path, label, lines[index - 1][0])
-                     for label, index in scan_lines(text, known)]
+        if not lines or path in gitlinks:
+            continue
+        problems += [_secret(sha, ref, path, label, first)
+                     for label, first, last in scan_spans(read(path), known)
+                     if not lines.isdisjoint(range(first, last + 1))]
     return problems
 
 
@@ -462,26 +483,41 @@ def _changed_paths(worktree: Path, run, label: str, *args: str) -> list:
     return changes
 
 
-def _added_lines(worktree: Path, run, label: str, *args: str) -> dict:
-    """Return {path: [(line in the new file, added line)]} of a patch with no context, binary
-    files included."""
-    result = fix_names.git(worktree, run, *args)
+def _added_ranges(worktree: Path, run, label: str, *args: str) -> dict:
+    """Return {path: set of the lines added in the new file} of a patch with no context,
+    binary files included, read as bytes so that a "\\r" never splits a line (the lines come
+    from the hunk headers, as git counts them)."""
+    result = fix_names.git(worktree, run, *args, binary=True)
     if result.returncode != 0:
-        raise fix_git.GitRefused(f"{label} a échoué : {result.stderr.strip()}")
-    added, path, in_hunk, number = {}, None, False, 0
-    for line in result.stdout.split("\n"):
-        if line.startswith("diff --git "):
+        raise fix_git.GitRefused(f"{label} a échoué : {_stderr(result)}")
+    added, path, in_hunk = {}, None, False
+    for line in result.stdout.split(b"\n"):
+        if line.startswith(b"diff --git "):
             path, in_hunk = None, False
-        elif line.startswith("@@") and (in_hunk or path is not None):
+        elif line.startswith(b"@@") and (in_hunk or path is not None):
             hunk = _HUNK.match(line)
-            in_hunk, number = hunk is not None, int(hunk.group(1)) if hunk else 0
-        elif not in_hunk:
-            if line.startswith("+++ "):
-                path = _diff_path(line[4:])
-        elif line.startswith("+"):
-            added.setdefault(path, []).append((number, line[1:]))
-            number += 1
+            in_hunk = hunk is not None
+            if hunk and path is not None:
+                start = int(hunk.group(1))
+                count = int(hunk.group(2)) if hunk.group(2) is not None else 1
+                added.setdefault(path, set()).update(range(start, start + count))
+        elif not in_hunk and line.startswith(b"+++ "):
+            path = _diff_path(line[4:].decode("utf-8", "replace"))
     return added
+
+
+def _blob_text(worktree: Path, run, spec: str) -> str:
+    """Return the content of a blob (<sha>:<path>, or :<path> for the index) as the audit
+    reads a file: bytes decoded as UTF-8, no newline translation."""
+    result = fix_names.git(worktree, run, "cat-file", "blob", spec, binary=True)
+    if result.returncode != 0:
+        raise fix_git.GitRefused(f"git cat-file {spec} a échoué : {_stderr(result)}")
+    return result.stdout.decode("utf-8", "replace")
+
+
+def _stderr(result) -> str:
+    text = result.stderr
+    return (text.decode("utf-8", "replace") if isinstance(text, bytes) else text).strip()
 
 
 def _diff_path(text: str) -> Optional[str]:

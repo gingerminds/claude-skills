@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cqa.secrets import known_values_from_env, redact, scan_lines, scan_text, scan_tree
+from cqa.secrets import (known_values_from_env, redact, scan_lines, scan_spans, scan_text,
+                         scan_tree)
 
 JWT = ".".join(["eyJhbGciOiJub25lIn0", "eyJzdWIiOiJ0ZXN0In0", "c2lnbmF0dXJlLXZhbHVl"])
 
@@ -411,6 +412,31 @@ class CodeCredentialsTest(unittest.TestCase):
         self.assertEqual(sorted({label for label, _ in scan_lines(text, ["s3cr3t-value"])}),
                          sorted(scan_text(text, ["s3cr3t-value"])))
         self.assertEqual(scan_lines("rien à signaler", ["s3cr3t-value"]), [])
+
+    def test_scan_spans_names_the_first_and_last_line_of_each_match(self):
+        """A define( or a private key over several lines spans them: the guard reports it when
+        one of its lines is added, at the line where it starts."""
+        text = "\n".join([
+            "<?php",
+            "define(",
+            "    'DB_PASSWORD',",
+            "    'Adm1nP@ss2024'",
+            ");",
+            self.WORDPRESS,
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "MIIEowIBAAKCAQEA",
+            "-----END RSA PRIVATE KEY-----",
+            "s3cr3t-value",
+        ])
+        self.assertEqual(scan_spans(text, ["s3cr3t-value"]), [
+            ("credential_define", 2, 4),
+            ("credential_assignment", 6, 6),
+            ("private_key", 7, 9),
+            ("known_value", 10, 10),
+        ])
+        self.assertEqual(scan_lines(text, ["s3cr3t-value"]),
+                         [(label, first) for label, first, _ in scan_spans(text, ["s3cr3t-value"])])
+        self.assertEqual(scan_spans("rien à signaler", ["s3cr3t-value"]), [])
 
 
 class ProcessAndKubeSecretsTest(unittest.TestCase):

@@ -28,6 +28,10 @@ HISTORY_DIR = "fix/_history"
 _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _ALIAS = re.compile(r"[a-z0-9]+")
+_BLOB = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+# The secret labels the lead may waive (key["secret_waivers"]): the heuristic ones of the
+# guard (fix_guard.HEURISTIC_SECRET_LABELS, kept equal there).
+WAIVABLE_LABELS = frozenset({"credential_assignment", "credential_define"})
 
 
 class StateError(ValueError):
@@ -90,7 +94,29 @@ def load(run_dir: Path) -> dict:
             or not (_v2_key(key) if "slug" in key else _key(name, key))
         ):
             raise StateError(f"{STATE_FILE} : la clé « {name} » est invalide.")
+        if not _waivers_ok(key.get("secret_waivers")):
+            raise StateError(
+                f"{STATE_FILE} : « secret_waivers » de la clé « {name} » est invalide : une "
+                "liste d'objets {\"blob\", \"path\", \"line\", \"label\", \"at\"} est attendue "
+                "(blob : SHA du contenu du fichier ; line : entier à partir de 1 ; label : "
+                f"{' ou '.join(sorted(WAIVABLE_LABELS))})."
+            )
     return state
+
+
+def _waivers_ok(value) -> bool:
+    """True for no waivers, or a list of secret waivers that the guard can match."""
+    if value is None:
+        return True
+    return isinstance(value, list) and all(
+        isinstance(item, dict)
+        and isinstance(item.get("blob"), str) and _BLOB.fullmatch(item["blob"]) is not None
+        and isinstance(item.get("path"), str) and item["path"] != ""
+        and isinstance(item.get("line"), int) and not isinstance(item["line"], bool)
+        and item["line"] >= 1
+        and item.get("label") in WAIVABLE_LABELS
+        for item in value
+    )
 
 
 def is_v2(state: dict) -> bool:

@@ -83,18 +83,18 @@ def is_fix_branch(name: str) -> bool:
     return name == BRANCH_BASE or name.startswith(BRANCH_PREFIX)
 
 
-def git(path: Path, run, *args: str):
+def git(path: Path, run, *args: str, binary: bool = False):
     """Run git in path with the hooks and the fsmonitor of the repo disabled.
 
-    Returns the CompletedProcess.
+    Returns the CompletedProcess, with bytes in stdout and stderr when binary is True (no
+    newline translation: a "\\r" stays in its line).
     """
+    options = {} if binary else {"text": True, "encoding": "utf-8", "errors": "replace"}
     return run(
         ["git", "-C", str(path), "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
          *args],
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        **options,
     )
 
 

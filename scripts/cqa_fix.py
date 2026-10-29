@@ -688,7 +688,8 @@ def _cmd_guard(args, services: Services) -> int:
         where = f"sur la branche {key['branch']}"
     else:
         problems = _unwaived(key, worktree, services.run,
-                             _staged_problems(run_dir, key, worktree, message, services.run))
+                             _staged_problems(run_dir, key, worktree, message, services.run),
+                             staged=True)
         where = "dans l'index et le message prévu, ne commitez pas en l'état"
     _emit({"ok": not problems, "problems": problems})
     if problems:
@@ -717,7 +718,9 @@ def _cmd_waive_secret(args, services: Services) -> int:
 
     The alert is named by the sha of its commit in <start_sha>..HEAD (or the blob of its path
     in the index, as guard --staged prints it), its path, line and label. Only a label of
-    fix_guard.HEURISTIC_SECRET_LABELS may be waived. The waiver keeps no text of the line.
+    fix_guard.HEURISTIC_SECRET_LABELS may be waived. The waiver is keyed on the blob of the
+    path (its content): it holds while the file is unchanged, in whatever commit a drop
+    replays it, and ends with any change of the file. It keeps no text of the line.
     """
     heuristic = sorted(fix_guard.HEURISTIC_SECRET_LABELS)
     if args.label not in fix_guard.HEURISTIC_SECRET_LABELS:
@@ -734,17 +737,22 @@ def _cmd_waive_secret(args, services: Services) -> int:
         worktree, services.run, key["start_sha"])}
     if args.sha in commits:
         problems = _guard_problems(run_dir, key, worktree, services.run, waivers=False)
+        blob = _blob_of(worktree, services.run, args.sha, args.path)
     elif fix_git.is_sha(args.sha) and args.sha == fix_names.git_out(
             worktree, services.run, "rev-parse", "--verify", "--quiet", f":{args.path}"):
         problems = _staged_problems(run_dir, key, worktree, "", services.run)
+        blob = args.sha
     else:
         raise UsageError(f"--sha {args.sha} : ni un commit de {key['start_sha'][:12]}..HEAD, ni "
                          f"le blob indexé de {args.path}. Rien n'a été levé.")
     wanted = {"sha": args.sha, "path": args.path, "line": args.line, "label": args.label}
-    if not any(item["waivable"] and all(item[name] == value for name, value in wanted.items())
-               for item in problems):
+    if blob is None or not any(
+        item["waivable"] and all(item[name] == value for name, value in wanted.items())
+        for item in problems
+    ):
         raise UsageError(f"La garde ne signale pas {args.label} à la ligne {args.line} de "
                          f"{args.path} ({args.sha[:12]}) : rien n'a été levé.")
+    wanted = {"blob": blob, "path": args.path, "line": args.line, "label": args.label}
     waivers = _secret_waivers(key)
     found = next((item for item in waivers
                   if all(item.get(name) == value for name, value in wanted.items())), None)
@@ -758,38 +766,27 @@ def _cmd_waive_secret(args, services: Services) -> int:
 
 
 def _secret_waivers(key: dict) -> list:
-    """Return the secret waivers of the key ([] when absent), checked to be a list of objects."""
-    value = key.get("secret_waivers")
-    if value is None:
-        return []
-    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
-        raise fix_state.StateError(
-            f"{fix_state.STATE_FILE} : « secret_waivers » doit être une liste d'objets."
-        )
-    return list(value)
+    """Return the secret waivers of the key ([] when absent; fix_state.load checked them)."""
+    return list(key.get("secret_waivers") or [])
 
 
-def _unwaived(key: dict, worktree: Path, run, problems: list) -> list:
-    """Return the problems that no secret waiver of the key covers (fix_guard.unwaived)."""
+def _blob_of(worktree: Path, run, sha, path) -> Optional[str]:
+    """Return the blob of path in commit sha, None when unknown."""
+    if not fix_git.is_sha(sha) or not path:
+        return None
+    return fix_names.git_out(worktree, run, "rev-parse", "--verify", "--quiet", f"{sha}:{path}")
+
+
+def _unwaived(key: dict, worktree: Path, run, problems: list, *, staged: bool = False) -> list:
+    """Return the problems that no secret waiver of the key covers (fix_guard.unwaived): the
+    blob of a problem is that of its path in its commit, or its sha itself when staged (the
+    blob of the index, as check_staged sets it)."""
     waivers = _secret_waivers(key)
     if not waivers:
         return problems
-
-    def blob_of(sha, path):
-        if not fix_git.is_sha(sha) or not path:
-            return None
-        return fix_names.git_out(worktree, run, "rev-parse", "--verify", "--quiet",
-                                 f"{sha}:{path}")
-
-    return fix_guard.unwaived(problems, waivers, blob_of)
-
-
-def _remap_waivers(key: dict, rewritten: dict) -> None:
-    """Move the secret waivers of rewritten commits to their new SHAs (drop, replay)."""
-    waivers = _secret_waivers(key)
-    if waivers:
-        key["secret_waivers"] = [{**item, "sha": rewritten.get(item.get("sha"), item.get("sha"))}
-                                 for item in waivers]
+    if staged:
+        return fix_guard.unwaived(problems, waivers, lambda sha, path: sha)
+    return fix_guard.unwaived(problems, waivers, lambda sha, path: _blob_of(worktree, run, sha, path))
 
 
 def _row_sections(key: dict) -> dict:
@@ -900,7 +897,6 @@ def _cmd_drop(args, services: Services) -> int:
                 f"retirée avec {_labels(refs)} : son correctif dépend d'un commit retiré"))
         else:
             row["commits"] = [rewritten.get(sha, sha) for sha in row.get("commits") or []]
-    _remap_waivers(key, rewritten)
     if bases:
         after = _branch_commits(worktree, services.run, key["start_sha"], key["branch"])
         key["bases"] = {

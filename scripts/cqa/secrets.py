@@ -222,16 +222,35 @@ def scan_lines(text: str, known_values: list[str]) -> list[tuple[str, int]]:
     The labels are those of scan_text; each pair comes once, by line, then in the order of
     scan_text. A value is never returned.
     """
+    found = []
+    for label, first, _ in scan_spans(text, known_values):
+        if (label, first) not in found:
+            found.append((label, first))
+    return found
+
+
+def scan_spans(text: str, known_values: list[str]) -> list[tuple[str, int, int]]:
+    """Return the (label, first line, last line) of every match in text, lines counted from 1
+    on "\\n" only (a "\\r" is part of its line, as git counts it).
+
+    A define( or a private key written over several lines spans them. Each triple comes once,
+    by first line, then in the order of scan_text, then by last line. A value is never returned.
+    """
     starts = [0] + [index + 1 for index, char in enumerate(text) if char == "\n"]
     found = set()
     for value in {value for value in known_values if value}:
-        found.update(("known_value", _line_of(starts, match.start()))
+        found.update(("known_value", *_span_of(starts, match))
                      for match in re.finditer(re.escape(value), text))
     for label, pattern in _PATTERNS:
-        found.update((label, _line_of(starts, match.start()))
+        found.update((label, *_span_of(starts, match))
                      for match in pattern.finditer(text) if not _skipped(pattern, match))
     order = ["known_value"] + [label for label, _ in _PATTERNS]
-    return sorted(found, key=lambda pair: (pair[1], order.index(pair[0])))
+    return sorted(found, key=lambda item: (item[1], order.index(item[0]), item[2]))
+
+
+def _span_of(starts: list, match: re.Match) -> tuple[int, int]:
+    first = _line_of(starts, match.start())
+    return first, max(first, _line_of(starts, match.end() - 1))
 
 
 def _line_of(starts: list, offset: int) -> int:

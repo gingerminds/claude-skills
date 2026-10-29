@@ -890,7 +890,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" guard "$RUN" "<repo>/<slug>"
 ```
 
-It prints `{"ok", "problems"}`, one problem per commit and path (`{"sha", "ref", "path", "line", "label", "reason", "kind", "waivable"}`, `kind` being `form` for a problem of the message, `suspect` for a heuristic secret alert (`credential_assignment`, `credential_define`) and `content` for the others), and exits 5 when there is one. A `suspect` with `waivable` true may be a false positive (a password read from a request, for instance): show the lead its path, line and label, never the line itself, and ask « Est-ce un vrai secret ? ». A real secret is a `content` problem. Otherwise, with the lead's answer:
+It prints `{"ok", "problems"}`, one problem per commit and path (`{"sha", "ref", "path", "line", "label", "reason", "kind", "waivable"}`, `kind` being `form` for a problem of the message, `suspect` for a heuristic secret alert (`credential_assignment`, `credential_define`) and `content` for the others), and exits 5 when there is one. A secret is reported per commit, path, line and label: `line` is the line of the file where it starts (a `define(` or a key written over several lines is reported when one of its lines is added), and one problem stands for every credential of that label on that line. A `suspect` with `waivable` true may be a false positive (a password read from a request, for instance): show the lead its path, line and label, never the line itself, and ask « Cette ligne contient-elle un vrai secret ? »: the lead judges every credential on that whole line. A real secret is a `content` problem. Otherwise, with the lead's answer:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -898,7 +898,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" waive-secret "$RUN" "<repo>/<slug>" --sha <sha> --path <path> --line <line> --label <label>
 ```
 
-The waiver holds for that line of that commit only (or of that blob of the index, which `guard --staged` prints as its `sha`); the guard no longer reports it. Any other secret label is never waived.
+One waiver covers that line of that file for that label, as long as the content of the file is the one the lead judged (the waiver is keyed on the blob of the path in that commit, or on the blob of the index that `guard --staged` prints as its `sha`): a `drop` that replays the commit without changing the file keeps it, any change of the file voids it and the alert comes back. The guard no longer reports it. Any other secret label is never waived.
 
 e. Review: for each fixer pass not reviewed yet (absent from `reviews` of the key) that has fixed rows (`outcome` `fixed` and `pass` N in `fix/state.json`, as `rows.fixed` of its `validate` listed them), in pass order, first read the scope of its diff:
 

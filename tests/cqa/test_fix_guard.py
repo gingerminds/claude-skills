@@ -263,6 +263,90 @@ class GuardMessageTest(RepoCase):
         ])
 
 
+class GuardContentTest(RepoCase):
+    """The guard scans the whole new content of every changed file, as the audit reads it
+    (bytes, no newline translation), and keeps the secrets that an added line carries."""
+
+    PASSWORD = "$db_password = 'RealS3cretValue99';"
+    DEFINE = "<?php\ndefine(\n    'DB_PASSWORD',\n    {value}\n);\n"
+
+    def add_bytes(self, message, files):
+        for path, content in files.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            real_git(self.repo, "add", "--", path)
+        real_git(self.repo, "commit", "-q", "-m", message)
+        return real_git(self.repo, "rev-parse", "HEAD")
+
+    def test_a_carriage_return_hides_nothing(self):
+        for case, content in (
+            ("lone CR", b"<?php // note\r" + self.PASSWORD.encode() + b"\n"),
+            ("CR line endings", b"<?php\r// a\r" + self.PASSWORD.encode() + b"\r"),
+        ):
+            with self.subTest(case=case):
+                sha = self.add_bytes("fix(securite CQ-3): x", {"web/cr.php": content})
+                self.assertEqual(self.check(),
+                                 [secret(sha, 3, "web/cr.php", "credential_assignment", 1)])
+                self.start = sha
+
+    def test_a_secret_over_several_lines_is_reported_when_one_of_its_lines_is_added(self):
+        self.start = self.add("chore: before",
+                              {"web/wp-config.php": self.DEFINE.format(value="getenv( 'DB_PASSWORD' )")})
+        sha = self.add("fix(securite CQ-3): x",
+                       {"web/wp-config.php": self.DEFINE.format(value="'Adm1nP@ss2024'")})
+        self.assertEqual(self.check(),
+                         [secret(sha, 3, "web/wp-config.php", "credential_define", 2)])
+        write(self.repo, "web/wp-config.php", self.DEFINE.format(value="'Adm1nP@ss2024!'"))
+        real_git(self.repo, "add", "--", "web/wp-config.php")
+        blob = real_git(self.repo, "rev-parse", ":web/wp-config.php")
+        staged = fix_guard.check_staged(self.repo, "fix(securite CQ-3): y", {3: "securite"},
+                                        {"name": "front"}, [], subprocess.run)
+        self.assertEqual(staged, [secret(blob, 3, "web/wp-config.php", "credential_define", 2)])
+
+    def test_a_secret_the_commit_did_not_add_is_not_reported(self):
+        self.start = self.add("chore: before", {"web/old.php": f"<?php\n{self.PASSWORD}\n"})
+        self.add("fix(securite CQ-3): x", {"web/old.php": f"<?php\n{self.PASSWORD}\n// note\n"})
+        self.assertEqual(self.check(), [])
+
+    def test_every_added_line_of_a_file_is_scanned(self):
+        lines = [f"// {index}" for index in range(30)]
+        self.start = self.add("chore: before", {"my dir/a b.php": "\n".join(lines) + "\n"})
+        lines[3] = lines[20] = self.PASSWORD
+        lines.insert(25, self.PASSWORD)
+        sha = self.add("fix(securite CQ-3): x", {"my dir/a b.php": "\n".join(lines) + "\n"})
+        self.assertEqual(self.check(), [
+            secret(sha, 3, "my dir/a b.php", "credential_assignment", line) for line in (4, 21, 26)
+        ])
+
+
+class UnwaivedTest(unittest.TestCase):
+    def test_a_waiver_covers_a_waivable_problem_of_the_same_blob_only(self):
+        blob = "b" * 40
+        suspect = secret("c" * 40, 3, "web/login.php", "credential_assignment", 2)
+        waivers = [{"blob": blob, "path": "web/login.php", "line": 2,
+                    "label": "credential_assignment"}]
+        self.assertEqual(fix_guard.unwaived([suspect], waivers, lambda sha, path: blob), [])
+        for case, blob_of in (("no blob", lambda sha, path: None),
+                              ("another blob", lambda sha, path: "d" * 40)):
+            with self.subTest(case=case):
+                self.assertEqual(fix_guard.unwaived([suspect], waivers, blob_of), [suspect])
+        for case, waiver in (("no blob", {k: v for k, v in waivers[0].items() if k != "blob"}),
+                             ("blob None", {**waivers[0], "blob": None}),
+                             ("other path", {**waivers[0], "path": "web/other.php"}),
+                             ("other line", {**waivers[0], "line": 3}),
+                             ("other label", {**waivers[0], "label": "credential_define"})):
+            with self.subTest(case=case):
+                self.assertEqual(fix_guard.unwaived([suspect], [waiver], lambda sha, path: blob),
+                                 [suspect])
+        for case, problem in (("known value", secret("c" * 40, 3, "web/login.php", "known_value", 2)),
+                              ("message", secret("c" * 40, 3, None, "credential_assignment", 2))):
+            with self.subTest(case=case):
+                covering = [{**waivers[0], "path": problem["path"]}]
+                self.assertEqual(fix_guard.unwaived([problem], covering, lambda sha, path: blob),
+                                 [problem])
+
+
 class GuardCommandTest(GitCase):
     def test_guard_refuses_malformed_third_party_paths(self):
         self.open_pass()
@@ -441,20 +525,68 @@ class SecretWaiverTest(GitCase):
         code, out, err = self.waive(sha, "web/login.php", 2, "credential_assignment")
         self.assertEqual(code, 0, err)
         waiver = json.loads(out)["waiver"]
-        self.assertEqual(set(waiver), {"sha", "path", "line", "label", "at"})
-        self.assertEqual((waiver["sha"], waiver["path"], waiver["line"], waiver["label"]),
-                         (sha, "web/login.php", 2, "credential_assignment"))
+        blob = real_git(self.worktree, "rev-parse", f"{sha}:web/login.php")
+        self.assertEqual(set(waiver), {"blob", "path", "line", "label", "at"})
+        self.assertEqual((waiver["blob"], waiver["path"], waiver["line"], waiver["label"]),
+                         (blob, "web/login.php", 2, "credential_assignment"))
+        self.assertNotEqual(blob, sha)
         self.assertEqual(self.key()["secret_waivers"], [waiver])
         self.assertEqual(self.guard(), (0, []))
         self.assertEqual(self.waive(sha, "web/login.php", 2, "credential_assignment")[0], 0)
         self.assertEqual(len(self.key()["secret_waivers"]), 1)
         state = (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8")
-        for text in ("$_POST", "wp_unslash", "pass1", "isset"):
+        for text in ("$_POST", "wp_unslash", "pass1", "isset", sha):
             self.assertNotIn(text, state)
         again = self.commit("fix(securite CQ-3): read it on the profile page",
-                            {"web/profile.php": f"<?php\n// Profile.\n{self.WORDPRESS}\n"})
-        self.assertEqual(self.guard(),
-                         (5, [secret(again, 3, "web/profile.php", "credential_assignment", 3)]))
+                            {"web/profile.php": f"<?php\n// Profile.\n{self.WORDPRESS}\n",
+                             "web/copy.php": f"<?php\n{self.WORDPRESS}\n"})
+        self.assertEqual(real_git(self.worktree, "rev-parse", f"{again}:web/copy.php"), blob)
+        self.assertEqual(self.guard(), (5, [
+            secret(again, 3, "web/copy.php", "credential_assignment", 2),
+            secret(again, 3, "web/profile.php", "credential_assignment", 3),
+        ]))
+
+    def test_a_malformed_waiver_in_the_state_is_refused(self):
+        sha = self.commit("fix(securite CQ-3): read the password field",
+                          {"web/login.php": f"<?php\n{self.WORDPRESS}\n"})
+        self.assertEqual(self.waive(sha, "web/login.php", 2, "credential_assignment")[0], 0)
+        good = self.key()["secret_waivers"][0]
+        for case, waivers in (
+            ("not a list", {}),
+            ("not an object", ["x"]),
+            ("no blob", [{name: value for name, value in good.items() if name != "blob"}]),
+            ("blob not a sha", [{**good, "blob": "abc"}]),
+            ("old sha key", [{**{name: value for name, value in good.items() if name != "blob"},
+                              "sha": sha}]),
+            ("empty path", [{**good, "path": ""}]),
+            ("line 0", [{**good, "line": 0}]),
+            ("line as text", [{**good, "line": "2"}]),
+            ("line as bool", [{**good, "line": True}]),
+            ("unknown label", [{**good, "label": "aws_key"}]),
+            ("empty label", [{**good, "label": ""}]),
+        ):
+            with self.subTest(case=case):
+                state = self.state_text()
+                state["keys"][KEY]["secret_waivers"] = waivers
+                fix_state.save(self.run_dir, state)
+                with self.assertRaises(fix_state.StateError) as caught:
+                    fix_state.load(self.run_dir)
+                self.assertIn("secret_waivers", str(caught.exception))
+                code, out, err = self.run_main(["guard", self.run_dir, KEY])
+                self.assertEqual(code, 6, err)
+                self.assertEqual(out, "")
+                self.assertIn("secret_waivers", err)
+        state = self.state_text()
+        state["keys"][KEY]["secret_waivers"] = [good]
+        fix_state.save(self.run_dir, state)
+        self.assertEqual(self.guard(), (0, []))
+        state["keys"][KEY].pop("secret_waivers")
+        fix_state.save(self.run_dir, state)
+        self.assertEqual(self.guard()[0], 5)
+
+    def state_text(self):
+        """The state as written, without the check of load (a malformed one is being fixed)."""
+        return json.loads((self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8"))
 
     def test_only_a_heuristic_alert_the_guard_reports_may_be_waived(self):
         env = {"GM_AUDIT_AUTH_PASS": "s3cr3t-value"}
@@ -494,22 +626,61 @@ class SecretWaiverTest(GitCase):
         self.assertNotIn("hunter2", (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8"))
         self.assertEqual(self.guard(env), (5, problems[:2]))
 
-    def test_a_drop_moves_the_waivers_to_the_rewritten_commits(self):
+    def drop(self, ref):
+        code, out, err = self.run_main(["drop", self.run_dir, KEY, "--refs", ref, "--reason",
+                                        "Revue bloquante : échappement manquant."])
+        self.assertEqual(code, 0, err)
+
+    def record(self, **commits):
+        """Record the commits of the rows ({"3": [sha]}) as fixed, as validate would."""
+        state = self.state()
+        for ref, shas in commits.items():
+            state["keys"][KEY]["rows"][ref].update(outcome="fixed", commits=shas)
+        fix_state.save(self.run_dir, state)
+
+    def test_a_drop_keeps_the_waiver_of_a_file_it_leaves_unchanged(self):
         dropped = self.commit("fix(securite CQ-5): add b", {"b5.txt": "b"})
         sha = self.commit("fix(securite CQ-3): read the password field",
                           {"web/login.php": f"<?php\n{self.WORDPRESS}\n"})
-        state = self.state()
-        state["keys"][KEY]["rows"]["5"].update(outcome="fixed", commits=[dropped])
-        state["keys"][KEY]["rows"]["3"].update(outcome="fixed", commits=[sha])
-        fix_state.save(self.run_dir, state)
+        self.record(**{"5": [dropped], "3": [sha]})
         self.assertEqual(self.waive(sha, "web/login.php", 2, "credential_assignment")[0], 0)
-        code, out, err = self.run_main(["drop", self.run_dir, KEY, "--refs", "CQ-5", "--reason",
-                                        "Revue bloquante : échappement manquant."])
-        self.assertEqual(code, 0, err)
+        waivers = self.key()["secret_waivers"]
+        self.drop("CQ-5")
         rewritten = self.key()["rows"]["3"]["commits"][0]
         self.assertNotEqual(rewritten, sha)
-        self.assertEqual([waiver["sha"] for waiver in self.key()["secret_waivers"]], [rewritten])
+        self.assertEqual(real_git(self.worktree, "rev-parse", f"{rewritten}:web/login.php"),
+                         waivers[0]["blob"])
+        self.assertEqual(self.key()["secret_waivers"], waivers)
         self.assertEqual(self.guard(), (0, []))
+
+    def test_a_drop_that_shifts_the_file_voids_the_waiver(self):
+        """The re-reviewer's probe: D (CQ-5) adds a line at the top of login.php, A (CQ-3)
+        adds the CQ-107 false positive at line 5 and a real password at line 6; the lead
+        waives line 5; once D is dropped, both lines moved up and both are reported again."""
+        other = "$db_password = 'RealS3cretValue99';"
+        first = self.commit("fix(securite CQ-3): add the login page",
+                            {"web/login.php": "<?php\n// a\n// b\n// c\n"})
+        shift = self.commit("fix(securite CQ-5): note the page",
+                            {"web/login.php": "<?php\n// D\n// a\n// b\n// c\n"})
+        sha = self.commit("fix(securite CQ-3): read the password field",
+                          {"web/login.php": f"<?php\n// D\n// a\n// b\n{self.WORDPRESS}\n{other}\n// c\n"})
+        self.record(**{"3": [first, sha], "5": [shift]})
+        alerts = [secret(sha, 3, "web/login.php", "credential_assignment", line) for line in (5, 6)]
+        self.assertEqual(self.guard(), (5, alerts))
+        self.assertEqual(self.waive(sha, "web/login.php", 5, "credential_assignment")[0], 0)
+        self.assertEqual(self.guard(), (5, alerts[1:]))
+        waivers = self.key()["secret_waivers"]
+        self.drop("CQ-5")
+        rewritten = self.key()["rows"]["3"]["commits"]
+        self.assertEqual(rewritten[0], first)
+        self.assertNotEqual(rewritten[1], sha)
+        self.assertEqual(self.key()["secret_waivers"], waivers)
+        self.assertEqual(self.guard(), (5, [
+            secret(rewritten[1], 3, "web/login.php", "credential_assignment", line)
+            for line in (4, 5)
+        ]))
+        state = (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8")
+        self.assertNotIn("RealS3cret", state)
 
 
 class ValidateTest(GitCase):
