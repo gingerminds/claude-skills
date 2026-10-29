@@ -46,6 +46,26 @@ _CREDENTIAL = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+# A PHP constant whose name says it holds a credential (DB_PASSWORD, API_TOKEN...) or a
+# WordPress salt, defined with a non-empty literal: define( 'DB_PASSWORD', '...' ). A value
+# that is an expression (getenv( 'X' ), $password, A_CONSTANT) is not matched.
+_DEFINE = re.compile(
+    r"""
+    (?P<pre>
+        (?<![\w$>:])define\s*\(\s*
+        (?P<nq>["'])
+        (?:\w*(?:password|passwd|pwd|secret|token|api_?key)\w*
+           |(?:secure_)?auth_(?:key|salt)|logged_in_(?:key|salt)|nonce_(?:key|salt))
+        (?P=nq)\s*,\s*
+        (?P<q>["'])
+    )
+    (?!\[secret\ masqué\])
+    (?P<val>(?:(?!(?P=q))[^\n])+)
+    (?=(?P=q))
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 # A bare credential needs 16 characters, one after a scheme (Basic, Bearer...) needs 4.
 _AUTH_HEADER = re.compile(
     r"""
@@ -134,8 +154,9 @@ _CODE_KEYWORDS = frozenset({"null", "true", "false", "none", "nil", "undefined",
 def _is_non_secret(match: re.Match, literal: bool = False) -> bool:
     """True when a credential match is a form field description or a pure code expression.
 
-    With literal, an unquoted value is also no secret when it is an expression whose quoted
-    literals are all harmless (see _is_expression).
+    With literal, an unquoted value is also no secret when it is an expression (see
+    _is_expression) whose quoted literals are all harmless; a quoted operand of that
+    expression, outside any bracket, is harmless only when empty (see _is_harmless_operand).
     """
     value = match.group("val")
     if match.group("q"):
@@ -155,12 +176,27 @@ def _is_non_secret(match: re.Match, literal: bool = False) -> bool:
         or bool(_CODE_CALL.fullmatch(expression))
         or (value.startswith(":") and text[match.start("val") - 1:match.start("val")] == ":")
     )
+    expression = False
     if not is_code and literal:
-        is_code = _is_expression(rest)
+        is_code = expression = _is_expression(rest)
     if not is_code or ":-" in rest:
         return False
     literals = list(_QUOTED_LITERAL.finditer(rest)) + list(_N_LITERAL.finditer(rest))
+    if expression:
+        return all(_is_harmless_operand(rest, literal) for literal in literals)
     return all(_is_harmless_literal(rest, literal) for literal in literals)
+
+
+def _is_harmless_operand(rest: str, literal: re.Match) -> bool:
+    """Judge a quoted literal of an expression (literal mode): inside a bracket of its
+    statement (a call argument, an index) by _is_harmless_literal, outside any bracket (an
+    operand: a fallback, a concatenated part) harmless only when empty. A literal after the
+    statement (in a trailing comment) keeps _is_harmless_literal."""
+    code = _QUOTED_LITERAL.sub(lambda found: " " * len(found.group(0)), rest)
+    statement = _statement(code)
+    if literal.start() >= len(statement) or _depth(statement[:literal.start()]) > 0:
+        return _is_harmless_literal(rest, literal)
+    return not literal.group(2)
 
 
 def _is_expression(rest: str) -> bool:
@@ -249,6 +285,7 @@ _PATTERNS = (
     ("notion_token", _NOTION),
     ("jwt", _JWT),
     ("credential_assignment", _CREDENTIAL),
+    ("credential_define", _DEFINE),
     ("authorization_header", _AUTH_HEADER),
     ("mysql_password_option", _MYSQL_PASSWORD),
     ("kube_client_key", _KUBE_CLIENT_KEY),

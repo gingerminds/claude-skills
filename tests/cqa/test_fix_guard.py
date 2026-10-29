@@ -1384,7 +1384,9 @@ class ValidateReportTest(unittest.TestCase):
         for option in ("Ne rien faire", "Laisser en l'état", "Laisser en l\u2019état",
                        "Laisser tel quel", "Confier la ligne à un dev", "La laisser aux devs",
                        "Laisser aux devs", "Laisser à un dev", "Pas de changement",
-                       "Ne pas corriger", "RIEN FAIRE pour l'instant", "Ne rien changer"):
+                       "Ne pas corriger", "RIEN FAIRE pour l'instant", "Ne rien changer",
+                       "Laisser la ligne telle quelle", "Garder tel quel", "Garder en l'état",
+                       "Ne pas toucher", "Ne pas toucher au fichier"):
             with self.subTest(option=option):
                 refused = {**question, "question": {**asked, "options": ["Équipe", option],
                                                     "default": "Équipe"}}
@@ -1394,7 +1396,8 @@ class ValidateReportTest(unittest.TestCase):
                 ])
         for option in ("Laisser un alt vide (image décorative)",
                        "Ne rien afficher si le champ est vide", "Laisser le lien ouvrir un onglet",
-                       "Ajouter le devis au devant de la page", "Changement de libellé"):
+                       "Ajouter le devis au devant de la page", "Changement de libellé",
+                       "Envoyer le formulaire au développeur", "Garder le lien et ajouter rel"):
             with self.subTest(accepted=option):
                 kept = {**question, "question": {**asked, "options": ["Équipe", option],
                                                  "default": option}}

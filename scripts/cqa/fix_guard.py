@@ -93,13 +93,15 @@ _ATTRIBUTION = re.compile(r"\W*(?:co-authored-by\s*:|claude-session\s*:|generate
 _SHORT_SHA = re.compile(r"[0-9a-f]{7,64}")
 _ABANDON = re.compile(r"\s*abandon\s*:", re.IGNORECASE)
 # An option that leaves the row as it is, in whole words: the orchestrator already offers to
-# leave it to a dev. « Laisser un alt vide » or « Ne rien afficher » are real fixes.
+# leave it to a dev. « Laisser un alt vide », « Ne rien afficher » or « Envoyer le formulaire
+# au développeur » are real fixes.
 _AS_IS = re.compile(
-    r"\b(?:rien (?:faire|changer|modifier)"
+    r"\b(?:rien (?:faire|changer|modifier|toucher)"
     r"|pas de (?:changement|modification)s?"
-    r"|ne pas (?:corriger|modifier|changer)"
-    r"|laisser (?:en l['\u2019]état|tel(?:le)?s? quel(?:le)?s?)"
-    r"|(?:à une?|aux|au) (?:devs?|développeur(?:se)?s?))\b",
+    r"|ne pas (?:corriger|modifier|changer|toucher)"
+    r"|(?:laisser|garder)(?: (?:la ligne|le code|le fichier|cela|ça|tout))?"
+    r" (?:en l['\u2019]état|tel(?:le)?s? quel(?:le)?s?)"
+    r"|(?:à une?|aux) (?:devs?|développeur(?:se)?s?))\b",
     re.IGNORECASE,
 )
 _DIFF = ("-U0", "--text", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",

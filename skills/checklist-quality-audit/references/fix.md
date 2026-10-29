@@ -10,9 +10,9 @@ The conventions of the fix mode (`/gm:checklist-quality-audit fix`, section 12 o
 | File | Written by | Content |
 |---|---|---|
 | `wt/` | `cqa_fix.py start` | the worktree of the key, on its branch |
-| `report-<N>.json` | fixer | its report of pass N (section 8) |
+| `fix/<repo>/report-<N>.json` | fixer | its report of pass N (section 8) |
 | `notes-<N>.json` | orchestrator | the answers and problems sent to pass N, from pass 2 |
-| `review-<N>.json` | reviewer | its verdicts on pass N (section 8) |
+| `fix/<repo>/review-<N>.json` | reviewer | its verdicts on pass N (section 8) |
 | `checks.json`, `check/` | `cqa_fix.py check` | the checks of the changed files (section 9) |
 | `mr-title.txt`, `mr.md`, `mr-addition.md` | `cqa_fix.py mr-body` | the title and description of the merge request |
 

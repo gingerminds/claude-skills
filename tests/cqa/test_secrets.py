@@ -33,6 +33,7 @@ PATTERN_CASES = [
     ("credential_assignment", "https://example.org/?api-key=abcd1234&page=2"),
     ("credential_assignment", '{"password": "hunter22"}'),
     ("credential_assignment", '{\\"password\\": \\"hunter22\\"}'),
+    ("credential_define", "define( 'DB_PASSWORD', 'Adm1nP@ss2024' );"),
     ("authorization_header", "Authorization: Basic dXNlcjpwYXNz"),
     ("authorization_header", "Authorization: Bearer abcd1234"),
     ("authorization_header", '"Authorization": "Bearer abcd1234"'),
@@ -338,6 +339,14 @@ class LiteralCredentialsTest(unittest.TestCase):
         "$password = (string) Adm1nP4ss;",
         "$password = isset( $x ) ? $y : 2024;",
         "password = isset(",
+        # Round 2: a quoted operand of the value (outside any call) is a literal.
+        "$password = getenv( 'DB_PASSWORD' ) ?: 'AZERTY2024';",
+        WORDPRESS[:-3] + "'AZERTY2024';",
+        "'password' => getenv( 'DB_PASSWORD' ) ?: 'PROD_DB_2024',",
+        "$password = getenv( 'DB_PASSWORD' ) ?: 's3cr3t.pass';",
+        "$password = getenv( 'DB_PASSWORD' ) ?: 'gingerminds.2024';",
+        "$token = env( 'API_TOKEN' ) ?? 'sk.live.4f9a8b7c6d5e4f3a';",
+        "$password = isset( $x ) ? $x : 'AZERTY2024' . $suffix;",
     ]
 
     def test_literal_only_credentials(self):
@@ -361,6 +370,49 @@ class LiteralCredentialsTest(unittest.TestCase):
         for text in NonSecretTest.NON_SECRETS + CLEAN_TEXTS:
             with self.subTest(text=text):
                 self.assertEqual(scan_text(text, [], literal_credentials=True), [])
+
+    DEFINED = [
+        "define( 'DB_PASSWORD', 'Adm1nP@ss2024' );",
+        "define('DB_PASSWORD','Adm1nP@ss2024');",
+        'define( "SMTP_PASSWD", "Adm1nP@ss2024" );',
+        "define( 'DB_PWD', 'x' );",
+        "define( 'MY_APP_SECRET', 'Adm1nP@ss2024' );",
+        "define( 'API_TOKEN', 'abcd1234efgh5678' );",
+        "DEFINE( 'db_password', 'Adm1nP@ss2024' );",
+        "define(\n    'DB_PASSWORD',\n    'Adm1nP@ss2024'\n);",
+        *[f"define( '{name}', 'k;X}}9+mJ|<w@F' );" for name in (
+            "AUTH_KEY", "SECURE_AUTH_KEY", "LOGGED_IN_KEY", "NONCE_KEY",
+            "AUTH_SALT", "SECURE_AUTH_SALT", "LOGGED_IN_SALT", "NONCE_SALT")],
+    ]
+    NOT_DEFINED = [
+        "define( 'DB_PASSWORD', getenv( 'DB_PASSWORD' ) );",
+        "define( 'DB_PASSWORD', $password );",
+        "define( 'DB_PASSWORD', DB_PASSWORD_FROM_ENV );",
+        "define( 'DB_PASSWORD', '' );",
+        "define( 'WP_DEBUG', false );",
+        "define( 'WP_ENVIRONMENT_TYPE', 'staging' );",
+        "define( 'DB_NAME', 'wordpress' );",
+        "define( 'OAUTH_KEY_URL', 'https://example.test/oauth' );",
+        "undefine( 'DB_PASSWORD', 'Adm1nP@ss2024' );",
+    ]
+
+    def test_defined_credentials(self):
+        for text in self.DEFINED:
+            for mode in (False, True):
+                with self.subTest(text=text, literal_credentials=mode):
+                    self.assertEqual(scan_text(text, [], literal_credentials=mode),
+                                     ["credential_define"])
+            with self.subTest(redact=text):
+                masked = redact(text, [])
+                self.assertIn("[secret masqué]", masked)
+                self.assertEqual(scan_text(masked, []), [])
+                self.assertEqual(redact(masked, []), masked)
+        for text in self.NOT_DEFINED:
+            for mode in (False, True):
+                with self.subTest(text=text, literal_credentials=mode):
+                    self.assertEqual(scan_text(text, [], literal_credentials=mode), [])
+        self.assertEqual(redact("define( 'DB_PASSWORD', 'Adm1nP@ss2024' );", []),
+                         "define( 'DB_PASSWORD', '[secret masqué]' );")
 
     def test_redact_keeps_masking_expressions(self):
         self.assertEqual(redact(self.WORDPRESS, []), "$password = [secret masqué]")
