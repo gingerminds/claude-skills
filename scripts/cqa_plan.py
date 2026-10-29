@@ -38,7 +38,7 @@ from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
 from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_digest
 from cqa.rerun import latest_findings, read_grounded_findings, rerun_candidates
-from cqa.project import parse_project_md, project_slug, sibling_repos
+from cqa.project import parse_project_md, project_name, project_slug, sibling_repos
 from cqa.secrets import known_values_from_env, scan_tree
 from cqa import crawl_budget
 from cqa.target import build_opener, fetch_page, fetch_timed, probe_target, validate_url
@@ -310,7 +310,7 @@ def _cmd_project(args, services) -> int:
             f"Le nom du dossier « {root.name} » ne permet pas de déduire le projet "
             "(forme attendue : « Client - Projet - Techno »)."
         )
-    name = _project_name(root.name)
+    name = project_name(root.name)
     _emit({"slug": slug, "name": name, "repos": [repo], "candidates": candidates})
     return EXIT_OK
 
@@ -1353,7 +1353,7 @@ def _cmd_scan(args, services) -> int:
         {"path": path, "label": label}
         for path, label in scan_tree(
             args.run_dir, known_values_from_env(), exclude=("fiches",),
-            skip_dirs=(fix_state.WORKTREE_DIRS,),
+            skip_dirs=fix_state.WORKTREE_DIRS,
         )
     ]
     _emit({"ok": not found, "found": found})
@@ -1569,11 +1569,6 @@ def _public_remote(remote: str) -> str:
         user = "" if scheme.lower() in ("http", "https") else userinfo.partition(":")[0]
         netloc = f"{user}@{host}" if user else host
     return f"{scheme}://{netloc}{slash}{tail}"
-
-
-def _project_name(dir_name: str) -> str:
-    parts = [part.strip() for part in dir_name.split(_SEPARATOR)]
-    return _SEPARATOR.join(parts[:-1]) if len(parts) >= 2 else dir_name
 
 
 def _repo_label(dir_name: str) -> str:

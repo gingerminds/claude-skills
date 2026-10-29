@@ -7,7 +7,7 @@ import re
 from datetime import date
 from typing import Optional
 
-from cqa import fix_names
+from cqa import fix_names, fix_rows
 from cqa.checklist import ref_label
 from cqa.report import run_start
 
@@ -277,11 +277,10 @@ def _row_info(key: dict, candidates: dict, notion_rows: list) -> dict:
     """Return {ref: candidate row}: the key's rows first, then any key's, then rows.json."""
     info = {}
     entries = [entry for entry in candidates.get("keys") or [] if isinstance(entry, dict)]
-    own = [entry for entry in entries if entry.get("repo") == key["repo"]
-           and entry.get("slug") == key["slug"]]
+    own = [entry for entry in entries if entry.get("repo") == key["repo"]]
     for entry in own + entries:
-        for row in entry.get("rows") or []:
-            if isinstance(row, dict) and isinstance(row.get("ref"), int):
+        for row in fix_rows.key_rows(entry):
+            if isinstance(row.get("ref"), int):
                 info.setdefault(row["ref"], row)
     for row in notion_rows:
         if isinstance(row, dict) and isinstance(row.get("ref"), int):
@@ -370,9 +369,11 @@ def _covered(rows: dict, info: dict) -> list:
 
 def _left(key: dict, candidates: dict, info: dict, branch_refs: set,
           covered: set = frozenset()) -> list:
-    """Return the open rows of the key's category that this MR does not fix, sorted by ref;
-    covered holds the refs of the skipped rows another fix of the MR covers (_covered)."""
+    """Return the open rows of the categories of the key's sections that this MR does not fix,
+    sorted by ref; covered holds the refs of the skipped rows another fix of the MR covers
+    (_covered)."""
     mr_url = (key.get("mr") or {}).get("url")
+    aliases = {section.get("alias") for section in key.get("sections") or []}
     found = {}
     for ref, row in key["rows"].items():
         if row.get("outcome") in ("skipped", "dropped") and int(ref) not in covered:
@@ -381,7 +382,7 @@ def _left(key: dict, candidates: dict, info: dict, branch_refs: set,
         ref = item.get("ref") if isinstance(item, dict) else None
         if not isinstance(ref, int) or ref in found or str(ref) in key["rows"]:
             continue
-        if _slug(item.get("category")) != key["slug"] or ref in branch_refs:
+        if _alias(item.get("category")) not in aliases or ref in branch_refs:
             continue
         if mr_url and item.get("url") == mr_url:
             continue
@@ -397,9 +398,9 @@ def _out(ref: int, info: dict, reason) -> dict:
             "url": notion_url(about.get("page_id"))}
 
 
-def _slug(category) -> Optional[str]:
+def _alias(category) -> Optional[str]:
     try:
-        return fix_names.category_slug(category or _NO_CATEGORY)
+        return fix_names.section_alias(category or _NO_CATEGORY)
     except ValueError:
         return None
 

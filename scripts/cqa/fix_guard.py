@@ -131,7 +131,7 @@ def check_commits(worktree: Path, start_sha: str, rows: set, repo: dict, known: 
 
 def validate_report(document, *, key: str, number: int, rows: dict, commits: list,
                     pass_commits: Optional[set] = None, reviewed: Optional[set] = None) -> tuple:
-    """Return (rows for the state, errors in French) for fix/<repo>/<slug>/report-<number>.json.
+    """Return (rows for the state, errors in French) for fix/<repo>/report-<number>.json.
 
     rows are the state rows of the key ({"3": {...}}), commits those of <start_sha>..HEAD
     (fix_git.commits_in_range). pass_commits, when given, holds the SHAs of
@@ -186,7 +186,7 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
 
 
 def validate_review(document, *, key: str, number: int, rows: dict) -> tuple:
-    """Return (blocking refs, errors in French) for fix/<repo>/<slug>/review-<number>.json.
+    """Return (blocking refs, errors in French) for fix/<repo>/review-<number>.json.
 
     Every row the fixer reported fixed in this pass needs a verdict, and only those rows may
     get one (a row fixed in another pass belongs to that pass's review); a blocking verdict

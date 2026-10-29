@@ -806,6 +806,20 @@ python3 "$S/cqa_fix.py" start "$RUN" "<repo>/<slug>"
 
 It prints `{"branch", "worktree", "base", "start_sha", "reused", "done_refs"}`: a new branch from `origin/<base>`, or the branch of an open merge request or of an unmerged fix branch taken over (`reused`); `done_refs` are rows already on that branch (`done_before`), never fixed again. Run again on a key that has its branch, it gives back the same branch and worktree.
 
+Sections: the key is a repo, with one branch and one worktree, and its `sections` in `fix/state.json` run one after the other, in their order (SÉCURITÉ first). Start a section before its first fixer pass; steps 5.b to 5.g run inside the section in progress, with its rows only. Once each of its rows is settled (fixed and reviewed, skipped, dropped, or a question set aside in autonomous mode), end it, then start the next one:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" section-start "$RUN" "<repo>" --section <alias>
+```
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" section-end "$RUN" "<repo>" --section <alias>
+```
+
 When `done_refs` leaves no row `pending` (rows all `done_before`): no fixer dispatch. Run `pass-start --pass 1` (5.b), write `fix/<repo>/<slug>/report-1.json` with `{"key": "<repo>/<slug>", "pass": 1, "rows": []}`, validate it as in 5.b: the key is `reviewed` at once. Then 5.d to 5.g.
 
 b. Fixer pass `N`: the key's `pass` in `fix/state.json` plus 1 (1 for a new key). Right before each dispatch, record the base of the pass and keep the printed `base`: it is the `Base` of the review of pass N.
@@ -813,7 +827,7 @@ b. Fixer pass `N`: the key's `pass` in `fix/state.json` plus 1 (1 for a new key)
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-python3 "$S/cqa_fix.py" pass-start "$RUN" "<repo>/<slug>" --pass <N>
+python3 "$S/cqa_fix.py" pass-start "$RUN" "<repo>/<slug>" --pass <N> --section <alias>
 ```
 
 Dispatch `gm:cqa-fixer` with the line, exactly:

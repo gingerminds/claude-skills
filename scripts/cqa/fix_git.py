@@ -34,13 +34,14 @@ class Refused(Exception):
     """
 
 
-def open_new(path, run, *, slug: str, flight: dict, push: str, base: str, worktree: Path) -> dict:
-    """First start of a key: take over or create its branch, then add its worktree.
+def open_new(path, run, *, flight: dict, push: str, base: str, worktree: Path) -> dict:
+    """First start of a key: take over or create the pass branch of the repo, then add its
+    worktree.
 
-    A real pass takes over the branch of an open MR of the category, else an unmerged branch
-    without MR, else creates the first free name from origin/<base>. A dry run always creates
-    a dry-run/ branch. Returns branch, start_sha, reused (None, "mr" or "branch"), mr and
-    taken_head (the head of a taken-over branch, None for a new one).
+    A real pass takes over the pass branch of an open MR, else an unmerged pass branch without
+    MR, else creates the first free name from origin/<base> (see reusable and free_branch). A
+    dry run always creates a dry-run/ branch. Returns branch, start_sha, reused (None, "mr" or
+    "branch"), mr and taken_head (the head of a taken-over branch, None for a new one).
 
     start_sha is the head of the taken-over branch, except for a branch without MR that origin
     does not have in a pass that pushes: its merge-base with origin/<base>, so that the guard
@@ -53,10 +54,10 @@ def open_new(path, run, *, slug: str, flight: dict, push: str, base: str, worktr
     base_sha = rev(path, run, f"refs/remotes/origin/{base}")
     if base_sha is None:
         raise GitRefused(f"origin/{base} est introuvable dans {path}.")
-    choice = None if push == "dry_run" else reusable(flight, slug)
+    choice = None if push == "dry_run" else reusable(flight)
     if choice is None:
-        prefix = fix_names.DRY_RUN_PREFIX if push == "dry_run" else fix_names.BRANCH_PREFIX
-        branch = free_branch(path, run, prefix, slug, flight)
+        name = fix_names.DRY_RUN_BASE if push == "dry_run" else fix_names.BRANCH_BASE
+        branch = free_branch(path, run, name, flight)
         _add_worktree(path, run, worktree, "--no-track", "-b", branch, str(worktree), base_sha)
         return {"branch": branch, "start_sha": base_sha, "reused": None, "mr": None,
                 "taken_head": None}
@@ -89,21 +90,22 @@ def reopen(path, run, *, branch: str, push: str, worktree: Path) -> None:
     _checkout(path, run, branch, push, worktree, first=False)
 
 
-def reusable(flight: dict, slug: str) -> Optional[tuple]:
-    """Return (reused, branch, mr) for the branch a real pass takes over, or None.
+def reusable(flight: dict) -> Optional[tuple]:
+    """Return (reused, branch, mr) for the pass branch a real pass takes over, or None.
 
+    Only a pass branch (fix_names.is_pass_branch) is taken over, never a v2 per-category one.
     An open MR wins over a branch without MR; the unsuffixed name wins, then the lowest
     suffix. The branch of a merged or closed MR is never taken over, and no branch is when
     GitLab could not be read (it may belong to a closed or squash-merged MR).
     """
-    prefix = fix_names.BRANCH_PREFIX
+    base = fix_names.BRANCH_BASE
 
     def fits(branch) -> bool:
         return (isinstance(branch, str) and branch not in barred
-                and fix_names.branch_matches(branch, prefix, slug))
+                and fix_names.is_pass_branch(branch, base))
 
     def order(branch: str) -> int:
-        rest = branch[len(prefix + slug):]
+        rest = branch[len(base):]
         return int(rest[1:]) if rest else 0
 
     barred = _mr_branches(flight, ("merged", "closed"))
@@ -121,8 +123,8 @@ def reusable(flight: dict, slug: str) -> Optional[tuple]:
     return None
 
 
-def free_branch(path, run, prefix: str, slug: str, flight: dict) -> str:
-    """Return the first of <prefix><slug>, <prefix><slug>-2... that no branch or MR uses."""
+def free_branch(path, run, base: str, flight: dict) -> str:
+    """Return the first of <base>, <base>-2... that no branch or MR uses."""
     taken = _mr_branches(flight, ("open", "closed", "merged"))
     for ref in ("refs/heads/", "refs/remotes/origin/"):
         listing = fix_names.git(path, run, "for-each-ref", "--format=%(refname)", ref)
@@ -135,10 +137,10 @@ def free_branch(path, run, prefix: str, slug: str, flight: dict) -> str:
         if ref.startswith("refs/heads/"):
             taken.add(ref[len("refs/heads/"):])
     for number in range(1, _MAX_SUFFIX):
-        name = prefix + slug if number == 1 else f"{prefix}{slug}-{number}"
+        name = base if number == 1 else f"{base}-{number}"
         if name not in taken:
             return name
-    raise GitRefused(f"Aucun nom de branche libre pour {prefix}{slug}.")
+    raise GitRefused(f"Aucun nom de branche libre pour {base}.")
 
 
 def remote_has(path, run, branch: str) -> bool:

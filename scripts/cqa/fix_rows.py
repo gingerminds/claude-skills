@@ -113,6 +113,17 @@ def select(
     }
 
 
+def key_rows(entry) -> list:
+    """Return the rows of a key of fix/candidates.json, section after section."""
+    sections = entry.get("sections") if isinstance(entry, dict) else None
+    found = []
+    for section in sections if isinstance(sections, list) else []:
+        rows = section.get("rows") if isinstance(section, dict) else None
+        if isinstance(rows, list):
+            found.extend(row for row in rows if isinstance(row, dict))
+    return found
+
+
 def _flight_notes(flights: dict) -> list:
     notes = []
     for flight in flights.values():

@@ -81,6 +81,12 @@ def project_slug(dir_names: list[str]) -> str:
     return slug
 
 
+def project_name(dir_name: str) -> str:
+    """Return the project name of a repo folder: "Acme - Shop - Laravel" gives "Acme - Shop"."""
+    parts = [part.strip() for part in dir_name.split(_SEPARATOR)]
+    return _SEPARATOR.join(parts[:-1]) if len(parts) >= 2 else dir_name
+
+
 def sibling_repos(repo: Path) -> list[Path]:
     """Return the git repos beside repo with the same "Client - Projet" prefix, sorted by name."""
     repo = Path(os.path.abspath(repo))

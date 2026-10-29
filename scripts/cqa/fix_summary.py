@@ -3,7 +3,7 @@
 Everything here is pure: the caller reads the run files and passes plain values. Texts are in
 French and never hold a long dash.
 """
-from cqa import fix_mr
+from cqa import fix_mr, fix_rows
 from cqa.checklist import ref_label
 
 NO_REASON = "Raison non précisée"
@@ -52,8 +52,8 @@ def _titles(candidates: dict) -> dict:
     """Return {ref: candidate row}, the first row seen for each ref."""
     found = {}
     for entry in candidates.get("keys") or []:
-        for row in (entry.get("rows") or []) if isinstance(entry, dict) else []:
-            if isinstance(row, dict) and isinstance(row.get("ref"), int):
+        for row in fix_rows.key_rows(entry):
+            if isinstance(row.get("ref"), int):
                 found.setdefault(row["ref"], row)
     return found
 
@@ -73,7 +73,9 @@ def _mr_section(keys: dict, info: dict) -> str:
         mr = key.get("mr")
         if not mr:
             continue
-        lines = [f"### {key['repo']} : {key.get('category') or 'sans catégorie'}", "",
+        categories = ", ".join(section.get("category") or section.get("alias") or ""
+                               for section in key.get("sections") or [])
+        lines = [f"### {key['repo']} : {categories or 'sans catégorie'}", "",
                  f"Lien : {mr.get('url')}", ""]
         fixed = _refs(key, "fixed", "done_before")
         covered = fix_mr.covered_refs(key["rows"])

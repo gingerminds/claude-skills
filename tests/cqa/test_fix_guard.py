@@ -7,11 +7,11 @@ from pathlib import Path
 from unittest import mock
 
 from cqa import fix_guard, fix_names, fix_state
-from tests.cqa.test_fix_git import GitCase, IDENTITY, PREFIX, flight, mr
+from tests.cqa.test_fix_git import BASE, GitCase, IDENTITY, KEY, flight, mr
 from tests.cqa.test_git_tools import commit, git as real_git
 
 SCHEMAS = Path(__file__).resolve().parents[2] / "skills" / "checklist-quality-audit" / "schemas"
-KEY = "front/securite"
+SECTION = ["--section", "securite"]
 
 THIRD_PARTY = "code tiers (third_party_paths)"
 DEPENDENCY_DIR = "dossier de dépendances"
@@ -183,7 +183,7 @@ class GuardCommandTest(GitCase):
                 self.assertIn("third_party_paths", err)
 
     def test_guard_ignores_commits_before_start_sha(self):
-        branch = PREFIX + "securite"
+        branch = BASE
         before = self.head(self.repo, "refs/remotes/origin/develop")
         self.push_branch(branch, "fix(CQ-3): first", "Apply 1 suggestion(s) to 1 file(s)")
         self.advance_develop()
@@ -237,18 +237,20 @@ class GuardCommandTest(GitCase):
 class ValidateTest(GitCase):
     def setUp(self):
         super().setUp()
-        self.folder = self.run_dir / "fix" / "front" / "securite"
+        self.folder = self.run_dir / "fix" / "front"
 
     def started(self):
         self.open_pass()
         started = self.start_ok()
         self.worktree = Path(started["worktree"])
         self.start_sha = started["start_sha"]
+        self.section_start()
         self.pass_start(1)
         return started
 
     def pass_start(self, number):
-        code, out, err = self.run_main(["pass-start", self.run_dir, KEY, "--pass", str(number)])
+        code, out, err = self.run_main(
+            ["pass-start", self.run_dir, KEY, "--pass", str(number), *SECTION])
         self.assertEqual(code, 0, err)
         return json.loads(out)
 
@@ -304,11 +306,11 @@ class ValidateTest(GitCase):
         key = self.key()
         self.assertEqual(key["rows"]["3"], {
             "outcome": "fixed", "reason": None, "commits": [fixed], "pass": 1,
-            "attention": "Vérifier le cache du CDN.",
+            "attention": "Vérifier le cache du CDN.", "section": "securite",
         })
         self.assertEqual(key["rows"]["5"], {
             "outcome": "skipped", "reason": "Demande une décision de l'équipe UI/UX.",
-            "commits": [], "pass": 1, "attention": None,
+            "commits": [], "pass": 1, "attention": None, "section": "securite",
         })
         self.assertEqual((key["step"], key["pass"]), ("fixed", 1))
 
@@ -346,13 +348,13 @@ class ValidateTest(GitCase):
         self.started()
         fixed = self.fixer_commit(self.worktree, "a.php", "fix(CQ-3): add the header")
         document = self.report(fixed)
-        document.update(key="front/qualite", rows=document["rows"][:1])
+        document.update(key="back", rows=document["rows"][:1])
         document["pass"] = 2
         self.write_doc("report-1.json", document)
         code, result, err = self.validate("report")
         self.assertEqual(code, 6)
         joined = " ".join(result["errors"])
-        for expected in ("front/qualite", "« pass »", "CQ-5"):
+        for expected in ('vaut "back"', "« pass »", "CQ-5"):
             self.assertIn(expected, joined)
         (self.folder / "report-1.json").write_text("{", encoding="utf-8")
         self.assertEqual(self.validate("report")[0], 6)
@@ -436,7 +438,7 @@ class ValidateTest(GitCase):
 class DropTest(GitCase):
     def setUp(self):
         super().setUp()
-        self.write_run(flight(), slugs=("securite", "qualite"), rows=(3, 5, 12))
+        self.write_run(flight(), rows=(3, 5, 12))
         self.open_pass()
 
     def drop(self, key, refs, reason="Revue bloquante : échappement manquant.", run=subprocess.run):
@@ -485,16 +487,17 @@ class DropTest(GitCase):
         self.assertEqual(rows["12"]["commits"], [self.head(worktree)])
         self.assertNotEqual(self.head(worktree), kept)
 
-        other = self.start_ok("front/qualite")
-        worktree = Path(other["worktree"])
+    def test_drop_also_drops_a_row_whose_commit_no_longer_replays(self):
+        started = self.start_ok()
+        worktree = Path(started["worktree"])
         self.fixer_commit(worktree, "shared.txt", "fix(CQ-3): add shared")
         self.fixer_commit(worktree, "shared.txt", "fix(CQ-12): change shared")
-        code, result, err = self.drop("front/qualite", "CQ-3")
+        code, result, err = self.drop(KEY, "CQ-3")
         self.assertEqual(code, 0, err)
         self.assertEqual(result, {"dropped": [3], "also_dropped": [12]})
-        self.assertEqual(self.head(worktree), other["start_sha"])
-        self.assert_clean_on(worktree, other["branch"])
-        rows = self.key("front/qualite")["rows"]
+        self.assertEqual(self.head(worktree), started["start_sha"])
+        self.assert_clean_on(worktree, started["branch"])
+        rows = self.key()["rows"]
         self.assertEqual((rows["3"]["outcome"], rows["12"]["outcome"]), ("dropped", "dropped"))
         self.assertIn("CQ-3", rows["12"]["reason"])
         self.assertEqual(rows["5"]["outcome"], "pending")
@@ -674,10 +677,12 @@ class DropSafetyTest(DropTest):
     def test_drop_moves_the_key_to_reviewed_once_every_blocking_row_is_dropped(self):
         started = self.start_ok()
         worktree = Path(started["worktree"])
-        self.assertEqual(self.run_main(["pass-start", self.run_dir, KEY, "--pass", "1"])[0], 0)
+        self.section_start()
+        self.assertEqual(
+            self.run_main(["pass-start", self.run_dir, KEY, "--pass", "1", *SECTION])[0], 0)
         first = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
         second = self.fixer_commit(worktree, "b12.txt", "fix(CQ-12): add b")
-        folder = self.run_dir / "fix" / "front" / "securite"
+        folder = self.run_dir / "fix" / "front"
         report = {"key": KEY, "pass": 1, "rows": [
             {"ref": 3, "outcome": "fixed", "change": "Ajoute a.", "uat": "Lire a.",
              "commits": [first]},
@@ -712,11 +717,13 @@ class PassReviewTest(GitCase):
     def setUp(self):
         super().setUp()
         self.write_run(flight(), rows=(3, 5, 12))
-        self.folder = self.run_dir / "fix" / "front" / "securite"
+        self.folder = self.run_dir / "fix" / "front"
         self.open_pass()
 
     def pass_start(self, number):
-        code, out, err = self.run_main(["pass-start", self.run_dir, KEY, "--pass", str(number)])
+        self.section("start", "securite")
+        code, out, err = self.run_main(
+            ["pass-start", self.run_dir, KEY, "--pass", str(number), *SECTION])
         return code, json.loads(out) if out else None, err
 
     def write_doc(self, name, document):
@@ -1034,7 +1041,7 @@ class SettledRowsTest(GitCase):
 
     def setUp(self):
         super().setUp()
-        self.folder = self.run_dir / "fix" / "front" / "securite"
+        self.folder = self.run_dir / "fix" / "front"
 
     def main_ok(self, *args):
         code, out, err = self.run_main([args[0], self.run_dir, *args[1:]])
@@ -1046,7 +1053,7 @@ class SettledRowsTest(GitCase):
             json.dumps({"key": KEY, "pass": number, "rows": rows}), encoding="utf-8")
 
     def test_an_empty_report_brings_a_key_whose_rows_are_all_done_before_to_reviewed(self):
-        branch = PREFIX + "securite"
+        branch = BASE
         real_git(self.repo, "checkout", "-q", "-b", branch)
         commit(self.repo, "s.txt", "fix(CQ-3): x")
         real_git(self.repo, "checkout", "-q", "develop")
@@ -1054,7 +1061,8 @@ class SettledRowsTest(GitCase):
                        rows=(3,))
         self.open_pass()
         self.assertEqual(self.start_ok()["done_refs"], [3])
-        self.main_ok("pass-start", KEY, "--pass", "1")
+        self.section_start()
+        self.main_ok("pass-start", KEY, "--pass", "1", *SECTION)
         self.write_report(1, [])
         result = self.main_ok("validate", KEY, "report", "--pass", "1")
         self.assertEqual((result["ok"], result["errors"]), (True, []))
@@ -1068,7 +1076,8 @@ class SettledRowsTest(GitCase):
         self.write_run(flight(), rows=(3, 5))
         self.open_pass()
         worktree = Path(self.start_ok()["worktree"])
-        self.main_ok("pass-start", KEY, "--pass", "1")
+        self.section_start()
+        self.main_ok("pass-start", KEY, "--pass", "1", *SECTION)
         fixed = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
         question = {"text": "Quel contact ?", "options": ["Équipe", "Client"], "default": "Client"}
         self.write_report(1, [

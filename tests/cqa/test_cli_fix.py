@@ -223,6 +223,7 @@ class CandidatesTest(FixCase):
 
 class PassTest(FixCase):
     UNFINISHED = "Une passe fix est inachevée : reprenez-la ou abandonnez-la (cqa_fix.py abandon)."
+    PROJECT = {"slug": "boutique", "name": "Boutique Exemple", "protection": None}
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -230,12 +231,17 @@ class PassTest(FixCase):
         self.run_dir = Path(tmp.name) / "run"
         (self.run_dir / "fix").mkdir(parents=True)
         rows = [{"ref": 3, "title": "Trois"}, {"ref": 12, "title": "Douze"}]
-        candidates = {
-            "keys": [{"key": "front/securite", "repo": "front", "category": "SÉCURITÉ",
-                      "slug": "securite", "push_ready": False, "rows": rows}],
-            "left": [], "flights": {}, "notes": [], "estimate_min": 18,
-        }
+        self.write_candidates([{"key": "front", "repo": "front", "push_ready": False, "sections": [
+            {"category": "SÉCURITÉ", "alias": "securite", "rows": rows}]}])
+        self.write_context({"project": self.PROJECT,
+                            "repos": [{"name": "front", "path": "/srv/front"}]})
+
+    def write_candidates(self, keys):
+        candidates = {"keys": keys, "left": [], "flights": {}, "notes": [], "estimate_min": 18}
         (self.run_dir / "fix" / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+
+    def write_context(self, context):
+        (self.run_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
 
     def open(self, mode="present", push="mr", notion="yes"):
         return self.run_main(
@@ -258,16 +264,62 @@ class PassTest(FixCase):
             {k: state[k] for k in ("finished_at", "stage", "mode", "push", "notion")},
             {"finished_at": None, "stage": "keys", "mode": "present", "push": "mr", "notion": True},
         )
-        row = {"outcome": "pending", "reason": None, "commits": [], "pass": 0, "attention": None}
-        self.assertEqual(state["keys"], {"front/securite": {
-            "repo": "front", "category": "SÉCURITÉ", "slug": "securite", "push_ready": False,
+        self.assertEqual(state["project_name"], "Boutique Exemple")
+        row = {"outcome": "pending", "reason": None, "commits": [], "pass": 0, "attention": None,
+               "section": "securite"}
+        self.assertEqual(state["keys"], {"front": {
+            "repo": "front", "push_ready": False,
             "branch": None, "base": None, "start_sha": None, "worktree": None, "reused": None,
             "mr": None, "step": "selected", "pass": 0, "dev_fingerprint": None,
-            "bases": {}, "reviews": {}, "reports": [], "rows": {"3": row, "12": row},
+            "bases": {}, "reviews": {}, "reports": [],
+            "sections": [{"category": "SÉCURITÉ", "alias": "securite", "refs": [3, 12],
+                          "state": "pending", "reason": None}],
+            "pass_sections": {}, "rows": {"3": row, "12": row},
         }})
         result = json.loads(out)
-        self.assertEqual(result["keys"], ["front/securite"])
+        self.assertEqual(result["keys"], ["front"])
+        self.assertEqual(result["project_name"], "Boutique Exemple")
         self.assertIsNone(result["archived"])
+
+    def test_open_builds_one_key_per_repo_with_sections(self):
+        row = lambda ref: {"ref": ref, "title": f"Ligne {ref}"}
+        self.write_candidates([
+            {"key": "back", "repo": "back", "push_ready": True, "sections": [
+                {"category": "QUALITÉ", "alias": "qualite", "rows": [row(7)]}]},
+            {"key": "front", "repo": "front", "push_ready": False, "sections": [
+                {"category": "SÉCURITÉ", "alias": "securite", "rows": [row(3), row(12)]},
+                {"category": "SEO / GEO", "alias": "seo", "rows": [row(40)]}]},
+        ])
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["keys"], ["back", "front"])
+        state = self.state()
+        self.assertEqual(list(state["keys"]), ["back", "front"])
+        front = state["keys"]["front"]
+        self.assertEqual(front["sections"], [
+            {"category": "SÉCURITÉ", "alias": "securite", "refs": [3, 12], "state": "pending",
+             "reason": None},
+            {"category": "SEO / GEO", "alias": "seo", "refs": [40], "state": "pending",
+             "reason": None},
+        ])
+        self.assertEqual({ref: item["section"] for ref, item in front["rows"].items()},
+                         {"3": "securite", "12": "securite", "40": "seo"})
+        self.assertEqual((front["pass_sections"], front["push_ready"]), ({}, False))
+        self.assertNotIn("slug", front)
+        self.assertNotIn("category", front)
+        back = state["keys"]["back"]
+        self.assertEqual(([item["alias"] for item in back["sections"]], list(back["rows"]),
+                          back["push_ready"]), (["qualite"], ["7"], True))
+
+    def test_open_records_the_project_name(self):
+        self.assertEqual(self.open()[0], 0)
+        self.assertEqual(self.state()["project_name"], "Boutique Exemple")
+        self.finish()
+        self.write_context({"repos": [{"name": "front", "path": "/srv/Acme - Boutique - WordPress"}]})
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.state()["project_name"], "Acme - Boutique")
+        self.assertEqual(json.loads(out)["project_name"], "Acme - Boutique")
 
     def test_dry_run_forces_notion_off(self):
         code, out, err = self.open(mode="autonomous", push="dry_run", notion="yes")
@@ -277,6 +329,16 @@ class PassTest(FixCase):
     def test_open_needs_candidates_and_valid_options(self):
         code, out, err = self.open(push="everywhere")
         self.assertEqual(code, 2)
+        v2 = {"key": "front/securite", "repo": "front", "category": "SÉCURITÉ",
+              "slug": "securite", "push_ready": False, "rows": [{"ref": 3, "title": "Trois"}]}
+        self.write_candidates([v2])
+        code, out, err = self.open()
+        self.assertEqual(code, 2)
+        self.assertIn("relancez cqa_fix.py candidates", err)
+        (self.run_dir / "context.json").unlink()
+        code, out, err = self.open()
+        self.assertEqual(code, 6)
+        self.assertIn("context.json", err)
         (self.run_dir / "fix" / "candidates.json").unlink()
         code, out, err = self.open()
         self.assertEqual(code, 2)
@@ -293,9 +355,9 @@ class PassTest(FixCase):
 
     def test_open_archives_a_finished_pass(self):
         self.assertEqual(self.open()[0], 0)
-        folder = self.run_dir / "fix" / "front" / "securite"
+        folder = self.run_dir / "fix" / "front"
         folder.mkdir(parents=True)
-        (folder / "report-1.json").write_text('{"key": "front/securite"}', encoding="utf-8")
+        (folder / "report-1.json").write_text('{"key": "front"}', encoding="utf-8")
         self.finish()
         old = self.state()
         code, out, err = self.open(push="local")
@@ -306,11 +368,11 @@ class PassTest(FixCase):
         self.assertEqual(
             json.loads((history / "state.json").read_text(encoding="utf-8")), old
         )
-        self.assertTrue((history / "front" / "securite" / "report-1.json").is_file())
+        self.assertTrue((history / "front" / "report-1.json").is_file())
         self.assertFalse((self.run_dir / "fix" / "front").exists())
         state = self.state()
         self.assertEqual((state["finished_at"], state["push"]), (None, "local"))
-        self.assertEqual(state["keys"]["front/securite"]["step"], "selected")
+        self.assertEqual(state["keys"]["front"]["step"], "selected")
 
     def test_pending_until_summary(self):
         self.assertFalse(fix_state.pending(self.run_dir))
@@ -345,14 +407,24 @@ class PassTest(FixCase):
         (self.run_dir / "fix" / "state.json").unlink()
         self.assertEqual(self.open()[0], 0)
         state = self.state()
-        state["keys"]["front/securite"]["branch"] = "--upload-pack=x"
+        state["keys"]["front"]["branch"] = "--upload-pack=x"
+        (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 6)
+        state["keys"]["front"]["branch"] = "feature/checklist-qa-fix-securite"
+        (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 6)
+        state["keys"]["front"]["branch"] = "feature/checklist-qa-fix-2"
+        state["keys"]["front"]["sections"][0]["state"] = "done"
         (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
         self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 6)
 
     def test_key_commands_need_a_started_key(self):
         self.assertEqual(self.open()[0], 0)
-        key = "front/securite"
+        key = "front"
         for argv in (
+            ["section-start", self.run_dir, key, "--section", "securite"],
+            ["section-end", self.run_dir, key, "--section", "securite"],
+            ["pass-start", self.run_dir, key, "--pass", "1", "--section", "securite"],
             ["validate", self.run_dir, key, "report", "--pass", "1"],
             ["validate", self.run_dir, key, "review", "--pass", "1"],
             ["guard", self.run_dir, key],
@@ -367,9 +439,9 @@ class PassTest(FixCase):
                 self.assertEqual(code, 2, err)
                 self.assertIn("cqa_fix.py start", err)
         self.assertEqual(self.state()["keys"][key]["rows"]["3"]["outcome"], "pending")
-        code, out, err = self.run_main(["guard", self.run_dir, "front/nothing"])
+        code, out, err = self.run_main(["guard", self.run_dir, "back"])
         self.assertEqual(code, 2)
-        self.assertIn("front/nothing", err)
+        self.assertIn("Clé inconnue : back", err)
 
     def test_abandon_without_a_pass_exits_2(self):
         code, out, err = self.run_main(["abandon", self.run_dir])
@@ -392,8 +464,8 @@ class PassTest(FixCase):
 
 class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
-        for name in ("doctor", "candidates", "open", "stage", "start", "pass-start", "validate",
-                     "guard", "drop",
+        for name in ("doctor", "candidates", "open", "stage", "start", "section-start",
+                     "section-end", "pass-start", "validate", "guard", "drop",
                      "check", "mr-body", "publish", "finish", "summary", "abandon"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)

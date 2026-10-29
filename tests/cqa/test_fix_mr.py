@@ -9,10 +9,10 @@ from urllib.parse import unquote
 
 import cqa_fix
 from cqa import fix_mr, fix_state
-from tests.cqa.test_fix_git import GitCase, HOST, PREFIX, flight, mr
+from tests.cqa.test_fix_git import BASE, GitCase, HOST, KEY, PREFIX, flight, mr
 from tests.cqa.test_git_tools import commit, git as real_git
 
-KEY = "front/securite"
+SECTION = ["--section", "securite"]
 REPO = f"{HOST}/acme/shop"
 STALE = "Description de MR périmée : relancez mr-body."
 BAD_MESSAGE = "message de commit hors convention"
@@ -192,7 +192,9 @@ class MaterialTest(unittest.TestCase):
                     "pass": number, "attention": attention}
 
         self.sha = "0123456789abcdef0123456789abcdef01234567"
-        self.key = {"repo": "front", "category": "SÉCURITÉ", "slug": "securite", "mr": None,
+        self.key = {"repo": "front", "mr": None,
+                    "sections": [{"category": "SÉCURITÉ", "alias": "securite",
+                                  "refs": [3, 5, 6, 12], "state": "active", "reason": None}],
                     "rows": {
                         "3": row("fixed", commits=[self.sha], attention="Vérifier le cache du CDN."),
                         "5": row("skipped", "Demande une décision du client."),
@@ -206,12 +208,14 @@ class MaterialTest(unittest.TestCase):
 
         self.candidates = {
             "keys": [
-                {"key": KEY, "repo": "front", "category": "SÉCURITÉ", "slug": "securite", "rows": [
-                    info(3, "Trois", ROW_ID), info(5, "Cinq", "p5"), info(6, "Six", "p6"),
-                    info(12, "Douze", "p12"),
-                ]},
-                {"key": "back/securite", "repo": "back", "category": "SÉCURITÉ",
-                 "slug": "securite", "rows": [info(41, "Quarante et un", "p41")]},
+                {"key": KEY, "repo": "front", "sections": [
+                    {"category": "SÉCURITÉ", "alias": "securite", "rows": [
+                        info(3, "Trois", ROW_ID), info(5, "Cinq", "p5"), info(6, "Six", "p6"),
+                        info(12, "Douze", "p12"),
+                    ]}]},
+                {"key": "back", "repo": "back", "sections": [
+                    {"category": "SÉCURITÉ", "alias": "securite",
+                     "rows": [info(41, "Quarante et un", "p41")]}]},
             ],
             "left": [
                 {"ref": 40, "title": "Quarante", "category": "SÉCURITÉ", "reason": "Manuel", "url": None},
@@ -266,7 +270,7 @@ class MaterialTest(unittest.TestCase):
                                  "pass": 2, "attention": None}
         self.key["rows"]["8"] = {"outcome": "skipped", "reason": reason.format(6), "commits": [],
                                  "pass": 2, "attention": None}
-        self.candidates["keys"][0]["rows"] += [
+        self.candidates["keys"][0]["sections"][0]["rows"] += [
             {"ref": 7, "title": "Sept", "page_id": "p7"}, {"ref": 8, "title": "Huit", "page_id": "p8"},
         ]
         found = self.material()
@@ -464,7 +468,7 @@ class MrCase(GitCase):
         target = self.root / RUN_ID
         self.run_dir.rename(target)
         self.run_dir = target
-        self.folder = self.run_dir / "fix" / "front" / "securite"
+        self.folder = self.run_dir / "fix" / "front"
         self.gitlab = FakeGitLab()
 
     def tearDown(self):
@@ -484,7 +488,8 @@ class MrCase(GitCase):
         started = self.start_ok()
         self.worktree = Path(started["worktree"])
         self.branch = started["branch"]
-        self.assertEqual(self.cli("pass-start", KEY, "--pass", "1")[0], 0)
+        self.assertEqual(self.cli("section-start", KEY, *SECTION)[0], 0)
+        self.assertEqual(self.cli("pass-start", KEY, "--pass", "1", *SECTION)[0], 0)
         rows = [{"ref": 5, "outcome": "skipped", "reason": "Demande une décision de l'équipe UI/UX."}]
         if fix:
             self.fixed = self.fixer_commit(self.worktree, "a3.txt", "fix(CQ-3): add a")
@@ -523,7 +528,7 @@ class MrCase(GitCase):
 
     def open_mr(self, state="opened", description="## Contexte\n\nTexte du relecteur.\n"):
         """A branch pushed by an earlier pass, with its MR !12, taken over by start."""
-        branch = PREFIX + "securite"
+        branch = BASE
         self.push_branch(branch, "fix(CQ-107): add headers")
         self.write_run(flight(open=[mr(12, branch, [107])]))
         self.gitlab.add(12, branch, description, state)
@@ -544,7 +549,7 @@ class MrBodyTest(MrCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out), {
             "title": "Checklist PRE-MEL : correctifs SECURITE (1 ligne)",
-            "file": "fix/front/securite/mr.md", "kind": "create", "fixed": [3], "covered": [],
+            "file": "fix/front/mr.md", "kind": "create", "fixed": [3], "covered": [],
             "waiting": [], "out_of_scope": [5],
         })
         self.assertEqual((self.folder / "mr-title.txt").read_text(encoding="utf-8"),
@@ -588,7 +593,7 @@ class MrBodyTest(MrCase):
         code, out, err = self.cli("mr-body", KEY)
         self.assertEqual(code, 0, err)
         result = json.loads(out)
-        self.assertEqual((result["kind"], result["file"]), ("update", "fix/front/securite/mr-addition.md"))
+        self.assertEqual((result["kind"], result["file"]), ("update", "fix/front/mr-addition.md"))
         self.assertFalse((self.folder / "mr.md").exists())
         addition, hors = fix_mr.split_addition(
             (self.folder / "mr-addition.md").read_text(encoding="utf-8"))
@@ -751,7 +756,7 @@ class PublishTest(MrCase):
         self.assertEqual(self.key()["mr"], {"iid": 12, "url": MR_URL})
         self.assertEqual(self.cli("finish", KEY)[0], 0)
         self.assertEqual(self.start_ok()["branch"], self.branch)
-        self.assertEqual(self.cli("pass-start", KEY, "--pass", "2")[0], 0)
+        self.assertEqual(self.cli("pass-start", KEY, "--pass", "2", *SECTION)[0], 0)
         self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
         self.write_doc("report-2.json", {"key": KEY, "pass": 2, "rows": [
             {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.",
@@ -851,7 +856,7 @@ class PublishTest(MrCase):
     def test_publish_refuses_a_stale_description(self):
         self.reviewed()
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
-        self.assertEqual(self.cli("pass-start", KEY, "--pass", "2")[0], 0)
+        self.assertEqual(self.cli("pass-start", KEY, "--pass", "2", *SECTION)[0], 0)
         self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
         self.write_doc("report-2.json", {"key": KEY, "pass": 2, "rows": [
             {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.",
@@ -876,7 +881,7 @@ class PublishTest(MrCase):
         self.assertEqual(self.glab_args("mr", "update"), [])
 
     def test_publish_checks_a_taken_over_branch_never_pushed(self):
-        branch = PREFIX + "securite"
+        branch = BASE
         real_git(self.repo, "checkout", "-q", "-b", branch)
         commit(self.repo, "s3.txt", "fix(CQ-3): earlier fix")
         commit(self.repo, "s40.txt", "fix(CQ-40): earlier fix of another row")
@@ -904,7 +909,7 @@ class PublishTest(MrCase):
         self.assertEqual(self.glab_args("mr"), [])
 
     def test_publish_links_the_rows_already_on_the_branch(self):
-        branch = PREFIX + "securite"
+        branch = BASE
         real_git(self.repo, "checkout", "-q", "-b", branch)
         commit(self.repo, "s3.txt", "fix(CQ-3): earlier fix")
         real_git(self.repo, "checkout", "-q", "develop")
@@ -928,7 +933,7 @@ class PublishTest(MrCase):
 
     def take_over_local_branch(self, *subjects):
         """Start on a never-pushed fix branch carrying one commit per subject; return the SHAs."""
-        branch = PREFIX + "securite"
+        branch = BASE
         real_git(self.repo, "checkout", "-q", "-b", branch)
         shas = [commit(self.repo, f"inherited-{index}.txt", subject)
                 for index, subject in enumerate(subjects)]
@@ -990,7 +995,8 @@ class PublishTest(MrCase):
 
     def fix_row_5(self):
         """Fix CQ-5 in pass 1 of a key whose CQ-3 is done_before, then review: reviewed."""
-        self.assertEqual(self.cli("pass-start", KEY, "--pass", "1")[0], 0)
+        self.assertEqual(self.cli("section-start", KEY, *SECTION)[0], 0)
+        self.assertEqual(self.cli("pass-start", KEY, "--pass", "1", *SECTION)[0], 0)
         sha = self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
         self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [
             {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.", "commits": [sha]}]})

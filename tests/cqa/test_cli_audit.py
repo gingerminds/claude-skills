@@ -1924,9 +1924,10 @@ class ScanTest(AuditCase):
     def test_scan_skips_fix_worktrees(self):
         run_dir = self.make_run()
         config = "<?php\n$password = 'hunter22';\n"
-        worktree = run_dir / "fix" / "front" / "securite" / "wt"
-        worktree.mkdir(parents=True)
-        (worktree / "wp-config.php").write_text(config, encoding="utf-8")
+        repo_folder = run_dir / "fix" / "front"
+        for worktree in (repo_folder / "wt", repo_folder / "securite" / "wt"):
+            worktree.mkdir(parents=True)
+            (worktree / "wp-config.php").write_text(config, encoding="utf-8")
         self.assertEqual(self.run_json(["scan", run_dir]), {"ok": True, "found": []})
         (worktree.parent / "wp-config.php").write_text(config, encoding="utf-8")
         code, out, err = self.run_main(["scan", run_dir])

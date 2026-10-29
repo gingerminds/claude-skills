@@ -21,6 +21,7 @@ from urllib.parse import quote
 from cqa import deferred, fix_checks, fix_git, fix_gitlab, fix_guard, fix_mr, fix_names, fix_rows, fix_state, fix_summary
 from cqa.checklist import parse_refs, ref_label
 from cqa.notion_read import write_json, write_text
+from cqa.project import project_name
 from cqa.report import run_start
 from cqa.rerun import latest_findings, read_grounded_findings
 from cqa.secrets import known_values_from_env, scan_text
@@ -32,6 +33,7 @@ EXIT_CONTEXT = 6
 EXIT_SECRET = 7
 
 UNFINISHED = "Une passe fix est inachevée : reprenez-la ou abandonnez-la (cqa_fix.py abandon)."
+UNFINISHED_V2 = "Passe v2 inachevée : abandonnez-la (cqa_fix.py abandon), puis relancez fix."
 _REVIEW_FILE = re.compile(r"review-([0-9]+)\.json")
 NO_PASS = "Aucune passe fix en cours : lancez d'abord cqa_fix.py open."
 NEED_BODY = "Lancez d'abord cqa_fix.py mr-body."
@@ -43,6 +45,8 @@ STALE_BODY = "Description de MR périmée : relancez mr-body."
 NOTHING_PUSHED = "Rien n'a été poussé."
 UNREPORTED = "commit non rapporté par le fixer : {sha} {subject}"
 LINKS_FILE = "fix/mr-links.json"
+KEY_HELP = "clé de la passe : le nom du repo (fix/candidates.json)"
+SECTION_HELP = "alias de la section (securite, qualite...)"
 # Push settings of the dev's config that could send more than the branch, trigger GitLab
 # push options (ci.skip, merge_request.*) or prompt. An empty pushOption resets the list.
 _PUSH_CONFIG = ("-c", "push.followTags=false", "-c", "push.recurseSubmodules=no",
@@ -112,39 +116,49 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("stage", choices=fix_state.STAGES[1:], help="étape atteinte")
     sub = _command(commands, "start", "branche et worktree d'une clé", _cmd_start)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.add_argument("key", help="clé <repo>/<slug> de fix/candidates.json")
+    sub.add_argument("key", help=KEY_HELP)
+    for name, help_text, handler in (
+        ("section-start", "commence la section suivante d'une clé", _cmd_section_start),
+        ("section-end", "termine la section en cours d'une clé, toutes ses lignes réglées",
+         _cmd_section_end),
+    ):
+        sub = _command(commands, name, help_text, handler)
+        sub.add_argument("run_dir", type=Path, help="dossier du run")
+        sub.add_argument("key", help=KEY_HELP)
+        sub.add_argument("--section", required=True, help=SECTION_HELP)
     sub = _command(commands, "pass-start", "note la tête de la branche avant une passe du fixer",
                    _cmd_pass_start)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("key", help=KEY_HELP)
     sub.add_argument("--pass", dest="number", type=int, required=True,
                      help="numéro de la passe du fixer qui commence")
+    sub.add_argument("--section", required=True, help=SECTION_HELP)
     sub = _command(commands, "validate", "contrôle un rapport ou une revue", _cmd_validate)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("key", help=KEY_HELP)
     sub.add_argument("kind", choices=("report", "review"), help="report-<N> ou review-<N>.json")
     sub.add_argument("--pass", dest="number", type=int, required=True, help="numéro de la passe")
     sub = _command(commands, "guard", "garde-fou sur les commits d'une clé", _cmd_guard)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("key", help=KEY_HELP)
     sub = _command(commands, "drop", "retire des lignes de la branche d'une clé", _cmd_drop)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("key", help=KEY_HELP)
     sub.add_argument("--refs", required=True, help="Réf à retirer, séparées par des virgules")
     sub.add_argument("--reason", required=True, help="raison, en français, donnée dans la MR")
     sub = _command(commands, "check", "contrôles de syntaxe et stylelint des fichiers corrigés", _cmd_check)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("key", help=KEY_HELP)
     sub = _command(commands, "mr-body", "titre et description de la MR d'une clé", _cmd_mr_body)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("key", help=KEY_HELP)
     sub = _command(commands, "publish", "pousse la branche, crée ou complète la MR en brouillon",
                    _cmd_publish)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("key", help=KEY_HELP)
     sub = _command(commands, "finish", "retire le worktree d'une clé publiée", _cmd_finish)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("key", help=KEY_HELP)
     sub.add_argument("--keep-local", action="store_true",
                      help="garde la branche en local après un push refusé ou en échec")
     sub = _command(commands, "summary", "synthèse de la passe et message pour l'équipe", _cmd_summary)
@@ -278,24 +292,39 @@ def _cmd_open(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     old = _read_state(run_dir, required=False)
     if old is not None and not old.get("finished_at"):
-        raise UsageError(UNFINISHED)
+        raise UsageError(UNFINISHED_V2 if fix_state.is_v2(old) else UNFINISHED)
     if not (run_dir / "fix" / "candidates.json").is_file():
         raise UsageError("Lancez d'abord cqa_fix.py candidates.")
     candidates = _read_run_json(run_dir, "fix/candidates.json", "cqa_fix.py candidates")
+    context = _load_context(run_dir)
     try:
         state = fix_state.new_state(
-            candidates, mode=args.mode, push=args.push, notion=args.notion == "yes"
+            candidates, mode=args.mode, push=args.push, notion=args.notion == "yes",
+            project_name=_project_name(context),
         )
-    except (KeyError, TypeError, AttributeError):
+    except (KeyError, TypeError, AttributeError, ValueError):
         raise UsageError("fix/candidates.json : clés invalides, relancez cqa_fix.py candidates.")
     removed, archived = _archive(run_dir, old, services.run) if old is not None else ([], None)
     fix_state.save(run_dir, state)
     _emit({
         "started_at": state["started_at"], "stage": state["stage"], "mode": state["mode"],
-        "push": state["push"], "notion": state["notion"], "keys": list(state["keys"]),
-        "archived": archived, "removed": removed,
+        "push": state["push"], "notion": state["notion"], "project_name": state["project_name"],
+        "keys": list(state["keys"]), "archived": archived, "removed": removed,
     })
     return EXIT_OK
+
+
+def _project_name(context: dict) -> Optional[str]:
+    """Return the name of the project as cqa_plan.py project gives it: « project.name » of
+    context.json, else the folder name of the first repo without its techno part."""
+    project = context.get("project")
+    name = project.get("name") if isinstance(project, dict) else None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    for repo in context.get("repos") or []:
+        if isinstance(repo, dict) and isinstance(repo.get("path"), str) and repo["path"].strip():
+            return project_name(Path(repo["path"]).name) or None
+    return None
 
 
 def _cmd_stage(args, services: Services) -> int:
@@ -331,8 +360,7 @@ def _cmd_start(args, services: Services) -> int:
         fingerprint = fix_state.dev_fingerprint(path, services.run)
         folder.mkdir(parents=True, exist_ok=True)
         opened = fix_git.open_new(
-            path, services.run, slug=key["slug"], flight=flight, push=state["push"], base=base,
-            worktree=worktree,
+            path, services.run, flight=flight, push=state["push"], base=base, worktree=worktree,
         )
         key.update(opened, base=base, worktree=str(worktree), dev_fingerprint=fingerprint)
     else:
@@ -359,17 +387,30 @@ def _cmd_start(args, services: Services) -> int:
 def _cmd_pass_start(args, services: Services) -> int:
     """Record the head of the key's branch just before fixer pass N: the Base of review N.
 
-    N must not be lower than a pass already started, and no report of pass N or later may be
-    validated yet. Starting the same pass again before its report keeps its first base, so that
-    the commits of an interrupted run stay in bases[N]..HEAD; the base moves to HEAD only when
-    it is no longer in the branch. A reviewed key goes back to fixed: it is never reviewed in
-    the middle of a pass (see _every_pass_reviewed).
+    Pass N belongs to the section in progress (--section, recorded in pass_sections): its
+    report covers the rows of that section only. N must not be lower than a pass already
+    started, and no report of pass N or later may be validated yet. Starting the same pass
+    again before its report keeps its first base, so that the commits of an interrupted run
+    stay in bases[N]..HEAD; the base moves to HEAD only when it is no longer in the branch. A
+    reviewed key goes back to fixed: it is never reviewed in the middle of a pass (see
+    _every_pass_reviewed).
     """
     run_dir = args.run_dir.resolve()
     if args.number < 1:
         raise UsageError("--pass : un numéro de passe à partir de 1 est attendu.")
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
+    section = _section(key, args.key, args.section)
+    if section["state"] != "active":
+        raise UsageError(
+            f"La section {args.section} est à l'état « {section['state']} » : pass-start "
+            "attend la section en cours (cqa_fix.py section-start)."
+        )
+    owners = _recorded(key, "pass_sections")
+    owner = owners.get(str(args.number))
+    if owner is not None and owner != args.section:
+        raise UsageError(f"--pass {args.number} : la passe {args.number} appartient à la "
+                         f"section {owner}.")
     bases = _recorded(key, "bases")
     started = max((int(number) for number in bases), default=0)
     reported = key.get("pass") or 0
@@ -390,11 +431,113 @@ def _cmd_pass_start(args, services: Services) -> int:
             raise fix_git.GitRefused(f"git rev-parse HEAD a échoué dans {worktree}.")
         bases[str(args.number)] = base
         key["bases"] = bases
+    owners[str(args.number)] = args.section
+    key["pass_sections"] = owners
     if key.get("step") == "reviewed":
         key["step"] = "fixed"
     fix_state.save(run_dir, state)
     _emit({"pass": args.number, "base": base})
     return EXIT_OK
+
+
+def _cmd_section_start(args, services: Services) -> int:
+    """Make the next section of the key the one in progress; starting it again resumes it.
+
+    Sections run in their order: only the first pending one may start, and only while no
+    other section is in progress.
+    """
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    section = _section(key, args.key, args.section)
+    if section["state"] != "active":
+        active = next((item for item in key["sections"] if item["state"] == "active"), None)
+        if active is not None:
+            raise UsageError(
+                f"La section {active['alias']} est en cours : terminez-la (cqa_fix.py "
+                f"section-end) avant la section {args.section}."
+            )
+        if section["state"] != "pending":
+            raise UsageError(
+                f"La section {args.section} est à l'état « {section['state']} » : elle ne "
+                "recommence pas."
+            )
+        first = next(item for item in key["sections"] if item["state"] == "pending")
+        if first is not section:
+            raise UsageError(
+                f"La section {first['alias']} passe avant la section {args.section} : "
+                "commencez-la d'abord."
+            )
+        section["state"] = "active"
+        fix_state.save(run_dir, state)
+    _emit({"section": section["alias"], "category": section.get("category"),
+           "refs": section["refs"], "state": section["state"]})
+    return EXIT_OK
+
+
+def _cmd_section_end(args, services: Services) -> int:
+    """Settle the section in progress once each of its rows is settled.
+
+    A row is settled when it is skipped, dropped or already on the branch, fixed with a review
+    of its pass that does not block it, or a question set aside (autonomous mode only). No
+    pass of the section may be in progress (started, its report not validated).
+    """
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    section = _section(key, args.key, args.section)
+    if section["state"] != "active":
+        raise UsageError(
+            f"La section {args.section} est à l'état « {section['state']} » : section-end "
+            "attend la section en cours."
+        )
+    started = max((int(number) for number in _recorded(key, "bases")), default=0)
+    if started > (key.get("pass") or 0):
+        raise UsageError(
+            f"La passe {started} est commencée sans rapport validé : validez-le avant de "
+            f"terminer la section {args.section}."
+        )
+    reviews = _recorded(key, "reviews")
+    unsettled = []
+    for ref in section["refs"]:
+        why = _unsettled(ref, key["rows"].get(str(ref)) or {}, reviews, state.get("mode"))
+        if why:
+            unsettled.append(f"{ref_label(ref)} {why}")
+    if unsettled:
+        raise UsageError(f"La section {args.section} n'est pas réglée : {', '.join(unsettled)}.")
+    section["state"] = "settled"
+    fix_state.save(run_dir, state)
+    following = next((item["alias"] for item in key["sections"] if item["state"] == "pending"),
+                     None)
+    _emit({"section": section["alias"], "state": "settled", "next": following})
+    return EXIT_OK
+
+
+def _unsettled(ref: int, row: dict, reviews: dict, mode) -> Optional[str]:
+    """Return why a row of a section is not settled yet, or None."""
+    outcome = row.get("outcome")
+    if outcome in ("skipped", "dropped", "done_before"):
+        return None
+    if outcome == "question":
+        return None if mode == "autonomous" else "question sans réponse"
+    if outcome == "fixed":
+        number = row.get("pass")
+        review = reviews.get(str(number))
+        if not isinstance(review, dict):
+            return f"sans revue de la passe {number}"
+        if ref in (review.get("blocking") or []):
+            return f"bloquante à la revue de la passe {number}"
+        return None
+    return "en attente"
+
+
+def _section(key: dict, name: str, alias: str) -> dict:
+    """Return the section of the key with this alias; exit 2 when there is none."""
+    for section in key["sections"]:
+        if section["alias"] == alias:
+            return section
+    known = ", ".join(section["alias"] for section in key["sections"]) or "aucune"
+    raise UsageError(f"Section inconnue : {alias} (sections de la clé {name} : {known}).")
 
 
 def _cmd_validate(args, services: Services) -> int:
@@ -417,8 +560,8 @@ def _cmd_validate(args, services: Services) -> int:
             pass_commits = {item["sha"] for item in fix_git.commits_in_range(
                 worktree, services.run, base)}
         entries, errors = fix_guard.validate_report(
-            document, key=args.key, number=args.number, rows=key["rows"], commits=commits,
-            pass_commits=pass_commits,
+            document, key=args.key, number=args.number, rows=_pass_rows(key, args.number),
+            commits=commits, pass_commits=pass_commits,
             reviewed={int(number) for number in _recorded(key, "reviews")},
         )
     errors = closed + errors
@@ -447,6 +590,14 @@ def _cmd_validate(args, services: Services) -> int:
         "dev_checkout_changed": changed,
     })
     return EXIT_CONTEXT if errors else EXIT_OK
+
+
+def _pass_rows(key: dict, number: int) -> dict:
+    """Return the rows of the section of pass number (pass-start records it), else every row."""
+    alias = _recorded(key, "pass_sections").get(str(number))
+    if alias is None:
+        return key["rows"]
+    return {ref: row for ref, row in key["rows"].items() if row.get("section") == alias}
 
 
 def _validate_review(run_dir: Path, state: dict, key: dict, args, document, errors: list) -> int:
@@ -488,7 +639,7 @@ def _cmd_check(args, services: Services) -> int:
     key = _started_key(state, args.key)
     worktree = _key_worktree(run_dir, key, services.run)
     third_party = _third_party(_repo(run_dir, key["repo"]))
-    folder = run_dir / "fix" / key["repo"] / key["slug"]
+    folder = _key_folder(run_dir, key)
     check_dir = folder / "check"
     try:
         files = fix_checks.changed_files(worktree, key["start_sha"], services.run)
@@ -730,7 +881,8 @@ def _cmd_mr_body(args, services: Services) -> int:
         _numbered(run_dir, key, "review"), _optional_key_json(run_dir, key, "checks.json"),
         changed, set(branch_refs), since=since,
     )
-    category = key.get("category") or ""
+    category = ", ".join(section.get("category") or section["alias"]
+                         for section in key["sections"])
     count = len(found["fixed"]) + len(found["covered"])
     if key.get("mr"):
         text = fix_mr.addition(**found)
@@ -753,7 +905,7 @@ def _cmd_mr_body(args, services: Services) -> int:
     key["mr_body"] = _body_stamp(run_dir, key, worktree, services.run)
     fix_state.save(run_dir, state)
     _emit({
-        "title": title, "file": f"fix/{key['repo']}/{key['slug']}/{name}", "kind": kind,
+        "title": title, "file": (folder / name).relative_to(run_dir).as_posix(), "kind": kind,
         "fixed": [row["ref"] for row in found["fixed"]],
         "covered": [row["ref"] for row in found["covered"]],
         "waiting": [row["ref"] for row in found["waiting"]],
@@ -780,10 +932,10 @@ def _cmd_publish(args, services: Services) -> int:
     if state.get("mode") == "autonomous" and state["stage"] == "keys":
         raise fix_git.Refused(AUTONOMOUS_KEYS)
     _need_reviewed(key, args.key, "publish")
-    if not fix_names.branch_matches(branch, fix_names.BRANCH_PREFIX, key["slug"]):
+    if not fix_names.is_pass_branch(branch, fix_names.BRANCH_BASE):
         raise fix_git.Refused(
             f"La branche {branch} n'est pas une branche de correctif "
-            f"({fix_names.BRANCH_PREFIX}{key['slug']}) : rien n'a été poussé."
+            f"({fix_names.BRANCH_BASE}) : rien n'a été poussé."
         )
     worktree = _key_worktree(run_dir, key, run)
     links = _read_links(run_dir)
@@ -943,7 +1095,9 @@ def _run_id(run_dir: Path, context: dict) -> str:
 
 
 def _key_folder(run_dir: Path, key: dict) -> Path:
-    return run_dir / "fix" / key["repo"] / key["slug"]
+    """Return fix/<repo>, or fix/<repo>/<slug> for a key of a v2 pass."""
+    folder = run_dir / "fix" / key["repo"]
+    return folder / key["slug"] if "slug" in key else folder
 
 
 def _numbered(run_dir: Path, key: dict, kind: str) -> list:
@@ -1269,10 +1423,13 @@ def _read_state(run_dir: Path, *, required: bool):
 
 
 def _pass_state(run_dir: Path) -> dict:
-    """Return the state of the pass in progress; exit 2 when there is none."""
+    """Return the state of the pass in progress; exit 2 when there is none, or when it is a
+    v2 pass, which only abandon closes."""
     state = _read_state(run_dir, required=True)
     if state.get("finished_at"):
         raise UsageError(NO_PASS)
+    if fix_state.is_v2(state):
+        raise UsageError(UNFINISHED_V2)
     return state
 
 
@@ -1318,7 +1475,7 @@ def _key_worktree(run_dir: Path, key: dict, run) -> Path:
 
 def _read_key_file(run_dir: Path, key: dict, name: str) -> tuple:
     """Return (document, []) for a file of the key folder, or (None, [error])."""
-    relative = f"fix/{key['repo']}/{key['slug']}/{name}"
+    relative = (_key_folder(run_dir, key) / name).relative_to(run_dir).as_posix()
     try:
         return json.loads((run_dir / relative).read_text(encoding="utf-8")), []
     except FileNotFoundError:
@@ -1340,7 +1497,7 @@ def _labels(refs) -> str:
 
 
 def _worktree_path(run_dir: Path, key: dict) -> Path:
-    return run_dir / "fix" / key["repo"] / key["slug"] / "wt"
+    return _key_folder(run_dir, key) / "wt"
 
 
 def _repo(run_dir: Path, name: str) -> dict:
@@ -1379,11 +1536,12 @@ def _archive(run_dir: Path, old: dict, run) -> tuple:
     removed = _remove_worktrees(run_dir, old, run)
     target = _new_history_dir(run_dir)
     for key in old["keys"].values():
-        folder = run_dir / "fix" / key["repo"] / key["slug"]
+        folder = _key_folder(run_dir, key)
         if folder.is_dir():
-            (target / key["repo"]).mkdir(parents=True, exist_ok=True)
-            shutil.move(str(folder), str(target / key["repo"] / key["slug"]))
-            if not any(folder.parent.iterdir()):
+            destination = target / folder.relative_to(run_dir / "fix")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(folder), str(destination))
+            if folder.parent != run_dir / "fix" and not any(folder.parent.iterdir()):
                 folder.parent.rmdir()
     os.replace(run_dir / fix_state.STATE_FILE, target / "state.json")
     return removed, target.relative_to(run_dir).as_posix()

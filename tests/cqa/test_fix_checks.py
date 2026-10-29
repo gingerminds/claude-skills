@@ -8,9 +8,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from cqa import fix_checks, fix_names, fix_state
-from tests.cqa.test_fix_git import GitCase
+from tests.cqa.test_fix_git import KEY, GitCase
 
-KEY = "front/securite"
 PHP = "Syntaxe PHP (php -l)"
 JS = "Syntaxe JavaScript (node --check)"
 STYLE = "stylelint (configuration du projet)"
@@ -311,7 +310,7 @@ class CheckCommandTest(GitCase):
         self.assertEqual(out["failed_refs"], [3])
         self.assertEqual([(c["name"], c["status"]) for c in out["checks"]], [(PHP, "failed")])
         self.assertEqual(out["not_run"], [])
-        folder = self.run_dir / "fix" / "front" / "securite"
+        folder = self.run_dir / "fix" / "front"
         saved = json.loads((folder / "checks.json").read_text(encoding="utf-8"))
         self.assertEqual(saved, {"checks": out["checks"], "not_run": []})
         self.assertEqual(self.key()["step"], "checked")
@@ -334,7 +333,7 @@ class CheckCommandTest(GitCase):
         state = self.state()
         state["keys"][KEY]["step"] = "reviewed"
         fix_state.save(self.run_dir, state)
-        folder = self.run_dir / "fix" / "front" / "securite" / "check"
+        folder = self.run_dir / "fix" / "front" / "check"
         write(folder, "stale.txt", "old")
         self.tsv = "ok\tphp -l\ta.php\t\n"
         code, out, err = self.check()
