@@ -693,6 +693,40 @@ class SectionTest(GitCase):
                     self.assertIn("CQ-3 question sans réponse", err)
                 self.assertEqual(self.run_main(["abandon", self.run_dir])[0], 0)
 
+    def test_end_of_pass_answers_reopen_their_settled_section(self):
+        """Autonomous mode: at the questions stage, the answer pass of a question set aside goes
+        to its settled section, which stays settled; its fixed row waits for its own review."""
+        self.write_run(flight(), sections={"securite": (3,)})
+        self.open_pass(mode="autonomous")
+        worktree = Path(self.start_ok()["worktree"])
+        self.section_start()
+        self.assertEqual(self.pass_start(1)[0], 0)
+        question = [{"ref": 3, "outcome": "question", "question": self.QUESTION}]
+        self.assertEqual(self.validate("report", 1, question)[0], 0)
+        code, result, err = self.section("end", "securite")
+        self.assertEqual(code, 0, err)
+        code, result, err = self.pass_start(2)
+        self.assertEqual(code, 2, err)
+        self.assertIn("« settled »", err)
+        self.assertEqual(self.run_main(["stage", self.run_dir, "questions"])[0], 0)
+        code, result, err = self.pass_start(2)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.key()["pass_sections"], {"1": "securite", "2": "securite"})
+        self.assertEqual(self.key()["sections"][0]["state"], "settled")
+        code, result, err = self.section("start", "securite")
+        self.assertEqual(code, 2, err)
+        answer = self.fixer_commit(worktree, "contact.txt", "fix(CQ-3): add the contact")
+        self.assertEqual(self.validate("report", 2, [self.fixed(answer)])[0], 0)
+        key = self.key()
+        self.assertEqual((key["rows"]["3"]["outcome"], key["rows"]["3"]["pass"]), ("fixed", 2))
+        self.assertEqual((key["step"], key["sections"][0]["state"]), ("fixed", "settled"))
+        code, result, err = self.pass_start(3)
+        self.assertEqual(code, 2, err)
+        self.assertIn("« settled »", err)
+        ok = [{"ref": 3, "verdict": "ok", "notes": None}]
+        self.assertEqual(self.validate("review", 2, ok, attention=[])[0], 0)
+        self.assertEqual(self.key()["step"], "reviewed")
+
 
 class V2PassTest(GitCase):
     """A pass opened by the v2 fix mode (one key per repo and category) is closed, never resumed."""

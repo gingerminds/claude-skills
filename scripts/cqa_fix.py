@@ -388,12 +388,13 @@ def _cmd_pass_start(args, services: Services) -> int:
     """Record the head of the key's branch just before fixer pass N: the Base of review N.
 
     Pass N belongs to the section in progress (--section, recorded in pass_sections): its
-    report covers the rows of that section only. N must not be lower than a pass already
-    started, and no report of pass N or later may be validated yet. Starting the same pass
-    again before its report keeps its first base, so that the commits of an interrupted run
-    stay in bases[N]..HEAD; the base moves to HEAD only when it is no longer in the branch. A
-    reviewed key goes back to fixed: it is never reviewed in the middle of a pass (see
-    _every_pass_reviewed).
+    report covers the rows of that section only. At the questions stage, a pass that answers
+    the questions set aside in a settled section belongs to that section, which stays settled
+    (_answers_questions). N must not be lower than a pass already started, and no report of
+    pass N or later may be validated yet. Starting the same pass again before its report keeps
+    its first base, so that the commits of an interrupted run stay in bases[N]..HEAD; the base
+    moves to HEAD only when it is no longer in the branch. A reviewed key goes back to fixed:
+    it is never reviewed in the middle of a pass (see _every_pass_reviewed).
     """
     run_dir = args.run_dir.resolve()
     if args.number < 1:
@@ -401,7 +402,7 @@ def _cmd_pass_start(args, services: Services) -> int:
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
     section = _section(key, args.key, args.section)
-    if section["state"] != "active":
+    if section["state"] != "active" and not _answers_questions(state, key, section):
         raise UsageError(
             f"La section {args.section} est à l'état « {section['state']} » : pass-start "
             "attend la section en cours (cqa_fix.py section-start)."
@@ -438,6 +439,20 @@ def _cmd_pass_start(args, services: Services) -> int:
     fix_state.save(run_dir, state)
     _emit({"pass": args.number, "base": base})
     return EXIT_OK
+
+
+def _answers_questions(state: dict, key: dict, section: dict) -> bool:
+    """True at the questions stage for a settled section that still holds a question row: the
+    pass answers the questions set aside in autonomous mode (SKILL.md section 12, step 6)."""
+    return state["stage"] == "questions" and section["state"] == "settled" and any(
+        (key["rows"].get(str(ref)) or {}).get("outcome") == "question" for ref in section["refs"]
+    )
+
+
+def _pass_in_progress(key: dict) -> Optional[int]:
+    """Return the pass started (pass-start) whose report is not validated yet, or None (R16)."""
+    started = max((int(number) for number in _recorded(key, "bases")), default=0)
+    return started if started > (key.get("pass") or 0) else None
 
 
 def _cmd_section_start(args, services: Services) -> int:
@@ -491,8 +506,8 @@ def _cmd_section_end(args, services: Services) -> int:
             f"La section {args.section} est à l'état « {section['state']} » : section-end "
             "attend la section en cours."
         )
-    started = max((int(number) for number in _recorded(key, "bases")), default=0)
-    if started > (key.get("pass") or 0):
+    started = _pass_in_progress(key)
+    if started is not None:
         raise UsageError(
             f"La passe {started} est commencée sans rapport validé : validez-le avant de "
             f"terminer la section {args.section}."
@@ -821,8 +836,7 @@ def _every_pass_reviewed(key: dict) -> bool:
     that pass: an earlier blocking verdict on it no longer counts. A dropped row is no longer
     fixed.
     """
-    started = max((int(number) for number in _recorded(key, "bases")), default=0)
-    if started > (key.get("pass") or 0):
+    if _pass_in_progress(key) is not None:
         return False
     rows = [row for row in key["rows"].values() if isinstance(row, dict)]
     if any(row.get("outcome") == "pending" for row in rows):
