@@ -1028,6 +1028,65 @@ class PassReviewTest(GitCase):
         self.assertEqual(self.key()["step"], "reviewed")
 
 
+class SettledRowsTest(GitCase):
+    """Section 12 of SKILL.md: a key already done needs no fixer, and a row left to the devs is
+    dropped without one (R18)."""
+
+    def setUp(self):
+        super().setUp()
+        self.folder = self.run_dir / "fix" / "front" / "securite"
+
+    def main_ok(self, *args):
+        code, out, err = self.run_main([args[0], self.run_dir, *args[1:]])
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def write_report(self, number, rows):
+        (self.folder / f"report-{number}.json").write_text(
+            json.dumps({"key": KEY, "pass": number, "rows": rows}), encoding="utf-8")
+
+    def test_an_empty_report_brings_a_key_whose_rows_are_all_done_before_to_reviewed(self):
+        branch = PREFIX + "securite"
+        real_git(self.repo, "checkout", "-q", "-b", branch)
+        commit(self.repo, "s.txt", "fix(CQ-3): x")
+        real_git(self.repo, "checkout", "-q", "develop")
+        self.write_run(flight(branches=[{"branch": branch, "where": "local", "refs": [3]}]),
+                       rows=(3,))
+        self.open_pass()
+        self.assertEqual(self.start_ok()["done_refs"], [3])
+        self.main_ok("pass-start", KEY, "--pass", "1")
+        self.write_report(1, [])
+        result = self.main_ok("validate", KEY, "report", "--pass", "1")
+        self.assertEqual((result["ok"], result["errors"]), (True, []))
+        self.assertEqual(result["rows"], {"fixed": [], "skipped": [], "question": []})
+        key = self.key()
+        self.assertEqual((key["step"], key["pass"]), ("reviewed", 1))
+        self.assertEqual(key["rows"]["3"]["outcome"], "done_before")
+        self.assertEqual(self.main_ok("guard", KEY)["ok"], True)
+
+    def test_a_question_left_to_the_devs_is_dropped_without_touching_the_branch(self):
+        self.write_run(flight(), rows=(3, 5))
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        self.main_ok("pass-start", KEY, "--pass", "1")
+        fixed = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
+        question = {"text": "Quel contact ?", "options": ["Équipe", "Client"], "default": "Client"}
+        self.write_report(1, [
+            {"ref": 3, "outcome": "fixed", "change": "Ajoute a.", "uat": "Lire a.",
+             "commits": [fixed]},
+            {"ref": 5, "outcome": "question", "question": question},
+        ])
+        self.main_ok("validate", KEY, "report", "--pass", "1")
+        result = self.main_ok("drop", KEY, "--refs", "CQ-5", "--reason",
+                              "laissée aux devs par le lead")
+        self.assertEqual(result, {"dropped": [5], "also_dropped": []})
+        self.assertEqual(self.head(worktree), fixed)
+        rows = self.key()["rows"]
+        self.assertEqual(rows["5"]["outcome"], "dropped")
+        self.assertEqual(rows["5"]["reason"], "laissée aux devs par le lead")
+        self.assertEqual((rows["3"]["outcome"], rows["3"]["commits"]), ("fixed", [fixed]))
+
+
 class ValidateReportTest(unittest.TestCase):
     """fix_guard.validate_report alone: every problem of a row comes out of one run."""
 

@@ -658,7 +658,7 @@ S="${CLAUDE_SKILL_DIR}/../../scripts"
 python3 "$S/cqa_plan.py" runs "<slug>"
 ```
 
-Take the most recent run whose `fix_pending` is true, else the most recent run whose `lots` and `plan` are true, and ask « Utiliser le run <run_id> ? » with « Oui » and « Choisir un autre run » (then list the runs with their date and ask which one). No such run: say « Aucun run à corriger : lancez d'abord /gm:checklist-quality-audit. » and stop. Check its context, without asking the Basic Auth credentials (errors: show them and stop):
+Take the most recent run whose `fix_pending` is true (a new pass on another run would collide with the branches still checked out in that run's worktrees: git checks a branch out in one worktree only), else the most recent run whose `lots` and `plan` are true, and ask « Utiliser le run <run_id> ? » with « Oui » and « Choisir un autre run » (then list the runs with their date and ask which one). No such run: say « Aucun run à corriger : lancez d'abord /gm:checklist-quality-audit. » and stop. Check its context, without asking the Basic Auth credentials (errors: show them and stop):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -666,7 +666,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" context "$RUN" --check
 ```
 
-When the run has `write_pending` true, say « Terminez d'abord l'écriture de l'audit (/gm:checklist-quality-audit rerun). » and stop. When it has `fix_pending` true, ask « Une passe fix est inachevée. » with « Reprendre les correctifs » and « Abandonner »:
+When the run has `write_pending` true, say « Terminez d'abord l'écriture de l'audit (/gm:checklist-quality-audit rerun). » and stop. When it has `fix_pending` true, read `push` in `fix/state.json`. With `--dry-run` and a stored `push` other than `dry_run`, say « Une passe fix réelle est inachevée sur ce run : relancez /gm:checklist-quality-audit fix sans --dry-run pour la reprendre ou l'abandonner. » and stop. Otherwise ask « Une passe fix est inachevée. », followed in the same question by its stored push mode (« Publication : MR en brouillon. » for `mr`, « Publication : branches locales. » for `local`, « Publication : --dry-run, rien n'est poussé. » for `dry_run`: the stored mode wins over the invocation), with « Reprendre les correctifs » and « Abandonner »:
 
 - « Abandonner »: abandon the pass, then go on with step 2 for a new pass. It removes the worktrees of the pass and prints `{"removed", "unpushed"}`: tell the lead which local branches keep commits not pushed (`unpushed`); they are never deleted.
 
@@ -680,8 +680,8 @@ python3 "$S/cqa_fix.py" abandon "$RUN"
   - `selected`: 5.a (`start`), then the rest of step 5.
   - `started`: a fixer pass on the rows still `pending` (5.b).
   - `fixed`: first the questions not handled yet (5.c: present mode, the rows still `question`; autonomous mode, those not set aside yet, as the list of step 6 shows), then 5.d.
-  - `checked`: `guard` (5.d), then the review of each pass whose rows are fixed and whose review is not in `reviews` (5.e), then the problems (5.f).
-  - `reviewed`: present mode, the publication (5.g); autonomous mode, nothing until step 6.
+  - `checked`: `check` and `guard` again (5.d: `failed_refs` is not stored), then the review of each pass whose rows are fixed and whose review is not in `reviews` (5.e), then the problems (5.f).
+  - `reviewed`: `check` and `guard` again (5.d), then the problems (5.f: a key reaches `reviewed` before 5.f has run), before any publication: present mode, then 5.g; autonomous mode, then nothing until step 6.
   - `published`: `finish` (5.g).
   - `done`: nothing.
 
@@ -705,7 +705,7 @@ python3 "$S/cqa_fix.py" doctor "$RUN"
 
 It writes `fix/doctor.json` and prints `{"repos": [{"repo", "host", "project", "status", "user", "base", "identity", "fetched", "ahead"}]}`. Keep for the presentation, in French:
 
-- `status`: `ok` (push and draft merge request possible); `no_push` (no right to push on the project), `glab_missing` (`glab` not installed), `unauthenticated` (the lead runs `glab auth login --hostname <host>`): local branches only for that repo; `not_gitlab`: its rows are left to the devs.
+- `status`: `ok` (push and draft merge request possible; the push itself is a `git push origin` with the remote's own credentials, SSH key or credential helper, and must work without a prompt); `no_push` (no right to push on the project), `glab_missing` (`glab` not installed), `unauthenticated` (the lead runs `glab auth login --hostname <host>`): local branches only for that repo; `not_gitlab`: its rows are left to the devs.
 - `identity` false: no `user.name` or `user.email` in the repo, the commits would fail: the lead sets them before the launch (the commits are theirs).
 - `fetched` false: `git fetch origin` failed, the branches would start from a stale `origin/<base>`.
 - `ahead`: the commits of `origin/<base>` since the audited commit; every row is checked again on the current code before it is fixed.
@@ -725,7 +725,12 @@ S="${CLAUDE_SKILL_DIR}/../../scripts"
 bash "$S/cqa-toolbox.sh" doctor
 ```
 
-`docker` false or `docker_version` null: the checks run with the host's binaries, else are declared not run; say so. `images.agence` null: the first `check` downloads the `agence` image, unless the lead pulls it before (`cqa-toolbox.sh pull`, `references/diagnostic.md`, section 6).
+`docker` false or `docker_version` null: the checks run with the host's binaries, else are declared not run; say so. `check` never downloads an image (`--pull never`): a missing image counts as unavailable. With Docker running and `images.agence` null, ask before any pass « Télécharger l'image de la boîte à outils ? » with « Télécharger » and « Continuer sans ». « Télécharger »: run the download below with Bash `run_in_background` and wait for its end before `open` (step 3); exit 1 (an image failed, usually the registry login, `references/diagnostic.md`, section 6): run `doctor` again and say what is still missing. « Continuer sans »: the syntax checks fall back to the host's binaries, else are declared not run, and stylelint is not run; the merge requests say so.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+bash "$S/cqa-toolbox.sh" pull
+```
 
 Then list the candidates:
 
@@ -785,6 +790,8 @@ python3 "$S/cqa_fix.py" start "$RUN" "<repo>/<slug>"
 
 It prints `{"branch", "worktree", "base", "start_sha", "reused", "done_refs"}`: a new branch from `origin/<base>`, or the branch of an open merge request or of an unmerged fix branch taken over (`reused`); `done_refs` are rows already on that branch (`done_before`), never fixed again. Run again on a key that has its branch, it gives back the same branch and worktree.
 
+When `done_refs` leaves no row `pending` (rows all `done_before`): no fixer dispatch. Run `pass-start --pass 1` (5.b), write `fix/<repo>/<slug>/report-1.json` with `{"key": "<repo>/<slug>", "pass": 1, "rows": []}`, validate it as in 5.b: the key is `reviewed` at once. Then 5.d to 5.g.
+
 b. Fixer pass `N`: the key's `pass` in `fix/state.json` plus 1 (1 for a new key). Right before each dispatch, record the base of the pass and keep the printed `base`: it is the `Base` of the review of pass N.
 
 ```bash
@@ -821,7 +828,14 @@ git -C "<worktree>" -c core.hooksPath=/dev/null -c core.fsmonitor=false status -
 
 c. Questions: the rows of `rows.question`. Each `question` of `report-<N>.json` has a `text`, 2 to 4 `options` and the `default` the fixer would apply.
 
-- Present mode: ask them now, one at a time, with the fixer's options, plus « Laisser aux devs » while there are fewer than 4, saying which option is the default. Write the answers in `notes-<N+1>.json` (`answers`; `problems` empty) and run one fixer pass on the answered rows (5.b with N+1) before 5.d. An answered row is never asked again: « Laisser aux devs » is an answer too (the fixer skips the row with « laissée aux devs par le lead »).
+- Present mode: ask them now, one at a time, with the fixer's options, plus « Laisser aux devs » while there are fewer than 4, saying which option is the default. A row the lead leaves to the devs (« Laisser aux devs », or a free answer that says so) gets no fixer pass: drop it with the command below (a row without commits is only marked `dropped`; the branch does not change). Write the other answers in `notes-<N+1>.json` (`answers`; `problems` empty) and run one fixer pass on those rows (5.b with N+1) before 5.d. An answered row is never asked again.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" drop "$RUN" "<repo>/<slug>" --refs CQ-12 --reason "laissée aux devs par le lead"
+```
+
 - Autonomous mode: set each question aside, then go on without the row (it waits for step 6):
 
 ```bash
@@ -864,10 +878,10 @@ python3 "$S/cqa_fix.py" validate "$RUN" "<repo>/<slug>" review --pass <N>
 
 It prints `{"ok", "errors", "blocking"}`. Exit 6: dispatch the reviewer once more with the `errors`, and validate again; still invalid: the key is left (below).
 
-f. Problems, once the reviews of e are recorded. A row has a problem when it is in `failed_refs`, when a guard problem names its commit (the problem's `ref`, or a `sha` among the row's `commits` in `fix/state.json`), when a review lists it in `blocking`, or when the fixer gave it up (its `attention` in `fix/state.json` starts with « Abandon : »). Each row gets at most one correction pass:
+f. Problems, once the reviews of e are recorded. Read them fresh each time, for the rows of the key: a row has a problem when it is in `failed_refs` of the last `check`, when a problem of the last `guard` names its commit (the problem's `ref`, or a `sha` among the row's `commits` in `fix/state.json`), when the review of its current pass (its `pass` in `fix/state.json`) lists it in `blocking`, or when the fixer gave it up (its `attention` in `fix/state.json` starts with « Abandon : »). Each row gets at most one correction pass: each row enters the `problems` of a notes file once. Repeat until no row of the key has a problem:
 
-- One correction pass, on the rows with a problem that the fixer did not give up and that no earlier `notes-<M>.json` of the key lists in `problems`: write `notes-<N>.json` with their `problems` (`source` `guard`, `check` or `review`, `detail` in French as `references/fix.md`, section 1 says), then 5.b, 5.d and 5.e once, for that pass only (its review has its own `Base`).
-- Then every row that still has a problem leaves the branch, whatever the problem and whether it had a correction pass or not: no second correction pass follows. One call per reason, in French, 300 characters at most (the fixer's « Abandon : » text, the reviewer's notes, the failed check or the guard reason), then run `guard` again:
+1. Rows with a problem that the fixer did not give up and that no `notes-<M>.json` of the key lists in `problems` yet: one correction pass on them. Write `notes-<N>.json` with their `problems` (`source` `guard`, `check` or `review`, `detail` in French as `references/fix.md`, section 1 says), then 5.b, 5.d and 5.e for that pass (its review has its own `Base`), and repeat.
+2. Otherwise every row with a problem had its correction pass, or was given up: it leaves the branch, one call per reason, in French, 300 characters at most (the fixer's « Abandon : » text, the reviewer's notes, the failed check or the guard reason), then `check` and `guard` again (the drop rewrites the commits that follow it, so the checked files change), and repeat.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -875,8 +889,9 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" drop "$RUN" "<repo>/<slug>" --refs CQ-12 --reason "<raison en français>"
 ```
 
-  It prints `{"dropped", "also_dropped"}`: `also_dropped` are rows whose fix depended on a removed commit; keep them for the end message.
-- A problem on an inherited commit goes neither to the fixer nor to `drop` (which refuses `done_before` rows and refs outside the key, exit 5): a guard problem on a commit that no row of the key lists in its `commits` (a commit of a taken-over branch, at or before its head), or a `failed_refs` row that is `done_before`. It goes to the lead: present mode, tell them at once; autonomous mode, set it aside. A guard problem left there keeps the key from publication (`publish` exits 5, below).
+`drop` prints `{"dropped", "also_dropped"}`: `also_dropped` are rows whose fix depended on a removed commit; keep them for the end message.
+
+Not a problem of a row, and never sent to the fixer nor to `drop` (which refuses `done_before` rows and refs outside the key, exit 5): a guard problem on a commit that no row of the key lists in its `commits` (a commit of a taken-over branch, at or before its head), or a `failed_refs` row that is `done_before`. It goes to the lead: present mode, tell them at once; autonomous mode, set it aside. A guard problem left there keeps the key from publication (`publish` exits 5, below).
 
 The key is now at `reviewed` (no row `pending`, every pass with fixed rows reviewed without a blocking row); otherwise it is left (below).
 
@@ -903,7 +918,8 @@ It checks everything again (guard, every new commit reported, the merge request 
 
 - 0: `finish`. With the `note` « Aucun commit sur la branche : ni push ni MR. », nothing left the workstation: `finish` too.
 - 2 with « Description de MR périmée : relancez mr-body. », or with a merge request already open for the branch: `mr-body` again, then `publish` once more.
-- Any other 2 (a push or `glab` failure), 5 (refused by a guard: remote branch diverged, merge request merged or closed, guard problem, commit not reported) or 7 (a secret in the title or the description: give the labels, never a value; the same for an exit 7 of `mr-body`): show the message and ask the lead on the spot « La publication de <repo>/<slug> a échoué : <message> » with « Relancer la publication » (once the lead fixed the cause: `mr-body` again, then `publish`) and « Garder la branche en local ». Never force anything.
+- 5 with « La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé. », or with « La MR !<iid> est fusionnée » or « fermée » (« relancez une passe fix »): no retry can pass, so no question: tell the lead on the spot, then `finish --keep-local` (the branch stays in the dev's repo; the lead integrates the remote commits by hand, or a later fix pass starts a new branch).
+- Any other 2 (a push or `glab` failure), 5 (refused by a guard: guard problem, commit not reported) or 7 (a secret in the title or the description: give the labels, never a value; the same for an exit 7 of `mr-body`): show the message and ask the lead on the spot « La publication de <repo>/<slug> a échoué : <message> » with « Relancer la publication » (once the lead fixed the cause: `mr-body` again, then `publish`) and « Garder la branche en local ». Never force anything.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -935,15 +951,15 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" deferred "$RUN" --fix
 ```
 
-It prints `{"items"}`, the open entries of the fix mode (`id`, `kind`, `detail`, `refs`). The lead is back: go through them one at a time, in French, with AskUserQuestion. A row question: ask it with the options of the row (its `question` in the last report of the key that holds it), plus « Laisser aux devs » while there are fewer than 4. Any other entry (a changed checkout, rows refused by git, uncommitted changes, a problem left to the lead): say it and ask what it needs; for uncommitted changes, « C'est réglé, reprendre » (the key goes on from its `step`, as on a resume, step 1) or « Laisser cette clé ». Then, for each key with answers, in the order of `keys`: `start` (5.a, it gives the key back its worktree), write `notes-<N>.json` with the `answers`, and run 5.b to 5.f for the answered rows. A row left without answer goes to « Hors-scope » of its merge request. Close each entry once settled (a question once the pass of its key is reviewed):
+It prints `{"items"}`, the open entries of the fix mode (`id`, `kind`, `detail`, `refs`). The lead is back: go through them one at a time, in French, with AskUserQuestion. A row question: ask it with the options of the row (its `question` in the last report of the key that holds it), plus « Laisser aux devs » while there are fewer than 4; a row left to the devs (« Laisser aux devs », or a free answer that says so) is dropped as in 5.c (`--reason "laissée aux devs par le lead"`), without a fixer pass. Any other entry (a changed checkout, rows refused by git, uncommitted changes, a problem left to the lead): say it and ask what it needs; for uncommitted changes, « C'est réglé, reprendre » (the key goes on from its `step`, as on a resume, step 1) or « Laisser cette clé ». Then, for each key with other answers, in the order of `keys`: `start` (5.a, it gives the key back its worktree), write `notes-<N>.json` with those `answers`, and run 5.b to 5.f for the answered rows. A row left without answer goes to « Hors-scope » of its merge request. Close each entry once settled (a question once its row is dropped or the pass of its key is reviewed):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-python3 "$S/cqa_plan.py" deferred "$RUN" --resolve <id>
+python3 "$S/cqa_plan.py" deferred "$RUN" --resolve <id> --fix
 ```
 
-Then publish every key still at `reviewed`, SÉCURITÉ first, the lead present, as in 5.g (`mr-body`, `publish` and `finish`, or `finish` alone for a local branch). In autonomous mode this is the first push of the pass: Claude Code may ask the lead to confirm each one, and a publication failure is asked on the spot.
+In autonomous mode, before any publication, when at least one key at `reviewed` would be pushed (`push` `mr`, key `push_ready`), ask « Publier les branches maintenant ? » with « Publier » and « Garder les branches en local ». « Garder les branches en local »: `finish --keep-local` for every key at `reviewed` (nothing is pushed, the branches stay in the dev's repo), then step 7. After « Publier », and in present mode: publish every key still at `reviewed`, SÉCURITÉ first, the lead present, as in 5.g (`mr-body`, `publish` and `finish`, or `finish` alone for a local branch). In autonomous mode this is the first push of the pass: Claude Code may ask the lead to confirm each one, and a publication failure is asked on the spot.
 
 **7. Notion.** Move the pass to this stage in every case:
 

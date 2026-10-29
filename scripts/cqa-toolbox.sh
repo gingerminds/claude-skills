@@ -618,7 +618,7 @@ cmd_check() {
   rm -rf -- "$check_dir/tools" "$check_dir/syntax.tsv" || return 1
   mkdir -p -- "$check_dir/tools/stylelint/raw" || return 1
 
-  docker run --rm --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+  docker run --rm --pull never --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
     -v "$check_dir:/in:ro" -v "$worktree:/repos/$repo:ro" \
     --entrypoint sh "$(image_ref agence)" -c "$SYNTAX_SCRIPT" sh "$repo" \
     >"$check_dir/syntax.tsv" </dev/null || rc=$?
@@ -628,7 +628,7 @@ cmd_check() {
     return 1
   fi
   if grep -Eq '\.(css|scss|sass|less|vue)$' "$check_dir/files.txt"; then
-    docker run --rm --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+    docker run --rm --pull never --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
       -v "$check_dir:/in:ro" -v "$check_dir/tools:/out" -v "$worktree:/repos/$repo:ro" \
       "$(image_ref agence)" stylelint --repos /repos --context /in/context.json </dev/null || {
       say "check : stylelint a échoué."

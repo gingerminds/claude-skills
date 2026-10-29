@@ -104,10 +104,6 @@ FIX_FORBIDDEN = (
 )
 # The reviewer stages and commits nothing: git add as a whole is forbidden.
 REVIEWER_FORBIDDEN = ("git add", "git commit", "git checkout", *FIX_FORBIDDEN[2:])
-FIX_COMMANDS = (
-    "doctor", "candidates", "open", "stage", "start", "pass-start", "validate", "guard", "drop",
-    "check", "mr-body", "publish", "finish", "abandon", "summary",
-)
 # Exact labels of the fix mode (design 4.1, 4.4 and 4.13).
 FIX_LABELS = (
     "« Terminez d'abord l'écriture de l'audit (/gm:checklist-quality-audit rerun). »",
@@ -1647,14 +1643,16 @@ class FixSectionTest(unittest.TestCase):
 
     def test_section_cites_every_command(self):
         calls = {(cli, command) for cli, command, _ in _CLI_CALL.findall(self.section)}
-        for command in FIX_COMMANDS:
+        commands = sorted(_python_commands(cqa_fix))
+        self.assertIn("pass-start", commands)
+        for command in commands:
             with self.subTest(command=command):
                 self.assertIn(("cqa_fix.py", command), calls)
         for call in (
             ("cqa_plan.py", "project"), ("cqa_plan.py", "runs"), ("cqa_plan.py", "context"),
             ("cqa_plan.py", "defer"), ("cqa_plan.py", "deferred"), ("cqa_notion.py", "rows"),
             ("cqa_notion.py", "mr-links"), ("cqa_notion.py", "apply"),
-            ("cqa-toolbox.sh", "doctor"),
+            ("cqa-toolbox.sh", "doctor"), ("cqa-toolbox.sh", "pull"),
         ):
             with self.subTest(call=call):
                 self.assertIn(call, calls)
@@ -1667,6 +1665,7 @@ class FixSectionTest(unittest.TestCase):
             'cqa_fix.py" pass-start "$RUN" "<repo>/<slug>" --pass <N>',
             'cqa_fix.py" finish "$RUN" "<repo>/<slug>" --keep-local',
             'cqa_fix.py" summary "$RUN" --replace-failed',
+            'cqa_plan.py" deferred "$RUN" --resolve <id> --fix',
             "commit.gpgSign",
         ):
             with self.subTest(needle=needle):
@@ -1687,6 +1686,7 @@ class FixSectionTest(unittest.TestCase):
         for needle in (
             "SÉCURITÉ first",
             "at most one correction pass",
+            "each row enters the `problems` of a notes file once",
             "never marks a merge request Ready, never approves, merges or closes one",
             "never asks the Basic Auth credentials",
             "never contacts the preprod",
@@ -1696,7 +1696,9 @@ class FixSectionTest(unittest.TestCase):
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
-        for absent in ("GM_AUDIT_AUTH", "probe-target", "ssh -o", "cqa_ssh_ro.py"):
+        for absent in ("GM_AUDIT_AUTH", "probe-target", "ssh -o", "cqa_ssh_ro.py",
+                       "no second correction pass follows", "the fixer skips the row",
+                       "the first `check` downloads"):
             with self.subTest(absent=absent):
                 self.assertNotIn(absent, self.section)
 
@@ -1709,6 +1711,8 @@ class FixSectionTest(unittest.TestCase):
             'cqa_fix.py" doctor',
             "commit.gpgSign",
             'cqa-toolbox.sh" doctor',
+            "« Télécharger l'image de la boîte à outils ? »",
+            'cqa-toolbox.sh" pull',
             'cqa_fix.py" candidates',
             "« Lancer ces correctifs ? »",
             "« Mode 100 % autonome ? »",
@@ -1725,12 +1729,13 @@ class FixSectionTest(unittest.TestCase):
             'cqa_fix.py" guard',
             REVIEWER_DISPATCH,
             "review --pass <N>",
-            'cqa_fix.py" drop',
+            'drop "$RUN" "<repo>/<slug>" --refs CQ-12 --reason "<raison en français>"',
             'cqa_fix.py" mr-body',
             'cqa_fix.py" publish',
             'cqa_fix.py" finish',
             'stage "$RUN" questions',
             'deferred "$RUN" --fix',
+            "« Publier les branches maintenant ? »",
             'stage "$RUN" notion',
             'cqa_notion.py" mr-links',
             'cqa_notion.py" apply',
@@ -1747,6 +1752,86 @@ class FixSectionTest(unittest.TestCase):
                                                     zip(markers[1:], positions[1:])):
             with self.subTest(before=before, after=after):
                 self.assertLess(first, second)
+
+    def test_resume_checks_again_before_any_publication(self):
+        """A key reaches `reviewed` before 5.f, and `failed_refs` is not stored: a resumed key at
+        `checked` or `reviewed` runs `check` and `guard` again, then 5.f, before publishing."""
+        resume = self.section[self.section.index("« Reprendre les correctifs »"):
+                              self.section.index("**2. ")]
+        lines = {step: next(line for line in resume.splitlines()
+                            if line.startswith(f"  - `{step}`:"))
+                 for step in ("checked", "reviewed")}
+        for step, line in lines.items():
+            with self.subTest(step=step):
+                self.assertIn("`check` and `guard` again", line)
+                self.assertIn("5.f", line)
+        reviewed = lines["reviewed"]
+        self.assertLess(reviewed.index("5.f"), reviewed.index("5.g"))
+        self.assertIn("before any publication", reviewed)
+
+    def test_resume_names_the_push_mode_and_refuses_a_dry_run_over_a_real_pass(self):
+        run = self.section[:self.section.index("**2. ")]
+        for needle in ("« Publication : MR en brouillon. »", "« Publication : branches locales. »",
+                       "« Publication : --dry-run, rien n'est poussé. »",
+                       "« Une passe fix réelle est inachevée sur ce run : relancez "
+                       "/gm:checklist-quality-audit fix sans --dry-run pour la reprendre ou "
+                       "l'abandonner. »",
+                       "still checked out in"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, run)
+
+    def test_a_row_left_to_the_devs_is_dropped_without_a_fixer_pass(self):
+        """R18: « Laisser aux devs » is applied by drop, a row without commits is just marked."""
+        command = ('cqa_fix.py" drop "$RUN" "<repo>/<slug>" --refs CQ-12 '
+                   '--reason "laissée aux devs par le lead"')
+        self.assertIn(command, self.section)
+        questions = self.section[self.section.index("c. Questions"):self.section.index("d. Checks")]
+        self.assertIn(command, questions)
+        self.assertIn("no fixer pass", questions)
+        end = self.section[self.section.index('deferred "$RUN" --fix'):]
+        self.assertIn("« Laisser aux devs »", end)
+        self.assertIn("drop", end[:end.index("« Publier les branches maintenant ? »")])
+
+    def test_toolbox_image_is_never_pulled_during_a_pass(self):
+        """R19: the agence image is downloaded before any pass, or the checks go without it."""
+        for needle in ("« Télécharger l'image de la boîte à outils ? »", "« Télécharger »",
+                       "« Continuer sans »", "`--pull never`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.section)
+        self.assertLess(self.section.index('cqa-toolbox.sh" pull'),
+                        self.section.index('cqa_fix.py" open'))
+
+    def test_correction_attempts_are_counted_per_row(self):
+        """R22: 5.f repeats while a row with a problem has not had its correction attempt."""
+        problems = self.section[self.section.index("f. Problems"):self.section.index("g. Publication")]
+        for needle in ("Repeat until no row of the key has a problem",
+                       "each row enters the `problems` of a notes file once",
+                       "then `check` and `guard` again"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, problems)
+
+    def test_a_key_already_done_needs_no_fixer(self):
+        """Minor 7: rows all `done_before` after start: an empty report validated as pass 1."""
+        for needle in ("all `done_before`", "no fixer dispatch",
+                       '{"key": "<repo>/<slug>", "pass": 1, "rows": []}'):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.section)
+
+    def test_autonomous_publication_is_confirmed_first(self):
+        """R21: before the first push of an autonomous pass, the lead says whether to publish."""
+        end = self.section[self.section.index('deferred "$RUN" --fix'):]
+        question = end.index("« Publier les branches maintenant ? »")
+        for needle in ("« Publier »", "« Garder les branches en local »",
+                       "`finish --keep-local` for every key"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, end[question:])
+
+    def test_a_diverged_or_closed_merge_request_is_not_retried(self):
+        """Minor 6: no « Relancer la publication » when the remote moved or the MR is closed."""
+        line = next(line for line in self.section.splitlines() if cqa_fix.DIVERGED in line)
+        self.assertNotIn("« Relancer la publication »", line)
+        self.assertIn("--keep-local", line)
+        self.assertIn("fusionnée", line)
 
     def test_resume_takes_each_key_back_at_its_step(self):
         resume = self.section[self.section.index("« Reprendre les correctifs »"):
@@ -1809,7 +1894,8 @@ class FixSectionTest(unittest.TestCase):
     def test_readme_documents_the_fix_mode(self):
         readme = _text(ROOT / "README.md")
         for needle in ("### Corriger : `fix`", "/gm:cqa fix", "cqa-fixer.md",
-                       "cqa-fix-reviewer.md", "--dry-run"):
+                       "cqa-fix-reviewer.md", "--dry-run", "`git push origin`",
+                       "credential helper"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, readme)
 

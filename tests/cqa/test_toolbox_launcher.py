@@ -897,6 +897,8 @@ class CheckTest(LauncherCase):
         self.assertEqual(2, len(runs))
         for call in runs:
             self.assertTrue(has_pair(call, "--network", "none"))
+            # R19: a missing image is never downloaded in the middle of a fix pass.
+            self.assertTrue(has_pair(call, "--pull", "never"))
             self.assertIn("--rm", call)
             self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
             self.assertTrue(has_pair(call, "--env", "HOME=/tmp"))
