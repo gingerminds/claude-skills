@@ -820,6 +820,14 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" section-end "$RUN" "<repo>" --section <alias>
 ```
 
+A section that cannot reach a valid review (report or review still invalid after a new attempt, a problem of the workstation) is given up instead: its commits leave the branch, its open rows become `dropped` with the reason, and the uncommitted changes of the worktree are first saved in `fix/<repo>/leftover-<N>.patch`, then the worktree is reset and cleaned. It prints `{"section", "state", "next", "dropped", "also_dropped", "retry", "leftover"}`; then start the next section.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" section-end "$RUN" "<repo>" --section <alias> --failed --reason "<raison en français>"
+```
+
 When `done_refs` leaves no row `pending` (rows all `done_before`): no fixer dispatch. Run `section-start` for the first section, then `pass-start --pass 1 --section <alias>` (5.b), write `fix/<repo>/<slug>/report-1.json` with `{"key": "<repo>/<slug>", "pass": 1, "rows": []}`, validate it as in 5.b: the key is `reviewed` at once. End that section, then start and end each next one (their rows are all settled). Then 5.d to 5.g.
 
 b. Fixer pass `N`: the key's `pass` in `fix/state.json` plus 1 (1 for a new key). Right before each dispatch, record the base of the pass and keep the printed `base`: it is the `Base` of the review of pass N.
@@ -935,7 +943,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" drop "$RUN" "<repo>/<slug>" --refs CQ-12 --reason "<raison en français>"
 ```
 
-`drop` prints `{"dropped", "also_dropped"}`: `also_dropped` are rows whose fix depended on a removed commit; keep them for the end message.
+`drop` prints `{"dropped", "also_dropped", "retry"}`: `also_dropped` are rows whose fix depended on a removed commit; keep them for the end message. Those of `retry` are back to `pending` (`retry` true, the reason in `reason`) for one more fixer pass in their section; the others, or a row taken along a second time, are dropped for good.
 
 Not a problem of a row, and never sent to the fixer nor to `drop` (which refuses `done_before` rows and refs outside the key, exit 5): a guard problem on a commit that no row of the key lists in its `commits` (a commit of a taken-over branch, at or before its head), or a `failed_refs` row that is `done_before`. It goes to the lead: present mode, tell them at once; autonomous mode, set it aside. A guard problem left there keeps the key from publication (`publish` exits 5, below).
 
@@ -945,6 +953,20 @@ g. Publication. In autonomous mode the key stops at `reviewed`, with its branch 
 
 - `push` `local` or `dry_run`, or a key whose `push_ready` is false: no publication, only `finish` (below), which keeps the branch in the dev's repo.
 - Otherwise `mr-body`, `publish`, then `finish`.
+
+Before `mr-body`, group the unpushed commits by section: `reorder` prints `{"reordered", "conflicts"}`, and a conflict leaves the order as it was (the summary says so). Then rewrite the message of each commit that a guard problem of `kind` `form` names; the new message goes through the guard first (exit 5 with its `problems`, nothing changed). Run `guard` again afterwards.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" reorder "$RUN" "<repo>"
+```
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" reword "$RUN" "<repo>" --commit <sha> --message-file <file>
+```
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

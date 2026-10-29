@@ -128,6 +128,11 @@ def _build_parser() -> argparse.ArgumentParser:
         sub.add_argument("run_dir", type=Path, help="dossier du run")
         sub.add_argument("key", help=KEY_HELP)
         sub.add_argument("--section", required=True, help=SECTION_HELP)
+        if name == "section-end":
+            sub.add_argument("--failed", action="store_true", help=(
+                "la section n'aboutit pas : ses commits sont retirés, ses lignes aussi"))
+            sub.add_argument("--reason",
+                             help="avec --failed : raison, en français, donnée dans la MR")
     sub = _command(commands, "pass-start", "note la tête de la branche avant une passe du fixer",
                    _cmd_pass_start)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
@@ -168,6 +173,17 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("key", help=KEY_HELP)
     sub.add_argument("--refs", required=True, help="Réf à retirer, séparées par des virgules")
     sub.add_argument("--reason", required=True, help="raison, en français, donnée dans la MR")
+    sub = _command(commands, "reorder", "range les commits non poussés d'une clé par section",
+                   _cmd_reorder)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help=KEY_HELP)
+    sub = _command(commands, "reword", "réécrit le message d'un commit non poussé d'une clé",
+                   _cmd_reword)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help=KEY_HELP)
+    sub.add_argument("--commit", required=True, help="SHA du commit dont le message change")
+    sub.add_argument("--message-file", type=Path, required=True,
+                     help="fichier du nouveau message (sujet, puis corps éventuel)")
     sub = _command(commands, "check", "contrôles de syntaxe et stylelint des fichiers corrigés", _cmd_check)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help=KEY_HELP)
@@ -464,11 +480,17 @@ def _cmd_pass_start(args, services: Services) -> int:
 
 
 def _answers_questions(state: dict, key: dict, section: dict) -> bool:
-    """True at the questions stage for a settled section that still holds a question row: the
-    pass answers the questions set aside in autonomous mode (SKILL.md section 12, step 6)."""
-    return state["stage"] == "questions" and section["state"] == "settled" and any(
-        (key["rows"].get(str(ref)) or {}).get("outcome") == "question" for ref in section["refs"]
-    )
+    """True at the questions stage for a settled section that still holds a question row, or a
+    row back to pending for its retry (_settle_drops): the pass answers the questions set aside
+    in autonomous mode (SKILL.md section 12, step 6), or retries that row."""
+    if state["stage"] != "questions" or section["state"] != "settled":
+        return False
+    for ref in section["refs"]:
+        row = key["rows"].get(str(ref)) or {}
+        if row.get("outcome") == "question" or (row.get("outcome") == "pending"
+                                                and row.get("retry")):
+            return True
+    return False
 
 
 def _pass_in_progress(key: dict) -> Optional[int]:
@@ -513,12 +535,16 @@ def _cmd_section_start(args, services: Services) -> int:
 
 
 def _cmd_section_end(args, services: Services) -> int:
-    """Settle the section in progress once each of its rows is settled.
+    """Settle the section in progress once each of its rows is settled, or with --failed give
+    it up (_fail_section).
 
     A row is settled when it is skipped, dropped or already on the branch, fixed with a review
     of its pass that does not block it, or a question set aside (autonomous mode only). No
     pass of the section may be in progress (started, its report not validated).
     """
+    if args.failed != (args.reason is not None):
+        raise UsageError("--failed et --reason vont ensemble : la section qui n'aboutit pas et "
+                         "la raison, en français, du retrait de ses lignes.")
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
@@ -528,6 +554,8 @@ def _cmd_section_end(args, services: Services) -> int:
             f"La section {args.section} est à l'état « {section['state']} » : section-end "
             "attend la section en cours."
         )
+    if args.failed:
+        return _fail_section(run_dir, state, key, section, _reason(args.reason), services.run)
     started = _pass_in_progress(key)
     if started is not None:
         raise UsageError(
@@ -544,10 +572,101 @@ def _cmd_section_end(args, services: Services) -> int:
         raise UsageError(f"La section {args.section} n'est pas réglée : {', '.join(unsettled)}.")
     section["state"] = "settled"
     fix_state.save(run_dir, state)
-    following = next((item["alias"] for item in key["sections"] if item["state"] == "pending"),
-                     None)
-    _emit({"section": section["alias"], "state": "settled", "next": following})
+    _emit({"section": section["alias"], "state": "settled", "next": _next_section(key)})
     return EXIT_OK
+
+
+def _next_section(key: dict) -> Optional[str]:
+    return next((item["alias"] for item in key["sections"] if item["state"] == "pending"), None)
+
+
+def _fail_section(run_dir: Path, state: dict, key: dict, section: dict, reason: str,
+                  run) -> int:
+    """Give up the section in progress (section-end --failed): it could not reach a valid
+    review, or the workstation failed.
+
+    Its rows still open (pending, fixed, question, or skipped as covered by a fix) leave with
+    reason; skipped, dropped and done_before rows keep theirs. Their commits leave the branch
+    with drop_commits, with every commit made since the first pass of the section
+    (reported or not). Nothing changes when one of them is already on a remote. The
+    uncommitted changes of the worktree are first saved in fix/<repo>/leftover-<N>.patch,
+    then the worktree is reset and cleaned (fix_git.save_leftovers). The passes of the
+    section whose report is not validated are closed: their base and section are forgotten,
+    so that the next section may use their number, and their report, review and notes files
+    are renamed <name>-<N>.failed.json, as is a review that was never recorded.
+    """
+    worktree = _key_worktree(run_dir, key, run)
+    rows, alias = key["rows"], section["alias"]
+    covered = fix_mr.covered_refs(rows)
+    refs = [ref for ref in section["refs"] if _gives_up(rows.get(str(ref)) or {}, ref, covered)]
+    allowed, linked = _drop_scope(rows)
+    passes = sorted(int(number) for number, owner in _recorded(key, "pass_sections").items()
+                    if owner == alias)
+    extra = frozenset(_commits_since_pass(worktree, run, key, passes))
+    scope = {"branch": key["branch"], "start_sha": key["start_sha"], "refs": set(refs),
+             "linked": linked, "extra": extra}
+    fix_git.check_drop(worktree, run, **scope)
+    leftover = fix_git.save_leftovers(worktree, run, _key_folder(run_dir, key))
+    saved = None
+    if leftover is not None:
+        saved = {"patch": leftover["path"].relative_to(run_dir).as_posix(),
+                 "base": leftover["base"], "untracked": leftover["untracked"]}
+        section["leftover"] = saved["patch"]
+        fix_state.save(run_dir, state)
+    before = _range_shas(worktree, run, key)
+    result = fix_git.drop_commits(worktree, run, allowed=allowed, **scope)
+    also, retry = _settle_drops(
+        state, key, refs, result["dropped"], reason,
+        f"retirée avec la section {alias} : son correctif dépend d'un commit retiré",
+    )
+    _remap(worktree, run, key, before, result["rewritten"])
+    _close_failed_passes(run_dir, key, passes)
+    section.update(state="failed", reason=reason)
+    if _every_pass_reviewed(key):
+        _raise_step(key, "reviewed")
+    fix_state.save(run_dir, state)
+    if result["unattached"]:
+        raise fix_git.GitRefused(result["unattached"])
+    _emit({"section": alias, "state": "failed", "next": _next_section(key), "dropped": refs,
+           "also_dropped": also, "retry": retry, "leftover": saved})
+    return EXIT_OK
+
+
+def _gives_up(row: dict, ref: int, covered: dict) -> bool:
+    """True for a row that a failed section drops: still open, or skipped as covered by a fix."""
+    outcome = row.get("outcome")
+    return outcome in ("pending", "fixed", "question") or (outcome == "skipped"
+                                                           and ref in covered)
+
+
+def _commits_since_pass(worktree: Path, run, key: dict, passes: list) -> set:
+    """Return the SHAs of bases[N]..HEAD for the first of passes whose base is in the branch."""
+    bases = _recorded(key, "bases")
+    for number in passes:
+        base = bases.get(str(number))
+        if fix_git.is_sha(base) and fix_git.is_ancestor(worktree, run, base, "HEAD"):
+            return {item["sha"] for item in fix_git.commits_in_range(worktree, run, base)}
+    return set()
+
+
+def _close_failed_passes(run_dir: Path, key: dict, passes: list) -> None:
+    """Close the passes of a failed section (see _fail_section)."""
+    bases, owners = _recorded(key, "bases"), _recorded(key, "pass_sections")
+    reviews = _recorded(key, "reviews")
+    folder = _key_folder(run_dir, key)
+    for number in passes:
+        names = ()
+        if number > (key.get("pass") or 0):
+            bases.pop(str(number), None)
+            owners.pop(str(number), None)
+            names = ("report", "review", "notes")
+        elif str(number) not in reviews:
+            names = ("review",)
+        for name in names:
+            path = folder / f"{name}-{number}.json"
+            if path.exists():
+                os.replace(path, folder / f"{name}-{number}.failed.json")
+    key["bases"], key["pass_sections"] = bases, owners
 
 
 def _unsettled(ref: int, row: dict, reviews: dict, mode) -> Optional[str]:
@@ -867,17 +986,27 @@ def _third_party(repo: dict) -> list:
     return third_party
 
 
-def _cmd_drop(args, services: Services) -> int:
-    run_dir = args.run_dir.resolve()
-    refs = parse_refs(args.refs)
-    reason = args.reason.strip()
-    if not refs:
-        raise UsageError("--refs : au moins une Réf est attendue (CQ-3).")
+def _reason(text: str) -> str:
+    """Return the --reason of a drop, stripped; exit 2 when empty or too long."""
+    reason = text.strip()
     if not reason or len(reason) > fix_guard.MAX_REASON:
         raise UsageError(
             f"--reason : une raison en français de {fix_guard.MAX_REASON} caractères au plus "
             "est attendue."
         )
+    return reason
+
+
+def _cmd_drop(args, services: Services) -> int:
+    """Remove rows from the key's branch (fix_git.drop_commits) and record why.
+
+    A row taken along by the drop (also_dropped) gets one retry (_settle_drops).
+    """
+    run_dir = args.run_dir.resolve()
+    refs = parse_refs(args.refs)
+    if not refs:
+        raise UsageError("--refs : au moins une Réf est attendue (CQ-3).")
+    reason = _reason(args.reason)
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
     rows = key["rows"]
@@ -890,36 +1019,202 @@ def _cmd_drop(args, services: Services) -> int:
             f"{_labels(before)} : déjà sur la branche avant cette passe, rien n'a été retiré."
         )
     worktree = _key_worktree(run_dir, key, services.run)
-    allowed = {int(ref) for ref, row in rows.items() if row.get("outcome") != "done_before"}
-    linked = {int(ref): rows[ref].get("commits") or [] for ref in rows if int(ref) in allowed}
-    bases = _recorded(key, "bases")
-    before = ([item["sha"] for item in fix_git.commits_in_range(worktree, services.run,
-                                                                key["start_sha"])]
-              if bases else [])
+    allowed, linked = _drop_scope(rows)
+    before = _range_shas(worktree, services.run, key)
     result = fix_git.drop_commits(
         worktree, services.run, branch=key["branch"], start_sha=key["start_sha"], refs=set(refs),
         linked=linked, allowed=allowed,
     )
-    rewritten = result["rewritten"]
-    also = sorted(set(result["dropped"]) - set(refs))
-    for ref, row in rows.items():
-        if int(ref) in result["dropped"]:
-            row.update(outcome="dropped", commits=[], reason=reason if int(ref) in refs else (
-                f"retirée avec {_labels(refs)} : son correctif dépend d'un commit retiré"))
-        else:
-            row["commits"] = [rewritten.get(sha, sha) for sha in row.get("commits") or []]
-    if bases:
-        after = _branch_commits(worktree, services.run, key["start_sha"], key["branch"])
-        key["bases"] = {
-            number: _remapped(base, before, after, rewritten, key["start_sha"])
-            for number, base in bases.items()
-        }
+    also, retry = _settle_drops(
+        state, key, refs, result["dropped"], reason,
+        f"retirée avec {_labels(refs)} : son correctif dépend d'un commit retiré",
+    )
+    _remap(worktree, services.run, key, before, result["rewritten"])
     if _every_pass_reviewed(key):
         _raise_step(key, "reviewed")
     fix_state.save(run_dir, state)
     if result["unattached"]:
         raise fix_git.GitRefused(result["unattached"])
-    _emit({"dropped": refs, "also_dropped": also})
+    _emit({"dropped": refs, "also_dropped": also, "retry": retry})
+    return EXIT_OK
+
+
+def _drop_scope(rows: dict) -> tuple:
+    """Return (allowed, linked) for drop_commits: the refs a drop may take (all but done_before)
+    and their recorded commits."""
+    allowed = {int(ref) for ref, row in rows.items() if row.get("outcome") != "done_before"}
+    linked = {int(ref): rows[ref].get("commits") or [] for ref in rows if int(ref) in allowed}
+    return allowed, linked
+
+
+def _settle_drops(state: dict, key: dict, refs: list, dropped: set, reason: str,
+                  ricochet: str) -> tuple:
+    """Record a drop in the rows and return (also_dropped, retry), sorted.
+
+    The rows of refs leave the branch with reason. A row taken along (its fix depended on a
+    removed commit) goes back to pending once, with ricochet as its reason and retry true,
+    for one more pass of the fixer in its section (_can_retry); it leaves for good with that
+    reason when it already had its retry, or when its section can no longer run a pass.
+    """
+    also, retry = sorted(set(dropped) - set(refs)), []
+    for ref in sorted(dropped):
+        row = key["rows"][str(ref)]
+        if ref in refs:
+            row.update(outcome="dropped", commits=[], reason=reason)
+        elif not row.get("retry") and _can_retry(state, key, row):
+            row.update(outcome="pending", commits=[], reason=ricochet, retry=True, attention=None)
+            row.pop("remaining", None)
+            row.pop("corrections", None)
+            retry.append(ref)
+        else:
+            row.update(outcome="dropped", commits=[], reason=ricochet)
+    return also, retry
+
+
+def _can_retry(state: dict, key: dict, row: dict) -> bool:
+    """True when the section of row may still run a pass of the fixer: not started yet, in
+    progress, or settled at the questions stage (_answers_questions)."""
+    section = next((item for item in key["sections"] if item["alias"] == row.get("section")),
+                   None)
+    if section is None:
+        return False
+    if section["state"] in ("pending", "active"):
+        return True
+    return section["state"] == "settled" and state["stage"] == "questions"
+
+
+def _range_shas(worktree: Path, run, key: dict) -> list:
+    """Return the SHAs of <start_sha>..HEAD, oldest first (before a rewrite, for _remap)."""
+    return [item["sha"] for item in fix_git.commits_in_range(worktree, run, key["start_sha"])]
+
+
+def _remap(worktree: Path, run, key: dict, before: list, rewritten: dict) -> None:
+    """Point the SHAs that the key records at its rewritten branch: the commits of the rows,
+    the bases of the passes and the head of a taken-over branch (_remapped).
+
+    before lists <start_sha>..HEAD before the rewrite. start_sha never moves; reviews hold
+    refs only, and secret waivers are keyed on blobs: neither changes. The stamp of the MR
+    description (mr_body) keeps the old head, so that publish asks for a new one.
+    """
+    for row in key["rows"].values():
+        if isinstance(row, dict):
+            row["commits"] = [rewritten.get(sha, sha) for sha in row.get("commits") or []]
+    bases, taken = _recorded(key, "bases"), key.get("taken_head")
+    if not bases and not fix_git.is_sha(taken):
+        return
+    after = _branch_commits(worktree, run, key["start_sha"], key["branch"])
+    if bases:
+        key["bases"] = {
+            number: _remapped(base, before, after, rewritten, key["start_sha"])
+            for number, base in bases.items()
+        }
+    if fix_git.is_sha(taken):
+        key["taken_head"] = _remapped(taken, before, after, rewritten, key["start_sha"])
+
+
+def _cmd_reorder(args, services: Services) -> int:
+    """Group the commits of the key by section, in the order of its sections, before the
+    publication (fix_git.reorder_commits): the commits of a section keep their order, and
+    pushed commits or those of a taken-over branch never move.
+
+    A conflict changes nothing in git: the subjects of the commits that did not replay go to
+    reorder_conflicts in the state, for the summary; a reorder that goes through, or finds
+    nothing to move, clears it.
+    """
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    worktree = _key_worktree(run_dir, key, services.run)
+    commits = fix_git.commits_in_range(worktree, services.run, key["start_sha"])
+    result = fix_git.reorder_commits(
+        worktree, services.run, branch=key["branch"], start_sha=key["start_sha"],
+        keep=key.get("taken_head"), rank=_section_rank(key),
+    )
+    if result["conflicts"]:
+        subjects = {item["sha"]: item["message"].split("\n", 1)[0] for item in commits}
+        key["reorder_conflicts"] = [subjects.get(sha, sha) for sha in result["conflicts"]]
+    else:
+        key.pop("reorder_conflicts", None)
+        _remap(worktree, services.run, key, [item["sha"] for item in commits],
+               result["rewritten"])
+    fix_state.save(run_dir, state)
+    if result["unattached"]:
+        raise fix_git.GitRefused(result["unattached"])
+    _emit({"reordered": result["reordered"], "conflicts": result["conflicts"]})
+    return EXIT_OK
+
+
+def _section_rank(key: dict):
+    """Return rank(commit) for reorder_commits: the place in the key of the section of the row
+    that its subject names, else of the first row that lists it in its commits, else of the
+    section alias of its subject; None when none is a section of the key."""
+    ranks = {}
+    for index, section in enumerate(key["sections"]):
+        ranks.setdefault(section["alias"], index)
+    owners = {}
+    for section in key["sections"]:
+        for ref in section["refs"]:
+            for sha in (key["rows"].get(str(ref)) or {}).get("commits") or []:
+                owners.setdefault(sha, ranks[section["alias"]])
+
+    def rank(commit: dict) -> Optional[int]:
+        row = key["rows"].get(str(commit["ref"])) if commit["ref"] is not None else None
+        if isinstance(row, dict) and row.get("section") in ranks:
+            return ranks[row["section"]]
+        if commit["sha"] in owners:
+            return owners[commit["sha"]]
+        parsed = fix_names.parse_subject(commit["message"].split("\n", 1)[0])
+        return ranks.get(parsed[0]) if parsed else None
+
+    return rank
+
+
+def _cmd_reword(args, services: Services) -> int:
+    """Rewrite the message of one unpushed commit of the key (fix_git.reword_commit), the
+    content of every commit unchanged, to settle a form problem of the guard before the push.
+
+    The new message (--message-file, read as git commit -F would) goes through the guard's
+    checks of a message first (fix_guard.check_message: convention, section, length,
+    attribution, secrets, gitleaks): a problem exits 5 with {"ok", "problems", "note"} and
+    nothing changes.
+    """
+    try:
+        message = _commit_message(args.message_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as error:
+        raise UsageError(f"--message-file : {args.message_file} est illisible ({error}).")
+    if not message:
+        raise UsageError("--message-file : le message est vide.")
+    if not re.fullmatch(r"[0-9a-fA-F]{4,64}", args.commit):
+        raise UsageError(f"--commit {args.commit} : un SHA de commit est attendu.")
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    run = services.run
+    worktree = _key_worktree(run_dir, key, run)
+    commits = fix_git.commits_in_range(worktree, run, key["start_sha"])
+    sha = fix_names.git_out(worktree, run, "rev-parse", "--verify", "--quiet",
+                            f"{args.commit}^{{commit}}")
+    if sha not in {item["sha"] for item in commits}:
+        raise UsageError(f"--commit {args.commit} : ce n'est pas un commit de "
+                         f"{key['start_sha'][:12]}..HEAD de la branche {key['branch']}. "
+                         "Rien n'a changé.")
+    scanner = fix_gitleaks.Gitleaks(run, LAUNCHER)
+    problems = fix_guard.check_message(message, _row_sections(key), known_values_from_env(),
+                                       gitleaks=scanner)
+    _note(scanner)
+    if problems:
+        _emit({"ok": False, "problems": problems, "note": scanner.note})
+        print(f"Garde-fou : {len(problems)} problème(s) dans le nouveau message, détail dans "
+              "« problems ». Rien n'a été réécrit.", file=sys.stderr)
+        return EXIT_REFUSED
+    result = fix_git.reword_commit(worktree, run, branch=key["branch"],
+                                   start_sha=key["start_sha"], sha=sha, message=message)
+    _remap(worktree, run, key, [item["sha"] for item in commits], result["rewritten"])
+    fix_state.save(run_dir, state)
+    if result["unattached"]:
+        raise fix_git.GitRefused(result["unattached"])
+    _emit({"reworded": bool(result["rewritten"]), "commit": result["commit"],
+           "note": scanner.note})
     return EXIT_OK
 
 
@@ -932,10 +1227,10 @@ def _branch_commits(worktree: Path, run, start_sha: str, branch: str) -> set:
 
 
 def _remapped(base: str, before: list, after: set, rewritten: dict, start_sha: str) -> str:
-    """Return where a pass base lands after a drop.
+    """Return where a pass base (or a taken-over head) lands after a rewrite of the branch.
 
-    before lists <start_sha>..HEAD before the drop, oldest first (linear: drop refuses merges);
-    after holds the commits of the rebuilt branch. A kept commit maps to its new SHA (or stays);
+    before lists <start_sha>..HEAD before the rewrite, oldest first (linear: every rewrite
+    refuses merges); after holds the commits of the rebuilt branch. A kept commit maps to its new SHA (or stays);
     a dropped one to the new SHA of its nearest kept first-parent ancestor, else start_sha. A
     base outside the range (start_sha or older) does not move.
     """

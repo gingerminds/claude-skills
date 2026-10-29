@@ -1259,7 +1259,7 @@ class DropTest(GitCase):
         fix_state.save(self.run_dir, state)
         code, result, err = self.drop(KEY, "CQ-3,CQ-5")
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"dropped": [3, 5], "also_dropped": []})
+        self.assertEqual(result, {"dropped": [3, 5], "also_dropped": [], "retry": []})
         self.assertEqual(self.subjects(worktree, started["start_sha"]), ["fix(CQ-12): add b"])
         self.assertEqual(sorted(path.name for path in worktree.glob("*.txt")), ["a.txt", "b12.txt"])
         self.assert_clean_on(worktree, started["branch"])
@@ -1280,11 +1280,11 @@ class DropTest(GitCase):
         self.fixer_commit(worktree, "shared.txt", "fix(CQ-12): change shared")
         code, result, err = self.drop(KEY, "CQ-3")
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"dropped": [3], "also_dropped": [12]})
+        self.assertEqual(result, {"dropped": [3], "also_dropped": [12], "retry": [12]})
         self.assertEqual(self.head(worktree), started["start_sha"])
         self.assert_clean_on(worktree, started["branch"])
         rows = self.key()["rows"]
-        self.assertEqual((rows["3"]["outcome"], rows["12"]["outcome"]), ("dropped", "dropped"))
+        self.assertEqual((rows["3"]["outcome"], rows["12"]["outcome"]), ("dropped", "pending"))
         self.assertIn("CQ-3", rows["12"]["reason"])
         self.assertEqual(rows["5"]["outcome"], "pending")
 
@@ -1300,9 +1300,75 @@ class DropTest(GitCase):
         fix_state.save(self.run_dir, state)
         code, result, err = self.drop(KEY, "CQ-3")
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"dropped": [3], "also_dropped": [12]})
+        self.assertEqual(result, {"dropped": [3], "also_dropped": [12], "retry": [12]})
         self.assertEqual(self.head(worktree), started["start_sha"])
         self.assert_clean_on(worktree, started["branch"])
+
+    def test_also_dropped_rows_get_one_retry(self):
+        """A row dropped by ricochet goes back to the fixer once, in its section, with the
+        reason; dropped by ricochet again, it leaves for good."""
+        started = self.start_ok()
+        worktree = Path(started["worktree"])
+        self.section_start()
+        shared = self.fixer_commit(worktree, "shared.txt", "fix(securite CQ-3): add shared")
+        change = self.fixer_commit(worktree, "shared.txt", "fix(securite CQ-12): change shared")
+        self.record(r3=[shared], r12=[change])
+        state = self.state()
+        state["keys"][KEY]["rows"]["12"].update(attention="Abandon : ancien texte.",
+                                                remaining="Reste b.")
+        fix_state.save(self.run_dir, state)
+        code, result, err = self.drop(KEY, "CQ-3")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(result, {"dropped": [3], "also_dropped": [12], "retry": [12]})
+        self.assertEqual(self.head(worktree), started["start_sha"])
+        self.assert_clean_on(worktree, started["branch"])
+        row = self.key()["rows"]["12"]
+        self.assertEqual((row["outcome"], row["commits"], row["retry"], row["attention"]),
+                         ("pending", [], True, None))
+        self.assertNotIn("remaining", row)
+        self.assertIn("CQ-3", row["reason"])
+        code, result, err = self.section("end", "securite")
+        self.assertEqual(code, 2, err)
+        self.assertIn("CQ-12 en attente", err)
+        other = self.fixer_commit(worktree, "other.txt", "fix(securite CQ-5): add other")
+        again = self.fixer_commit(worktree, "other.txt", "fix(securite CQ-12): change other")
+        self.record(r5=[other], r12=[again])
+        code, result, err = self.drop(KEY, "CQ-5")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(result, {"dropped": [5], "also_dropped": [12], "retry": []})
+        rows = self.key()["rows"]
+        self.assertEqual((rows["12"]["outcome"], rows["12"]["commits"]), ("dropped", []))
+        self.assertIn("CQ-5", rows["12"]["reason"])
+        self.assertEqual(self.head(worktree), started["start_sha"])
+        self.assertEqual(self.section("end", "securite")[0], 0)
+
+    def test_a_ricochet_in_a_settled_section_is_final_until_the_questions(self):
+        """Keys stage: a settled section takes no more pass, so its row is dropped for good;
+        at the questions stage its section takes the retry, as for an answered question."""
+        self.assertEqual(self.run_main(["abandon", self.run_dir])[0], 0)
+        self.write_run(flight(), sections={"securite": (3,), "qualite": (5, 12)})
+        for stage, outcome in (("keys", "dropped"), ("questions", "pending")):
+            with self.subTest(stage=stage):
+                self.open_pass(mode="autonomous")
+                started = self.start_ok()
+                worktree = Path(started["worktree"])
+                shared = self.fixer_commit(worktree, f"{stage}.txt", "fix(qualite CQ-5): add")
+                change = self.fixer_commit(worktree, f"{stage}.txt", "fix(securite CQ-3): edit")
+                self.record(r5=[shared], r3=[change])
+                state = self.state()
+                state["stage"] = stage
+                state["keys"][KEY]["sections"][0]["state"] = "settled"
+                state["keys"][KEY]["sections"][1]["state"] = "active"
+                fix_state.save(self.run_dir, state)
+                code, result, err = self.drop(KEY, "CQ-5")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(result["also_dropped"], [3])
+                self.assertEqual(self.key()["rows"]["3"]["outcome"], outcome)
+                if stage == "questions":
+                    code, out, err = self.run_main(["pass-start", self.run_dir, KEY, "--pass",
+                                                    "1", *SECTION])
+                    self.assertEqual(code, 0, err)
+                self.assertEqual(self.run_main(["abandon", self.run_dir])[0], 0)
 
     def test_drop_refuses_pushed_commits(self):
         started = self.start_ok()
@@ -1371,7 +1437,7 @@ class DropSafetyTest(DropTest):
         self.record(r3=[first])
         code, result, err = self.drop(KEY, "CQ-5", reason="Demande une décision du client.")
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"dropped": [5], "also_dropped": []})
+        self.assertEqual(result, {"dropped": [5], "also_dropped": [], "retry": []})
         self.assertEqual(self.head(worktree), head)
         self.assertEqual(self.head(self.repo, f"refs/heads/{started['branch']}"), head)
         rows = self.key()["rows"]
@@ -1874,7 +1940,7 @@ class SettledRowsTest(GitCase):
         self.main_ok("validate", KEY, "report", "--pass", "1")
         result = self.main_ok("drop", KEY, "--refs", "CQ-5", "--reason",
                               "laissée aux devs par le lead")
-        self.assertEqual(result, {"dropped": [5], "also_dropped": []})
+        self.assertEqual(result, {"dropped": [5], "also_dropped": [], "retry": []})
         self.assertEqual(self.head(worktree), fixed)
         rows = self.key()["rows"]
         self.assertEqual(rows["5"]["outcome"], "dropped")

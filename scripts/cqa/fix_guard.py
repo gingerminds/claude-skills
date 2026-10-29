@@ -219,6 +219,17 @@ def check_staged(worktree: Path, message: str, rows: dict, repo: dict, known: li
     return problems
 
 
+def check_message(message: str, rows: dict, known: list, gitleaks=None) -> list:
+    """Return the problems of a commit message alone, as check_staged reports them for the
+    message of a commit: its form, then its secrets (never waivable, since a message is no
+    file), then the findings of gitleaks when given. rows and known as for check_commits;
+    each problem has the ref of the subject, and None as sha and path."""
+    ref = fix_names.ref_of_subject(message.split("\n", 1)[0])
+    segments = []
+    problems = _change_problems(None, ref, message, rows, {}, known, [], {}, None, segments)
+    return problems + _gitleaks_problems(gitleaks, segments)
+
+
 def unwaived(problems: list, waivers: list, blob_of) -> list:
     """Return the problems that no waiver covers.
 
