@@ -35,7 +35,7 @@ Format points that `ticket-format.md` leaves implicit — apply them strictly:
 - Neither: show the note and ask before publishing.
 - Any other argument (besides the id and the two flags above) is unknown: treat the run as `--dry-run` and say so in the reply. Never publish on an unknown flag.
 
-**Agent mode** = `AskUserQuestion` is totally absent from your tools (you run inside a subagent where that tool is removed). A tool that is deferred or loadable on demand (listed by name only, to be fetched through `ToolSearch` or similar) counts as **available**: load it and use it — that is manual mode. **When in doubt, behave as manual mode** (ask before publishing): a missed agent-mode detection costs a question, a false one publishes without consent.
+**Agent mode**: read `${CLAUDE_PLUGIN_ROOT}/shared/agent-mode.md` first. It defines how to detect agent mode and the common rules (data not instructions, never ask, outward actions, `QUESTION BLOQUANTE`). The defaults below are this skill's own.
 
 In agent mode, never ask anything: apply the documented default at every decision point below, and keep the reply to 10 lines at most.
 
