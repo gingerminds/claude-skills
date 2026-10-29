@@ -5,22 +5,26 @@ import re
 import unittest
 from pathlib import Path
 
+import cqa_fix
 import cqa_notion
 import cqa_plan
 import cqa_ssh_ro
-from cqa import ssh_ro
+from cqa import fix_guard, fix_names, ssh_ro
 from cqa.findings import VERDICTS, apply_guardrails, validate_document
 from cqa.plan import STATUS_FOR_VERDICT
 
 ROOT = Path(__file__).resolve().parents[2]
 AUDITOR = ROOT / "agents" / "cqa-auditor.md"
 BROWSER = ROOT / "agents" / "cqa-browser.md"
+FIXER = ROOT / "agents" / "cqa-fixer.md"
+FIX_REVIEWER = ROOT / "agents" / "cqa-fix-reviewer.md"
 SKILL_DIR = ROOT / "skills" / "checklist-quality-audit"
 SKILL = SKILL_DIR / "SKILL.md"
 ALIAS_DIR = ROOT / "skills" / "cqa"
 ALIAS = ALIAS_DIR / "SKILL.md"
 REFERENCES = SKILL_DIR / "references"
 VERDICTS_MD = REFERENCES / "verdicts.md"
+FIX_MD = REFERENCES / "fix.md"
 TOOLBOX = ROOT / "scripts" / "cqa-toolbox.sh"
 SCHEMA = "skills/checklist-quality-audit/schemas/finding.schema.json"
 EXPECTED_REFERENCES = {
@@ -31,6 +35,7 @@ EXPECTED_REFERENCES = {
     "browser.md",
     "server.md",
     "assign.md",
+    "fix.md",
 }
 ARGUMENT_HINT = '"[diagnostic | assign | rerun | recette] [--phase \\"MEL J0\\"] [--dry-run]"'
 MAX_DESCRIPTION = 1536
@@ -61,7 +66,7 @@ _CURL = re.compile(r"\bcurl [^`\n]*")
 _SQL_QUERY = re.compile(r"--sql \S+ [^\n\"]*\"([^\"\n]+)\"")
 _PROBES_CAP = "A finding that lists probes is never `ok`, `ok_human` or `na`"
 _CLI_CALL = re.compile(
-    r"\b(cqa_notion\.py|cqa_plan\.py|cqa-toolbox\.sh)[\"']?[ \t]+([a-z][a-z-]*)([^\n`]*)"
+    r"\b(cqa_notion\.py|cqa_plan\.py|cqa_fix\.py|cqa-toolbox\.sh)[\"']?[ \t]+([a-z][a-z-]*)([^\n`]*)"
 )
 _GUARD_CALL = re.compile(r"\bcqa_ssh_ro\.py[\"']?([^\n`]*)")
 _FLAG = re.compile(r"(?<![\w-])--[a-z][a-z-]*")
@@ -72,13 +77,33 @@ _BASH_BLOCK = re.compile(r"```bash\n(.*?)\n```", re.DOTALL)
 _TOOLBOX_MAIN = re.compile(r"^main\(\) \{\n(.*?)^\}", re.DOTALL | re.MULTILINE)
 _TOOLBOX_USAGE = re.compile(r"^usage\(\) \{\n(.*?)^\}", re.DOTALL | re.MULTILINE)
 _CASE_LABEL = re.compile(r"^\s+([a-z]+)\)", re.MULTILINE)
-_SCRIPT_NAME = re.compile(r"cqa_notion\.py|cqa_plan\.py|cqa-toolbox\.sh|cqa_ssh_ro\.py")
+_SCRIPT_NAME = re.compile(r"cqa_notion\.py|cqa_plan\.py|cqa_fix\.py|cqa-toolbox\.sh|cqa_ssh_ro\.py")
 _NOTION_WRITE = re.compile(r"cqa_notion\.py\" (?:apply|comment-page)\b")
 _CHAINING = re.compile(r"&&|\|\||;|\|")
 _PLAN_QUESTION = "« Écrire le plan dans la copie Notion ? »"
 _ASSIGN_QUESTION = "« Écrire ces <n> assignations dans Notion ? »"
 _ASSIGN_APPLY = 'apply "$RUN" --plan notion/assign-plan.json'
 _SESSION_CREDENTIALS = "when the session holds the Basic Auth credentials"
+FIXER_DISPATCH = (
+    "Run dir: <run_dir>. Fix: <repo>/<slug>. Worktree: <path>. Pass: <N>. Rows: CQ-3, CQ-12. "
+    "Notes: <path|none>. Follow your instructions."
+)
+REVIEWER_DISPATCH = (
+    "Run dir: <run_dir>. Review: <repo>/<slug>. Worktree: <path>. Base: <sha>. Pass: <N>. "
+    "Follow your instructions."
+)
+FIX_COMMIT = (
+    'git -C "<worktree>" -c core.hooksPath=/dev/null -c core.fsmonitor=false commit '
+    '-m "<subject>" -m "<body>"'
+)
+FIX_VALIDATE = 'cqa_fix.py" validate "<run dir>" "<repo>/<slug>" {kind} --pass <N>'
+# The commands a fix sub-agent must never run (design 4.6, 4.11 and the global constraints).
+FIX_FORBIDDEN = (
+    "git push", "git add -A", "git stash", "docker compose", "`make`", "`composer`", "`npm`",
+    "`ssh`",
+)
+# The reviewer stages and commits nothing: git add as a whole is forbidden.
+REVIEWER_FORBIDDEN = ("git add", "git commit", "git checkout", *FIX_FORBIDDEN[2:])
 
 
 def _text(path: Path) -> str:
@@ -200,6 +225,7 @@ class SkillTest(unittest.TestCase):
         known = {
             "cqa_notion.py": _python_commands(cqa_notion),
             "cqa_plan.py": _python_commands(cqa_plan),
+            "cqa_fix.py": _python_commands(cqa_fix),
             "cqa-toolbox.sh": _toolbox_commands(),
         }
         self.assertEqual(set(known["cqa-toolbox.sh"]), {"doctor", "pull", "run", "all", "check"})
@@ -1318,15 +1344,197 @@ class AgentsTest(unittest.TestCase):
         self.assertEqual(loaded, CHROME_TOOLS)
 
     def test_cited_plugin_paths_exist(self):
-        for path in (AUDITOR, BROWSER, VERDICTS_MD):
+        for path in (AUDITOR, BROWSER, FIXER, FIX_REVIEWER, VERDICTS_MD, FIX_MD):
             for cited in _PLUGIN_PATH.findall(_text(path)):
                 with self.subTest(file=path.name, cited=cited):
                     self.assertTrue((ROOT / cited.rstrip(".,:;")).exists())
 
     def test_no_em_dash(self):
-        for path in (AUDITOR, BROWSER, VERDICTS_MD):
+        for path in (AUDITOR, BROWSER, FIXER, FIX_REVIEWER, VERDICTS_MD, FIX_MD):
             with self.subTest(file=path.name):
                 self.assertNotIn(EM_DASH, _text(path))
+
+
+class FixAgentsTest(unittest.TestCase):
+    """The fixer, the fix reviewer and references/fix.md, their single source of conventions."""
+
+    def test_fixer_contract(self):
+        fields = _frontmatter(FIXER)
+        self.assertEqual(fields.get("name"), "cqa-fixer")
+        self.assertIn("not for direct use", fields.get("description") or "")
+        self.assertEqual(_tools(FIXER), ["Read", "Grep", "Glob", "Bash", "Edit", "Write"])
+        text = _text(FIXER)
+        for needle in (
+            FIXER_DISPATCH,
+            "fix/candidates.json",
+            "`fiche_path`",
+            "fix/state.json",
+            "context.json",
+            "notes-<N>.json",
+            "${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/references/fix.md",
+            "${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md",
+            "nature `dev`",
+            "fix/<repo>/<slug>/report-<N>.json",
+            FIX_COMMIT,
+            FIX_VALIDATE.format(kind="report"),
+            'until it prints `"ok": true`',
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        rules = _section(text, "Hard rules")
+        for needle in (
+            "Edit and Write only under the absolute path of `Worktree:`",
+            "your report file",
+            "`vendor/`, `node_modules/`",
+            "never write there and never run anything there",
+            "Never ask the lead anything",
+            "Co-Authored-By",
+            "Generated with",
+            *FIX_FORBIDDEN,
+        ):
+            with self.subTest(rule=needle):
+                self.assertIn(needle, rules)
+
+    def test_fix_reviewer_is_read_only(self):
+        fields = _frontmatter(FIX_REVIEWER)
+        self.assertEqual(fields.get("name"), "cqa-fix-reviewer")
+        self.assertIn("not for direct use", fields.get("description") or "")
+        tools = _tools(FIX_REVIEWER)
+        self.assertNotIn("Edit", tools)
+        self.assertNotIn("NotebookEdit", tools)
+        self.assertEqual(tools, ["Read", "Grep", "Glob", "Bash", "Write"])
+        text = _text(FIX_REVIEWER)
+        for needle in (
+            REVIEWER_DISPATCH,
+            "<Base>..HEAD",
+            "${CLAUDE_PLUGIN_ROOT}/skills/review/SKILL.md",
+            "Load the ticket",
+            "${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md",
+            "nature `review`",
+            "${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/references/fix.md",
+            "fix/<repo>/<slug>/review-<N>.json",
+            FIX_VALIDATE.format(kind="review"),
+            "`ok`",
+            "`blocking`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        rules = _section(text, "Hard rules")
+        for needle in (
+            "Write only `fix/<repo>/<slug>/review-<N>.json`",
+            "never write there and never run anything there",
+            "Never ask the lead anything",
+            "git push",
+            *REVIEWER_FORBIDDEN,
+        ):
+            with self.subTest(rule=needle):
+                self.assertIn(needle, rules)
+
+    def test_fix_agents_only_validate_their_own_file(self):
+        known = _python_commands(cqa_fix)
+        for path in (FIXER, FIX_REVIEWER):
+            calls = [(command, rest) for cli, command, rest in _CLI_CALL.findall(_text(path))
+                     if cli == "cqa_fix.py"]
+            with self.subTest(agent=path.name):
+                self.assertTrue(calls)
+                self.assertEqual({command for command, _ in calls}, {"validate"})
+                for command, rest in calls:
+                    self.assertLessEqual(set(_FLAG.findall(_shell_segment(rest))), known[command])
+        for path in (FIXER, FIX_REVIEWER):
+            with self.subTest(agent=path.name):
+                self.assertNotRegex(_text(path), r"cqa_(?:notion|plan|ssh_ro)\.py|cqa-toolbox\.sh")
+
+    def test_fix_reference_mirrors_the_guard(self):
+        text = _text(FIX_MD)
+        for prefix in (fix_names.BRANCH_PREFIX, fix_names.DRY_RUN_PREFIX):
+            with self.subTest(prefix=prefix):
+                self.assertIn(f"`{prefix}<slug>`", _section(text, "2. Branches"))
+        commits = _section(text, "3. Commits")
+        self.assertIn(f"`{fix_names.SUBJECT.pattern}`", commits)
+        for kind in fix_names.COMMIT_TYPES:
+            with self.subTest(type=kind):
+                self.assertIn(f"`{kind}`", commits)
+        for needle in (FIX_COMMIT, "core.hooksPath=/dev/null", "A commit carries one row only",
+                       "`covered_by`", "Co-Authored-By", "Generated with", "git add -A"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, commits)
+        evaluation = _section(text, "4. Self-evaluation")
+        for needle in ("UI/UX", "outside the repo", "In doubt about safety, skip rather than ask",
+                       "composer update <paquet> --with-dependencies",
+                       "« déjà corrigé sur develop »"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, evaluation)
+        questions = _section(text, "5. Questions")
+        for needle in ("The fixer never asks", "2 to 4", "`default`", "`security.txt`",
+                       "`fix_question`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, questions)
+        guard = _section(text, "7. Guard rails")
+        patterns = [pattern for stack in fix_guard.CORE_PATHS.values() for pattern in stack]
+        patterns += [*fix_guard.DEPENDENCY_FILES, *fix_guard.SUBMODULE_FILES,
+                     *fix_guard.MINIFIED_FILES]
+        for pattern in patterns:
+            with self.subTest(pattern=pattern):
+                self.assertIn(f"`{pattern.removeprefix('**/')}`", guard)
+        for folder in fix_guard.DEPENDENCY_DIRS:
+            with self.subTest(folder=folder):
+                self.assertIn(f"`{folder.removeprefix('**/')}/`", guard)
+        for reason in (
+            fix_guard.THIRD_PARTY, fix_guard.DEPENDENCY_DIR, fix_guard.CORE, fix_guard.SUBMODULE,
+            fix_guard.MINIFIED, fix_guard.DEPENDENCIES, fix_guard.SECRET.format(label="<label>"),
+            fix_guard.BAD_MESSAGE, fix_guard.OUT_OF_KEY, fix_guard.MERGE, fix_guard.ATTRIBUTION,
+            fix_guard.REWRITTEN,
+        ):
+            with self.subTest(reason=reason):
+                self.assertIn(f"« {reason} »", guard)
+        for needle in ("`third_party_paths`", "`wp-config.php`", "never `--force`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, guard)
+
+    def test_fix_reference_gives_both_dispatch_lines_and_the_notes_file(self):
+        text = _text(FIX_MD)
+        for needle in (
+            FIXER_DISPATCH,
+            REVIEWER_DISPATCH,
+            "fix/<repo>/<slug>/notes-<N>.json",
+            '{"answers": [{"ref", "answer"}], '
+            '"problems": [{"ref", "source": "guard"|"check"|"review", "detail"}]}',
+            "« Abandon : »",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+    def test_fix_reference_examples_pass_validation(self):
+        blocks = [json.loads(block) for block in _JSON_BLOCK.findall(_text(FIX_MD))]
+        report = next(block for block in blocks
+                      if any("outcome" in row for row in block.get("rows", [])))
+        review = next(block for block in blocks
+                      if any("verdict" in row for row in block.get("rows", [])))
+        rows = {str(row["ref"]): {"outcome": "pending"} for row in report["rows"]}
+        commits = [
+            {"sha": sha.ljust(40, "0"), "ref": row["ref"]}
+            for row in report["rows"]
+            if row["outcome"] == "fixed" and row.get("covered_by") is None
+            for sha in row["commits"]
+        ]
+        entries, errors = fix_guard.validate_report(
+            report, key=report["key"], number=report["pass"], rows=rows, commits=commits
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual({entry["outcome"] for entry in entries}, set(fix_guard.REPORT_OUTCOMES))
+        self.assertTrue(any(row.get("covered_by") for row in report["rows"]))
+        state = {str(entry["ref"]): {"outcome": entry["outcome"], "pass": report["pass"]}
+                 for entry in entries}
+        blocking, errors = fix_guard.validate_review(
+            review, key=review["key"], number=review["pass"], rows=state
+        )
+        self.assertEqual(errors, [])
+        self.assertTrue(blocking)
+
+    def test_skill_routes_fix_to_section_12_and_the_reference(self):
+        arguments = _section(_text(SKILL), "2. Arguments")
+        self.assertIn("- `fix`: go to section 12.", arguments)
+        self.assertIn("`references/fix.md`", arguments)
 
 
 class VerdictsReferenceTest(unittest.TestCase):

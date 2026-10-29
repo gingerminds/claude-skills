@@ -38,6 +38,8 @@ CONTENT_SCOPE = [
     "skills/cqa",
     "agents/cqa-auditor.md",
     "agents/cqa-browser.md",
+    "agents/cqa-fixer.md",
+    "agents/cqa-fix-reviewer.md",
     "README.md",
 ]
 
@@ -126,6 +128,12 @@ class PublicHygieneTest(unittest.TestCase):
             "README.md",
         ):
             self.assertIn(expected, names)
+
+    def test_content_scope_covers_every_agent(self):
+        covered = {path.relative_to(ROOT).as_posix() for path in scope_files(CONTENT_SCOPE)}
+        for path in sorted((ROOT / "agents").glob("*.md")):
+            with self.subTest(agent=path.name):
+                self.assertIn(path.relative_to(ROOT).as_posix(), covered)
 
     def test_no_ipv4(self):
         leaks = [
