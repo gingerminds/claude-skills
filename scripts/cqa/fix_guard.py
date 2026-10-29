@@ -64,6 +64,11 @@ MIN_OPTIONS = 2
 MAX_OPTIONS = 4
 
 _GITLINK = "160000"
+# Rows a report may no longer change: their state outcome and the error that names them.
+_SETTLED = {
+    "done_before": "déjà faite sur la branche avant cette passe (done_before), hors du rapport",
+    "dropped": "retirée de la branche (dropped), hors du rapport",
+}
 # Trailers and footers that credit a tool: Co-Authored-By, Claude-Session, "Generated with".
 _ATTRIBUTION = re.compile(r"\W*(?:co-authored-by\s*:|claude-session\s*:|generated with\b)",
                           re.IGNORECASE)
@@ -145,6 +150,10 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
         if ref is None:
             continue
         seen[ref] += 1
+        settled = _SETTLED.get(rows[str(ref)].get("outcome"))
+        if settled:
+            errors.append(f"ligne {ref_label(ref)} : {settled}")
+            continue
         problems, entry = _report_row(item, ref, known, subjects)
         errors.extend(f"ligne {ref_label(ref)} : {problem}" for problem in problems)
         if entry is not None:
@@ -160,8 +169,8 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
 def validate_review(document, *, key: str, number: int, rows: dict) -> tuple:
     """Return (blocking refs, errors in French) for fix/<repo>/<slug>/review-<number>.json.
 
-    Every row the fixer reported fixed in this pass needs a verdict; a blocking verdict
-    needs notes, which tell the fixer what to change.
+    Every row the fixer reported fixed in this pass needs a verdict, and only fixed rows may
+    get one; a blocking verdict needs notes, which tell the fixer what to change.
     """
     if not isinstance(document, dict):
         return [], ['la revue doit être un objet JSON {"key", "pass", "rows", "attention"}']
@@ -183,6 +192,12 @@ def validate_review(document, *, key: str, number: int, rows: dict) -> tuple:
         if ref is None:
             continue
         seen[ref] += 1
+        outcome = rows[str(ref)].get("outcome")
+        if outcome != "fixed":
+            errors.append(
+                f"ligne {ref_label(ref)} : verdict sur une ligne non corrigée ({outcome})"
+            )
+            continue
         verdict = item.get("verdict")
         if verdict not in VERDICTS:
             errors.append(f"ligne {ref_label(ref)} : « verdict » inconnu : {_shown(verdict)} "
@@ -266,7 +281,12 @@ def _added_lines(worktree: Path, run, sha: str) -> dict:
 
 
 def _diff_path(text: str) -> Optional[str]:
-    """Return the path of a "+++ b/<path>" header, unquoted; None for /dev/null."""
+    """Return the path of a "+++ b/<path>" header, unquoted; None for /dev/null.
+
+    git ends the header with a tab when the path holds a space.
+    """
+    if text.endswith("\t"):
+        text = text[:-1]
     if text.startswith('"') and text.endswith('"') and len(text) > 1:
         quoted = _C_ESCAPE.sub(
             lambda found: chr(int(found.group(1), 8)) if found.group(1)[0].isdigit()
@@ -349,6 +369,8 @@ def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
         question = item.get("question")
         problems += _question(question)
         reason = question.get("text") if isinstance(question, dict) else None
+    if outcome != "fixed" and ref in subjects.values():
+        problems.append("commit sur la branche pour une ligne non corrigée")
     if problems:
         return problems, None
     entry = {"ref": ref, "outcome": outcome, "reason": reason, "commits": shas,

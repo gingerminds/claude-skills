@@ -9,6 +9,7 @@ report, review or state, 7 secret found.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,7 @@ EXIT_CONTEXT = 6
 EXIT_SECRET = 7
 
 UNFINISHED = "Une passe fix est inachevée : reprenez-la ou abandonnez-la (cqa_fix.py abandon)."
+_REVIEW_FILE = re.compile(r"review-([0-9]+)\.json")
 NO_PASS = "Aucune passe fix en cours : lancez d'abord cqa_fix.py open."
 
 
@@ -325,8 +327,13 @@ def _cmd_validate(args, services: Services) -> int:
     summary = {outcome: [] for outcome in fix_guard.REPORT_OUTCOMES}
     if not errors:
         for entry in entries:
-            key["rows"][str(entry["ref"])].update(
-                outcome=entry["outcome"], reason=entry["reason"], commits=entry["commits"],
+            row = key["rows"][str(entry["ref"])]
+            commits = []
+            if entry["outcome"] == "fixed":
+                previous = row.get("commits") or []
+                commits = previous + [sha for sha in entry["commits"] if sha not in previous]
+            row.update(
+                outcome=entry["outcome"], reason=entry["reason"], commits=commits,
                 attention=entry["attention"], **{"pass": args.number},
             )
             summary[entry["outcome"]].append(entry["ref"])
@@ -360,8 +367,15 @@ def _cmd_guard(args, services: Services) -> int:
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
     worktree = _key_worktree(run_dir, key, services.run)
+    repo = _repo(run_dir, key["repo"])
+    third_party = repo.get("third_party_paths", [])
+    if not isinstance(third_party, list) or not all(isinstance(item, str) for item in third_party):
+        raise ContextError(
+            f"context.json : « third_party_paths » du repo « {repo['name']} » doit être une "
+            "liste de chemins."
+        )
     problems = fix_guard.check_commits(
-        worktree, key["start_sha"], {int(ref) for ref in key["rows"]}, _repo(run_dir, key["repo"]),
+        worktree, key["start_sha"], {int(ref) for ref in key["rows"]}, repo,
         known_values_from_env(), services.run,
     )
     _emit({"ok": not problems, "problems": problems})
@@ -409,9 +423,35 @@ def _cmd_drop(args, services: Services) -> int:
                 f"retirée avec {_labels(refs)} : son correctif dépend d'un commit retiré"))
         else:
             row["commits"] = [rewritten.get(sha, sha) for sha in row.get("commits") or []]
+    if _blocking_rows_dropped(run_dir, key):
+        steps = fix_state.STEPS
+        if steps.index(key.get("step", "started")) < steps.index("reviewed"):
+            key["step"] = "reviewed"
     fix_state.save(run_dir, state)
+    if result["unattached"]:
+        raise fix_git.GitRefused(result["unattached"])
     _emit({"dropped": refs, "also_dropped": also})
     return EXIT_OK
+
+
+def _blocking_rows_dropped(run_dir: Path, key: dict) -> bool:
+    """True when the latest review of the key has blocking rows and all of them are dropped."""
+    folder = run_dir / "fix" / key["repo"] / key["slug"]
+    numbers = [
+        int(found.group(1)) for found in (_REVIEW_FILE.fullmatch(path.name)
+                                          for path in folder.glob("review-*.json")) if found
+    ]
+    if not numbers:
+        return False
+    document, errors = _read_key_file(run_dir, key, f"review-{max(numbers)}.json")
+    items = document.get("rows") if isinstance(document, dict) else None
+    if errors or not isinstance(items, list):
+        return False
+    blocking = [item.get("ref") for item in items
+                if isinstance(item, dict) and item.get("verdict") == "blocking"]
+    return bool(blocking) and all(
+        (key["rows"].get(str(ref)) or {}).get("outcome") == "dropped" for ref in blocking
+    )
 
 
 def _cmd_abandon(args, services: Services) -> int:

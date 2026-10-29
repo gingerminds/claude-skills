@@ -157,8 +157,31 @@ class GuardMessageTest(RepoCase):
             {"sha": added, "ref": 3, "path": "new.php", "reason": "secret détecté (aws_key)"},
         ])
 
+    def test_guard_names_a_path_with_a_space_or_an_accent(self):
+        aws = "AKIA" + "IOSFODNN7EXAMPLE"
+        content = f"<?php\n'{aws}';\n"
+        spaced = self.add("fix(CQ-3): add a spaced file", {"web/my file.php": content})
+        accented = self.add("fix(CQ-3): add an accented file", {"web/clé.php": content})
+        reason = "secret détecté (aws_key)"
+        self.assertEqual(self.check(), [
+            {"sha": spaced, "ref": 3, "path": "web/my file.php", "reason": reason},
+            {"sha": accented, "ref": 3, "path": "web/clé.php", "reason": reason},
+        ])
+
 
 class GuardCommandTest(GitCase):
+    def test_guard_refuses_malformed_third_party_paths(self):
+        self.open_pass()
+        self.start_ok()
+        for value in ("web/app/plugins/acme-forms", ["web/app/plugins/acme-forms", 3]):
+            with self.subTest(value=value):
+                repos = [{"name": "front", "path": str(self.repo), "remote": "x",
+                          "third_party_paths": value}]
+                self.write_json("context.json", {"repos": repos})
+                code, out, err = self.run_main(["guard", self.run_dir, KEY])
+                self.assertEqual(code, 6, err)
+                self.assertIn("third_party_paths", err)
+
     def test_guard_ignores_commits_before_start_sha(self):
         branch = PREFIX + "securite"
         before = self.head(self.repo, "refs/remotes/origin/develop")
@@ -327,6 +350,62 @@ class ValidateTest(GitCase):
         (self.folder / "report-1.json").write_text("{", encoding="utf-8")
         self.assertEqual(self.validate("report")[0], 6)
 
+    def test_validate_report_keeps_the_commits_of_earlier_passes(self):
+        self.started()
+        first = self.fixer_commit(self.worktree, "a.php", "fix(CQ-3): add the header")
+        self.write_doc("report-1.json", self.report(first))
+        self.assertEqual(self.validate("report")[0], 0)
+        second = self.fixer_commit(self.worktree, "b.php", "fix(CQ-3): cover the 404 page")
+        correction = self.report(second, number=2)
+        correction["rows"] = correction["rows"][:1]
+        correction["rows"][0]["commits"] = [second, first[:12]]
+        self.write_doc("report-2.json", correction)
+        code, result, err = self.validate("report", 2)
+        self.assertEqual(code, 0, err)
+        row = self.key()["rows"]["3"]
+        self.assertEqual((row["commits"], row["pass"]), ([first, second], 2))
+
+    def test_validate_report_refuses_rows_it_may_not_change(self):
+        self.started()
+        fixed = self.fixer_commit(self.worktree, "a.php", "fix(CQ-3): add the header")
+        self.fixer_commit(self.worktree, "b.php", "fix(CQ-5): start something")
+        question = {"text": "Quel contact ?", "options": ["Équipe", "Client"], "default": "Client"}
+        for change in ({}, {"outcome": "question", "question": question}):
+            with self.subTest(outcome=change.get("outcome", "skipped")):
+                document = self.report(fixed)
+                document["rows"][1].update(change)
+                self.write_doc("report-1.json", document)
+                code, result, err = self.validate("report")
+                self.assertEqual(code, 6, err)
+                self.assertIn("ligne CQ-5 : commit sur la branche pour une ligne non corrigée",
+                              result["errors"])
+        for outcome in ("done_before", "dropped"):
+            with self.subTest(outcome=outcome):
+                state = self.state()
+                state["keys"][KEY]["rows"]["5"]["outcome"] = outcome
+                fix_state.save(self.run_dir, state)
+                self.write_doc("report-1.json", self.report(fixed))
+                code, result, err = self.validate("report")
+                self.assertEqual(code, 6, err)
+                self.assertTrue(any("CQ-5" in error and f"({outcome})" in error
+                                    for error in result["errors"]), result)
+        self.assertEqual(self.key()["rows"]["3"]["outcome"], "pending")
+
+    def test_validate_review_judges_fixed_rows_only(self):
+        self.started()
+        fixed = self.fixer_commit(self.worktree, "a.php", "fix(CQ-3): add the header")
+        self.write_doc("report-1.json", self.report(fixed))
+        self.assertEqual(self.validate("report")[0], 0)
+        review = {"key": KEY, "pass": 1, "attention": [], "rows": [
+            {"ref": 3, "verdict": "ok", "notes": None},
+            {"ref": 5, "verdict": "ok", "notes": None},
+        ]}
+        self.write_doc("review-1.json", review)
+        code, result, err = self.validate("review")
+        self.assertEqual(code, 6, err)
+        self.assertIn("ligne CQ-5 : verdict sur une ligne non corrigée (skipped)", result["errors"])
+        self.assertEqual(self.key()["step"], "fixed")
+
     def test_validate_reports_a_changed_dev_checkout(self):
         self.started()
         fixed = self.fixer_commit(self.worktree, "a.php", "fix(CQ-3): add the header")
@@ -349,9 +428,17 @@ class DropTest(GitCase):
         self.write_run(flight(), slugs=("securite", "qualite"), rows=(3, 5, 12))
         self.open_pass()
 
-    def drop(self, key, refs, reason="Revue bloquante : échappement manquant."):
-        code, out, err = self.run_main(["drop", self.run_dir, key, "--refs", refs, "--reason", reason])
+    def drop(self, key, refs, reason="Revue bloquante : échappement manquant.", run=subprocess.run):
+        code, out, err = self.run_main(
+            ["drop", self.run_dir, key, "--refs", refs, "--reason", reason], run=run)
         return code, json.loads(out) if out else None, err
+
+    def record(self, key=KEY, **commits):
+        """Mark rows fixed with their commits in the state, as validate report does."""
+        state = self.state()
+        for ref, shas in commits.items():
+            state["keys"][key]["rows"][ref.lstrip("r")].update(outcome="fixed", commits=shas)
+        fix_state.save(self.run_dir, state)
 
     def subjects(self, worktree, start):
         return real_git(worktree, "log", "--reverse", "--format=%s", f"{start}..HEAD").splitlines()
@@ -471,20 +558,165 @@ class DropTest(GitCase):
         self.assertEqual((rows["3"]["outcome"], rows["12"]["outcome"]), ("pending", "pending"))
 
 
+class DropSafetyTest(DropTest):
+    def test_drop_marks_a_row_without_commits_and_leaves_the_branch(self):
+        started = self.start_ok()
+        worktree = Path(started["worktree"])
+        first = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
+        real_git(worktree, "checkout", "-q", "-b", "side")
+        self.fixer_commit(worktree, "s12.txt", "fix(CQ-12): side work")
+        real_git(worktree, "checkout", "-q", started["branch"])
+        real_git(worktree, "merge", "-q", "--no-ff", "-m", "Merge branch 'side'", "side")
+        head = self.head(worktree)
+        self.record(r3=[first])
+        code, result, err = self.drop(KEY, "CQ-5", reason="Demande une décision du client.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(result, {"dropped": [5], "also_dropped": []})
+        self.assertEqual(self.head(worktree), head)
+        self.assertEqual(self.head(self.repo, f"refs/heads/{started['branch']}"), head)
+        rows = self.key()["rows"]
+        self.assertEqual((rows["5"]["outcome"], rows["5"]["reason"], rows["5"]["commits"]),
+                         ("dropped", "Demande une décision du client.", []))
+        self.assertEqual((rows["3"]["outcome"], rows["3"]["commits"]), ("fixed", [first]))
+        code, result, err = self.drop(KEY, "CQ-3")
+        self.assertEqual(code, 5)
+        self.assertIn("fusion", err)
+        self.assertEqual(self.head(worktree), head)
+
+    def test_drop_stops_on_a_cherry_pick_failure_that_is_not_a_conflict(self):
+        started = self.start_ok()
+        worktree = Path(started["worktree"])
+        first = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
+        head = self.fixer_commit(worktree, "b12.txt", "fix(CQ-12): add b")
+        self.record(r3=[first], r12=[head])
+        before = self.state()
+
+        def failing(command, **kwargs):
+            if "cherry-pick" in command and "--abort" not in command:
+                return subprocess.CompletedProcess(command, 1, "", "error: simulated failure")
+            return subprocess.run(command, **kwargs)
+
+        code, result, err = self.drop(KEY, "CQ-3", run=failing)
+        self.assertEqual(code, 2)
+        self.assertIn("simulated failure", err)
+        self.assertEqual(self.head(self.repo, f"refs/heads/{started['branch']}"), head)
+        self.assert_clean_on(worktree, started["branch"])
+        self.assertEqual(self.state(), before)
+        real_git(self.repo, "config", "commit.gpgSign", "true")
+        real_git(self.repo, "config", "gpg.program", "false")
+        code, result, err = self.drop(KEY, "CQ-3")
+        self.assertEqual(code, 2)
+        self.assertEqual(self.head(self.repo, f"refs/heads/{started['branch']}"), head)
+        self.assert_clean_on(worktree, started["branch"])
+        self.assertEqual(self.state(), before)
+
+    def test_drop_restores_the_worktree_when_git_fails_midway(self):
+        started = self.start_ok()
+        worktree = Path(started["worktree"])
+        branch = started["branch"]
+        self.fixer_commit(worktree, "x12.txt", "fix(CQ-12): add x")
+        self.fixer_commit(worktree, "shared.txt", "fix(CQ-3): add shared")
+        head = self.fixer_commit(worktree, "shared.txt", "fix(CQ-12): change shared")
+        before = self.state()
+        calls = []
+
+        def flaky(command, **kwargs):
+            if any(str(arg).startswith("--contains=") for arg in command):
+                calls.append(command)
+                if len(calls) == 2:
+                    return subprocess.CompletedProcess(command, 128, "", "fatal: simulated")
+            return subprocess.run(command, **kwargs)
+
+        code, result, err = self.drop(KEY, "CQ-3", run=flaky)
+        self.assertEqual(code, 2)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.head(self.repo, f"refs/heads/{branch}"), head)
+        self.assert_clean_on(worktree, branch)
+        self.assertEqual(self.state(), before)
+
+    def test_drop_saves_the_state_when_the_worktree_cannot_go_back(self):
+        started = self.start_ok()
+        worktree = Path(started["worktree"])
+        branch = started["branch"]
+        first = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
+        kept = self.fixer_commit(worktree, "b12.txt", "fix(CQ-12): add b")
+        self.record(r3=[first], r12=[kept])
+
+        def stuck(command, **kwargs):
+            if list(command[-3:]) == ["checkout", "-q", branch]:
+                return subprocess.CompletedProcess(command, 1, "", "error: simulated checkout")
+            return subprocess.run(command, **kwargs)
+
+        code, result, err = self.drop(KEY, "CQ-3", run=stuck)
+        self.assertEqual(code, 2)
+        self.assertIn("simulated checkout", err)
+        new_head = self.head(self.repo, f"refs/heads/{branch}")
+        self.assertNotEqual(new_head, kept)
+        rows = self.key()["rows"]
+        self.assertEqual(rows["3"]["outcome"], "dropped")
+        self.assertEqual(rows["12"]["commits"], [new_head])
+        real_git(worktree, "checkout", "-q", branch)
+        code, result, err = self.drop(KEY, "CQ-3")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.head(worktree), new_head)
+
+    def test_drop_moves_the_key_to_reviewed_once_every_blocking_row_is_dropped(self):
+        started = self.start_ok()
+        worktree = Path(started["worktree"])
+        first = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
+        second = self.fixer_commit(worktree, "b12.txt", "fix(CQ-12): add b")
+        folder = self.run_dir / "fix" / "front" / "securite"
+        report = {"key": KEY, "pass": 1, "rows": [
+            {"ref": 3, "outcome": "fixed", "change": "Ajoute a.", "uat": "Lire a.",
+             "commits": [first]},
+            {"ref": 12, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.",
+             "commits": [second]},
+            {"ref": 5, "outcome": "skipped", "reason": "Hors du repo."},
+        ]}
+        (folder / "report-1.json").write_text(json.dumps(report), encoding="utf-8")
+        review = {"key": KEY, "pass": 1, "attention": [], "rows": [
+            {"ref": 3, "verdict": "blocking", "notes": "Échappement manquant."},
+            {"ref": 12, "verdict": "blocking", "notes": "Test manquant."},
+        ]}
+        (folder / "review-1.json").write_text(json.dumps(review), encoding="utf-8")
+        for kind in ("report", "review"):
+            code, out, err = self.run_main(["validate", self.run_dir, KEY, kind, "--pass", "1"])
+            self.assertEqual(code, 0, err)
+        self.assertEqual(self.key()["step"], "fixed")
+        self.assertEqual(self.drop(KEY, "CQ-3")[0], 0)
+        self.assertEqual(self.key()["step"], "fixed")
+        self.assertEqual(self.drop(KEY, "CQ-12")[0], 0)
+        self.assertEqual(self.key()["step"], "reviewed")
+        state = self.state()
+        state["keys"][KEY]["step"] = "published"
+        fix_state.save(self.run_dir, state)
+        self.assertEqual(self.drop(KEY, "CQ-5")[0], 0)
+        self.assertEqual(self.key()["step"], "published")
+
+
 class SchemaTest(unittest.TestCase):
     def test_schemas_document_the_values_the_validator_accepts(self):
         report = json.loads((SCHEMAS / "fix-report.schema.json").read_text(encoding="utf-8"))
         row = report["$defs"]["row"]["properties"]
         self.assertEqual(row["outcome"]["enum"], list(fix_guard.REPORT_OUTCOMES))
         self.assertEqual(row["change"]["maxLength"], fix_guard.MAX_TEXT)
+        self.assertEqual(row["uat"]["maxLength"], fix_guard.MAX_TEXT)
         self.assertEqual(row["reason"]["maxLength"], fix_guard.MAX_REASON)
-        options = report["$defs"]["question"]["properties"]["options"]
+        self.assertEqual(row["attention"]["maxLength"], fix_guard.MAX_NOTE)
+        question = report["$defs"]["question"]["properties"]
+        self.assertEqual(question["text"]["maxLength"], fix_guard.MAX_TEXT)
+        options = question["options"]
         self.assertEqual((options["minItems"], options["maxItems"]),
                          (fix_guard.MIN_OPTIONS, fix_guard.MAX_OPTIONS))
+        self.assertEqual(options["items"]["maxLength"], fix_guard.MAX_OPTION)
         review = json.loads((SCHEMAS / "fix-review.schema.json").read_text(encoding="utf-8"))
         verdict = review["$defs"]["row"]["properties"]["verdict"]
         self.assertEqual(verdict["enum"], list(fix_guard.VERDICTS))
         self.assertEqual(fix_guard.VERDICTS, ("ok", "blocking"))
+        notes = review["$defs"]["row"]["properties"]["notes"]
+        self.assertEqual(notes["maxLength"], fix_guard.MAX_TEXT)
+        remarks = review["properties"]["attention"]["items"]
+        self.assertEqual(remarks["maxLength"], fix_guard.MAX_NOTE)
 
 
 if __name__ == "__main__":
