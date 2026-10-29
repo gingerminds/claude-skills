@@ -1919,6 +1919,21 @@ class ScanTest(AuditCase):
             json.loads(out)["found"], [{"path": "findings/CQ-072.md", "label": "authorization_header"}]
         )
 
+    def test_scan_skips_fix_worktrees(self):
+        run_dir = self.make_run()
+        config = "<?php\n$password = 'hunter22';\n"
+        worktree = run_dir / "fix" / "front" / "securite" / "wt"
+        worktree.mkdir(parents=True)
+        (worktree / "wp-config.php").write_text(config, encoding="utf-8")
+        self.assertEqual(self.run_json(["scan", run_dir]), {"ok": True, "found": []})
+        (worktree.parent / "wp-config.php").write_text(config, encoding="utf-8")
+        code, out, err = self.run_main(["scan", run_dir])
+        self.assertEqual(code, 7)
+        self.assertEqual(
+            json.loads(out)["found"],
+            [{"path": "fix/front/securite/wp-config.php", "label": "credential_assignment"}],
+        )
+
     def test_scan_of_the_clean_fixture(self):
         run_dir = self.make_run()
         self.assertEqual(self.run_json(["scan", run_dir]), {"ok": True, "found": []})

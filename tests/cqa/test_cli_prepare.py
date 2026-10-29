@@ -1848,7 +1848,9 @@ class RunsCommandTest(CliCase):
         self.assertEqual(old_state["path"], str(old))
         self.assertEqual(empty_state["path"], str(empty))
         keys = ["context", "lots", "findings", "plan", "applied", "synthese", "done"]
-        self.assertEqual(sorted(full_state), sorted(["run_id", "path", "write_pending", *keys]))
+        self.assertEqual(
+            sorted(full_state), sorted(["run_id", "path", "write_pending", "fix_pending", *keys])
+        )
         self.assertEqual(
             [state["write_pending"] for state in result["runs"]], [False, False, False]
         )
@@ -1871,6 +1873,17 @@ class RunsCommandTest(CliCase):
         entries.append({"key": "k2", "plan_id": "p1"})
         self.write(run_dir, "notion/applied.json", {"applied": entries})
         return run_dir
+
+    def test_runs_reports_fix_pending(self):
+        run_dir = self.make_run("2026-10-20-1000", "context.json")
+        self.assertFalse(self.runs()["runs"][0]["fix_pending"])
+        self.write(run_dir, "fix/state.json", {"started_at": "2026-10-20T10:00:00Z",
+                                               "finished_at": None, "stage": "keys", "keys": {}})
+        self.assertTrue(self.runs()["runs"][0]["fix_pending"])
+        self.write(run_dir, "fix/state.json", {"started_at": "2026-10-20T10:00:00Z",
+                                               "finished_at": "2026-10-20T11:00:00Z",
+                                               "stage": "summary", "keys": {}})
+        self.assertFalse(self.runs()["runs"][0]["fix_pending"])
 
     def test_write_pending_when_an_operation_of_the_plan_is_not_in_the_journal(self):
         self.pending_run()

@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -8,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import cqa_fix
-from cqa import fix_gitlab
+from cqa import fix_gitlab, fix_state
 from tests.cqa.test_git_tools import commit, git as real_git
 from tests.cqa.test_cli_prepare import clean_environ
 
@@ -190,9 +191,151 @@ class CandidatesTest(FixCase):
             self.assertIn("rows.json", err)
 
 
+class PassTest(FixCase):
+    UNFINISHED = "Une passe fix est inachevée : reprenez-la ou abandonnez-la (cqa_fix.py abandon)."
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.run_dir = Path(tmp.name) / "run"
+        (self.run_dir / "fix").mkdir(parents=True)
+        rows = [{"ref": 3, "title": "Trois"}, {"ref": 12, "title": "Douze"}]
+        candidates = {
+            "keys": [{"key": "front/securite", "repo": "front", "category": "SÉCURITÉ",
+                      "slug": "securite", "push_ready": False, "rows": rows}],
+            "left": [], "flights": {}, "notes": [], "estimate_min": 18,
+        }
+        (self.run_dir / "fix" / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+
+    def open(self, mode="present", push="mr", notion="yes"):
+        return self.run_main(
+            ["open", self.run_dir, "--mode", mode, "--push", push, "--notion", notion])
+
+    def state(self):
+        return json.loads((self.run_dir / "fix" / "state.json").read_text(encoding="utf-8"))
+
+    def finish(self):
+        state = fix_state.load(self.run_dir)
+        state["finished_at"] = "2026-10-29T10:00:00Z"
+        fix_state.save(self.run_dir, state)
+
+    def test_open_writes_the_state(self):
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        state = self.state()
+        self.assertRegex(state["started_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertEqual(
+            {k: state[k] for k in ("finished_at", "stage", "mode", "push", "notion")},
+            {"finished_at": None, "stage": "keys", "mode": "present", "push": "mr", "notion": True},
+        )
+        row = {"outcome": "pending", "reason": None, "commits": [], "pass": 0, "attention": None}
+        self.assertEqual(state["keys"], {"front/securite": {
+            "repo": "front", "category": "SÉCURITÉ", "slug": "securite", "push_ready": False,
+            "branch": None, "base": None, "start_sha": None, "worktree": None, "reused": None,
+            "mr": None, "step": "selected", "pass": 0, "dev_fingerprint": None,
+            "rows": {"3": row, "12": row},
+        }})
+        result = json.loads(out)
+        self.assertEqual(result["keys"], ["front/securite"])
+        self.assertIsNone(result["archived"])
+
+    def test_dry_run_forces_notion_off(self):
+        code, out, err = self.open(mode="autonomous", push="dry_run", notion="yes")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((self.state()["push"], self.state()["notion"]), ("dry_run", False))
+
+    def test_open_needs_candidates_and_valid_options(self):
+        code, out, err = self.open(push="everywhere")
+        self.assertEqual(code, 2)
+        (self.run_dir / "fix" / "candidates.json").unlink()
+        code, out, err = self.open()
+        self.assertEqual(code, 2)
+        self.assertIn("cqa_fix.py candidates", err)
+        self.assertFalse((self.run_dir / "fix" / "state.json").exists())
+
+    def test_open_refuses_while_a_pass_is_unfinished(self):
+        self.assertEqual(self.open()[0], 0)
+        before = self.state()
+        code, out, err = self.open(push="local")
+        self.assertEqual(code, 2)
+        self.assertIn(self.UNFINISHED, err)
+        self.assertEqual(self.state(), before)
+
+    def test_open_archives_a_finished_pass(self):
+        self.assertEqual(self.open()[0], 0)
+        folder = self.run_dir / "fix" / "front" / "securite"
+        folder.mkdir(parents=True)
+        (folder / "report-1.json").write_text('{"key": "front/securite"}', encoding="utf-8")
+        self.finish()
+        old = self.state()
+        code, out, err = self.open(push="local")
+        self.assertEqual(code, 0, err)
+        archived = json.loads(out)["archived"]
+        self.assertRegex(archived, r"^fix/history/\d{4}-\d{2}-\d{2}-\d{6}$")
+        history = self.run_dir / archived
+        self.assertEqual(
+            json.loads((history / "state.json").read_text(encoding="utf-8")), old
+        )
+        self.assertTrue((history / "front" / "securite" / "report-1.json").is_file())
+        self.assertFalse((self.run_dir / "fix" / "front").exists())
+        state = self.state()
+        self.assertEqual((state["finished_at"], state["push"]), (None, "local"))
+        self.assertEqual(state["keys"]["front/securite"]["step"], "selected")
+
+    def test_pending_until_summary(self):
+        self.assertFalse(fix_state.pending(self.run_dir))
+        self.assertEqual(self.open()[0], 0)
+        self.assertTrue(fix_state.pending(self.run_dir))
+        for stage in ("questions", "notion", "summary"):
+            code, out, err = self.run_main(["stage", self.run_dir, stage])
+            self.assertEqual(code, 0, err)
+            self.assertEqual(self.state()["stage"], stage)
+            self.assertTrue(fix_state.pending(self.run_dir))
+        self.finish()
+        self.assertFalse(fix_state.pending(self.run_dir))
+
+    def test_stage_moves_forward_only(self):
+        code, out, err = self.run_main(["stage", self.run_dir, "questions"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.open()[0], 0)
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 0)
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 0)
+        code, out, err = self.run_main(["stage", self.run_dir, "questions"])
+        self.assertEqual(code, 2)
+        self.assertIn("notion", err)
+        self.assertEqual(self.run_main(["stage", self.run_dir, "keys"])[0], 2)
+        self.assertEqual(self.run_main(["stage", self.run_dir, "later"])[0], 2)
+        self.assertEqual(self.state()["stage"], "notion")
+
+    def test_invalid_state_exits_6(self):
+        (self.run_dir / "fix" / "state.json").write_text("{", encoding="utf-8")
+        self.assertTrue(fix_state.pending(self.run_dir))
+        self.assertEqual(self.open()[0], 6)
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 6)
+        (self.run_dir / "fix" / "state.json").unlink()
+        self.assertEqual(self.open()[0], 0)
+        state = self.state()
+        state["keys"]["front/securite"]["branch"] = "--upload-pack=x"
+        (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 6)
+
+    def test_abandon_without_a_pass_exits_2(self):
+        code, out, err = self.run_main(["abandon", self.run_dir])
+        self.assertEqual(code, 2)
+        self.assertIn("cqa_fix.py open", err)
+
+    def test_save_is_atomic(self):
+        self.assertEqual(self.open()[0], 0)
+        state = fix_state.load(self.run_dir)
+        state["stage"] = "notion"
+        fix_state.save(self.run_dir, state)
+        self.assertEqual(sorted(os.listdir(self.run_dir / "fix")), ["candidates.json", "state.json"])
+        self.assertEqual(fix_state.load(self.run_dir)["stage"], "notion")
+
+
 class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
-        for name in ("doctor", "candidates"):
+        for name in ("doctor", "candidates", "open", "stage", "start", "abandon"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)
 

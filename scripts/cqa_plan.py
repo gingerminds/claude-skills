@@ -23,7 +23,7 @@ from typing import Callable, NamedTuple, Optional
 from html.parser import HTMLParser
 from urllib.parse import urldefrag, urljoin, urlsplit
 
-from cqa import deferred, probes, report
+from cqa import deferred, fix_state, probes, report
 from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
 from cqa.findings import apply_guardrails, validate_document
 from cqa.git_tools import (
@@ -1339,7 +1339,10 @@ def _cmd_synthesis(args, services) -> int:
 def _cmd_scan(args, services) -> int:
     found = [
         {"path": path, "label": label}
-        for path, label in scan_tree(args.run_dir, known_values_from_env(), exclude=("fiches",))
+        for path, label in scan_tree(
+            args.run_dir, known_values_from_env(), exclude=("fiches",),
+            skip_dirs=(fix_state.WORKTREE_DIRS,),
+        )
     ]
     _emit({"ok": not found, "found": found})
     return EXIT_SECRET if found else EXIT_OK
@@ -1601,6 +1604,7 @@ def _run_state(run_dir: Path) -> dict:
     findings = run_dir / "findings"
     state["findings"] = findings.is_dir() and any(findings.glob("*.json"))
     state["write_pending"] = _write_pending(run_dir)
+    state["fix_pending"] = fix_state.pending(run_dir)
     return state
 
 

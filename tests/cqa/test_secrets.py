@@ -524,6 +524,16 @@ class ScanTreeTest(unittest.TestCase):
             [("findings/fiches/b.md", "credential_assignment")],
         )
 
+    def test_skip_dirs_matches_whole_segments(self):
+        for relative in ("fix/front/securite/wt/a.php", "fix/front/securite/report.json",
+                         "fix/front/wt/b.php", "fix/history/x/front/securite/wt/c.php"):
+            self.write(relative, "DB_PASSWORD=hunter22")
+        self.assertEqual(
+            [path for path, _ in scan_tree(self.root, [], skip_dirs=("fix/*/*/wt",))],
+            ["fix/front/securite/report.json", "fix/front/wt/b.php",
+             "fix/history/x/front/securite/wt/c.php"],
+        )
+
     def test_missing_root_raises(self):
         with self.assertRaises(FileNotFoundError):
             scan_tree(self.root / "absent", [])

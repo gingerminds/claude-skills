@@ -1,4 +1,5 @@
 """Detect and mask secrets. Scans report labels, never values."""
+import fnmatch
 import os
 import re
 from collections.abc import Mapping
@@ -221,17 +222,26 @@ def known_values_from_env(env: Mapping[str, str] = os.environ) -> list[str]:
 
 
 def scan_tree(
-    root: Path, known_values: list[str], exclude: tuple[str, ...] = ()
+    root: Path,
+    known_values: list[str],
+    exclude: tuple[str, ...] = (),
+    skip_dirs: tuple[str, ...] = (),
 ) -> list[tuple[str, str]]:
     """Return (relative path, label) pairs for every file under root, sorted by path.
 
-    Paths whose first segment is in exclude are skipped.
+    Paths whose first segment is in exclude are skipped, and so are the directories whose
+    relative path matches a skip_dirs pattern segment by segment ("fix/*/*/wt").
 
     A missing root or an unreadable file raises OSError instead of passing as clean.
     """
     root = Path(root)
     found = []
-    for directory, _, names in os.walk(root, onerror=_raise):
+    for directory, subdirs, names in os.walk(root, onerror=_raise):
+        if skip_dirs:
+            subdirs[:] = [
+                name for name in subdirs
+                if not _skipped_dir(Path(directory, name).relative_to(root).as_posix(), skip_dirs)
+            ]
         for name in names:
             path = Path(directory, name)
             if not path.is_file():
@@ -243,6 +253,17 @@ def scan_tree(
             found.extend((relative, label) for label in scan_text(text, known_values))
     found.sort(key=lambda pair: pair[0])
     return found
+
+
+def _skipped_dir(relative: str, patterns: tuple[str, ...]) -> bool:
+    parts = relative.split("/")
+    for pattern in patterns:
+        wanted = pattern.split("/")
+        if len(wanted) == len(parts) and all(
+            fnmatch.fnmatchcase(part, glob) for part, glob in zip(parts, wanted)
+        ):
+            return True
+    return False
 
 
 def _redact_credentials(text: str) -> str:
