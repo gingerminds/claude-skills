@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
 
-from cqa import fix_git, fix_gitlab, fix_guard, fix_names, fix_rows, fix_state
+from cqa import fix_checks, fix_git, fix_gitlab, fix_guard, fix_names, fix_rows, fix_state
 from cqa.checklist import parse_refs, ref_label
 from cqa.notion_read import write_json
 from cqa.rerun import latest_findings, read_grounded_findings
@@ -104,6 +104,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("key", help="clé <repo>/<slug> de la passe")
     sub.add_argument("--refs", required=True, help="Réf à retirer, séparées par des virgules")
     sub.add_argument("--reason", required=True, help="raison, en français, donnée dans la MR")
+    sub = _command(commands, "check", "contrôles de syntaxe et stylelint des fichiers corrigés", _cmd_check)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
     sub = _command(commands, "abandon", "abandonne la passe en cours", _cmd_abandon)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     return parser
@@ -368,12 +371,7 @@ def _cmd_guard(args, services: Services) -> int:
     key = _started_key(state, args.key)
     worktree = _key_worktree(run_dir, key, services.run)
     repo = _repo(run_dir, key["repo"])
-    third_party = repo.get("third_party_paths", [])
-    if not isinstance(third_party, list) or not all(isinstance(item, str) for item in third_party):
-        raise ContextError(
-            f"context.json : « third_party_paths » du repo « {repo['name']} » doit être une "
-            "liste de chemins."
-        )
+    _third_party(repo)
     problems = fix_guard.check_commits(
         worktree, key["start_sha"], {int(ref) for ref in key["rows"]}, repo,
         known_values_from_env(), services.run,
@@ -384,6 +382,48 @@ def _cmd_guard(args, services: Services) -> int:
               "détail dans « problems ».", file=sys.stderr)
         return EXIT_REFUSED
     return EXIT_OK
+
+
+def _cmd_check(args, services: Services) -> int:
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    worktree = _key_worktree(run_dir, key, services.run)
+    third_party = _third_party(_repo(run_dir, key["repo"]))
+    folder = run_dir / "fix" / key["repo"] / key["slug"]
+    check_dir = folder / "check"
+    try:
+        files = fix_checks.changed_files(worktree, key["start_sha"], services.run)
+        added = fix_checks.added_lines(worktree, key["start_sha"], services.run)
+    except ValueError as error:
+        raise UsageError(str(error))
+    shutil.rmtree(check_dir, ignore_errors=True)
+    check_dir.mkdir(parents=True)
+    checks = []
+    if files:
+        checks = fix_checks.run_checks(
+            services.run, Path(__file__).resolve().parent / "cqa-toolbox.sh", check_dir, worktree,
+            key["repo"], files, added, third_party,
+        )
+    refs = fix_checks.failed_refs(worktree, key["start_sha"], checks, services.run)
+    not_run = [{**item, "why": fix_checks.NOT_RUN_WHY} for item in fix_checks.project_commands(worktree)]
+    write_json(folder / "checks.json", {"checks": checks, "not_run": not_run})
+    if fix_state.STEPS.index(key.get("step", "started")) < fix_state.STEPS.index("checked"):
+        key["step"] = "checked"
+        fix_state.save(run_dir, state)
+    _emit({"checks": checks, "not_run": not_run, "failed_refs": refs})
+    return EXIT_OK
+
+
+def _third_party(repo: dict) -> list:
+    """Return the repo's third_party_paths; raises ContextError when it is not a list of paths."""
+    third_party = repo.get("third_party_paths", [])
+    if not isinstance(third_party, list) or not all(isinstance(item, str) for item in third_party):
+        raise ContextError(
+            f"context.json : « third_party_paths » du repo « {repo['name']} » doit être une "
+            "liste de chemins."
+        )
+    return third_party
 
 
 def _cmd_drop(args, services: Services) -> int:

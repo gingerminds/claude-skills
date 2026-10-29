@@ -873,6 +873,110 @@ class PullTest(LauncherCase):
         self.assertIn("registry.gitlab.gingerminds.fr", result.stderr)
 
 
+class CheckTest(LauncherCase):
+    def setUp(self):
+        super().setUp()
+        self.check_dir = self.tmp / "check"
+        self.check_dir.mkdir()
+        self.worktree = self.tmp / "wt"
+        self.worktree.mkdir()
+        (self.check_dir / "files.txt").write_text("a.php\nweb/style.scss\n", encoding="utf-8")
+        (self.check_dir / "context.json").write_text(
+            json.dumps({"repos": [{"name": "front", "third_party_paths": []}]}), encoding="utf-8")
+
+    def check(self, **extra):
+        return self.launch("check", str(self.check_dir), str(self.worktree), "front", **extra)
+
+    def docker_runs(self):
+        return [call for call in self.calls() if call[:1] == ["run"]]
+
+    def test_check_mounts_the_worktree_read_only_without_network(self):
+        result = self.check(**SECRETS)
+        self.assertEqual(0, result.returncode, result.stderr)
+        runs = self.docker_runs()
+        self.assertEqual(2, len(runs))
+        for call in runs:
+            self.assertTrue(has_pair(call, "--network", "none"))
+            self.assertIn("--rm", call)
+            self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
+            self.assertTrue(has_pair(call, "--env", "HOME=/tmp"))
+            self.assertTrue(has_pair(call, "--tmpfs", "/tmp"))
+            self.assertTrue(has_pair(call, "-v", f"{self.worktree}:/repos/front:ro"))
+            mounts = [call[i + 1] for i in range(len(call) - 1) if call[i] == "-v"]
+            others = [m for m in mounts if "/repos/" in m and m != f"{self.worktree}:/repos/front:ro"]
+            self.assertEqual([], others)
+            self.assertEqual(["HOME=/tmp"], env_args(call))
+            for secret in ("GM_AUDIT_AUTH_USER", "GM_AUDIT_AUTH_PASS", "cqa-user", "pass-xyz-123"):
+                self.assertNotIn(secret, " ".join(call))
+        syntax, style = runs
+        self.assertTrue(has_pair(syntax, "--entrypoint", "sh"))
+        self.assertTrue(has_pair(syntax, "-v", f"{self.check_dir}:/in:ro"))
+        self.assertEqual("agence", split_run(style)[1])
+        self.assertEqual(
+            ["stylelint", "--repos", "/repos", "--context", "/in/context.json"], split_run(style)[2])
+        self.assertTrue(has_pair(style, "-v", f"{self.check_dir}:/in:ro"))
+        self.assertTrue(has_pair(style, "-v", f"{self.check_dir}/tools:/out"))
+        self.assertTrue((self.check_dir / "tools" / "stylelint" / "raw").is_dir())
+        self.assertTrue((self.check_dir / "syntax.tsv").is_file())
+
+    def test_check_skips_stylelint_without_a_style_file(self):
+        (self.check_dir / "files.txt").write_text("a.php\n", encoding="utf-8")
+        self.assertEqual(0, self.check().returncode)
+        self.assertEqual(1, len(self.docker_runs()))
+
+    def test_check_writes_nothing_outside_the_check_dir(self):
+        before = sorted(p.name for p in self.tmp.iterdir())
+        self.assertEqual(0, self.check().returncode)
+        self.assertEqual([], list(self.worktree.iterdir()))
+        self.assertEqual(before + [], sorted(p.name for p in self.tmp.iterdir() if p.name != "docker.log"))
+
+    def test_check_failures_and_environment(self):
+        result = self.check(CQA_STUB_FAIL="--entrypoint sh")
+        self.assertEqual(1, result.returncode)
+        self.assertFalse((self.check_dir / "syntax.tsv").exists())
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name in ("python3", "uname", "dirname", "basename", "id"):
+            (bin_dir / name).symlink_to(shutil.which(name))
+        result = self.check(path=str(bin_dir))
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Docker", result.stderr)
+        self.assertEqual(2, self.launch("check", str(self.check_dir)).returncode)
+        self.assertEqual(2, self.launch("check", str(self.tmp / "none"), str(self.worktree), "front").returncode)
+        (self.check_dir / "files.txt").unlink()
+        self.assertEqual(2, self.check().returncode)
+
+    def test_syntax_script_reports_one_line_per_file(self):
+        if shutil.which("node") is None:
+            self.skipTest("node absent")
+        match = re.search(r"read -r -d '' SYNTAX_SCRIPT <<'SCRIPT' \|\| true\n(.*?)\nSCRIPT\n",
+                          SCRIPT.read_text(encoding="utf-8"), re.DOTALL)
+        self.assertIsNotNone(match)
+        root = self.tmp / "fake-root"
+        repo = root / "repos" / "front"
+        repo.mkdir(parents=True)
+        (repo / "good.json").write_text("\ufeff{\"a\": 1}", encoding="utf-8")
+        (repo / "bad.json").write_text("{\"a\": ", encoding="utf-8")
+        (repo / "a.js").write_text("let x = ;\n", encoding="utf-8")
+        (repo / "b.js").write_text("let x = 1;\n", encoding="utf-8")
+        (repo / "c.yml").write_text("a: 1\n", encoding="utf-8")
+        (repo / "d.txt").write_text("x", encoding="utf-8")
+        listing = self.tmp / "in.txt"
+        listing.write_text("good.json\nbad.json\na.js\nb.js\nc.yml\nd.txt\n", encoding="utf-8")
+        script = match.group(1).replace("/repos/", f"{root}/repos/").replace("</in/files.txt", f"<{listing}")
+        result = subprocess.run(["sh", "-c", script, "sh", "front"], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        status = {row[2]: (row[0], row[1]) for row in rows}
+        self.assertEqual(("ok", "json"), status["good.json"])
+        self.assertEqual(("ko", "json"), status["bad.json"])
+        self.assertEqual(("ko", "node --check"), status["a.js"])
+        self.assertEqual(("ok", "node --check"), status["b.js"])
+        self.assertIn(status["c.yml"][0], ("ok", "skip"))
+        self.assertNotIn("d.txt", status)
+        self.assertTrue(all(len(row) == 4 for row in rows))
+
+
 class SourceTest(unittest.TestCase):
     def source(self):
         return SCRIPT.read_text(encoding="utf-8")

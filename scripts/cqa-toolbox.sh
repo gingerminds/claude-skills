@@ -5,6 +5,7 @@
 #   cqa-toolbox.sh pull
 #   cqa-toolbox.sh run <run_dir> <tool> [--followup]
 #   cqa-toolbox.sh all <run_dir>
+#   cqa-toolbox.sh check <check_dir> <worktree> <repo_name>
 #
 # Exit codes: 0 success, 1 tool failure, 2 usage or environment; "run" passes through the
 # exit code of the tool container. Secret values never appear on a command line: they are
@@ -51,6 +52,7 @@ usage() {
   say "  cqa-toolbox.sh pull"
   say "  cqa-toolbox.sh run <dossier_du_run> <outil> [--followup]"
   say "  cqa-toolbox.sh all <dossier_du_run>"
+  say "  cqa-toolbox.sh check <dossier_de_controle> <worktree> <nom_du_repo>"
   say "Outils : ${ALL_TOOLS[*]}"
   exit 2
 }
@@ -533,6 +535,105 @@ print(json.dumps(report, indent=2, ensure_ascii=False))
 PY
 }
 
+# Syntax checks of the files listed in /in/files.txt, run by sh inside the container.
+# Prints one line per file: ok|ko|skip, check, path, message (tabs and newlines flattened).
+IFS= read -r -d '' SYNTAX_SCRIPT <<'SCRIPT' || true
+repo="$1"
+have() { command -v "$1" >/dev/null 2>&1; }
+emit() {
+  msg="$(printf '%s' "$4" | tr '\t\r\n' '   ' | sed "s#/repos/$repo/##g" | cut -c1-300)"
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$msg"
+}
+first_error() {
+  printf '%s\n' "$1" | grep -m1 -i 'error' || printf '%s\n' "$1" | head -n 1
+}
+JSON_JS='try{JSON.parse(require("fs").readFileSync(process.argv[1],"utf8").replace(/^﻿/,""))}catch(e){console.error(e.message);process.exit(1)}'
+YAML_JS='const {createRequire}=require("module");const r=createRequire("/opt/gm-audit/package.json");let y;try{y=r("yaml")}catch(e){try{y=r("js-yaml")}catch(f){process.exit(3)}}try{const t=require("fs").readFileSync(process.argv[1],"utf8");if(y.parseAllDocuments){for(const d of y.parseAllDocuments(t)){if(d.errors.length){throw d.errors[0]}}}else{y.loadAll(t)}}catch(e){console.error(e.message);process.exit(1)}'
+while IFS= read -r f || [ -n "$f" ]; do
+  [ -n "$f" ] || continue
+  p="/repos/$repo/$f"
+  case "$f" in
+    *.php)
+      if have php; then
+        if out="$(php -l "$p" 2>&1)"; then emit ok "php -l" "$f" ""; else emit ko "php -l" "$f" "$(first_error "$out")"; fi
+      else
+        emit skip "php -l" "$f" "php absent de l'image"
+      fi
+      ;;
+    *.js | *.mjs | *.cjs)
+      if have node; then
+        if out="$(node --check "$p" 2>&1)"; then emit ok "node --check" "$f" ""; else emit ko "node --check" "$f" "$(first_error "$out")"; fi
+      else
+        emit skip "node --check" "$f" "node absent de l'image"
+      fi
+      ;;
+    *.json)
+      if have node; then
+        if out="$(node -e "$JSON_JS" "$p" 2>&1)"; then emit ok json "$f" ""; else emit ko json "$f" "$(first_error "$out")"; fi
+      else
+        emit skip json "$f" "node absent de l'image"
+      fi
+      ;;
+    *.yml | *.yaml)
+      rc=0
+      if have node; then
+        out="$(node -e "$YAML_JS" "$p" 2>&1)" || rc=$?
+      else
+        rc=3
+      fi
+      case "$rc" in
+        0) emit ok yaml "$f" "" ;;
+        3) emit skip yaml "$f" "module YAML absent de l'image" ;;
+        *) emit ko yaml "$f" "$(first_error "$out")" ;;
+      esac
+      ;;
+  esac
+done </in/files.txt
+SCRIPT
+
+# check <check_dir> <worktree> <repo_name>: syntax and stylelint checks of the files listed in
+# <check_dir>/files.txt, on a read-only copy of the worktree, without network and without credentials.
+# Writes only under <check_dir> (syntax.tsv and tools/stylelint/).
+cmd_check() {
+  local check_dir worktree repo rc=0 uid_gid
+  [ "$#" -eq 3 ] || usage
+  require_docker
+  [ -d "$1" ] || die "Le dossier de contrôle est introuvable : $1"
+  [ -d "$2" ] || die "Le worktree est introuvable : $2"
+  check_dir="$(cd "$1" && pwd)"
+  worktree="$(cd "$2" && pwd)"
+  repo="$3"
+  case "$repo" in
+    "" | *[!A-Za-z0-9_.-]* | -* | .*) die "Le nom du repo « $repo » ne convient pas (lettres, chiffres, point, tiret, souligné)." ;;
+  esac
+  case "$check_dir$worktree" in
+    *:*) die "Les chemins du contrôle ne doivent pas contenir « : » (montage Docker)." ;;
+  esac
+  [ -f "$check_dir/files.txt" ] || die "files.txt est introuvable dans $check_dir."
+  [ -f "$check_dir/context.json" ] || die "context.json est introuvable dans $check_dir."
+  uid_gid="$(id -u):$(id -g)"
+  rm -rf -- "$check_dir/tools" "$check_dir/syntax.tsv" || return 1
+  mkdir -p -- "$check_dir/tools/stylelint/raw" || return 1
+
+  docker run --rm --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+    -v "$check_dir:/in:ro" -v "$worktree:/repos/$repo:ro" \
+    --entrypoint sh "$(image_ref agence)" -c "$SYNTAX_SCRIPT" sh "$repo" \
+    >"$check_dir/syntax.tsv" </dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f -- "$check_dir/syntax.tsv"
+    say "check : les contrôles de syntaxe ont échoué (code $rc)."
+    return 1
+  fi
+  if grep -Eq '\.(css|scss|sass|less|vue)$' "$check_dir/files.txt"; then
+    docker run --rm --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+      -v "$check_dir:/in:ro" -v "$check_dir/tools:/out" -v "$worktree:/repos/$repo:ro" \
+      "$(image_ref agence)" stylelint --repos /repos --context /in/context.json </dev/null || {
+      say "check : stylelint a échoué."
+      return 1
+    }
+  fi
+}
+
 main() {
   [ "$#" -ge 1 ] || usage
   local sub="$1"
@@ -548,6 +649,7 @@ main() {
       ;;
     run) cmd_run "$@" ;;
     all) cmd_all "$@" ;;
+    check) cmd_check "$@" ;;
     *) usage ;;
   esac
 }
