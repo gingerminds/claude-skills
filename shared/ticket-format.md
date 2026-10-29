@@ -40,7 +40,8 @@ REPRODUCTION :
 - Étapes :
   1. <étape>
 - Fréquence : <systématique | intermittent | inconnue>
-<ou : Non reproductible en l'état : <ce qui manque pour reproduire>>
+<ou, pour un bug dont les étapes manquent : Non reproductible en l'état : <ce qui manque pour reproduire>>
+<ou, pour un ticket qui n'est pas un bug : Sans objet (demande / évolution) : <comment observer l'état actuel, si utile>>
 
 CRITÈRES D'ACCEPTATION :
 1. <critère vérifiable par une observation concrète> <(inféré) si déduit>
@@ -57,7 +58,8 @@ ENVIRONNEMENT DE VÉRIFICATION :
 
 ## Writing rules
 
-- Never invent reproduction steps: write "Non reproductible en l'état" when they are missing.
+- Never invent reproduction steps: for a bug whose steps are missing, write "Non reproductible en l'état : …". For a ticket that is not a bug (request, configuration, feature), there is nothing to reproduce: write "Sans objet (demande / évolution) : …" instead, never "Non reproductible en l'état".
+- Every acceptance criterion is checkable by observing the product (a page, a behaviour, a log, a test result). Answers or communication to the client are never criteria: they belong to QUESTIONS OUVERTES or the project-manager part.
 - Never point to code (file, module, class): that is the dev skill's job.
 - Never include credentials or passwords.
 - The project-manager part has no technical jargon.
