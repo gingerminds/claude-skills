@@ -16,3 +16,5 @@ Agent mode = `AskUserQuestion` is totally absent from your tools (you run inside
   - **always** at the top of the final reply.
 
   Then stop before any outward action that depends on the answer.
+
+A skill's explicit agent-mode output or default always takes precedence; `QUESTION BLOQUANTE` is only for a blocking decision the skill gives no default for.
