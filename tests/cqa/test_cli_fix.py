@@ -328,6 +328,9 @@ class PassTest(FixCase):
             ["guard", self.run_dir, key],
             ["check", self.run_dir, key],
             ["drop", self.run_dir, key, "--refs", "CQ-3", "--reason", "Hors-scope."],
+            ["mr-body", self.run_dir, key],
+            ["publish", self.run_dir, key],
+            ["finish", self.run_dir, key],
         ):
             with self.subTest(command=argv[0]):
                 code, out, err = self.run_main(argv)
@@ -360,7 +363,7 @@ class PassTest(FixCase):
 class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
         for name in ("doctor", "candidates", "open", "stage", "start", "validate", "guard", "drop",
-                     "check", "abandon"):
+                     "check", "mr-body", "publish", "finish", "abandon"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)
 

@@ -13,15 +13,17 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Callable, NamedTuple, Optional
+from urllib.parse import quote
 
-from cqa import fix_checks, fix_git, fix_gitlab, fix_guard, fix_names, fix_rows, fix_state
+from cqa import fix_checks, fix_git, fix_gitlab, fix_guard, fix_mr, fix_names, fix_rows, fix_state
 from cqa.checklist import parse_refs, ref_label
-from cqa.notion_read import write_json
+from cqa.notion_read import write_json, write_text
+from cqa.report import run_start
 from cqa.rerun import latest_findings, read_grounded_findings
-from cqa.secrets import known_values_from_env
+from cqa.secrets import known_values_from_env, scan_text
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -32,6 +34,13 @@ EXIT_SECRET = 7
 UNFINISHED = "Une passe fix est inachevée : reprenez-la ou abandonnez-la (cqa_fix.py abandon)."
 _REVIEW_FILE = re.compile(r"review-([0-9]+)\.json")
 NO_PASS = "Aucune passe fix en cours : lancez d'abord cqa_fix.py open."
+NEED_BODY = "Lancez d'abord cqa_fix.py mr-body."
+DIVERGED = "La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé."
+NOTHING_TO_PUBLISH = "Aucun commit sur la branche : ni push ni MR."
+LINKS_FILE = "fix/mr-links.json"
+# Push settings of the dev's config that could send more than the branch, or prompt.
+_PUSH_CONFIG = ("-c", "push.followTags=false", "-c", "push.recurseSubmodules=no",
+                "-c", "push.gpgSign=false")
 
 
 class UsageError(Exception):
@@ -40,6 +49,10 @@ class UsageError(Exception):
 
 class ContextError(Exception):
     """A context.json that is missing, unreadable or unfit for the command."""
+
+
+class SecretFound(Exception):
+    """A text bound for GitLab that holds a secret (exit 7); the message names labels only."""
 
 
 class Services(NamedTuple):
@@ -64,6 +77,9 @@ def main(argv, *, run=subprocess.run) -> int:
     except fix_git.Refused as error:
         print(error, file=sys.stderr)
         return EXIT_REFUSED
+    except SecretFound as error:
+        print(error, file=sys.stderr)
+        return EXIT_SECRET
     except (UsageError, fix_git.GitRefused, ValueError, OSError) as error:
         print(error, file=sys.stderr)
         return EXIT_USAGE
@@ -105,6 +121,16 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--refs", required=True, help="Réf à retirer, séparées par des virgules")
     sub.add_argument("--reason", required=True, help="raison, en français, donnée dans la MR")
     sub = _command(commands, "check", "contrôles de syntaxe et stylelint des fichiers corrigés", _cmd_check)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub = _command(commands, "mr-body", "titre et description de la MR d'une clé", _cmd_mr_body)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub = _command(commands, "publish", "pousse la branche, crée ou complète la MR en brouillon",
+                   _cmd_publish)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub = _command(commands, "finish", "retire le worktree d'une clé publiée", _cmd_finish)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help="clé <repo>/<slug> de la passe")
     sub = _command(commands, "abandon", "abandonne la passe en cours", _cmd_abandon)
@@ -492,6 +518,426 @@ def _blocking_rows_dropped(run_dir: Path, key: dict) -> bool:
     return bool(blocking) and all(
         (key["rows"].get(str(ref)) or {}).get("outcome") == "dropped" for ref in blocking
     )
+
+
+def _cmd_mr_body(args, services: Services) -> int:
+    """Write mr-title.txt and mr.md, or mr-addition.md when the key already has an MR."""
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    _need_reviewed(key, args.key, "mr-body")
+    context = _load_context(run_dir)
+    run_id = _run_id(run_dir, context)
+    worktree = _key_worktree(run_dir, key, services.run)
+    candidates = _read_run_json(run_dir, "fix/candidates.json", "cqa_fix.py candidates")
+    try:
+        changed = fix_checks.changed_files(worktree, key["start_sha"], services.run)
+    except ValueError as error:
+        raise UsageError(str(error))
+    branch_refs = fix_git.refs_between(
+        worktree, services.run, f"refs/remotes/origin/{key['base']}", "HEAD"
+    )
+    since = (key.get("published_pass") or 0) if key.get("mr") else 0
+    found = fix_mr.material(
+        key, candidates, _notion_rows(run_dir), _numbered(run_dir, key, "report"),
+        _numbered(run_dir, key, "review"), _optional_key_json(run_dir, key, "checks.json"),
+        changed, set(branch_refs), since=since,
+    )
+    category = key.get("category") or ""
+    if key.get("mr"):
+        text = fix_mr.addition(**found)
+        name, stale, kind, count = "mr-addition.md", "mr.md", "update", len(found["fixed"])
+    else:
+        notion = context.get("notion") if isinstance(context.get("notion"), dict) else {}
+        text = fix_mr.body(
+            run_id=run_id, category=category, copy_url=fix_mr.notion_url(notion.get("copy_page_id")),
+            **found,
+        )
+        name, stale, kind = "mr.md", "mr-addition.md", "create"
+        count = len(found["fixed"]) + len(found["earlier"])
+    title = fix_mr.title(category, count)
+    _refuse_secrets(f"{title}\n{text}", "rien n'a été écrit")
+    folder = _key_folder(run_dir, key)
+    write_text(folder / "mr-title.txt", title + "\n")
+    write_text(folder / name, text)
+    if (folder / stale).exists():
+        (folder / stale).unlink()
+    _emit({
+        "title": title, "file": f"fix/{key['repo']}/{key['slug']}/{name}", "kind": kind,
+        "fixed": [row["ref"] for row in found["fixed"]],
+        "waiting": [row["ref"] for row in found["waiting"]],
+        "out_of_scope": [row["ref"] for row in found["left"]],
+    })
+    return EXIT_OK
+
+
+def _cmd_publish(args, services: Services) -> int:
+    """Push the key's branch, then create its draft MR or add to the description of its MR.
+
+    Nothing leaves the machine before every check passed: local pass, step, branch name,
+    state of the MR on GitLab, description files, secrets, guard, and a remote branch that
+    HEAD contains. The push is a fast-forward of that one branch, never forced.
+    """
+    run = services.run
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    branch = key["branch"]
+    _refuse_local(state, key)
+    _need_reviewed(key, args.key, "publish")
+    if not fix_names.branch_matches(branch, fix_names.BRANCH_PREFIX, key["slug"]):
+        raise fix_git.Refused(
+            f"La branche {branch} n'est pas une branche de correctif "
+            f"({fix_names.BRANCH_PREFIX}{key['slug']}) : rien n'a été poussé."
+        )
+    worktree = _key_worktree(run_dir, key, run)
+    links = _read_links(run_dir)
+    if key.get("mr") is None and _ahead_of_base(worktree, run, key["base"]) == 0:
+        _published(run_dir, state, key)
+        _emit({"branch": branch, "head": fix_git.rev(worktree, run, "HEAD"), "pushed": False,
+               "mr": None, "created": False, "updated": False, "links": [],
+               "note": NOTHING_TO_PUBLISH})
+        return EXIT_OK
+    host, project, user = _gitlab_of(run_dir, key["repo"])
+    encoded = quote(project, safe="")
+    folder = _key_folder(run_dir, key)
+    current, adopted = None, False
+    if key.get("mr") is not None:
+        current = _open_mr(run, host, encoded, key["mr"], branch)
+    else:
+        found = _find_open_mr(run, host, encoded, branch)
+        if found is not None:
+            key["mr"] = {"iid": found["iid"], "url": found["web_url"]}
+            ours = _read_text(folder / "mr.md")
+            adopted = ours is not None and (found.get("description") or "").strip() == ours.strip()
+            if not adopted:
+                fix_state.save(run_dir, state)
+                raise UsageError(
+                    f"La MR !{found['iid']} est déjà ouverte pour la branche {branch} : relancez "
+                    "cqa_fix.py mr-body (ajout à sa description), puis cqa_fix.py publish. "
+                    "Rien n'a été poussé."
+                )
+    title = None
+    if current is not None:
+        text = _read_text(folder / "mr-addition.md")
+        if text is None:
+            raise UsageError(NEED_BODY)
+        _refuse_secrets(text, "rien n'a été poussé")
+    else:
+        text, title = _read_text(folder / "mr.md"), _read_text(folder / "mr-title.txt")
+        if text is None or not (title or "").strip():
+            raise UsageError(NEED_BODY)
+        title = title.strip()
+        _refuse_secrets(f"{title}\n{text}", "rien n'a été poussé")
+    problems = _guard_problems(run_dir, key, worktree, run)
+    if problems:
+        _emit({"ok": False, "problems": problems})
+        print(f"Garde-fou : {len(problems)} problème(s) sur la branche {branch}, rien n'a été "
+              "poussé : détail dans « problems ».", file=sys.stderr)
+        return EXIT_REFUSED
+    head = fix_git.rev(worktree, run, "HEAD")
+    remote = _remote_head(worktree, run, branch)
+    if remote is not None and not fix_git.is_ancestor(worktree, run, remote, head):
+        raise fix_git.Refused(DIVERGED)
+    pushed = remote != head
+    if pushed:
+        _push(worktree, run, branch)
+    created = updated = False
+    if key.get("mr") is None:
+        key["mr"] = _create_mr(run, host, encoded, worktree, branch=branch, base=key["base"],
+                               title=title, text=text, user=user)
+        created = True
+        fix_state.save(run_dir, state)
+    elif current is not None:
+        updated = _add_to_mr(run, host, worktree, key["mr"]["iid"], current, text)
+    refs = sorted(int(ref) for ref, row in key["rows"].items() if row.get("outcome") == "fixed")
+    write_json(run_dir / LINKS_FILE, fix_mr.merge_links(links, key["repo"], key["mr"], refs))
+    _published(run_dir, state, key)
+    _emit({"branch": branch, "head": head, "pushed": pushed, "mr": key["mr"], "created": created,
+           "updated": updated, "links": refs, "assignee": user if created else None})
+    return EXIT_OK
+
+
+def _cmd_finish(args, services: Services) -> int:
+    """Remove the worktree of a published key, or of a reviewed one whose branch stays local."""
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    step = key.get("step")
+    kept_local = state["push"] in ("local", "dry_run") or not key.get("push_ready")
+    if step != "published" and not (step == "reviewed" and kept_local):
+        raise UsageError(
+            f"La clé {args.key} est à l'étape « {step} » : finish attend « published », ou "
+            "« reviewed » quand la branche reste en local."
+        )
+    path = _repo_path(run_dir, key["repo"])
+    worktree = _worktree_path(run_dir, key)
+    removed = None
+    if worktree.exists():
+        _key_worktree(run_dir, key, services.run)
+        status = fix_names.git(worktree, services.run, "status", "--porcelain=v1", "-uall")
+        if status.returncode != 0:
+            raise fix_git.GitRefused(f"git status a échoué dans {worktree} : {status.stderr.strip()}")
+        if status.stdout.strip():
+            raise fix_git.Refused(
+                f"Le worktree {worktree} a des modifications non commitées : commitez-les ou "
+                "retirez-les, puis relancez. Rien n'a été retiré."
+            )
+        fix_git.remove_worktree(path, services.run, worktree)
+        removed = str(worktree)
+    key["step"] = "done"
+    fix_state.save(run_dir, state)
+    _emit({"removed": removed, "branch": key["branch"], "kept_local": kept_local,
+           "unpushed": fix_git.unpushed(path, services.run, key["branch"])})
+    return EXIT_OK
+
+
+def _need_reviewed(key: dict, name: str, command: str) -> None:
+    if key.get("step") != "reviewed":
+        raise UsageError(
+            f"La clé {name} est à l'étape « {key.get('step')} » : {command} attend « reviewed » "
+            "(revue sans ligne bloquante)."
+        )
+
+
+def _refuse_local(state: dict, key: dict) -> None:
+    """Refuse a push the lead did not agree to: local or dry-run pass, repo not ready."""
+    kept = f"rien n'est poussé, la branche {key['branch']} reste dans votre repo."
+    if state["push"] == "local":
+        raise fix_git.Refused(f"Passe en branches locales : {kept}")
+    if state["push"] == "dry_run":
+        raise fix_git.Refused(f"Passe --dry-run : {kept}")
+    if not key.get("push_ready"):
+        raise fix_git.Refused(
+            f"Le repo {key['repo']} n'est pas prêt pour GitLab (voir cqa_fix.py doctor) : {kept}"
+        )
+
+
+def _run_id(run_dir: Path, context: dict) -> str:
+    """Return the run id (AAAA-MM-JJ-HHMM): the run folder name, else context.json run_id."""
+    for value in (run_dir.name, context.get("run_id")):
+        try:
+            run_start(value)
+        except ValueError:
+            continue
+        return value
+    raise ContextError(
+        f"Le dossier du run {run_dir.name} ne porte pas de run_id AAAA-MM-JJ-HHMM : "
+        "la date de l'audit est inconnue."
+    )
+
+
+def _key_folder(run_dir: Path, key: dict) -> Path:
+    return run_dir / "fix" / key["repo"] / key["slug"]
+
+
+def _numbered(run_dir: Path, key: dict, kind: str) -> list:
+    """Return [(N, document)] of the report-<N>.json or review-<N>.json files of a key."""
+    pattern = re.compile(rf"{kind}-([0-9]+)\.json")
+    found = []
+    for path in _key_folder(run_dir, key).glob(f"{kind}-*.json"):
+        match = pattern.fullmatch(path.name)
+        if match:
+            document, errors = _read_key_file(run_dir, key, path.name)
+            if errors:
+                raise ContextError(errors[0])
+            found.append((int(match.group(1)), document))
+    return sorted(found, key=lambda item: item[0])
+
+
+def _optional_key_json(run_dir: Path, key: dict, name: str):
+    """Return a JSON file of the key folder, or None when it does not exist."""
+    if not (_key_folder(run_dir, key) / name).exists():
+        return None
+    document, errors = _read_key_file(run_dir, key, name)
+    if errors:
+        raise ContextError(errors[0])
+    return document
+
+
+def _notion_rows(run_dir: Path) -> list:
+    """Return the rows of rows.json, used only for Notion links; [] when unreadable."""
+    try:
+        rows = json.loads((run_dir / "rows.json").read_text(encoding="utf-8")).get("rows")
+    except (OSError, ValueError, AttributeError):
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def _read_text(path: Path) -> Optional[str]:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def _refuse_secrets(text: str, consequence: str) -> None:
+    labels = scan_text(text, known_values_from_env())
+    if labels:
+        raise SecretFound(
+            f"Secret détecté dans le titre ou la description de la MR ({', '.join(labels)}) : "
+            f"{consequence}. Retirez-le du rapport ou du constat, puis relancez cqa_fix.py mr-body."
+        )
+
+
+def _read_links(run_dir: Path) -> dict:
+    """Return fix/mr-links.json ({"links": {}} when absent); exit 6 when it is unreadable."""
+    try:
+        document = json.loads((run_dir / LINKS_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"links": {}}
+    except (OSError, ValueError) as error:
+        raise ContextError(f"{LINKS_FILE} est illisible : {error}")
+    links = document.get("links") if isinstance(document, dict) else None
+    if not isinstance(links, dict) or not all(
+        isinstance(entries, list) and all(isinstance(entry, dict) for entry in entries)
+        for entries in links.values()
+    ):
+        raise ContextError(f'{LINKS_FILE} : {{"links": {{"<Réf>": [{{"repo", "url", "iid"}}]}}}} attendu.')
+    return document
+
+
+def _gitlab_of(run_dir: Path, name: str) -> tuple:
+    """Return (host, project, user) of a repo from fix/doctor.json."""
+    doctor = _read_run_json(run_dir, "fix/doctor.json", "cqa_fix.py doctor")
+    for entry in doctor.get("repos") or []:
+        if isinstance(entry, dict) and entry.get("repo") == name:
+            if not entry.get("host") or not entry.get("project"):
+                raise fix_git.Refused(f"Le repo {name} n'est pas sur GitLab : rien n'a été poussé.")
+            return entry["host"], entry["project"], entry.get("user")
+    raise UsageError(f"fix/doctor.json : le repo « {name} » est absent, relancez cqa_fix.py doctor.")
+
+
+def _open_mr(run, host: str, encoded: str, mr, branch: str) -> dict:
+    """Return the MR of the state as GitLab has it now; exit 5 when it is merged or closed."""
+    iid = mr.get("iid") if isinstance(mr, dict) else None
+    if not isinstance(iid, int) or isinstance(iid, bool) or not isinstance(mr.get("url"), str):
+        raise fix_state.StateError(f"{fix_state.STATE_FILE} : « mr » de la clé est invalide.")
+    info = fix_gitlab.glab_json(run, host, f"projects/{encoded}/merge_requests/{iid}")
+    if not isinstance(info, dict):
+        raise UsageError(f"GitLab illisible : l'état de la MR !{iid} est inconnu. Rien n'a été poussé.")
+    if info.get("state") in ("merged", "closed"):
+        word = "fusionnée" if info["state"] == "merged" else "fermée"
+        raise fix_git.Refused(
+            f"La MR !{iid} est {word} : relancez une passe fix pour repartir d'une nouvelle branche."
+        )
+    if info.get("state") != "opened":
+        raise UsageError(
+            f"La MR !{iid} est dans l'état « {info.get('state')} » : rien n'a été poussé, "
+            "relancez plus tard."
+        )
+    if info.get("source_branch") != branch:
+        raise fix_git.Refused(f"La MR !{iid} ne part pas de la branche {branch} : rien n'a été poussé.")
+    return info
+
+
+def _find_open_mr(run, host: str, encoded: str, branch: str) -> Optional[dict]:
+    """Return the open MR whose source branch is branch, or None."""
+    query = f"merge_requests?source_branch={quote(branch, safe='')}&state=opened"
+    listing = fix_gitlab.glab_json(run, host, f"projects/{encoded}/{query}")
+    if not isinstance(listing, list):
+        raise UsageError(
+            f"GitLab illisible : impossible de savoir si une MR est ouverte pour la branche "
+            f"{branch}. Rien n'a été poussé."
+        )
+    for item in listing:
+        if (isinstance(item, dict) and item.get("source_branch") == branch
+                and isinstance(item.get("iid"), int) and isinstance(item.get("web_url"), str)):
+            return item
+    return None
+
+
+def _guard_problems(run_dir: Path, key: dict, worktree: Path, run) -> list:
+    repo = _repo(run_dir, key["repo"])
+    _third_party(repo)
+    return fix_guard.check_commits(
+        worktree, key["start_sha"], {int(ref) for ref in key["rows"]}, repo,
+        known_values_from_env(), run,
+    )
+
+
+def _ahead_of_base(worktree: Path, run, base: str) -> int:
+    count = fix_names.git(worktree, run, "rev-list", "--count", f"refs/remotes/origin/{base}..HEAD")
+    if count.returncode != 0:
+        raise fix_git.GitRefused(f"git rev-list a échoué dans {worktree} : {count.stderr.strip()}")
+    return int(count.stdout.strip() or 0)
+
+
+def _remote_head(worktree: Path, run, branch: str) -> Optional[str]:
+    """Fetch origin/<branch> when GitLab has it and return its head, else None."""
+    ref = f"refs/heads/{branch}"
+    listing = fix_names.git(worktree, run, "ls-remote", "--heads", "origin", ref)
+    if listing.returncode != 0:
+        raise fix_git.GitRefused(
+            f"git ls-remote origin a échoué : {listing.stderr.strip()}. Rien n'a été poussé."
+        )
+    if not any(line.split("\t", 1)[-1] == ref for line in listing.stdout.splitlines()):
+        return None
+    if not fix_git.fetch(worktree, run, f"+{ref}:refs/remotes/origin/{branch}"):
+        raise fix_git.GitRefused(f"git fetch origin {branch} a échoué : rien n'a été poussé.")
+    return fix_git.rev(worktree, run, f"refs/remotes/origin/{branch}")
+
+
+def _push(worktree: Path, run, branch: str) -> None:
+    pushed = fix_names.git(
+        worktree, run, *_PUSH_CONFIG, "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}"
+    )
+    if pushed.returncode != 0:
+        raise fix_git.GitRefused(
+            f"Le push de {branch} a échoué : {pushed.stderr.strip()}. Rien n'a changé sur GitLab, "
+            "la branche reste en local."
+        )
+
+
+def _create_mr(run, host: str, encoded: str, worktree: Path, *, branch: str, base: str, title: str,
+               text: str, user) -> dict:
+    """Create the draft MR, assigned to the lead, and return {"iid", "url"}."""
+    args = ["mr", "create", "--source-branch", branch, "--target-branch", base, "--title", title,
+            f"--description={text}", "--draft"]
+    if user:
+        args += ["--assignee", user]
+    created = fix_gitlab.glab(run, host, *args, "--yes", cwd=str(worktree))
+    if created.returncode != 0:
+        raise fix_git.GitRefused(
+            f"glab mr create a échoué : {(created.stderr or created.stdout).strip()}. La branche "
+            f"{branch} est poussée, sans MR : relancez cqa_fix.py publish."
+        )
+    mr = fix_mr.mr_from_output(f"{created.stdout}\n{created.stderr}")
+    if mr is None:
+        found = _find_open_mr(run, host, encoded, branch)
+        mr = {"iid": found["iid"], "url": found["web_url"]} if found else None
+    if mr is None:
+        raise fix_git.GitRefused(
+            f"La MR de la branche {branch} est créée, mais son lien est illisible : relancez "
+            "cqa_fix.py publish."
+        )
+    return mr
+
+
+def _add_to_mr(run, host: str, worktree: Path, iid: int, current: dict, text: str) -> bool:
+    """Add mr-addition.md to the description GitLab has; return True when it changed."""
+    old = current.get("description") or ""
+    addition, hors_scope = fix_mr.split_addition(text)
+    if addition and addition in old:
+        addition = ""
+    merged = fix_mr.merge_description(old, addition, hors_scope, date.today())
+    if merged == old:
+        return False
+    updated = fix_gitlab.glab(run, host, "mr", "update", str(iid), f"--description={merged}",
+                              cwd=str(worktree))
+    if updated.returncode != 0:
+        raise fix_git.GitRefused(
+            f"glab mr update !{iid} a échoué : {(updated.stderr or updated.stdout).strip()}. "
+            "La description de la MR n'a pas changé : relancez cqa_fix.py publish."
+        )
+    return True
+
+
+def _published(run_dir: Path, state: dict, key: dict) -> None:
+    """Record the publication: an addition later only describes the passes after this one."""
+    key["step"] = "published"
+    key["published_pass"] = key.get("pass") or 0
+    fix_state.save(run_dir, state)
 
 
 def _cmd_abandon(args, services: Services) -> int:
