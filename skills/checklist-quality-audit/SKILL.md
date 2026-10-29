@@ -705,7 +705,7 @@ python3 "$S/cqa_fix.py" doctor "$RUN"
 
 It writes `fix/doctor.json` and prints `{"repos": [{"repo", "host", "project", "status", "user", "base", "identity", "fetched", "ahead"}]}`. Keep for the presentation, in French:
 
-- `status`: `ok` (push and draft merge request possible; the push itself is a `git push origin` with the remote's own credentials, SSH key or credential helper, and must work without a prompt); `no_push` (no right to push on the project), `glab_missing` (`glab` not installed), `unauthenticated` (the lead runs `glab auth login --hostname <host>`): local branches only for that repo; `not_gitlab`: its rows are left to the devs.
+- `status`: `ok` (push and draft merge request possible; the push itself is a `git push origin` with the remote's own credentials, SSH key or credential helper, and must work without a prompt); `no_push` (no right to push on the project), `glab_missing` (`glab` not installed), `unauthenticated` (GitLab refused the token, HTTP 401 or 403: the lead runs `glab auth login --hostname <host>`), `unreachable` (« GitLab injoignable » : `glab` never reached the host, a network, VPN, proxy or DNS failure, not a login problem; the lead checks the connection, then `doctor` runs again): local branches only for that repo; `not_gitlab`: its rows are left to the devs.
 - `identity` false: no `user.name` or `user.email` in the repo, the commits would fail: the lead sets them before the launch (the commits are theirs).
 - `fetched` false: `git fetch origin` failed, the branches would start from a stale `origin/<base>`.
 - `ahead`: the commits of `origin/<base>` since the audited commit; every row is checked again on the current code before it is fixed.
@@ -730,6 +730,22 @@ bash "$S/cqa-toolbox.sh" doctor
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 bash "$S/cqa-toolbox.sh" pull
+```
+
+Third-party plugins, when a WordPress repo of the run (`stack` `wordpress`) has no `third_party_paths` in `context.json`: the guard refuses a commit in `third_party_paths` (`references/fix.md`, section 7), so they must be known before any fixer runs. List the plugin folders:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" wp-plugins "$RUN"
+```
+
+No plugin found: no question. Otherwise ask « Plugins maison à analyser ? » with the rules of `references/context.md`, section 6.1.1, as in section 10, step 6, write the plugins left unchecked into `repos[].third_party_paths` of their repo in `context.json`, then check the context again (errors: show them and stop). This belongs to the interactive part, in autonomous mode too: always before `open`.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" context "$RUN" --check
 ```
 
 Then list the candidates:
@@ -895,7 +911,7 @@ Not a problem of a row, and never sent to the fixer nor to `drop` (which refuses
 
 The key is now at `reviewed` (no row `pending`, every pass with fixed rows reviewed without a blocking row); otherwise it is left (below).
 
-g. Publication. In autonomous mode the key stops at `reviewed`, with its branch and its worktree: nothing is pushed and no merge request is created during the pass (Claude Code may ask the lead to confirm a push); step 6 publishes every key. In present mode, publish the key now:
+g. Publication. In autonomous mode the key stops at `reviewed`, with its branch and its worktree: nothing is pushed and no merge request is created during the pass (Claude Code may ask the lead to confirm a push); step 6 publishes every key, and `publish` refuses it (exit 5) until step 6 moves the pass to the stage `questions`. In present mode, publish the key now:
 
 - `push` `local` or `dry_run`, or a key whose `push_ready` is false: no publication, only `finish` (below), which keeps the branch in the dev's repo.
 - Otherwise `mr-body`, `publish`, then `finish`.
@@ -916,7 +932,7 @@ python3 "$S/cqa_fix.py" publish "$RUN" "<repo>/<slug>"
 
 It checks everything again (guard, every new commit reported, the merge request still open on GitLab, the remote branch not diverged), pushes the branch as a fast-forward, then creates the draft merge request assigned to the lead, or adds to its description, and prints `{"branch", "head", "pushed", "mr", "created", "updated", "links"}`. By exit code:
 
-- 0: `finish`. With the `note` « Aucun commit sur la branche : ni push ni MR. », nothing left the workstation: `finish` too.
+- 0: `finish`. With the `note` « Aucun commit sur la branche : ni push ni MR. », nothing left the workstation: `finish` too (the empty branch stays in the dev's repo, and the summary names it).
 - 2 with « Description de MR périmée : relancez mr-body. », or with a merge request already open for the branch: `mr-body` again, then `publish` once more.
 - 5 with « La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé. », or with « La MR !<iid> est fusionnée » or « fermée » (« relancez une passe fix »): no retry can pass, so no question: tell the lead on the spot, then `finish --keep-local` (the branch stays in the dev's repo; the lead integrates the remote commits by hand, or a later fix pass starts a new branch).
 - Any other 2 (a push or `glab` failure), 5 (refused by a guard: guard problem, commit not reported) or 7 (a secret in the title or the description: give the labels, never a value; the same for an exit 7 of `mr-body`): show the message and ask the lead on the spot « La publication de <repo>/<slug> a échoué : <message> » with « Relancer la publication » (once the lead fixed the cause: `mr-body` again, then `publish`) and « Garder la branche en local ». Never force anything.
@@ -951,7 +967,15 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" deferred "$RUN" --fix
 ```
 
-It prints `{"items"}`, the open entries of the fix mode (`id`, `kind`, `detail`, `refs`). The lead is back: go through them one at a time, in French, with AskUserQuestion. A row question: ask it with the options of the row (its `question` in the last report of the key that holds it), plus « Laisser aux devs » while there are fewer than 4; a row left to the devs (« Laisser aux devs », or a free answer that says so) is dropped as in 5.c (`--reason "laissée aux devs par le lead"`), without a fixer pass. Any other entry (a changed checkout, rows refused by git, uncommitted changes, a problem left to the lead): say it and ask what it needs; for uncommitted changes, « C'est réglé, reprendre » (the key goes on from its `step`, as on a resume, step 1) or « Laisser cette clé ». Then, for each key with other answers, in the order of `keys`: `start` (5.a, it gives the key back its worktree), write `notes-<N>.json` with those `answers`, and run 5.b to 5.f for the answered rows. A row left without answer goes to « Hors-scope » of its merge request. Close each entry once settled (a question once its row is dropped or the pass of its key is reviewed):
+It prints `{"items"}`, the open entries of the fix mode (`id`, `kind`, `detail`, `refs`). The lead is back: go through them one at a time, in French, with AskUserQuestion. A row question: ask it with the options of the row (its `question` in the last report of the key that holds it), plus « Laisser aux devs » while there are fewer than 4; a row left to the devs (« Laisser aux devs », or a free answer that says so) is dropped as in 5.c (`--reason "laissée aux devs par le lead"`), without a fixer pass. Any other entry (a changed checkout, rows refused by git, uncommitted changes, a problem left to the lead): say it and ask what it needs; for uncommitted changes, « C'est réglé, reprendre » (the key goes on from its `step`, as on a resume, step 1) or « Laisser cette clé ». A row left without answer (the lead skips its question, or gives no answer the fixer can apply) is dropped the same way, without a fixer pass, so that it goes to « Hors-scope » of its merge request:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" drop "$RUN" "<repo>/<slug>" --refs CQ-12 --reason "sans réponse du lead"
+```
+
+Then, for each key with other answers, in the order of `keys`: `start` (5.a, it gives the key back its worktree), write `notes-<N>.json` with those `answers`, and run 5.b to 5.f for the answered rows. Close each entry once settled (a question once its row is dropped or the pass of its key is reviewed):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -1001,7 +1025,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" summary "$RUN" --replace-failed CQ-3,CQ-12
 ```
 
-Pass `--replace-failed` only with the refs kept at step 7. It writes `fix/synthese.md`, closes the pass and its open `fix_question` entries, and prints `{"text", "team_message"}`. Exit 7: a secret in the text: give the labels, never a value; nothing was written. Then release the workstation:
+Pass `--replace-failed` only with the refs kept at step 7. It writes `fix/synthese.md`, closes the pass and its open `fix_question` entries, and prints `{"text", "team_message"}`. Exit 7: a secret in the text: nothing was written, and the pass stays pending (`fix_pending`, its `fix_question` entries open) until a `summary` passes. Give the labels, never a value, and tell the lead which text holds it: most often the `reason` of a row in `fix/state.json`, which comes from the fixer's `report-<N>.json` (a `reason`, or the text of a `question`) or from a `drop`; else a title or a reason of `fix/candidates.json`. Once the lead agrees, replace the value by « [secret retiré] » in that text, in `fix/state.json` and in the file it comes from, then run `summary` again (same options). Then release the workstation:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -1017,7 +1041,7 @@ End, in French: show `text`, then the keys left (step 5) with their branch and w
 |---|---|
 | `cqa_notion.py` | 0 success; 2 environment or usage; 3 Notion API or network (token refused, page not shared with the integration); 6 schema of the copy not v2; 7 at least one write blocked; 8 write refused on the template |
 | `cqa_plan.py` | 0 success; 2 usage or missing file (the message names the command to run first); 6 invalid `context.json` or findings; 7 secret found by `scan` |
-| `cqa_fix.py` | 0 success; 2 usage or environment (also a failed push or `glab` call, a stale merge request description, a worktree missing: the message says what to run); 5 refused by a guard (the message says why: guard problem, remote branch diverged, merge request merged or closed, commit not reported, local or dry-run pass, uncommitted changes); 6 invalid `context.json`, report, review or state; 7 secret found in a merge request text or the summary |
+| `cqa_fix.py` | 0 success; 2 usage or environment (also a failed push or `glab` call, a stale merge request description, a worktree missing: the message says what to run); 5 refused by a guard (the message says why: guard problem, remote branch diverged, merge request merged or closed, commit not reported, local or dry-run pass, an autonomous pass still in its key loop, uncommitted changes); 6 invalid `context.json`, report, review or state; 7 secret found in a merge request text or the summary |
 | `cqa_ssh_ro.py` | 0 success; 1 remote failure (command or file missing on the server); 2 usage; 4 refused, to be confirmed by the lead |
 | `cqa-keepawake.sh` | 0 success, also without any inhibitor on the workstation (warning only); 2 usage |
 | `cqa-toolbox.sh` | 0 success; 1 at least one tool failed (the manifest is written); 2 usage or environment; `run` returns the code of the tool (3: target unreachable or 401) |

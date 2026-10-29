@@ -1554,6 +1554,18 @@ class FixAgentsTest(unittest.TestCase):
         self.assertIn("--no-ext-diff --no-textconv", _section(fixer, "Hard rules"))
         self.assertIn("authored with the lead's git identity", _section(reference, "3. Commits"))
 
+    def test_fix_reference_says_when_the_step_moves_back(self):
+        """The step is not monotonic: pass-start and validate report lower it, the R14 rule
+        only raises it."""
+        keys = _section(_text(FIX_MD), "1. Keys")
+        self.assertNotIn("The step only moves forward.", keys)
+        for needle in ("`pass-start` brings a `reviewed` key back to `fixed`",
+                       "`validate ... report` sets the key to `fixed`",
+                       "`start` brings a `done` key back to `started`",
+                       "only raises the step"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, keys)
+
     def test_a_row_of_an_unreviewed_pass_is_never_reported_again(self):
         """Fix round 4: the review of a pass comes before any new report of its rows, a started
         pass keeps the key from reviewed, and a row covered by another fix is a correctif."""
@@ -1652,7 +1664,7 @@ class FixSectionTest(unittest.TestCase):
             ("cqa_plan.py", "project"), ("cqa_plan.py", "runs"), ("cqa_plan.py", "context"),
             ("cqa_plan.py", "defer"), ("cqa_plan.py", "deferred"), ("cqa_notion.py", "rows"),
             ("cqa_notion.py", "mr-links"), ("cqa_notion.py", "apply"),
-            ("cqa-toolbox.sh", "doctor"), ("cqa-toolbox.sh", "pull"),
+            ("cqa-toolbox.sh", "doctor"), ("cqa-toolbox.sh", "pull"), ("cqa_plan.py", "wp-plugins"),
         ):
             with self.subTest(call=call):
                 self.assertIn(call, calls)
@@ -1713,6 +1725,8 @@ class FixSectionTest(unittest.TestCase):
             'cqa-toolbox.sh" doctor',
             "« Télécharger l'image de la boîte à outils ? »",
             'cqa-toolbox.sh" pull',
+            'cqa_plan.py" wp-plugins "$RUN"',
+            "« Plugins maison à analyser ? »",
             'cqa_fix.py" candidates',
             "« Lancer ces correctifs ? »",
             "« Mode 100 % autonome ? »",
@@ -1890,6 +1904,68 @@ class FixSectionTest(unittest.TestCase):
                        "6 invalid", "7 secret"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, row)
+
+    def test_wordpress_plugins_are_asked_before_the_candidates(self):
+        """I3: the guard refuses commits in `third_party_paths`, so a WordPress repo without
+        them gets the plugins question in the interactive part, before `candidates`."""
+        diagnostic = self.section[self.section.index("**2. Diagnostic.**"):
+                                  self.section.index("**3. ")]
+        for needle in ("`stack` `wordpress`", "`third_party_paths`",
+                       'python3 "$S/cqa_plan.py" wp-plugins "$RUN"',
+                       "« Plugins maison à analyser ? »", "`references/context.md`, section 6.1.1",
+                       'python3 "$S/cqa_plan.py" context "$RUN" --check',
+                       "No plugin found: no question", "before `open`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, diagnostic)
+        self.assertLess(diagnostic.index("wp-plugins"), diagnostic.index('cqa_fix.py" candidates'))
+        self.assertLess(diagnostic.index("wp-plugins"), diagnostic.index('context "$RUN" --check'))
+        self.assertLess(diagnostic.index('context "$RUN" --check'),
+                        diagnostic.index('cqa_fix.py" candidates'))
+        context = _section(_text(REFERENCES / "context.md"), "6.1.1 Third-party plugins")
+        self.assertIn("never asked after the audit starts", context)
+        self.assertIn("SKILL.md, section 12, step 2", context)
+
+    def test_a_question_left_without_answer_is_dropped(self):
+        """M2: a deferred question without answer lands in « Hors-scope » through drop."""
+        command = ('cqa_fix.py" drop "$RUN" "<repo>/<slug>" --refs CQ-12 '
+                   '--reason "sans réponse du lead"')
+        end = self.section[self.section.index('deferred "$RUN" --fix'):
+                           self.section.index("« Publier les branches maintenant ? »")]
+        self.assertIn(command, end)
+        self.assertIn("« Hors-scope »", end)
+        questions = _section(_text(FIX_MD), "5. Questions")
+        self.assertIn("« sans réponse du lead »", questions)
+        self.assertIn("`cqa_fix.py drop`", questions)
+
+    def test_a_secret_in_the_summary_keeps_the_pass_pending(self):
+        """M3: summary exit 7 writes nothing; the lead clears the text, then summary again."""
+        summary = self.section[self.section.index("**8. Summary.**"):]
+        summary = summary[:summary.index('cqa-keepawake.sh" stop')]
+        for needle in ("Exit 7", "Give the labels, never a value", "the pass stays pending",
+                       "`fix_pending`", "which text holds", "`reason`", "`report-<N>.json`",
+                       "run `summary` again"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, summary)
+
+    def test_doctor_names_an_unreachable_gitlab(self):
+        """M5: a network failure of glab is « GitLab injoignable », not a missing login."""
+        diagnostic = self.section[self.section.index("**2. Diagnostic.**"):
+                                  self.section.index("**3. ")]
+        status = next(line for line in diagnostic.splitlines() if line.startswith("- `status`:"))
+        for needle in ("`unreachable`", "« GitLab injoignable »", "`unauthenticated`",
+                       "local branches only"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, status)
+        self.assertLess(status.index("`unreachable`"), status.index("local branches only"))
+
+    def test_publish_refuses_an_autonomous_pass_before_the_questions_stage(self):
+        """I1: in autonomous mode nothing is pushed before `stage questions` (step 6)."""
+        table = self.skill[self.skill.index("## Exit codes"):]
+        row = next(line for line in table.splitlines() if line.startswith("| `cqa_fix.py` |"))
+        self.assertIn("autonomous pass still in its key loop", row)
+        keys = self.section[self.section.index("**5. "):self.section.index("**6. ")]
+        self.assertIn("`publish` refuses it (exit 5) until step 6 moves the pass to the stage "
+                      "`questions`", keys)
 
     def test_readme_documents_the_fix_mode(self):
         readme = _text(ROOT / "README.md")
