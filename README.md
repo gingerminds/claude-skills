@@ -11,7 +11,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | Skill | Invocation | Rôle |
 | :--- | :--- | :--- |
 | `ticket` | `/gm:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation, pièces jointes chargées à la demande — pour amorcer le contexte avant une session dev spécifique à la stack. Détecte la stack du projet pour router vers le bon skill dev, et classe le ticket en bug ou feature/refactor pour appliquer la discipline adaptée (hypothèse de cause racine, ou esquisse d'ampleur/approches). Orienté Mantis + GitLab. |
-| `ticket-refine` | `/gm:ticket-refine` | Qualifie un ticket Mantis en note interne **privée** (devs et chefs de projet, jamais le client) — objectif en langage clair, hors périmètre, questions ouvertes prêtes à relayer au client, comment tester, reproduction, critères d'acceptation testables — avec un verdict de préparation (prêt / prêt avec hypothèses / pas prêt). Écrit `.gm/handoff/<id>/refine.md` puis publie la note privée sur Mantis (avec ton accord en usage manuel ; directement en mode agent ou avec `--publish`). À utiliser avant d'assigner ou de développer ; pour préparer une session dev, voir `ticket`. |
+| `ticket-refine` | `/gm:ticket-refine` | Qualifie un ticket Mantis en note interne **privée** (devs et chefs de projet, jamais le client) — objectif en langage clair, hors périmètre, questions ouvertes prêtes à relayer au client, comment tester, reproduction, critères d'acceptation testables — avec un verdict de préparation (prêt / prêt avec hypothèses / pas prêt). Écrit `.gm/handoff/<id>/refine.md` puis publie la note privée sur Mantis (avec ton accord en usage manuel ; directement en mode agent ou avec `--publish` ; `--dry-run` n'envoie rien). Le compte Mantis du token doit pouvoir ajouter des notes privées. À utiliser avant d'assigner ou de développer ; pour préparer une session dev, voir `ticket`. |
 | `drupal` | `/gm:drupal` | Expertise backend Drupal 10/11 — architecture, services, plugins, events, entités, cache, sécurité. |
 | `vue` | `/gm:vue` | Expertise frontend Vue 3 / Nuxt 3 — Composition API, composables, Pinia, SSR/SSG, TypeScript, architecture de composants. |
 | `laravel` | `/gm:laravel` | Expertise backend Laravel — Eloquent, migrations, form requests, services, queues, events, tests. |
@@ -66,11 +66,11 @@ Sur un clone local, fais d'abord un `git pull` dans le dépôt, puis `/plugin ma
 Tape `/gm:<skill>` dans Claude Code. Les skills se chaînent — un flux Drupal typique :
 
 ```
-/gm:ticket-refine # (optionnel) qualifie le ticket en note Mantis privée
-/gm:ticket        # digère le ticket Mantis en brief
-/gm:drupal        # implémente en s'appuyant sur le brief + le code existant
-/gm:review        # verdict severity-ranked sur le diff
-/gm:merge-request # ouvre la MR GitLab (Draft) liée au ticket
+/gm:ticket-refine  # (optionnel) qualifie le ticket en note Mantis privée
+/gm:ticket         # digère le ticket Mantis en brief
+/gm:drupal         # implémente en s'appuyant sur le brief + le code existant
+/gm:review         # verdict severity-ranked sur le diff
+/gm:merge-request  # ouvre la MR GitLab (Draft) liée au ticket
 ```
 
 Côté reviewer, `/gm:merge-review` prend une MR existante (URL ou numéro), charge le ticket lié et rédige la note de review. `/gm:security` fait un audit dépendances + infra à part entière, `/gm:docker-devops` couvre tout le volet conteneurs / CI.

@@ -12,7 +12,6 @@ mkdir -p "$STUB_DIR/bin"
 # Stub curl: record args, copy --data-binary @file, write body to -o, print code.
 cat > "$STUB_DIR/bin/curl" <<'STUB'
 #!/usr/bin/env bash
-: > /dev/null
 printf '%s\n' "$@" > "$STUB_DIR/args"
 out=""
 while (( $# )); do
@@ -70,14 +69,14 @@ test_dry_run_prints_private_payload_without_env() {
   if [[ $rc -ne 0 ]]; then fail "${FUNCNAME[0]}" "rc=$rc"
   elif [[ "$(jq -r .view_state.name <<<"$out")" != "private" ]]; then fail "${FUNCNAME[0]}" "not private"
   elif [[ "$(jq -r .text <<<"$out")" != "hello" ]]; then fail "${FUNCNAME[0]}" "text mismatch"
-  elif [[ "$err" != *"DRY-RUN: nothing sent to Mantis"* ]]; then fail "${FUNCNAME[0]}" "stderr: $err"
+  elif [[ "$err" != *"DRY-RUN: nothing sent to Mantis (issue 1)"* ]]; then fail "${FUNCNAME[0]}" "stderr: $err"
   elif [[ -e "$STUB_DIR/args" ]]; then fail "${FUNCNAME[0]}" "curl was called"
   else pass "${FUNCNAME[0]}"; fi
 }
 
 test_posts_private_note() {
   local f="$STUB_DIR/n.txt"; printf 'hello' > "$f"
-  STUB_CODE=201 STUB_BODY='{"note":{"id":42}}' MANTIS_URL=https://mantis.test/ MANTIS_TOKEN=tok run_script 123 "$f"
+  STUB_CODE=201 STUB_BODY='{"note":{"id":42,"view_state":{"name":"private"}}}' MANTIS_URL=https://mantis.test/ MANTIS_TOKEN=tok run_script 123 "$f"
   local args; args="$(cat "$STUB_DIR/args" 2>/dev/null)"
   if [[ $rc -ne 0 ]]; then fail "${FUNCNAME[0]}" "rc=$rc err=$err"
   elif [[ "$out" != "Posted private note 42 on issue 123" ]]; then fail "${FUNCNAME[0]}" "stdout: $out"
@@ -85,6 +84,23 @@ test_posts_private_note() {
   elif [[ "$args" != *"Authorization: tok"* ]]; then fail "${FUNCNAME[0]}" "auth header"
   elif [[ "$args" != *"-X"* || "$args" != *"POST"* ]]; then fail "${FUNCNAME[0]}" "-X POST"
   elif [[ "$(jq -r .view_state.name "$STUB_DIR/payload")" != "private" ]]; then fail "${FUNCNAME[0]}" "payload not private"
+  else pass "${FUNCNAME[0]}"; fi
+}
+
+test_too_many_args_exits_2() {
+  local f="$STUB_DIR/n.txt"; printf 'hello' > "$f"
+  MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 1 "$f" --dry-run extra
+  if [[ $rc -ne 2 ]]; then fail "${FUNCNAME[0]}" "rc=$rc"
+  elif [[ -e "$STUB_DIR/args" ]]; then fail "${FUNCNAME[0]}" "curl was called"
+  else pass "${FUNCNAME[0]}"; fi
+}
+
+test_non_private_response_exits_3() {
+  local f="$STUB_DIR/n.txt"; printf 'hello' > "$f"
+  STUB_CODE=201 STUB_BODY='{"note":{"id":1,"view_state":{"name":"public"}}}' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 7 "$f"
+  if [[ $rc -ne 3 ]]; then fail "${FUNCNAME[0]}" "rc=$rc"
+  elif [[ "$err" != *"NOT stored as private"* ]]; then fail "${FUNCNAME[0]}" "stderr: $err"
+  elif [[ "$err" != *"https://mantis.test/view.php?id=7#c1"* ]]; then fail "${FUNCNAME[0]}" "url missing: $err"
   else pass "${FUNCNAME[0]}"; fi
 }
 
@@ -100,18 +116,20 @@ test_api_error_exits_3() {
 test_special_chars_preserved() {
   local f="$STUB_DIR/special.txt"
   printf '%s\n%s\n%s' 'Il a dit "ok" — à vérifier' '$HOME' 'C:\chemin' > "$f"
-  STUB_CODE=201 STUB_BODY='{"note":{"id":1}}' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 1 "$f"
+  STUB_CODE=201 STUB_BODY='{"note":{"id":1,"view_state":{"name":"private"}}}' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 1 "$f"
   local got want; got="$(jq -j .text "$STUB_DIR/payload"; echo x)"; want="$(cat "$f"; echo x)"
   [[ $rc -eq 0 && "$got" == "$want" ]] && pass "${FUNCNAME[0]}" || fail "${FUNCNAME[0]}" "rc=$rc payload text differs"
 }
 
 test_leading_zeros_stripped() {
   local f="$STUB_DIR/n.txt"; printf 'hello' > "$f"
-  STUB_CODE=201 STUB_BODY='{"note":{"id":1}}' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 0051234 "$f"
+  STUB_CODE=201 STUB_BODY='{"note":{"id":1,"view_state":{"name":"private"}}}' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 0051234 "$f"
   grep -q '/issues/51234/notes' "$STUB_DIR/args" 2>/dev/null && pass "${FUNCNAME[0]}" || fail "${FUNCNAME[0]}" "id not stripped"
 }
 
 test_missing_args_exits_2
+test_too_many_args_exits_2
+test_non_private_response_exits_3
 test_empty_note_exits_2
 test_missing_env_exits_2
 test_dry_run_prints_private_payload_without_env

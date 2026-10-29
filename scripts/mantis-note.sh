@@ -15,7 +15,7 @@
 # Exit codes:
 #   0  note posted (HTTP 200/201), or dry-run done
 #   2  bad usage / missing or empty note file / missing env (outside --dry-run)
-#   3  HTTP / API error
+#   3  HTTP / API error, or the stored note is not private (delete it!)
 set -euo pipefail
 
 raw_id="${1:-}"
@@ -23,7 +23,7 @@ note_file="${2:-}"
 dry_run=0
 [[ "${3:-}" == "--dry-run" ]] && dry_run=1
 
-if [[ -z "$raw_id" || -z "$note_file" || ( -n "${3:-}" && $dry_run -eq 0 ) ]]; then
+if (( $# > 3 )) || [[ -z "$raw_id" || -z "$note_file" || ( -n "${3:-}" && $dry_run -eq 0 ) ]]; then
   echo "usage: mantis-note.sh <issue-id> <note-file> [--dry-run]" >&2
   exit 2
 fi
@@ -53,7 +53,7 @@ fi
 
 if [[ $dry_run -eq 1 ]]; then
   cat "$payload"
-  echo "DRY-RUN: nothing sent to Mantis" >&2
+  echo "DRY-RUN: nothing sent to Mantis (issue ${id})" >&2
   exit 0
 fi
 
@@ -78,4 +78,9 @@ if [[ "$code" != "200" && "$code" != "201" ]]; then
 fi
 
 note_id="$(jq -r '.note.id // "?"' "$body" 2>/dev/null || echo '?')"
+view_state="$(jq -r '.note.view_state.name // empty' "$body" 2>/dev/null || true)"
+if [[ "$view_state" != "private" ]]; then
+  echo "WARNING: note ${note_id} on issue ${id} was NOT stored as private — delete it now: ${base}/view.php?id=${id}#c${note_id}" >&2
+  exit 3
+fi
 echo "Posted private note ${note_id} on issue ${id}"

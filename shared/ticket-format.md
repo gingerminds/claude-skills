@@ -10,7 +10,7 @@ Mantis Markdown rendering is not guaranteed, so the note must read well as plain
 
 ```
 [gm:ticket-refine] Note de qualification du <JJ/MM/AAAA>
-Verdict : <prêt | prêt avec hypothèses | pas prêt — ce qui manque>
+Verdict : <prêt | prêt avec hypothèses | pas prêt — ce qui manque, sans tiret cadratin>
 <si la note remplace une précédente : Remplace la note de qualification du <JJ/MM/AAAA>.>
 
 === POUR LE CHEF DE PROJET ===
@@ -44,7 +44,7 @@ REPRODUCTION :
 <ou, pour un ticket qui n'est pas un bug : Sans objet (demande / évolution) : <comment observer l'état actuel, si utile>>
 
 CRITÈRES D'ACCEPTATION :
-1. <critère vérifiable par une observation concrète> <(inféré) si déduit>
+1. <critère vérifiable par une observation concrète> <(inféré) si déduit> | (aucun critère vérifiable en l'état)
 
 ENVIRONNEMENT DE VÉRIFICATION :
 <local | preprod | prod (lecture seule)> — <pourquoi>
@@ -52,9 +52,10 @@ ENVIRONNEMENT DE VÉRIFICATION :
 
 ## Verdict rules
 
-- `pas prêt`: as soon as one question is blocking, or no acceptance criterion is verifiable.
-- `prêt avec hypothèses`: at least one criterion marked "(inféré)" or one unconfirmed assumption.
-- `prêt`: otherwise.
+- `pas prêt`: as soon as one open question is blocking, or no acceptance criterion is verifiable (CRITÈRES D'ACCEPTATION then contains `(aucun critère vérifiable en l'état)`).
+- `prêt avec hypothèses`: at least one open question that is not blocking, at least one criterion marked "(inféré)", or one unconfirmed assumption.
+- `prêt`: only if there is no open question and no inferred criterion.
+- The text after `pas prêt — ` must not itself contain ` — ` (use commas): consumers may split the line from the right.
 
 ## Writing rules
 
