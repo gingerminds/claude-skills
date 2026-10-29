@@ -1,0 +1,153 @@
+{
+  "copy_data_source_id": "ds-copy",
+  "rows": [
+    {
+      "page_id": "page-101",
+      "ref": 101,
+      "title": "Activer la compression des réponses HTTP",
+      "status": "À traiter",
+      "assignees": [],
+      "category": "PERFORMANCE",
+      "subcategory": "Réseau",
+      "blocking": true,
+      "sections": [
+        "Back"
+      ],
+      "technos": [],
+      "phases": [],
+      "tools": [
+        "Code",
+        "HTTP"
+      ],
+      "automation": "Auto",
+      "tooling_hint": "",
+      "last_edited_by_bot": false,
+      "reference_page_id": "reference-101",
+      "fiche_path": "fiches/CQ-101.md"
+    },
+    {
+      "page_id": "page-102",
+      "ref": 102,
+      "title": "Servir les images en formats modernes",
+      "status": "Mis en place",
+      "assignees": [
+        "Inès"
+      ],
+      "category": "PERFORMANCE",
+      "subcategory": "Images",
+      "blocking": false,
+      "sections": [
+        "Front"
+      ],
+      "technos": [],
+      "phases": [],
+      "tools": [
+        "Code"
+      ],
+      "automation": "Auto",
+      "tooling_hint": "",
+      "last_edited_by_bot": false,
+      "reference_page_id": "reference-102",
+      "fiche_path": "fiches/CQ-102.md"
+    },
+    {
+      "page_id": "page-103",
+      "ref": 103,
+      "title": "Désactiver le mode debug en production",
+      "status": "À traiter",
+      "assignees": [],
+      "category": "SÉCURITÉ",
+      "subcategory": "Configuration",
+      "blocking": true,
+      "sections": [
+        "Back"
+      ],
+      "technos": [
+        "Laravel"
+      ],
+      "phases": [],
+      "tools": [
+        "Code"
+      ],
+      "automation": "Auto",
+      "tooling_hint": "",
+      "last_edited_by_bot": false,
+      "reference_page_id": "reference-103",
+      "fiche_path": "fiches/CQ-103.md"
+    },
+    {
+      "page_id": "page-104",
+      "ref": 104,
+      "title": "Documenter la procédure de restauration",
+      "status": "À traiter",
+      "assignees": [],
+      "category": "SÉCURITÉ",
+      "subcategory": "Exploitation",
+      "blocking": false,
+      "sections": [],
+      "technos": [],
+      "phases": [],
+      "tools": [
+        "Code",
+        "Intervention humaine"
+      ],
+      "automation": "Auto",
+      "tooling_hint": "",
+      "last_edited_by_bot": false,
+      "reference_page_id": "reference-104",
+      "fiche_path": "fiches/CQ-104.md"
+    },
+    {
+      "page_id": "page-105",
+      "ref": 105,
+      "title": "Configurer les extensions du CMS",
+      "status": "À traiter",
+      "assignees": [],
+      "category": "QUALITÉ",
+      "subcategory": "CMS",
+      "blocking": false,
+      "sections": [],
+      "technos": [
+        "Wordpress"
+      ],
+      "phases": [],
+      "tools": [
+        "Code"
+      ],
+      "automation": "Auto",
+      "tooling_hint": "",
+      "last_edited_by_bot": false,
+      "reference_page_id": "reference-105",
+      "fiche_path": "fiches/CQ-105.md"
+    },
+    {
+      "page_id": "page-106",
+      "ref": 106,
+      "title": "Tester le parcours d'achat",
+      "status": "À traiter",
+      "assignees": [],
+      "category": "QUALITÉ",
+      "subcategory": "Parcours",
+      "blocking": false,
+      "sections": [
+        "Front"
+      ],
+      "technos": [],
+      "phases": [],
+      "tools": [
+        "Navigateur"
+      ],
+      "automation": "Auto",
+      "tooling_hint": "",
+      "last_edited_by_bot": false,
+      "reference_page_id": "reference-106",
+      "fiche_path": "fiches/CQ-106.md"
+    }
+  ],
+  "missing_in_copy": [
+    {
+      "ref": 190,
+      "title": "Auditer les sauvegardes"
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "lot": "code-securite",
+  "findings": [
+    {
+      "ref": 103,
+      "verdict": "partial",
+      "confidence": "high",
+      "summary": "Le mode debug est coupé, mais la page d'erreur détaillée reste active.",
+      "evidence": [
+        {
+          "type": "page",
+          "url": "https://preprod.example.org/",
+          "detail": "page d'erreur"
+        }
+      ],
+      "todo": "Désactiver la page d'erreur détaillée.",
+      "human_check": null,
+      "divergence": null,
+      "needs_probes": [
+        {
+          "url": "https://preprod.example.org/telescope",
+          "method": "GET"
+        },
+        {
+          "url": "https://preprod.example.org/status",
+          "method": "HEAD"
+        },
+        {
+          "url": "https://other.example.net/probe",
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "ref": 104,
+      "verdict": "excellent",
+      "confidence": "high",
+      "summary": "La procédure existe.",
+      "evidence": [],
+      "todo": null,
+      "human_check": null,
+      "divergence": null,
+      "needs_probes": [
+        {
+          "url": "https://preprod.example.org/hidden",
+          "method": "GET"
+        }
+      ]
+    }
+  ]
+}

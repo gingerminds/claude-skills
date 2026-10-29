@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review of the commits of one key and one pass of the fix mode",
+  "description": "Content of fix/<repo>/<slug>/review-<N>.json, written by the read-only reviewer and checked by cqa_fix.py validate <run_dir> <key> review --pass <N> (exit 6 with the list of errors). Every row the fixer reported fixed in pass N needs a verdict. A blocking verdict sends the row back to the fixer for one more attempt; still blocking after it, the row is dropped from the branch. Notes and remarks are written in French.",
+  "type": "object",
+  "required": ["key", "pass", "rows", "attention"],
+  "properties": {
+    "key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Key <repo>/<slug> of the dispatch."
+    },
+    "pass": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of the pass whose commits were reviewed."
+    },
+    "rows": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/row"},
+      "description": "One verdict per reviewed row. A ref that is not a row of the key, or that appears twice, is rejected."
+    },
+    "attention": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 400},
+      "description": "Non-blocking remarks for the Points d'attention section of the merge request, in French. [] when there are none."
+    }
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "required": ["ref", "verdict"],
+      "properties": {
+        "ref": {
+          "type": "integer",
+          "description": "Ref of the checklist row, as an integer (107 for CQ-107)."
+        },
+        "verdict": {
+          "enum": ["ok", "blocking"],
+          "description": "ok: the fix may go in the merge request. blocking: it may not as is; say why in notes."
+        },
+        "notes": {
+          "type": ["string", "null"],
+          "maxLength": 600,
+          "description": "Required for blocking: what is wrong and what to change, in French, 1 to 600 characters. Optional for ok."
+        }
+      },
+      "if": {"properties": {"verdict": {"const": "blocking"}}},
+      "then": {
+        "required": ["notes"],
+        "properties": {"notes": {"type": "string", "minLength": 1}}
+      }
+    }
+  },
+  "examples": [
+    {
+      "key": "front/securite",
+      "pass": 1,
+      "rows": [
+        {"ref": 107, "verdict": "ok", "notes": null},
+        {"ref": 112, "verdict": "blocking", "notes": "La valeur n'est pas échappée à l'affichage : utiliser esc_html()."}
+      ],
+      "attention": ["La règle d'en-tête s'applique aussi aux fichiers statiques : vérifier le cache du CDN."]
+    }
+  ]
+}

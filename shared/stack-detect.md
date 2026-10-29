@@ -7,7 +7,7 @@ The generic skills (`review`, `security`, `merge-review`…) stay **stack-agnost
 | Signal (at the project root) | Stack |
 |---|---|
 | `composer.json` contains `drupal/core*` | **drupal** |
-| `composer.json` contains `roots/wordpress`, or a `wp-content/` tree | **wordpress** |
+| `composer.json` contains `roots/wordpress`, `johnpbloch/wordpress` or `wpackagist-plugin/*` / `wpackagist-theme/*`, or a `wp-content/` tree | **wordpress** |
 | `composer.json` contains `laravel/framework` | **laravel** |
 | `composer.json` with no CMS/framework | php (generic) — no `stack/` resource |
 | `package.json` depends on `vue` / `nuxt` | **vue** |

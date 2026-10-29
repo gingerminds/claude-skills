@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Findings of one lot of the PRE-MEL audit",
+  "description": "Content of findings/<lot>.json: exactly one finding per checklist row of the lot. Every text a lead dev reads (summary, todo, human_check, divergence, detail) is written in French.",
+  "type": "object",
+  "required": ["lot", "findings"],
+  "properties": {
+    "lot": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Id of the lot, as given in the dispatch."
+    },
+    "findings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/finding"},
+      "description": "One finding per row of the lot. A ref that is not in the lot, or that appears twice, is rejected."
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": [
+        "ref",
+        "verdict",
+        "confidence",
+        "summary",
+        "evidence",
+        "todo",
+        "human_check",
+        "divergence",
+        "needs_probes"
+      ],
+      "properties": {
+        "ref": {
+          "type": "integer",
+          "description": "Ref of the checklist row, as an integer (79 for CQ-79)."
+        },
+        "verdict": {
+          "enum": ["ko", "partial", "unknown", "ok_human", "ok", "na"],
+          "description": "ko: not compliant. partial: partly compliant. unknown: cannot be evaluated (say why in summary). ok_human: compliant as far as the audit can tell, a human must validate (say what in human_check). ok: compliant, verified without human judgement; needs at least one piece of evidence and high confidence, and todo and human_check must be null, otherwise it is lowered to ok_human. na: not applicable; na needs high confidence, otherwise it becomes unknown. When several repos give different results, keep the worst in this order: ko, partial, unknown, ok_human, ok, na."
+        },
+        "confidence": {
+          "enum": ["high", "medium", "low"],
+          "description": "Confidence in the verdict."
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600,
+          "pattern": "\\S",
+          "description": "What was found, in French, 1 to 600 characters."
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {"$ref": "#/$defs/evidence_file"},
+              {"$ref": "#/$defs/evidence_page"},
+              {"$ref": "#/$defs/evidence_tool"},
+              {"$ref": "#/$defs/evidence_http"}
+            ]
+          },
+          "description": "What the verdict rests on. May be empty, but an ok without evidence is lowered to ok_human."
+        },
+        "todo": {
+          "type": ["string", "null"],
+          "maxLength": 400,
+          "description": "What to do to fix the row, in French, at most 400 characters. null when there is nothing to do: an ok with a filled todo is lowered to ok_human."
+        },
+        "human_check": {
+          "type": ["string", "null"],
+          "maxLength": 400,
+          "description": "What a human must validate, in French, at most 400 characters. null when nothing: an ok with a filled human_check is lowered to ok_human."
+        },
+        "divergence": {
+          "type": ["string", "null"],
+          "maxLength": 400,
+          "description": "Difference between the code (develop) and the preprod, in French, at most 400 characters, for example a fix not deployed yet. null when both agree. A filled divergence turns ok and ok_human into partial."
+        },
+        "needs_probes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/probe"},
+          "description": "HTTP responses missing from the tool collection. Ask for them here instead of concluding; they are run once, then the lot is re-run. [] when none is needed. A finding that still waits for probes after the follow-up is capped at unknown: ko and partial are kept, ok_human, ok and na become unknown."
+        },
+        "tool_dates": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z0-9-]+$"},
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+          },
+          "description": "Optional. For each tool whose tools/<tool>/result.json or summary.json was read, the started_at of that result.json (ISO 8601 UTC, for example 2026-10-27T21:15:05Z or 2026-10-27T21:15:05.068Z). It lets a later run tell which rows rest on a tool that was rerun since."
+        }
+      },
+      "examples": [
+        {
+          "ref": 79,
+          "verdict": "ko",
+          "confidence": "high",
+          "summary": "3 éléments ont un tabindex positif : l'ordre de tabulation saute le menu.",
+          "evidence": [
+            {"type": "file", "repo": "nuxt", "path": "components/AppHeader.vue", "line": 42},
+            {
+              "type": "page",
+              "url": "https://preprod.example.org/actualites/x",
+              "detail": "parcours au clavier"
+            },
+            {"type": "tool", "tool": "a11y", "ref": "summary.json#home/3"}
+          ],
+          "todo": "Supprimer les tabindex positifs et suivre l'ordre du DOM.",
+          "human_check": null,
+          "divergence": null,
+          "needs_probes": []
+        }
+      ]
+    },
+    "evidence_file": {
+      "type": "object",
+      "required": ["type", "repo", "path"],
+      "properties": {
+        "type": {"const": "file"},
+        "repo": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Name of the repo, as in context.json."
+        },
+        "path": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Path of a file inside the repo, relative to its root; a folder or the root itself is rejected."
+        },
+        "line": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Line number, optional."
+        }
+      }
+    },
+    "evidence_page": {
+      "type": "object",
+      "required": ["type", "url"],
+      "properties": {
+        "type": {"const": "page"},
+        "url": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "URL of the page that was looked at."
+        },
+        "detail": {
+          "type": ["string", "null"],
+          "description": "What was observed on the page, in French, optional."
+        }
+      }
+    },
+    "evidence_tool": {
+      "type": "object",
+      "required": ["type", "tool", "ref"],
+      "properties": {
+        "type": {"const": "tool"},
+        "tool": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Name of the toolbox tool, for example a11y."
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Where to find it, relative to tools/<tool>/, for example summary.json#home/3."
+        }
+      }
+    },
+    "evidence_http": {
+      "type": "object",
+      "required": ["type", "url", "detail"],
+      "properties": {
+        "type": {"const": "http"},
+        "url": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "URL that was requested."
+        },
+        "detail": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "What the response showed, in French (status, header, body excerpt without secrets)."
+        }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "required": ["url", "method"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "URL to request on the target."
+        },
+        "method": {
+          "enum": ["GET", "HEAD"],
+          "description": "HTTP method, uppercase."
+        }
+      }
+    }
+  }
+}
