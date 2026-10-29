@@ -90,6 +90,10 @@
             "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
           },
           "description": "Optional. For each tool whose tools/<tool>/result.json or summary.json was read, the started_at of that result.json (ISO 8601 UTC, for example 2026-10-27T21:15:05Z or 2026-10-27T21:15:05.068Z). It lets a later run tell which rows rest on a tool that was rerun since."
+        },
+        "in_repo": {
+          "type": "boolean",
+          "description": "Optional. false when all the work to fix the row lies outside the repos (back office, database, host, a new plugin, dependencies): the fix mode then leaves the row to the devs, with the reason « hors du dépôt : <todo> ». true when the fix is made in a repo. Absent: the fix mode decides as before."
         }
       },
       "examples": [

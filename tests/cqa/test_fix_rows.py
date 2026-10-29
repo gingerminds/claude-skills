@@ -40,8 +40,17 @@ def left_reasons(result):
     return {entry["ref"]: entry["reason"] for entry in result["left"]}
 
 
+def key_rows(key):
+    return [item for section in key["sections"] for item in section["rows"]]
+
+
 def kept_refs(result):
-    return [item["ref"] for key in result["keys"] for item in key["rows"]]
+    return [item["ref"] for key in result["keys"] for item in key_rows(key)]
+
+
+def sections(result):
+    return {key["key"]: [(section["alias"], [item["ref"] for item in section["rows"]])
+                         for section in key["sections"]] for key in result["keys"]}
 
 
 class SelectTest(unittest.TestCase):
@@ -63,7 +72,7 @@ class SelectTest(unittest.TestCase):
         excluded = [{"ref": 11, "reason": "no_tools"}, {"ref": 12, "reason": "no_fiche"}]
         result = select(rows, findings, excluded)
         self.assertEqual(kept_refs(result), [1, 2])
-        first, second = result["keys"][0]["rows"]
+        first, second = key_rows(result["keys"][0])
         self.assertEqual((first["semi_auto"], second["semi_auto"]), (False, True))
         self.assertEqual(first["verdict"], "ko")
         self.assertEqual(first["summary"], "Résumé 1")
@@ -108,7 +117,7 @@ class SelectTest(unittest.TestCase):
         self.assertEqual((urls[107], urls[40], urls[3]), (url, "u9", None))
         result = select(rows, findings, flights=flights, refs=(40,))
         self.assertIn(40, kept_refs(result))
-        forced = [item for key in result["keys"] for item in key["rows"] if item["ref"] == 40]
+        forced = [item for key in result["keys"] for item in key_rows(key) if item["ref"] == 40]
         self.assertTrue(forced[0]["lead"])
 
     def test_lead_refs_never_bypass_open_merged_or_branch_checks(self):
@@ -155,7 +164,7 @@ class SelectTest(unittest.TestCase):
                    "front": flight()}
         result = select([row(1)], {1: finding(1, repo=None)}, repos=repos, access=access,
                         flights=flights)
-        self.assertEqual([key["key"] for key in result["keys"]], ["front/securite"])
+        self.assertEqual([key["key"] for key in result["keys"]], ["front"])
 
     def test_rows_without_file_evidence_go_to_every_repo(self):
         repos = [{"name": "back"}, {"name": "front"}]
@@ -167,30 +176,93 @@ class SelectTest(unittest.TestCase):
                     3: finding(3, evidence=evidence)}
         result = select([row(1), row(2), row(3)], findings, repos=repos, access=access,
                         flights=flights)
-        by_key = {key["key"]: [r["ref"] for r in key["rows"]] for key in result["keys"]}
-        self.assertEqual(by_key, {"back/securite": [2, 3], "front/securite": [1, 2, 3]})
-        flags = {r["ref"]: r["every_repo"] for key in result["keys"] for r in key["rows"]}
+        self.assertEqual(sections(result), {"back": [("securite", [2, 3])],
+                                            "front": [("securite", [1, 2, 3])]})
+        flags = {r["ref"]: r["every_repo"] for key in result["keys"] for r in key_rows(key)}
         self.assertEqual(flags, {1: False, 2: True, 3: False})
         single = select([row(2)], {2: finding(2, repo=None)})
-        self.assertFalse(single["keys"][0]["rows"][0]["every_repo"])
-        self.assertEqual(single["keys"][0]["key"], "front/securite")
+        self.assertFalse(key_rows(single["keys"][0])[0]["every_repo"])
+        self.assertEqual(single["keys"][0]["key"], "front")
 
-    def test_keys_order_security_first_then_copy_order(self):
+    def test_one_key_per_repo_with_ordered_sections(self):
+        repos = [{"name": "back"}, {"name": "front"}]
+        access = [{"repo": "back", "status": "no_push"}, {"repo": "front", "status": "ok"}]
         rows = [row(1, category="SEO / GEO"), row(2, category="QUALITÉ"),
-                row(3, category="SÉCURITÉ"), row(4, category="SEO / GEO")]
-        result = select(rows, {n: finding(n) for n in (1, 2, 3, 4)})
-        self.assertEqual([key["key"] for key in result["keys"]],
-                         ["front/securite", "front/seo-geo", "front/qualite"])
-        key = result["keys"][1]
-        self.assertEqual((key["repo"], key["category"], key["slug"]),
-                         ("front", "SEO / GEO", "seo-geo"))
-        self.assertEqual([r["ref"] for r in key["rows"]], [1, 4])
+                row(3, category="SÉCURITÉ"), row(4, category="SEO / GEO"),
+                row(5, category="QUALITÉ"), row(6, category="RGPD & LÉGAL")]
+        findings = {1: finding(1), 2: finding(2, repo=None), 3: finding(3), 4: finding(4),
+                    5: finding(5, repo="back"), 6: finding(6, repo="back")}
+        result = select(rows, findings, repos=repos, access=access,
+                        flights={"back": flight(), "front": flight()})
+        self.assertEqual(sections(result), {
+            "back": [("qualite", [2, 5]), ("rgpd", [6])],
+            "front": [("securite", [3]), ("seo", [1, 4]), ("qualite", [2])],
+        })
+        back, front = result["keys"]
+        self.assertEqual({name: front[name] for name in ("key", "repo", "push_ready")},
+                         {"key": "front", "repo": "front", "push_ready": True})
+        self.assertEqual(set(front), {"key", "repo", "push_ready", "sections"})
+        self.assertFalse(back["push_ready"])
+        self.assertEqual(
+            [(section["category"], section["alias"]) for section in front["sections"]],
+            [("SÉCURITÉ", "securite"), ("SEO / GEO", "seo"), ("QUALITÉ", "qualite")],
+        )
+        self.assertEqual(set(front["sections"][0]), {"category", "alias", "rows"})
+        self.assertEqual(front["sections"][1]["rows"][0]["category"], "SEO / GEO")
+
+    def test_rows_outside_the_repo_are_left(self):
+        rows = [row(1), row(2), row(3), row(4, automation="Manuel"), row(5), row(6)]
+        findings = {1: finding(1, in_repo=False), 2: finding(2, in_repo=True), 3: finding(3),
+                    4: finding(4, in_repo=False), 5: finding(5, "ok", in_repo=False),
+                    6: finding(6, in_repo=False, todo=None)}
+        result = select(rows, findings)
+        self.assertEqual(kept_refs(result), [2, 3])
+        self.assertEqual(left_reasons(result), {
+            1: "hors du dépôt : Corriger", 4: "Manuel", 5: "rien à corriger selon l'audit",
+            6: "hors du dépôt",
+        })
+        self.assertIsNone(result["left"][0]["url"])
+        result = select(rows, findings, refs=(1,))
+        self.assertEqual(kept_refs(result), [1, 2, 3])
+
+    def test_candidates_skip_rows_of_a_v2_mr(self):
+        url = "https://gitlab.example.org/acme/shop/-/merge_requests/318"
+        flights = {"front": flight(
+            open=[{"iid": 318, "url": url, "branch": "feature/checklist-qa-fix-securite",
+                   "refs": [107]},
+                  {"iid": 320, "url": "u320", "branch": "feature/checklist-qa-fix-seo-geo",
+                   "refs": None}],
+            branches=[{"branch": "feature/checklist-qa-fix-qualite", "where": "local",
+                       "refs": [109]}],
+        )}
+        rows = [row(107), row(108), row(109, category="QUALITÉ"), row(110, category="QUALITÉ"),
+                row(111, category="SEO / GEO")]
+        findings = {n: finding(n) for n in (107, 108, 109, 110, 111)}
+        result = select(rows, findings, flights=flights)
+        self.assertEqual(sections(result), {"front": [("securite", [108]), ("qualite", [110])]})
+        self.assertEqual(left_reasons(result), {
+            107: "déjà dans la MR !318", 109: "déjà sur la branche feature/checklist-qa-fix-qualite",
+            111: "MR !320 ouverte, Réf illisibles",
+        })
+        self.assertEqual(result["left"][0]["url"], url)
+
+    def test_open_pass_mr_with_unreadable_refs_blocks_every_section_of_its_repo(self):
+        repos = [{"name": "back"}, {"name": "front"}]
+        access = [{"repo": "back", "status": "ok"}, {"repo": "front", "status": "ok"}]
+        flights = {"back": flight(),
+                   "front": flight(open=[{"iid": 21, "url": "u21", "refs": None,
+                                          "branch": "feature/checklist-qa-fix-2"}])}
+        rows = [row(1), row(2, category="QUALITÉ")]
+        result = select(rows, {1: finding(1, repo=None), 2: finding(2)}, repos=repos,
+                        access=access, flights=flights)
+        self.assertEqual(sections(result), {"back": [("securite", [1])]})
+        self.assertEqual(left_reasons(result), {2: "MR !21 ouverte, Réf illisibles"})
 
     def test_lead_can_add_and_remove_refs(self):
         rows = [row(1), row(2, automation="Détection seule")]
         findings = {1: finding(1), 2: finding(2)}
         result = select(rows, findings, refs=(2, 999))
-        added = result["keys"][0]["rows"][1]
+        added = key_rows(result["keys"][0])[1]
         self.assertEqual((added["ref"], added["lead"]), (2, True))
         self.assertIn("CQ-999 ne figure pas dans la copie : ignorée.", result["notes"])
         result = select(rows, findings, without=(1,))
@@ -207,17 +279,23 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(result["keys"], [])
         self.assertEqual(left_reasons(result), {1: "repo hors GitLab"})
 
-    def test_estimate(self):
-        rows = [row(1), row(2), row(3, category="SEO / GEO")]
-        result = select(rows, {n: finding(n) for n in (1, 2, 3)})
-        self.assertEqual(result["estimate_min"], 3 * 4 + 2 * 10)
+    def test_estimate_per_section(self):
+        repos = [{"name": "back"}, {"name": "front"}]
+        access = [{"repo": "back", "status": "ok"}, {"repo": "front", "status": "ok"}]
+        rows = [row(1), row(2), row(3, category="SEO / GEO"), row(4, category="QUALITÉ")]
+        findings = {1: finding(1), 2: finding(2), 3: finding(3), 4: finding(4, repo="back")}
+        result = select(rows, findings, repos=repos, access=access,
+                        flights={"back": flight(), "front": flight()})
+        self.assertEqual(sections(result), {"back": [("qualite", [4])],
+                                            "front": [("securite", [1, 2]), ("seo", [3])]})
+        self.assertEqual(result["estimate_min"], 4 * 4 + 3 * 10)
 
     def test_fiche_path_only_when_the_file_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "fiches").mkdir()
             (Path(tmp) / "fiches" / "CQ-001.md").write_text("x", encoding="utf-8")
             result = select([row(1), row(2)], {1: finding(1), 2: finding(2)}, run_dir=Path(tmp))
-        paths = [r["fiche_path"] for r in result["keys"][0]["rows"]]
+        paths = [r["fiche_path"] for r in key_rows(result["keys"][0])]
         self.assertEqual(paths, ["fiches/CQ-001.md", None])
 
 

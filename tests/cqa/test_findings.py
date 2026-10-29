@@ -463,6 +463,23 @@ class ValidateDocumentTest(unittest.TestCase):
                     errors, ["constat CQ-79 : « tool_dates » doit être un objet {outil: date}"]
                 )
 
+    def test_in_repo_is_optional_and_boolean(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                valid, errors = validate(make_finding(in_repo=value), make_finding(ref=80))
+                self.assertEqual(errors, [])
+                self.assertEqual(valid[0]["in_repo"], value)
+        valid, errors = validate(make_finding(), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertNotIn("in_repo", valid[0])
+        for value in (None, "false", 0, 1, []):
+            with self.subTest(value=value):
+                valid, errors = validate(make_finding(in_repo=value), make_finding(ref=80))
+                self.assertEqual([item["ref"] for item in valid], [80])
+                self.assertEqual(
+                    errors, ["constat CQ-79 : « in_repo » doit être un booléen (true ou false)"]
+                )
+
     def test_needs_probes(self):
         probes = [
             {"url": "https://preprod.example.org/robots.txt", "method": "GET"},
@@ -905,7 +922,8 @@ class SchemaTest(unittest.TestCase):
 
     def test_every_property_of_the_finding_is_described(self):
         self.assertEqual(
-            set(self.finding["properties"]), set(REQUIRED_FINDING_KEYS) | {"tool_dates"}
+            set(self.finding["properties"]),
+            set(REQUIRED_FINDING_KEYS) | {"tool_dates", "in_repo"},
         )
         for name, definition in self.finding["properties"].items():
             with self.subTest(name=name):

@@ -157,8 +157,10 @@ class CandidatesTest(FixCase):
             self.assertEqual(code, 0, err)
             written = json.loads((run_dir / "fix" / "candidates.json").read_text(encoding="utf-8"))
             self.assertEqual(written, json.loads(out))
-            self.assertEqual([k["key"] for k in written["keys"]], ["front/securite"])
-            self.assertEqual(written["keys"][0]["rows"][0]["fiche_path"], "fiches/CQ-001.md")
+            self.assertEqual([k["key"] for k in written["keys"]], ["front"])
+            self.assertEqual([s["alias"] for s in written["keys"][0]["sections"]], ["securite"])
+            self.assertEqual(written["keys"][0]["sections"][0]["rows"][0]["fiche_path"],
+                             "fiches/CQ-001.md")
             self.assertEqual([e["reason"] for e in written["left"]], ["Manuel"])
             self.assertEqual(self.calls, {"front": True, "back": False})
             self.assertEqual(written["notes"], ["n"])
@@ -178,9 +180,37 @@ class CandidatesTest(FixCase):
             self.assertEqual(code, 0, err)
             result = json.loads(out)
             self.assertEqual(self.calls, {"front": True, "back": False})
-            self.assertEqual([r["ref"] for k in result["keys"] for r in k["rows"]], [2])
+            self.assertEqual(
+                [r["ref"] for k in result["keys"] for s in k["sections"] for r in s["rows"]], [2])
             self.assertIn("CQ-999 ne figure pas dans la copie : ignorée.", result["notes"])
             self.assertFalse(result["keys"][0]["push_ready"])
+
+    def test_candidates_read_a_v2_mr_through_gitlab(self):
+        url = "https://gitlab.example.org/acme/shop/-/merge_requests/318"
+
+        def gitlab(command, **kwargs):
+            if command[0] == "git":
+                return subprocess.run(command, **kwargs)
+            path = command[-1]
+            if path.endswith("/merge_requests/318/commits?per_page=100"):
+                answer = [{"title": "fix(CQ-1): add headers"}]
+            elif "state=opened" in path:
+                answer = [{"iid": 318, "web_url": url,
+                           "source_branch": "feature/checklist-qa-fix-securite"}]
+            else:
+                answer = []
+            return subprocess.CompletedProcess(command, 0, json.dumps(answer), "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            code, out, err = self.run_main(["candidates", run_dir, "--refs", "CQ-2"], run=gitlab)
+            self.assertEqual(code, 0, err)
+            result = json.loads(out)
+            self.assertEqual([(s["alias"], [r["ref"] for r in s["rows"]])
+                              for k in result["keys"] for s in k["sections"]], [("seo", [2])])
+            self.assertEqual([(e["ref"], e["reason"], e["url"]) for e in result["left"]],
+                             [(1, "déjà dans la MR !318", url)])
+            self.assertEqual(result["flights"]["front"]["open"][0]["refs"], [1])
 
     def test_candidates_without_rows_json_exits_2(self):
         with tempfile.TemporaryDirectory() as tmp:
