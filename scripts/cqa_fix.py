@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import quote
 
-from cqa import fix_checks, fix_git, fix_gitlab, fix_guard, fix_mr, fix_names, fix_rows, fix_state
+from cqa import deferred, fix_checks, fix_git, fix_gitlab, fix_guard, fix_mr, fix_names, fix_rows, fix_state, fix_summary
 from cqa.checklist import parse_refs, ref_label
 from cqa.notion_read import write_json, write_text
 from cqa.report import run_start
@@ -139,6 +139,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("key", help="clé <repo>/<slug> de la passe")
     sub.add_argument("--keep-local", action="store_true",
                      help="garde la branche en local après un push refusé ou en échec")
+    sub = _command(commands, "summary", "synthèse de la passe et message pour l'équipe", _cmd_summary)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("--replace-failed", default="",
+                     help="Réf dont le commentaire du skill n'a pas pu être remplacé")
     sub = _command(commands, "abandon", "abandonne la passe en cours", _cmd_abandon)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     return parser
@@ -1024,9 +1028,44 @@ def _cmd_abandon(args, services: Services) -> int:
             count = fix_git.unpushed(path, services.run, key["branch"])
             if count:
                 unpushed.append({"branch": key["branch"], "commits": count})
+    _close_fix_questions(run_dir)
     state["finished_at"] = fix_state.now()
     fix_state.save(run_dir, state)
     _emit({"removed": removed, "unpushed": unpushed})
+    return EXIT_OK
+
+
+def _close_fix_questions(run_dir: Path) -> None:
+    for item in deferred.open_items(run_dir, fix=True):
+        deferred.resolve(run_dir, item["id"])
+
+
+def _cmd_summary(args, services: Services) -> int:
+    """Write fix/synthese.md, close the pass and its fix questions; exit 7 on a secret."""
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    failed = parse_refs(args.replace_failed)
+    context = _load_context(run_dir)
+    candidates = _read_run_json(run_dir, "fix/candidates.json", "cqa_fix.py candidates")
+    checks = {name: _optional_key_json(run_dir, key, "checks.json")
+              for name, key in state["keys"].items() if key.get("mr")}
+    name = context.get("name")
+    found = fix_summary.summary(
+        project=name if isinstance(name, str) and name.strip() else run_dir.name,
+        state=state, candidates=candidates, checks=checks, replace_failed=failed,
+    )
+    deferred.open_items(run_dir, fix=True)
+    labels = scan_text(f"{found['text']}\n{found['team_message']}", known_values_from_env())
+    if labels:
+        raise SecretFound(
+            f"Secret détecté dans la synthèse ({', '.join(labels)}) : rien n'a été écrit. "
+            "Retirez-le du rapport ou de la raison concernée, puis relancez cqa_fix.py summary."
+        )
+    write_text(run_dir / "fix" / "synthese.md", found["text"])
+    _close_fix_questions(run_dir)
+    state["finished_at"] = fix_state.now()
+    fix_state.save(run_dir, state)
+    _emit(found)
     return EXIT_OK
 
 

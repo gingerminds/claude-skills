@@ -363,7 +363,7 @@ class PassTest(FixCase):
 class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
         for name in ("doctor", "candidates", "open", "stage", "start", "validate", "guard", "drop",
-                     "check", "mr-body", "publish", "finish", "abandon"):
+                     "check", "mr-body", "publish", "finish", "summary", "abandon"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)
 
