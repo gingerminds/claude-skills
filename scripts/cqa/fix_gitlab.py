@@ -188,7 +188,7 @@ def _source(branch: str, where: str) -> str:
 
 def _mr_entry(run, host: str, encoded: str, mr, notes: list):
     branch = mr.get("source_branch") if isinstance(mr, dict) else None
-    if not isinstance(branch, str) or not branch.startswith(fix_names.BRANCH_PREFIX):
+    if not isinstance(branch, str) or not fix_names.is_fix_branch(branch):
         return None
     commits = glab_json(
         run, host, f"projects/{encoded}/merge_requests/{mr.get('iid')}/commits?per_page=100",
@@ -214,7 +214,7 @@ def _branches(path, run) -> dict:
         out = fix_names.git(path, run, "for-each-ref", "--format=%(refname)", ref)
         for line in out.stdout.splitlines() if out.returncode == 0 else []:
             name = line[len(strip):]
-            if not name.startswith(fix_names.BRANCH_PREFIX):
+            if not fix_names.is_fix_branch(name):
                 continue
             names[name] = "both" if name in names else where
     return names
