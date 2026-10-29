@@ -359,7 +359,7 @@ def _remove_worktrees(run_dir: Path, state: dict, run) -> list:
 
 
 def _archive(run_dir: Path, old: dict, run) -> tuple:
-    """Move a finished pass, state and key folders, to fix/history/<stamp>/."""
+    """Move a finished pass, state and key folders, to fix/_history/<stamp>/."""
     removed = _remove_worktrees(run_dir, old, run)
     target = _new_history_dir(run_dir)
     for key in old["keys"].values():
@@ -375,7 +375,7 @@ def _archive(run_dir: Path, old: dict, run) -> tuple:
 
 def _new_history_dir(run_dir: Path) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
-    history = run_dir / "fix" / "history"
+    history = run_dir / fix_state.HISTORY_DIR
     history.mkdir(parents=True, exist_ok=True)
     for index in range(1, 1000):
         target = history / (stamp if index == 1 else f"{stamp}-{index}")
@@ -384,7 +384,7 @@ def _new_history_dir(run_dir: Path) -> Path:
         except FileExistsError:
             continue
         return target
-    raise UsageError("fix/history/ : impossible de créer un dossier d'archive.")
+    raise UsageError(f"{fix_state.HISTORY_DIR}/ : impossible de créer un dossier d'archive.")
 
 
 def _emit(value) -> None:

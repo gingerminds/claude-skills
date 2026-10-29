@@ -1933,6 +1933,16 @@ class ScanTest(AuditCase):
             json.loads(out)["found"],
             [{"path": "fix/front/securite/wp-config.php", "label": "credential_assignment"}],
         )
+        (worktree.parent / "wp-config.php").unlink()
+        archived = run_dir / "fix" / "_history" / "2026-10-29-100000" / "wt" / "securite"
+        archived.mkdir(parents=True)
+        (archived / "wp-config.php").write_text(config, encoding="utf-8")
+        code, out, err = self.run_main(["scan", run_dir])
+        self.assertEqual(code, 7)
+        self.assertEqual(
+            [item["path"] for item in json.loads(out)["found"]],
+            ["fix/_history/2026-10-29-100000/wt/securite/wp-config.php"],
+        )
 
     def test_scan_of_the_clean_fixture(self):
         run_dir = self.make_run()

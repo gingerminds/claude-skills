@@ -271,7 +271,7 @@ class PassTest(FixCase):
         code, out, err = self.open(push="local")
         self.assertEqual(code, 0, err)
         archived = json.loads(out)["archived"]
-        self.assertRegex(archived, r"^fix/history/\d{4}-\d{2}-\d{2}-\d{6}$")
+        self.assertRegex(archived, r"^fix/_history/\d{4}-\d{2}-\d{2}-\d{6}$")
         history = self.run_dir / archived
         self.assertEqual(
             json.loads((history / "state.json").read_text(encoding="utf-8")), old
@@ -324,10 +324,15 @@ class PassTest(FixCase):
         self.assertEqual(code, 2)
         self.assertIn("cqa_fix.py open", err)
 
-    def test_save_is_atomic(self):
+    def test_save_replaces_the_state_in_one_step(self):
         self.assertEqual(self.open()[0], 0)
         state = fix_state.load(self.run_dir)
         state["stage"] = "notion"
+        with mock.patch("cqa.notion_read.os.replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                fix_state.save(self.run_dir, state)
+        self.assertEqual(fix_state.load(self.run_dir)["stage"], "keys")
+        (self.run_dir / "fix" / "state.json.tmp").unlink()
         fix_state.save(self.run_dir, state)
         self.assertEqual(sorted(os.listdir(self.run_dir / "fix")), ["candidates.json", "state.json"])
         self.assertEqual(fix_state.load(self.run_dir)["stage"], "notion")

@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-from cqa import fix_names, fix_state
+from cqa import fix_gitlab, fix_names, fix_state
 from tests.cqa.test_cli_fix import FixCase, REMOTE
 from tests.cqa.test_git_tools import commit, git as real_git
 
@@ -149,6 +149,15 @@ class DevCheckoutTest(GitCase):
             "files": {name: (self.repo / name).read_bytes() for name in ("a.txt", "b.txt", "notes.txt")},
         }
 
+    def install_hooks(self):
+        """Install hooks that write a witness file; return its path."""
+        marker = self.root / "marker"
+        for name in HOOKS:
+            hook = self.repo / ".git" / "hooks" / name
+            hook.write_text(f"#!/bin/sh\necho {name} >> '{marker}'\n", encoding="utf-8")
+            hook.chmod(0o755)
+        return marker
+
     def test_start_leaves_the_dev_checkout_untouched(self):
         expected = self.advance_develop()
         real_git(self.repo, "checkout", "-q", "-b", "feature/other")
@@ -157,11 +166,7 @@ class DevCheckoutTest(GitCase):
         real_git(self.repo, "stash", "-q")
         (self.repo / "b.txt").write_text("edited", encoding="utf-8")
         (self.repo / "notes.txt").write_text("untracked", encoding="utf-8")
-        marker = self.root / "marker"
-        for name in HOOKS:
-            hook = self.repo / ".git" / "hooks" / name
-            hook.write_text(f"#!/bin/sh\necho {name} >> '{marker}'\n", encoding="utf-8")
-            hook.chmod(0o755)
+        marker = self.install_hooks()
         before = self.snapshot()
         self.assertNotEqual(before["develop"], expected)
         self.assertEqual(len(before["stash"].splitlines()), 1)
@@ -174,6 +179,39 @@ class DevCheckoutTest(GitCase):
         self.assertEqual(self.tracking_config(), "")
         real_git(result["worktree"], "commit", "-q", "--allow-empty", "-m", "hooks are live")
         self.assertTrue(marker.exists())
+
+    def test_takeover_runs_no_dev_hook(self):
+        branch = PREFIX + "securite"
+        self.push_branch(branch, "fix(CQ-107): one")
+        real_git(self.repo, "fetch", "-q", "origin")
+        real_git(self.repo, "branch", "-q", "--no-track", branch, f"origin/{branch}")
+        remote = self.push_branch(branch, "fix(CQ-108): two", start=f"origin/{branch}")
+        self.write_run(flight(open=[mr(12, branch, [107, 108])]))
+        marker = self.install_hooks()
+        config = (self.repo / ".git" / "config").read_bytes()
+        self.open_pass()
+        result = self.start_ok()
+        self.assertEqual((result["reused"], self.head(result["worktree"])), ("mr", remote))
+        self.assertEqual(self.head(self.repo, f"refs/heads/{branch}"), remote)
+        self.fixer_commit(result["worktree"], "c.txt", "fix(CQ-3): add c")
+        self.assertFalse(marker.exists())
+        self.assertEqual((self.repo / ".git" / "config").read_bytes(), config)
+        self.assertEqual(self.tracking_config(), "")
+        real_git(result["worktree"], "commit", "-q", "--allow-empty", "-m", "hooks are live")
+        self.assertTrue(marker.exists())
+
+    def test_dev_fingerprint_names_the_failing_command(self):
+        for word, label in (("status", "git status"), ("stash", "git stash list")):
+            def run(command, **kwargs):
+                if word in command:
+                    return subprocess.CompletedProcess(command, 128, "", f"fatal: {word} broke")
+                return subprocess.run(command, **kwargs)
+
+            with self.subTest(word=word):
+                with self.assertRaises(ValueError) as caught:
+                    fix_state.dev_fingerprint(self.repo, run)
+                self.assertIn(label, str(caught.exception))
+                self.assertIn(f"{word} broke", str(caught.exception))
 
     def test_dev_fingerprint_reads_head_branch_stash_and_status(self):
         real_git(self.repo, "checkout", "-q", "-b", "feature/other")
@@ -196,6 +234,9 @@ class DevCheckoutTest(GitCase):
         self.assertEqual(second["status"]["notes.txt"], first["status"]["notes.txt"])
         real_git(self.repo, "checkout", "-q", "--detach")
         self.assertIsNone(fix_state.dev_fingerprint(self.repo, subprocess.run)["branch"])
+        (self.repo / "a.txt").unlink()
+        os.mkfifo(self.repo / "a.txt")
+        self.assertIn("a.txt", fix_state.dev_fingerprint(self.repo, subprocess.run)["status"])
 
 
 class StartTest(GitCase):
@@ -329,7 +370,7 @@ class StartTest(GitCase):
         self.assertEqual(self.head(again["worktree"]), reviewer)
         key = self.key()
         self.assertEqual((key["mr"]["iid"], key["reused"], key["step"]), (12, "mr", "started"))
-        self.run_main(["abandon", self.run_dir])
+        self.assertEqual(self.run_main(["abandon", self.run_dir])[0], 0)
         self.open_pass(push="local")
         local = self.start_ok("front/qualite")
         fixed = self.fixer_commit(local["worktree"], "q.txt", "fix(CQ-5): y")
@@ -338,6 +379,21 @@ class StartTest(GitCase):
         self.assertEqual(again, local)
         self.assertEqual(self.head(again["worktree"]), fixed)
         self.assertEqual(again["start_sha"], self.head(self.repo, "refs/remotes/origin/develop"))
+
+    def test_start_never_takes_over_a_branch_when_gitlab_is_unreadable(self):
+        branch = PREFIX + "securite"
+        real_git(self.repo, "checkout", "-q", "-b", branch)
+        commit(self.repo, "s.txt", "fix(CQ-3): maybe in a closed MR")
+        real_git(self.repo, "checkout", "-q", "develop")
+        self.write_run(flight(branches=[{"branch": branch, "where": "local", "refs": [3]}],
+                              notes=[fix_gitlab.NO_API_NOTE]))
+        self.open_pass()
+        result = self.start_ok()
+        self.assertEqual(
+            (result["branch"], result["reused"], result["done_refs"]),
+            (PREFIX + "securite-2", None, []),
+        )
+        self.assertEqual(self.key()["rows"]["3"]["outcome"], "pending")
 
     def test_start_takes_the_first_free_suffix(self):
         self.push_branch(PREFIX + "qualite-2", "fix(CQ-4): closed")

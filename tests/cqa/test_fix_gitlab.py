@@ -57,8 +57,17 @@ class NamesTest(unittest.TestCase):
         fix_names.git(Path("/x"), run, "fetch")
         self.assertEqual(
             calls[0],
-            ["git", "-C", "/x", "-c", "core.hooksPath=/dev/null", "fetch"],
+            ["git", "-C", "/x", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+             "fetch"],
         )
+
+
+    def test_git_out_strips_or_gives_none(self):
+        answers = iter([done([], out=" abc\n"), done([], out="\n"), done([], 1, out="abc")])
+        run = lambda command, **kwargs: next(answers)
+        self.assertEqual(fix_names.git_out(Path("/x"), run, "rev-parse", "HEAD"), "abc")
+        self.assertIsNone(fix_names.git_out(Path("/x"), run, "rev-parse", "HEAD"))
+        self.assertIsNone(fix_names.git_out(Path("/x"), run, "rev-parse", "HEAD"))
 
 
 class RemoteTest(unittest.TestCase):

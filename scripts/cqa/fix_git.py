@@ -7,8 +7,8 @@ an upstream: a new branch is created with --no-track.
 from pathlib import Path
 from typing import Optional
 
-from cqa import fix_names
-from cqa.fix_state import git_out
+from cqa import fix_gitlab, fix_names
+from cqa.fix_names import git_out
 
 CHECKED_OUT = (
     "La branche {branch} est extraite dans votre dossier : changez de branche, puis relancez."
@@ -67,7 +67,8 @@ def reusable(flight: dict, slug: str) -> Optional[tuple]:
     """Return (reused, branch, mr) for the branch a real pass takes over, or None.
 
     An open MR wins over a branch without MR; the unsuffixed name wins, then the lowest
-    suffix. The branch of a merged or closed MR is never taken over.
+    suffix. The branch of a merged or closed MR is never taken over, and no branch is when
+    GitLab could not be read (it may belong to a closed or squash-merged MR).
     """
     prefix = fix_names.BRANCH_PREFIX
 
@@ -84,6 +85,8 @@ def reusable(flight: dict, slug: str) -> Optional[tuple]:
     if mrs:
         mr = min(mrs, key=lambda entry: order(entry["branch"]))
         return "mr", mr["branch"], {"iid": mr.get("iid"), "url": mr.get("url")}
+    if fix_gitlab.NO_API_NOTE in ((flight or {}).get("notes") or []):
+        return None
     branches = [
         entry["branch"] for entry in _entries(flight, "branches") if fits(entry.get("branch"))
     ]

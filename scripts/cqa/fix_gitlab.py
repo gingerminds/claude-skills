@@ -8,7 +8,7 @@ from cqa import fix_names
 from cqa.git_tools import _parse_remote
 
 _PUSH_LEVEL = 30
-_NO_API_NOTE = "GitLab illisible : les MR existantes ne sont pas connues."
+NO_API_NOTE = "GitLab illisible : les MR existantes ne sont pas connues."
 
 
 def host_and_path(remote: str) -> tuple:
@@ -163,7 +163,7 @@ def in_flight(run, repo: dict, host: str, project: str, base: str, *, api: bool)
     if not api:
         found["open"], found["closed"], found["merged"] = [], [], []
         found["notes"] = [note for note in found["notes"] if not note.startswith("Commits")]
-        found["notes"].append(_NO_API_NOTE)
+        found["notes"].append(NO_API_NOTE)
     merged_branches = {entry["branch"] for entry in found["merged"]}
     for branch, where in candidates:
         if branch in merged_branches:

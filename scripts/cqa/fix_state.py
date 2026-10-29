@@ -1,11 +1,10 @@
 """State of a fix pass (fix/state.json) and the fingerprint of the dev's own checkout."""
-import hashlib
 import json
 import os
 import re
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from cqa import fix_names
 from cqa.notion_read import write_json
@@ -16,7 +15,8 @@ STEPS = ("selected", "started", "fixed", "checked", "reviewed", "published", "do
 OUTCOMES = ("pending", "fixed", "skipped", "question", "dropped", "done_before")
 MODES = ("autonomous", "present")
 PUSHES = ("mr", "local", "dry_run")
-WORKTREE_DIRS = "fix/*/*/wt"
+WORKTREE_DIRS = "fix/[!_]*/*/wt"
+HISTORY_DIR = "fix/_history"
 _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
@@ -120,33 +120,33 @@ def new_state(candidates: dict, *, mode: str, push: str, notion: bool) -> dict:
 def dev_fingerprint(repo_path, run) -> dict:
     """Return what the dev's checkout looks like: HEAD, branch, stash and dirty paths.
 
-    status maps each path of git status (untracked files included) to its status code and a
-    digest of its content. Nothing is written in the repo, not even the index.
+    status maps each path of git status (untracked files included) to its status code and the
+    size and modification time of the file; no content is read. Nothing is written in the
+    repo, not even the index.
     """
-    head = git_out(repo_path, run, "rev-parse", "--verify", "--quiet", "HEAD")
-    branch = git_out(repo_path, run, "symbolic-ref", "--quiet", "--short", "HEAD")
-    stash = fix_names.git(repo_path, run, "stash", "list", "--format=%H")
-    status = fix_names.git(
-        repo_path, run, "--no-optional-locks", "status", "--porcelain=v1", "-uall", "-z"
+    head = fix_names.git_out(repo_path, run, "rev-parse", "--verify", "--quiet", "HEAD")
+    branch = fix_names.git_out(repo_path, run, "symbolic-ref", "--quiet", "--short", "HEAD")
+    stash = _checked(repo_path, run, "git stash list", "stash", "list", "--format=%H")
+    status = _checked(
+        repo_path, run, "git status",
+        "--no-optional-locks", "status", "--porcelain=v1", "-uall", "-z",
     )
-    if status.returncode != 0 or stash.returncode != 0:
-        raise ValueError(f"git status est impossible dans {repo_path} : {status.stderr.strip()}")
     return {
         "head": head,
         "branch": branch,
-        "stash": stash.stdout.split(),
+        "stash": stash.split(),
         "status": {
-            path: f"{code} {_digest(Path(repo_path) / path)}"
-            for path, code in _status_entries(status.stdout)
+            path: f"{code} {_stat(Path(repo_path) / path)}"
+            for path, code in _status_entries(status)
         },
     }
 
 
-def git_out(path, run, *args: str) -> Optional[str]:
-    """Return the stripped output of a git command, or None when it fails or prints nothing."""
-    result = fix_names.git(path, run, *args)
-    text = result.stdout.strip() if result.returncode == 0 else ""
-    return text or None
+def _checked(repo_path, run, label: str, *args: str) -> str:
+    result = fix_names.git(repo_path, run, *args)
+    if result.returncode != 0:
+        raise ValueError(f"{label} a échoué dans {repo_path} : {result.stderr.strip()}")
+    return result.stdout
 
 
 def _status_entries(text: str) -> list:
@@ -165,18 +165,20 @@ def _status_entries(text: str) -> list:
     return entries
 
 
-def _digest(path: Path) -> str:
+def _stat(path: Path) -> str:
+    """Return the kind, size and mtime of a path, without following links or reading it."""
     try:
-        if path.is_symlink():
-            return "link:" + hashlib.sha256(os.readlink(path).encode("utf-8", "replace")).hexdigest()
-        if path.is_dir():
-            return "dir"
-        digest = hashlib.sha256()
-        with open(path, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1 << 16), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
+        info = os.lstat(path)
     except FileNotFoundError:
         return "missing"
     except OSError:
         return "unreadable"
+    if stat.S_ISREG(info.st_mode):
+        kind = "file"
+    elif stat.S_ISLNK(info.st_mode):
+        kind = "link"
+    elif stat.S_ISDIR(info.st_mode):
+        return "dir"
+    else:
+        return "special"
+    return f"{kind}:{info.st_size}:{info.st_mtime_ns}"

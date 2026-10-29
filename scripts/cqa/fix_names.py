@@ -31,11 +31,22 @@ def branch_matches(branch: str, prefix: str, slug: str) -> bool:
 
 
 def git(path: Path, run, *args: str):
-    """Run git in path with the hooks of the repo disabled; return the CompletedProcess."""
+    """Run git in path with the hooks and the fsmonitor of the repo disabled.
+
+    Returns the CompletedProcess.
+    """
     return run(
-        ["git", "-C", str(path), "-c", "core.hooksPath=/dev/null", *args],
+        ["git", "-C", str(path), "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+         *args],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
     )
+
+
+def git_out(path: Path, run, *args: str) -> Optional[str]:
+    """Return the stripped output of a git command, or None when it fails or prints nothing."""
+    result = git(path, run, *args)
+    text = result.stdout.strip() if result.returncode == 0 else ""
+    return text or None
