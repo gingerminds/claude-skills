@@ -8,6 +8,8 @@
 # Env:     MANTIS_URL    base URL of the Mantis instance (e.g. https://mantis.example.com)
 #          MANTIS_TOKEN  Mantis API token (My Account -> API Tokens)
 #
+# Timeouts: curl uses --connect-timeout 10; --max-time 60 (digest), 180 (--file download).
+#
 # Exit codes:
 #   0  ticket printed / file downloaded
 #   2  missing env / bad usage   -> skill should fall back to "paste the ticket"
@@ -38,7 +40,7 @@ if [[ "${2:-}" == "--file" ]]; then
 
   fbody="$(mktemp)"
   trap 'rm -f "$fbody"' EXIT
-  code="$(curl -sS -o "$fbody" -w '%{http_code}' \
+  code="$(curl -sS --connect-timeout 10 --max-time 180 -o "$fbody" -w '%{http_code}' \
     -H "Authorization: ${MANTIS_TOKEN}" \
     -H "Accept: application/json" \
     "${base}/api/rest/issues/${id}/files/${file_id}")" \
@@ -46,7 +48,7 @@ if [[ "${2:-}" == "--file" ]]; then
 
   if [[ "$code" != "200" ]]; then
     echo "Mantis API returned HTTP ${code} for issue ${id} file ${file_id}." >&2
-    jq -r '.message // empty' "$fbody" 2>/dev/null >&2 || true
+    jq -r '.message // empty' "$fbody" >&2 2>/dev/null || true
     exit 3
   fi
 
@@ -70,14 +72,14 @@ fi
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
 
-code="$(curl -sS -o "$body" -w '%{http_code}' \
+code="$(curl -sS --connect-timeout 10 --max-time 60 -o "$body" -w '%{http_code}' \
   -H "Authorization: ${MANTIS_TOKEN}" \
   -H "Accept: application/json" \
   "${base}/api/rest/issues/${id}")" || { echo "curl failed reaching ${base}" >&2; exit 3; }
 
 if [[ "$code" != "200" ]]; then
   echo "Mantis API returned HTTP ${code} for issue ${id}." >&2
-  jq -r '.message // empty' "$body" 2>/dev/null >&2 || true
+  jq -r '.message // empty' "$body" >&2 2>/dev/null || true
   exit 3
 fi
 
