@@ -1504,6 +1504,34 @@ class FixAgentsTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
 
+    def test_each_fixer_pass_gets_its_own_review(self):
+        """R14: pass-start records Base before pass N, review N judges the rows of pass N."""
+        reference = _text(FIX_MD)
+        for section, needles in (
+            ("1. Keys", ("`cqa_fix.py pass-start <run_dir> <key> --pass <N>`",
+                         "Every fixer pass N that leaves rows fixed is followed by its own review N",
+                         "review p is recorded and blocks none of them")),
+            ("5. Questions", ("its own review",)),
+            ("6. Correction pass", ("once the reviews of the passes in progress are written",)),
+        ):
+            for needle in needles:
+                with self.subTest(section=section, needle=needle):
+                    self.assertIn(needle, _section(reference, section))
+        reviewer = _text(FIX_REVIEWER)
+        for needle in ("whose `pass` is N", "are not your concern", "`bases[\"<N>\"]`"):
+            with self.subTest(agent="reviewer", needle=needle):
+                self.assertIn(needle, reviewer)
+        self.assertNotIn("the diff would hold more than the pass", reviewer)
+        fixer = _text(FIXER)
+        for needle in ("reviewed on its own", "--no-ext-diff --no-textconv",
+                       "« Abandon : » wins over « À valider avec soin : »",
+                       "repeats its `covered_by`", "never « déjà corrigé sur develop »",
+                       "`index.lock`"):
+            with self.subTest(agent="fixer", needle=needle):
+                self.assertIn(needle, fixer)
+        self.assertIn("--no-ext-diff --no-textconv", _section(fixer, "Hard rules"))
+        self.assertIn("authored with the lead's git identity", _section(reference, "3. Commits"))
+
     def test_fix_reference_examples_pass_validation(self):
         blocks = [json.loads(block) for block in _JSON_BLOCK.findall(_text(FIX_MD))]
         report = next(block for block in blocks

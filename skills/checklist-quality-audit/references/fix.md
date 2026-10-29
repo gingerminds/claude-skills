@@ -17,6 +17,8 @@ The conventions of the fix mode (`/gm:checklist-quality-audit fix`, section 12 o
 | `mr-title.txt`, `mr.md`, `mr-addition.md` | `cqa_fix.py mr-body` | the title and description of the merge request |
 
 - A pass is one dispatch of the fixer on a key, numbered from 1. Pass 1 takes the selected rows of the key. A later pass takes the rows the lead answered (questions, section 5) or the rows a check, the guard or the review sent back (correction, section 6).
+- Right before each fixer pass, `cqa_fix.py pass-start <run_dir> <key> --pass <N>` records the head of the branch as the base of pass N (`keys[<key>].bases["<N>"]` in `fix/state.json`). Every fixer pass N that leaves rows fixed is followed by its own review N, whose `Base` is that recorded head.
+- `cqa_fix.py validate <run_dir> <key> review --pass <N>` records the blocking rows of review N (`keys[<key>].reviews["<N>"]`). The key reaches the step `reviewed`, which `mr-body` and `publish` need, only when no row is pending and, for every pass p that has rows fixed in it (`outcome` `fixed`, `pass` p), review p is recorded and blocks none of them. A row fixed again in a later pass belongs to that pass; a dropped row no longer counts. `drop` applies the same rule.
 - The range of a key is `<start_sha>..HEAD` of its worktree (`keys[<key>].start_sha` in `fix/state.json`). The guard, the checks, `validate` and `drop` judge only those commits.
 - Row outcomes in `fix/state.json`: `pending` (not reported yet), `fixed`, `skipped`, `question`, `dropped` (removed from the branch by `cqa_fix.py drop`), `done_before` (already on a reused branch before this pass, never reported again).
 
@@ -30,7 +32,7 @@ The conventions of the fix mode (`/gm:checklist-quality-audit fix`, section 12 o
 
 `Run dir: <run_dir>. Review: <repo>/<slug>. Worktree: <path>. Base: <sha>. Pass: <N>. Follow your instructions.`
 
-`Base` is the head of the branch just before the fixer pass under review (`start_sha` for pass 1): the reviewer reads `<Base>..HEAD`. The reviewer of pass N runs after `cqa_fix.py validate` has accepted `report-<N>.json`.
+`Base` is the head that `pass-start` recorded just before fixer pass N. The reviewer reads `<Base>..HEAD` and judges only the rows fixed in pass N (`pass` N in the state); when a later pass already ran, its commits are also in `<Base>..HEAD` and belong to its own review. The reviewer of pass N runs after `cqa_fix.py validate` has accepted `report-<N>.json`.
 
 **Notes file** `fix/<repo>/<slug>/notes-<N>.json`, written by the orchestrator before pass N (N from 2):
 
@@ -75,7 +77,7 @@ The audit found the search form label printed without escaping.
 Escape it with esc_html() in searchform.php.
 ```
 
-- **No attribution line** of any kind: no `Co-Authored-By`, no `Claude-Session`, no « Generated with », no mention of an assistant or a tool. This rule of the skill wins over the defaults of the tool that runs it. The commits are signed by the lead's git identity (`user.name` and `user.email` of the repo): never `--author`, never `-c user.*`.
+- **No attribution line** of any kind: no `Co-Authored-By`, no `Claude-Session`, no « Generated with », no mention of an assistant or a tool. This rule of the skill wins over the defaults of the tool that runs it. The commits are authored with the lead's git identity (`user.name` and `user.email` of the repo): never `--author`, never `-c user.*`.
 - **A commit carries one row only.** A row may take several commits, each with its ref. A change that also fixes another row of the key goes in the commit of the first row; the report of the second row names that row in `covered_by`, and the reviewer judges the commit for both.
 - **History is never rewritten** by a sub-agent: no `--amend`, `rebase`, `reset`, `cherry-pick`, `revert`, `merge` or `tag`. A correction is a new commit on top. Only `cqa_fix.py drop` (the orchestrator, before any push) removes the commits of a row from the branch.
 
@@ -126,7 +128,7 @@ Reasons of a skipped row, in French, 300 characters at most, precise enough for 
 - Not a question: a risk or a doubt about safety (skip, section 4), a dependency (skip, with the command), what the audit or the fiche already settles.
 - A secret the fix needs (a key, a password, a token) never goes in the code: the row becomes a question on where the value comes from (an environment variable, a constant of the server configuration), or is skipped.
 - An answered row is never asked again: the next pass applies the answer, or skips the row with the reason (« laissée aux devs par le lead » when that is the answer).
-- Present mode: the orchestrator asks the questions of a key as soon as the fixer is done, one at a time, then runs a fixer pass on the answered rows, before the guard and the review. Autonomous mode: each question is put aside with the kind `fix_question` and asked at the very end; the key goes on without the row. A row left without answer, or that the lead leaves to the devs, goes to « Hors-scope » in the merge request.
+- Present mode: the orchestrator asks the questions of a key as soon as the fixer is done, one at a time, then runs a fixer pass on the answered rows (its own `pass-start`, and its own review when it fixes rows), before the guard and the review. Autonomous mode: each question is put aside with the kind `fix_question` and asked at the very end; the key goes on without the row, and the pass on the answered rows at the end gets its own `pass-start` and review in the same way. A row left without answer, or that the lead leaves to the devs, goes to « Hors-scope » in the merge request.
 
 ## 6. Correction pass
 
@@ -134,7 +136,7 @@ Reasons of a skipped row, in French, 300 characters at most, precise enough for 
 - The fixer answers a `check` or `review` problem with new commits on top of the branch, with the row's ref and a subject that says what the correction does. It reports the row `fixed` again, with all its commits: the earlier ones as `fix/state.json` lists them now (a drop may have rewritten the SHAs of an earlier report), plus the new ones; `change` and `uat` describe the whole fix.
 - A `guard` problem sits in a commit already on the branch: the guard reads every commit of `<start_sha>..HEAD`, and history is never rewritten, so no new commit can clear it. The fixer gives the row up.
 - **Giving up**: a row with a commit on the branch can be neither `skipped` nor `question` (`validate` refuses it). The fixer reports it `fixed`, with its commits, `change` and `uat` as they stand, and an `attention` that starts with « Abandon : » followed by the reason in French, 300 characters at most in all, since it becomes the reason of the drop. The same holds in pass 1 for a row the fixer committed and then judged wrong. The orchestrator drops such a row with that reason, without a further correction pass; a reviewer that meets one gives it `blocking` with that reason.
-- A drop rewrites the commits that follow the dropped ones. Between a fixer pass and its review, it keeps `Base` in the branch only in pass 1 (`Base` is `start_sha`); after a later pass, drop once its review is written.
+- A drop rewrites the commits that follow the dropped ones, which can take a recorded `Base` out of the branch: drop only once the reviews of the passes in progress are written.
 - A correction pass is checked, guarded and reviewed like any pass; its reviewer reads only the correction commits (`<Base>..HEAD`).
 
 ## 7. Guard rails

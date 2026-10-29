@@ -32,7 +32,7 @@
         },
         "outcome": {
           "enum": ["fixed", "skipped", "question"],
-          "description": "fixed: corrected by commits of the branch. skipped: not attempted or given up, with the reason. question: a decision is missing, the row waits for the answer."
+          "description": "fixed: corrected by commits of the branch (a row given up after its commits stays fixed, with an attention starting with « Abandon : »). skipped: not attempted, with the reason; no commit of the row on the branch. question: a decision is missing, the row waits for the answer; no commit of the row on the branch."
         },
         "change": {
           "type": ["string", "null"],

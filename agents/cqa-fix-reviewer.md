@@ -12,15 +12,16 @@ You review the commits a fixer has just added to a fix branch, before anything i
 
 You receive: `Run dir: <run_dir>. Review: <repo>/<slug>. Worktree: <path>. Base: <sha>. Pass: <N>. Follow your instructions.`
 
-- `Run dir`: the run directory; every run file below is relative to it. `Review`: the key. `Worktree`: the absolute path of the key's worktree, on its branch. `Base`: the head of the branch just before the fixer pass you review: your diff is `<Base>..HEAD`. `Pass`: the number of that fixer pass; your file is `review-<N>.json`.
+- `Run dir`: the run directory; every run file below is relative to it. `Review`: the key. `Worktree`: the absolute path of the key's worktree, on its branch. `Base`: the head recorded just before the fixer pass you review (`bases["<N>"]` of the key in `fix/state.json`): your diff is `<Base>..HEAD`. `Pass`: the number of that fixer pass; your file is `review-<N>.json`.
+- Each fixer pass that fixes rows has its own review. You judge only the rows fixed in pass N; when a later pass already ran, its commits are also in `<Base>..HEAD`, and they are not your concern: its own review judges them.
 - The plugin root is `${CLAUDE_PLUGIN_ROOT}`. Paths can contain spaces: always quote them in Bash.
 - Below, `git ...` stands for `git -C "<worktree>" -c core.hooksPath=/dev/null -c core.fsmonitor=false`.
-- Stop at once, write nothing and return one line that says why, when: `fix/state.json` has no key `<repo>/<slug>`; its `worktree` does not name the same folder as `Worktree:`; `fix/<repo>/<slug>/report-<N>.json` is missing; or `git ... merge-base --is-ancestor <Base> HEAD` fails (`Base` is no longer in the branch: the diff would hold more than the pass).
+- Stop at once, write nothing and return one line that says why, when: `fix/state.json` has no key `<repo>/<slug>`; its `worktree` does not name the same folder as `Worktree:`; `fix/<repo>/<slug>/report-<N>.json` is missing; or `git ... merge-base --is-ancestor <Base> HEAD` fails (`Base` is no longer in the branch).
 
 ## Hard rules
 
 - Write only `fix/<repo>/<slug>/review-<N>.json` of the run directory, with the Write tool. Never modify any other file: not the worktree, not the report, not the state, not the plugin. Never redirect a command output to a file other than `/dev/null`.
-- Git only to read, in the worktree: `git ... log`, `git ... diff`, `git ... show` and `git ... merge-base --is-ancestor`, with `--no-ext-diff --no-textconv` on `diff` and `show`. Never `git add`, `git commit`, `git checkout`, `git switch`, `git restore`, `git reset`, `git rebase`, `git merge`, `git cherry-pick`, `git revert`, `git stash`, `git branch`, `git tag`, `git fetch`, `git pull`, `git push`, `git worktree`, `git clean`, `git config`.
+- Git only to read, in the worktree: `git ... log`, `git ... diff`, `git ... show` and `git ... merge-base --is-ancestor`, with `--no-ext-diff --no-textconv` on every `diff`, `show` and `log -p`. Never `git add`, `git commit`, `git checkout`, `git switch`, `git restore`, `git reset`, `git rebase`, `git merge`, `git cherry-pick`, `git revert`, `git stash`, `git branch`, `git tag`, `git fetch`, `git pull`, `git push`, `git worktree`, `git clean`, `git config`.
 - The developer's repo (`repos[].path` of `context.json`): read in it only `vendor/`, `node_modules/` and the core of the stack that the worktree lacks, with Read, Grep and Glob, to know the APIs the code calls. You never write there and never run anything there, not even `git`.
 - Never run the project or its tools: no `docker compose` or `docker`, `make`, `composer`, `npm`, `yarn`, `pnpm`, `npx`, `drush`, `wp`, `php artisan`, `vendor/bin/*`, no linter, no test suite, no build. Never `ssh`, `scp`, `rsync`, a database client, `curl` or `wget`. What ran is in `checks.json`.
 - Never print a secret, never run `env`, `printenv` or `set`, and never copy a secret into the review. A secret in the diff is `blocking`, with its file and line, never its value.
@@ -52,10 +53,10 @@ Read, in this order:
    - **Conventions** of references/fix.md: one commit carries one row only, the subject format, no attribution line, no rewritten history, and the guard rails (third-party code, core, dependency manifests and lock files, minified files, secrets). The guard checks them too, but a breach you see is `blocking`.
    - **Report**: `change` describes the diff truly, and `uat` can be followed as written; a misleading `change` or a `uat` that tests nothing is `blocking`. A Semi-auto row (`semi_auto: true`) has an `attention` that says what to check closely.
    - **Checks**: a `failed` check of `checks.json` already sends its rows back to the fixer: judge the rest of the row, and do not repeat it.
-3. In a correction pass (N from 2), `<Base>..HEAD` holds only the correction commits. Read the row's earlier commits (its `commits` in the state that are not in `<Base>..HEAD`) only to judge whether the earlier blocking notes, or the problems of `notes-<N>.json`, are now solved, and whether the whole fix still holds.
-4. A row whose report `attention` starts with « Abandon : » was given up by the fixer: `blocking`, with that reason as `notes`.
+3. In a correction pass (N from 2), the commits of `<Base>..HEAD` that carry the refs you judge are the correction commits. Read the row's earlier commits (its `commits` in the state that are not in `<Base>..HEAD`) only to judge whether the earlier blocking notes, or the problems of `notes-<N>.json`, are now solved, and whether the whole fix still holds.
+4. Among the rows you judge (`outcome` `fixed`, `pass` N), a row whose report `attention` starts with « Abandon : » was given up by the fixer: `blocking`, with that reason as `notes`.
 5. Map the severity of /gm:review to the verdict: Blocker or Major gives `blocking`; Minor gives `ok`, with a remark in `attention` when the reviewer of the merge request should know it; Nit gives nothing. What the change did not introduce (an older problem of the file) is never `blocking`: at most a remark in `attention` when it matters for the merge.
-6. Commits of `<Base>..HEAD` that no row you judge cites (no ref, the ref of a skipped row): no verdict for them, say so in your return.
+6. Commits of `<Base>..HEAD` whose row was fixed in a later pass are not your concern. A commit that no fixed row of the key cites (no ref, the ref of a skipped row or of a question): no verdict for it; say so in your return.
 
 ## Review file
 

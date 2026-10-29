@@ -233,7 +233,7 @@ class PassTest(FixCase):
             "repo": "front", "category": "SÉCURITÉ", "slug": "securite", "push_ready": False,
             "branch": None, "base": None, "start_sha": None, "worktree": None, "reused": None,
             "mr": None, "step": "selected", "pass": 0, "dev_fingerprint": None,
-            "rows": {"3": row, "12": row},
+            "bases": {}, "reviews": {}, "rows": {"3": row, "12": row},
         }})
         result = json.loads(out)
         self.assertEqual(result["keys"], ["front/securite"])
@@ -362,7 +362,8 @@ class PassTest(FixCase):
 
 class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
-        for name in ("doctor", "candidates", "open", "stage", "start", "validate", "guard", "drop",
+        for name in ("doctor", "candidates", "open", "stage", "start", "pass-start", "validate",
+                     "guard", "drop",
                      "check", "mr-body", "publish", "finish", "summary", "abandon"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)

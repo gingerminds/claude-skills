@@ -111,6 +111,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = _command(commands, "start", "branche et worktree d'une clé", _cmd_start)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help="clé <repo>/<slug> de fix/candidates.json")
+    sub = _command(commands, "pass-start", "note la tête de la branche avant une passe du fixer",
+                   _cmd_pass_start)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help="clé <repo>/<slug> de la passe")
+    sub.add_argument("--pass", dest="number", type=int, required=True,
+                     help="numéro de la passe du fixer qui commence")
     sub = _command(commands, "validate", "contrôle un rapport ou une revue", _cmd_validate)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help="clé <repo>/<slug> de la passe")
@@ -347,6 +353,40 @@ def _cmd_start(args, services: Services) -> int:
     return EXIT_OK
 
 
+def _cmd_pass_start(args, services: Services) -> int:
+    """Record the head of the key's branch just before fixer pass N: the Base of review N.
+
+    N must not be lower than a pass already started, and no report of pass N or later may be
+    validated yet; starting the same pass again before its report overwrites its base.
+    """
+    run_dir = args.run_dir.resolve()
+    if args.number < 1:
+        raise UsageError("--pass : un numéro de passe à partir de 1 est attendu.")
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    bases = _recorded(key, "bases")
+    started = max((int(number) for number in bases), default=0)
+    reported = key.get("pass") or 0
+    if args.number < started:
+        raise UsageError(
+            f"--pass {args.number} : la passe {started} de la clé {args.key} est déjà commencée."
+        )
+    if args.number <= reported:
+        raise UsageError(
+            f"--pass {args.number} : le rapport de la passe {reported} de la clé {args.key} est "
+            f"déjà validé ; la passe suivante est la passe {reported + 1}."
+        )
+    worktree = _key_worktree(run_dir, key, services.run)
+    head = fix_names.git_out(worktree, services.run, "rev-parse", "--verify", "--quiet", "HEAD")
+    if not fix_git.is_sha(head):
+        raise fix_git.GitRefused(f"git rev-parse HEAD a échoué dans {worktree}.")
+    bases[str(args.number)] = head
+    key["bases"] = bases
+    fix_state.save(run_dir, state)
+    _emit({"pass": args.number, "base": head})
+    return EXIT_OK
+
+
 def _cmd_validate(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     if args.number < 1:
@@ -389,14 +429,18 @@ def _cmd_validate(args, services: Services) -> int:
 
 
 def _validate_review(run_dir: Path, state: dict, key: dict, args, document, errors: list) -> int:
-    """Check review-<N>.json; a review without blocking verdict moves the key to reviewed."""
+    """Check review-<N>.json and record its blocking rows; see _every_pass_reviewed."""
     blocking = []
     if document is not None:
         blocking, errors = fix_guard.validate_review(
             document, key=args.key, number=args.number, rows=key["rows"]
         )
-    if not errors and not blocking:
-        key["step"] = "reviewed"
+    if not errors:
+        reviews = _recorded(key, "reviews")
+        reviews[str(args.number)] = {"blocking": blocking}
+        key["reviews"] = reviews
+        if _every_pass_reviewed(key):
+            _raise_step(key, "reviewed")
         fix_state.save(run_dir, state)
     _emit({"ok": not errors, "errors": errors, "blocking": blocking})
     return EXIT_CONTEXT if errors else EXIT_OK
@@ -495,10 +539,8 @@ def _cmd_drop(args, services: Services) -> int:
                 f"retirée avec {_labels(refs)} : son correctif dépend d'un commit retiré"))
         else:
             row["commits"] = [rewritten.get(sha, sha) for sha in row.get("commits") or []]
-    if _blocking_rows_dropped(run_dir, key):
-        steps = fix_state.STEPS
-        if steps.index(key.get("step", "started")) < steps.index("reviewed"):
-            key["step"] = "reviewed"
+    if _every_pass_reviewed(key):
+        _raise_step(key, "reviewed")
     fix_state.save(run_dir, state)
     if result["unattached"]:
         raise fix_git.GitRefused(result["unattached"])
@@ -506,24 +548,45 @@ def _cmd_drop(args, services: Services) -> int:
     return EXIT_OK
 
 
-def _blocking_rows_dropped(run_dir: Path, key: dict) -> bool:
-    """True when the latest review of the key has blocking rows and all of them are dropped."""
-    folder = run_dir / "fix" / key["repo"] / key["slug"]
-    numbers = [
-        int(found.group(1)) for found in (_REVIEW_FILE.fullmatch(path.name)
-                                          for path in folder.glob("review-*.json")) if found
-    ]
-    if not numbers:
+def _every_pass_reviewed(key: dict) -> bool:
+    """True when the key may be reviewed (R14): no row is pending and, for every pass p with
+    rows fixed in it, review p is recorded and blocks none of them.
+
+    A row fixed again in a later pass belongs to that pass: an earlier blocking verdict on it no
+    longer counts. A dropped row is no longer fixed.
+    """
+    rows = [row for row in key["rows"].values() if isinstance(row, dict)]
+    if any(row.get("outcome") == "pending" for row in rows):
         return False
-    document, errors = _read_key_file(run_dir, key, f"review-{max(numbers)}.json")
-    items = document.get("rows") if isinstance(document, dict) else None
-    if errors or not isinstance(items, list):
-        return False
-    blocking = [item.get("ref") for item in items
-                if isinstance(item, dict) and item.get("verdict") == "blocking"]
-    return bool(blocking) and all(
-        (key["rows"].get(str(ref)) or {}).get("outcome") == "dropped" for ref in blocking
-    )
+    reviews = _recorded(key, "reviews")
+    fixed = {}
+    for ref, row in key["rows"].items():
+        if isinstance(row, dict) and row.get("outcome") == "fixed":
+            fixed.setdefault(str(row.get("pass") or 0), set()).add(int(ref))
+    for number, refs in fixed.items():
+        review = reviews.get(number)
+        if not isinstance(review, dict) or refs & set(review.get("blocking") or []):
+            return False
+    return True
+
+
+def _raise_step(key: dict, step: str) -> None:
+    """Move the key forward to step, never back."""
+    steps = fix_state.STEPS
+    if steps.index(key.get("step", "started")) < steps.index(step):
+        key["step"] = step
+
+
+def _recorded(key: dict, name: str) -> dict:
+    """Return the "bases" or "reviews" of a key ({} when absent), checked to be keyed by pass."""
+    value = key.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or not all(str(number).isdigit() for number in value):
+        raise fix_state.StateError(
+            f"{fix_state.STATE_FILE} : « {name} » doit être un objet indexé par numéro de passe."
+        )
+    return dict(value)
 
 
 def _cmd_mr_body(args, services: Services) -> int:
