@@ -369,7 +369,7 @@ class FakeGitLab:
 
     def __init__(self):
         self.git, self.calls, self.mrs = [], [], {}
-        self.next_iid, self.create_output = 12, None
+        self.next_iid, self.create_output, self.fail_git = 12, None, None
 
     def url(self, iid):
         return f"https://{HOST}/acme/shop/-/merge_requests/{iid}"
@@ -381,6 +381,8 @@ class FakeGitLab:
     def __call__(self, command, **kwargs):
         if command[0] == "git":
             self.git.append(list(command))
+            if self.fail_git and self.fail_git in command:
+                return done(command, "", 128, "fatal: simulated failure")
             return subprocess.run(command, **kwargs)
         args = list(command[1:])
         self.calls.append((args, kwargs))
@@ -860,6 +862,68 @@ class PublishTest(MrCase):
         link = [{"repo": "front", "url": MR_URL, "iid": 12}]
         self.assertEqual(self.links(), {"links": {"3": link, "5": link}})
         self.assertEqual(json.loads(out)["links"], [3, 5])
+
+    def take_over_local_branch(self, *subjects):
+        """Start on a never-pushed fix branch carrying one commit per subject; return the SHAs."""
+        branch = PREFIX + "securite"
+        real_git(self.repo, "checkout", "-q", "-b", branch)
+        shas = [commit(self.repo, f"inherited-{index}.txt", subject)
+                for index, subject in enumerate(subjects)]
+        real_git(self.repo, "checkout", "-q", "develop")
+        refs = sorted({int(found) for found in re.findall(r"\(CQ-([0-9]+)\)", " ".join(subjects))})
+        self.write_run(flight(branches=[{"branch": branch, "where": "local", "refs": refs}]))
+        self.open_pass()
+        started = self.start_ok()
+        self.worktree, self.branch = Path(started["worktree"]), started["branch"]
+        return shas
+
+    def test_guard_waives_stray_refs_of_inherited_commits_only(self):
+        self.take_over_local_branch("fix(CQ-3): earlier fix", "fix(CQ-40): earlier fix of another row")
+        stray = self.fixer_commit(self.worktree, "p40.txt", "fix(CQ-40): pass work outside the key")
+        code, out, err = self.cli("guard", KEY)
+        self.assertEqual(code, 5)
+        self.assertEqual(json.loads(out)["problems"],
+                         [{"sha": stray, "ref": 40, "path": None, "reason": "Réf hors de cette MR"}])
+
+    def test_publish_refuses_a_commit_the_fixer_did_not_report(self):
+        self.reviewed()
+        extra = self.fixer_commit(self.worktree, "extra.txt", "fix(CQ-3): extra change")
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 5)
+        self.assertIn(f"commit non rapporté par le fixer : {extra[:12]} fix(CQ-3): extra change", err)
+        self.assertNotIn(self.fixed[:12], err)
+        self.assertTrue(err.strip().endswith("Rien n'a été poussé."))
+        self.assertEqual(self.remote(self.branch), "")
+        self.assertEqual(self.glab_args("mr"), [])
+
+    def test_publish_refuses_a_pass_commit_of_a_row_done_before(self):
+        self.take_over_local_branch("fix(CQ-3): earlier fix")
+        self.assertEqual(self.key()["rows"]["3"]["outcome"], "done_before")
+        more = self.fixer_commit(self.worktree, "more3.txt", "fix(CQ-3): more on a done row")
+        self.fix_row_5()
+        self.assertEqual(self.cli("guard", KEY)[0], 0)
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 5)
+        self.assertIn(f"commit non rapporté par le fixer : {more[:12]} fix(CQ-3): more on a done row",
+                      err)
+        self.assertEqual(self.remote(self.branch), "")
+
+    def test_publish_says_nothing_was_pushed_when_origin_is_unreadable(self):
+        self.reviewed()
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        for word in ("ls-remote", "fetch"):
+            with self.subTest(command=word):
+                if word == "fetch":
+                    real_git(self.worktree, "push", "-q", "origin", f"{self.fixed}:refs/heads/{self.branch}")
+                self.gitlab.fail_git = word
+                code, out, err = self.cli("publish", KEY)
+                self.assertEqual(code, 2)
+                self.assertIn("simulated failure", err)
+                self.assertTrue(err.strip().endswith("Rien n'a été poussé."), err)
+                self.assertEqual(self.glab_args("mr"), [])
+                self.assertEqual(self.key()["step"], "reviewed")
 
     def fix_row_5(self):
         """Fix CQ-5 in pass 1 of a key whose CQ-3 is done_before, then review: reviewed."""

@@ -38,6 +38,8 @@ NEED_BODY = "Lancez d'abord cqa_fix.py mr-body."
 DIVERGED = "La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé."
 NOTHING_TO_PUBLISH = "Aucun commit sur la branche : ni push ni MR."
 STALE_BODY = "Description de MR périmée : relancez mr-body."
+NOTHING_PUSHED = "Rien n'a été poussé."
+UNREPORTED = "commit non rapporté par le fixer : {sha} {subject}"
 LINKS_FILE = "fix/mr-links.json"
 # Push settings of the dev's config that could send more than the branch, trigger GitLab
 # push options (ci.skip, merge_request.*) or prompt. An empty pushOption resets the list.
@@ -577,8 +579,9 @@ def _cmd_publish(args, services: Services) -> int:
     """Push the key's branch, then create its draft MR or add to the description of its MR.
 
     Nothing leaves the machine before every check passed: local pass, step, branch name,
-    state of the MR on GitLab, description files, secrets, guard, and a remote branch that
-    HEAD contains. The push is a fast-forward of that one branch, never forced.
+    state of the MR on GitLab, fresh description files, secrets, guard, every new commit
+    reported by the fixer, and a remote branch that HEAD contains. The push is a fast-forward
+    of that one branch, never forced.
     """
     run = services.run
     run_dir = args.run_dir.resolve()
@@ -641,6 +644,11 @@ def _cmd_publish(args, services: Services) -> int:
         print(f"Garde-fou : {len(problems)} problème(s) sur la branche {branch}, rien n'a été "
               "poussé : détail dans « problems ».", file=sys.stderr)
         return EXIT_REFUSED
+    unreported = _unreported(worktree, key, run)
+    if unreported:
+        lines = [UNREPORTED.format(sha=item["sha"][:12], subject=item["message"].split("\n", 1)[0])
+                 for item in unreported]
+        raise fix_git.Refused("\n".join(lines + [NOTHING_PUSHED]))
     head = fix_git.rev(worktree, run, "HEAD")
     remote = _remote_head(worktree, run, branch)
     if remote is not None and not fix_git.is_ancestor(worktree, run, remote, head):
@@ -866,18 +874,37 @@ def _find_open_mr(run, host: str, encoded: str, branch: str) -> Optional[dict]:
 def _guard_problems(run_dir: Path, key: dict, worktree: Path, run) -> list:
     """Run the guard on <start_sha>..HEAD of the key.
 
-    The refs of the key's rows are allowed, and so are those of the commits a taken-over
-    branch carried between start_sha and its head (never pushed, judged all the same).
+    The commits a taken-over branch carried between start_sha and its head (never pushed) are
+    judged like the others, except that a ref outside the key is not held against them.
     """
     repo = _repo(run_dir, key["repo"])
     _third_party(repo)
-    refs = {int(ref) for ref in key["rows"]}
-    taken = key.get("taken_head")
-    if taken and taken != key["start_sha"]:
-        refs.update(fix_git.refs_between(worktree, run, key["start_sha"], taken))
-    return fix_guard.check_commits(
-        worktree, key["start_sha"], refs, repo, known_values_from_env(), run,
+    problems = fix_guard.check_commits(
+        worktree, key["start_sha"], {int(ref) for ref in key["rows"]}, repo,
+        known_values_from_env(), run,
     )
+    inherited = _inherited_commits(worktree, key, run)
+    return [problem for problem in problems
+            if not (problem["reason"] == fix_guard.OUT_OF_KEY and problem["sha"] in inherited)]
+
+
+def _inherited_commits(worktree: Path, key: dict, run) -> set:
+    """Return the SHAs of <start_sha>..<taken_head>: what a taken-over branch carried."""
+    taken = key.get("taken_head")
+    if not taken or taken == key["start_sha"]:
+        return set()
+    listing = fix_names.git(worktree, run, "rev-list", f"{key['start_sha']}..{taken}")
+    if listing.returncode != 0:
+        raise fix_git.GitRefused(f"git rev-list a échoué dans {worktree} : {listing.stderr.strip()}")
+    return set(listing.stdout.split())
+
+
+def _unreported(worktree: Path, key: dict, run) -> list:
+    """Return the commits of <taken_head or start_sha>..HEAD that no fixed row of the state lists."""
+    reported = {sha for row in key["rows"].values() if row.get("outcome") == "fixed"
+                for sha in row.get("commits") or []}
+    commits = fix_git.commits_in_range(worktree, run, key.get("taken_head") or key["start_sha"])
+    return [commit for commit in commits if commit["sha"] not in reported]
 
 
 def _body_stamp(run_dir: Path, key: dict, worktree: Path, run) -> dict:
@@ -902,10 +929,18 @@ def _ahead_of_base(worktree: Path, run, base: str) -> int:
 
 def _remote_head(worktree: Path, run, branch: str) -> Optional[str]:
     """Fetch origin/<branch> when GitLab has it and return its head, else None."""
-    if not fix_git.remote_has(worktree, run, branch):
+    try:
+        present = fix_git.remote_has(worktree, run, branch)
+    except fix_git.GitRefused as error:
+        raise fix_git.GitRefused(f"{error}. {NOTHING_PUSHED}")
+    if not present:
         return None
-    if not fix_git.fetch(worktree, run, f"+refs/heads/{branch}:refs/remotes/origin/{branch}"):
-        raise fix_git.GitRefused(f"git fetch origin {branch} a échoué : rien n'a été poussé.")
+    fetched = fix_names.git(worktree, run, "fetch", "--quiet", "origin",
+                            f"+refs/heads/{branch}:refs/remotes/origin/{branch}")
+    if fetched.returncode != 0:
+        raise fix_git.GitRefused(
+            f"git fetch origin {branch} a échoué : {fetched.stderr.strip()}. {NOTHING_PUSHED}"
+        )
     return fix_git.rev(worktree, run, f"refs/remotes/origin/{branch}")
 
 
