@@ -162,7 +162,7 @@ Written in the instructions of the sub-agents, and checked in code: `cqa_fix.py 
 
 ## 8. Report and review files
 
-**Report** `fix/<repo>/<slug>/report-<N>.json`, format `skills/checklist-quality-audit/schemas/fix-report.schema.json`, checked by `cqa_fix.py validate <run_dir> <key> report --pass <N>` (exit 6 with every error in French; a valid report updates the rows of `fix/state.json`):
+**Report** `fix/<repo>/report-<N>.json`, format `skills/checklist-quality-audit/schemas/fix-report.schema.json`, checked by `cqa_fix.py validate <run_dir> <key> report --pass <N>` (exit 6 with every error in French; a valid report updates the rows of `fix/state.json`):
 
 - `key` and `pass` as in the dispatch; one entry per row, `ref` as an integer (107 for CQ-107), each ref once.
 - Every row of `Rows:` and every row still `pending` in the state is in the report. Rows `done_before` or `dropped` are not.
@@ -229,7 +229,7 @@ Written in the instructions of the sub-agents, and checked in code: `cqa_fix.py 
 }
 ```
 
-**Review** `fix/<repo>/<slug>/review-<N>.json`, format `skills/checklist-quality-audit/schemas/fix-review.schema.json`, checked by `cqa_fix.py validate <run_dir> <key> review --pass <N>` (exit 6 with every error in French):
+**Review** `fix/<repo>/review-<N>.json`, format `skills/checklist-quality-audit/schemas/fix-review.schema.json`, checked by `cqa_fix.py validate <run_dir> <key> review --pass <N>` (exit 6 with every error in French):
 
 - `key` and `pass` as in the dispatch; `rows` with one verdict per row the state shows `fixed` in pass N, and no verdict on another row; `attention`, a list (`[]` when there is nothing).
 - `ok`: the fix may go in the merge request as is; `notes` optional. `blocking`: it may not; `notes` required, in French, 600 characters at most: what is wrong and what to change. The fixer reads it alone, in one attempt.

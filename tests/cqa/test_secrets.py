@@ -310,6 +310,9 @@ class LiteralCredentialsTest(unittest.TestCase):
         "$token = !empty( $_GET['t'] ) ? sanitize_text_field( wp_unslash( $_GET['t'] ) ) : null;",
         "$password = (string) $request->get( 'password' );",
         "$secret = wp_unslash( $_POST['secret'] ?? '' );",
+        WORDPRESS + " // phpcs:ignore WordPress.Security.NonceVerification.Missing",
+        "$password = wp_generate_password( 24, false );",
+        "$token = $this->tokens->create( $user->ID, array( 'expires' => 3600 ) );",
     ]
     STILL_SECRETS = [
         "$password = 'hunter2hunter2';",
@@ -319,6 +322,22 @@ class LiteralCredentialsTest(unittest.TestCase):
         "password=isset(x)&token=abcd1234efgh5678",
         "PASSWORD=(hunter22)",
         "password: hunter22 (prod)",
+        # Round 1: a bare token that only looks like a call, a negation or a cast.
+        "DB_PASSWORD=Adm1n(2024)!",
+        "DB_PASSWORD=Adm1n(2024",
+        "API_KEY=sk(4f9a8b7c6d5e4f3a2b1c)z",
+        "password: Hunter2(prod)x",
+        "PASSWORD=!$uperS3cret",
+        "password=!Secret(x)y",
+        "PASSWORD=(string)hunter22",
+        "token: Abc(def ghi jkl",
+        "$password = foo(1) . Adm1nP4ss;",
+        "$password = foo( 1 ) . Adm1nP4ss;",
+        "$password = isset( $_POST['p'] ) ? Adm1nP4ss : '';",
+        "$password = isset( $x&token=abcd1234efgh5678 );",
+        "$password = (string) Adm1nP4ss;",
+        "$password = isset( $x ) ? $y : 2024;",
+        "password = isset(",
     ]
 
     def test_literal_only_credentials(self):

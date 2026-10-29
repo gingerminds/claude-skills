@@ -112,15 +112,23 @@ _ACCESSOR_CALL = re.compile(
 _HARMLESS_LITERAL = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+|[A-Z][A-Z0-9_]*")
 # A value cut at a space before "(" or "[" is a call or index: its arguments stay masked.
 _OPENING_BRACKET = re.compile(r"[ \t]*(?:\(|\[(?!secret masqué\]))")
-# Literal mode (the guard of the fix mode): an unquoted value that starts as code (a call, a
-# negated call or variable, a cast) is an expression, never a literal. A shell expansion
-# ($(...), ${...}, :-) keeps the rules above, since its words may be the value.
-_EXPRESSION_START = re.compile(
-    r"(?:![ \t]*)?[A-Za-z_][\w.\\]*\(|![ \t]*\$[A-Za-z_]"
-    r"|\((?:string|int|integer|bool|boolean|float|double|array|object)\)",
-    re.IGNORECASE,
-)
+# Literal mode (the guard of the fix mode): an unquoted value is an expression only when its
+# first bare word is exactly a call opener ("isset(", "!empty(") or a cast ("(string)"), the
+# statement goes on after it, and every word of the statement is code (see _is_code_word). A
+# shell expansion ($(...), ${...}, :-) keeps the rules above, since its words may be the value.
+_CASTS = frozenset({"string", "int", "integer", "bool", "boolean", "float", "double", "array",
+                    "object"})
+_OPENER = re.compile(r"!?[A-Za-z_][\w.\\]*\(|\((?:" + "|".join(sorted(_CASTS)) + r")\)",
+                     re.IGNORECASE)
 _SHELL_EXPANSION = re.compile(r"\$[({]|`|:-")
+_CODE_WORD = re.compile(
+    r"(?P<var>\$+[A-Za-z_]\w*)"
+    r"|(?P<member>(?:\?->|->|::)[A-Za-z_]\w*)"
+    r"|(?P<name>[A-Za-z_][\w\\]*(?:\.[A-Za-z_][\w\\]*)*)"
+    r"|(?P<number>[0-9][\w.]*)"
+)
+_CODE_KEYWORDS = frozenset({"null", "true", "false", "none", "nil", "undefined", "and", "or",
+                            "xor", "not", "new", "instanceof", "clone", "is", "in"})
 
 
 def _is_non_secret(match: re.Match, literal: bool = False) -> bool:
@@ -148,21 +156,58 @@ def _is_non_secret(match: re.Match, literal: bool = False) -> bool:
         or (value.startswith(":") and text[match.start("val") - 1:match.start("val")] == ":")
     )
     if not is_code and literal:
-        is_code = _is_expression(value, rest)
+        is_code = _is_expression(rest)
     if not is_code or ":-" in rest:
         return False
     literals = list(_QUOTED_LITERAL.finditer(rest)) + list(_N_LITERAL.finditer(rest))
     return all(_is_harmless_literal(rest, literal) for literal in literals)
 
 
-def _is_expression(value: str, rest: str) -> bool:
-    """True when an unquoted value starts an expression (call, cast, negation) that holds no
-    shell expansion and hides no other credential assignment in its first word."""
-    return (
-        bool(_EXPRESSION_START.match(rest))
-        and not _SHELL_EXPANSION.search(rest)
-        and _CREDENTIAL.search(value) is None
-    )
+def _is_expression(rest: str) -> bool:
+    """True when the value (rest: from the value to the end of its line) is an expression
+    without any literal part: its first bare word is exactly a call opener or a cast, the
+    statement goes on after it, there is no shell expansion, and every word of the statement
+    (up to its first ";" outside brackets) is code. Quoted literals are judged by the caller.
+    """
+    words = rest.split(None, 1)
+    if len(words) < 2 or not _OPENER.fullmatch(words[0]) or _SHELL_EXPANSION.search(rest):
+        return False
+    code = _statement(_QUOTED_LITERAL.sub(lambda found: " " * len(found.group(0)), rest))
+    return all(_is_code_word(code, found) for found in _CODE_WORD.finditer(code))
+
+
+def _statement(code: str) -> str:
+    """Return code up to its first ";" outside brackets (a trailing comment is left out)."""
+    depth = 0
+    for index, char in enumerate(code):
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif char == ";" and depth <= 0:
+            return code[:index]
+    return code
+
+
+def _is_code_word(code: str, found: re.Match) -> bool:
+    """True for a variable, a member, a called name, a class before :: or ->, a keyword, a
+    cast, or a whole number inside brackets (an argument or an index). Any other word is a
+    literal part of the value."""
+    kind, start, end = found.lastgroup, found.start(), found.end()
+    if kind in ("var", "member"):
+        return True
+    word = found.group().lower()
+    if kind == "number":
+        return word.isdigit() and _depth(code[:start]) > 0
+    if code[end:end + 1] == "(" or code[end:end + 2] in ("::", "->") or code[end:end + 3] == "?->":
+        return True
+    if word in _CODE_KEYWORDS:
+        return True
+    return word in _CASTS and code[start - 1:start] == "(" and code[end:end + 1] == ")"
+
+
+def _depth(code: str) -> int:
+    return code.count("(") + code.count("[") - code.count(")") - code.count("]")
 
 
 def _is_reference(text: str) -> bool:

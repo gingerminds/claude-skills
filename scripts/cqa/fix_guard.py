@@ -92,9 +92,16 @@ _ATTRIBUTION = re.compile(r"\W*(?:co-authored-by\s*:|claude-session\s*:|generate
                           re.IGNORECASE)
 _SHORT_SHA = re.compile(r"[0-9a-f]{7,64}")
 _ABANDON = re.compile(r"\s*abandon\s*:", re.IGNORECASE)
-# An option that leaves the row as it is: the orchestrator already offers to leave it to a dev.
-_AS_IS = ("ne rien", "rien faire", "laisser", "à un dev", "aux devs", "pas de changement",
-          "ne pas corriger")
+# An option that leaves the row as it is, in whole words: the orchestrator already offers to
+# leave it to a dev. « Laisser un alt vide » or « Ne rien afficher » are real fixes.
+_AS_IS = re.compile(
+    r"\b(?:rien (?:faire|changer|modifier)"
+    r"|pas de (?:changement|modification)s?"
+    r"|ne pas (?:corriger|modifier|changer)"
+    r"|laisser (?:en l['\u2019]état|tel(?:le)?s? quel(?:le)?s?)"
+    r"|(?:à une?|aux|au) (?:devs?|développeur(?:se)?s?))\b",
+    re.IGNORECASE,
+)
 _DIFF = ("-U0", "--text", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
          "--src-prefix=a/", "--dst-prefix=b/")
 _C_ESCAPE = re.compile(r'\\([0-7]{3}|[abtnvfr"\\])')
@@ -172,8 +179,9 @@ def review_scope(worktree: Path, run, base: str) -> dict:
     """Return {"light", "lines", "files"} for the diff base..HEAD that the review of a pass reads.
 
     files lists its paths, sorted; lines counts its added plus removed lines. light is True
-    when every file is documentation (fix_names.is_documentation), none binary, and lines is
-    LIGHT_REVIEW_LINES at most: the orchestrator then writes the review itself.
+    when there is at least one file, every file is documentation (fix_names.is_documentation),
+    none binary, and lines is LIGHT_REVIEW_LINES at most: the orchestrator then writes the
+    review itself.
     """
     result = fix_names.git(
         Path(worktree), run, "diff", "--numstat", "-z", "--no-renames", "--no-ext-diff",
@@ -193,7 +201,7 @@ def review_scope(worktree: Path, run, base: str) -> dict:
         else:
             binary = True
     files.sort()
-    light = (not binary and lines <= LIGHT_REVIEW_LINES
+    light = (bool(files) and not binary and lines <= LIGHT_REVIEW_LINES
              and all(fix_names.is_documentation(path) for path in files))
     return {"light": light, "lines": lines, "files": files}
 
@@ -565,7 +573,7 @@ def _question(value) -> list:
         problems += [
             f"« question.options » : « {option} » laisse la ligne en l'état ; l'orchestrateur "
             "propose déjà de la laisser aux devs"
-            for option in options if any(words in option.casefold() for words in _AS_IS)
+            for option in options if _AS_IS.search(option)
         ]
     return problems
 

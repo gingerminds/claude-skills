@@ -634,6 +634,7 @@ class ValidateTest(GitCase):
         code, out, err = self.run_main(["review-scope", self.run_dir, KEY, "--pass", "2"])
         self.assertEqual(code, 2, err)
         self.assertIn("pass-start", err)
+        self.assertEqual(scope(1), {"light": False, "lines": 0, "files": []})
         readme = [f"Ligne {index}" for index in range(30)]
         commit_lines({"README.md": readme}, "docs(securite CQ-3): document the headers")
         self.assertEqual(scope(1), {"light": True, "lines": 30, "files": ["README.md"]})
@@ -1380,9 +1381,10 @@ class ValidateReportTest(unittest.TestCase):
             "ligne CQ-3 : « remaining » dépasse 300 caractères (301)",
             "ligne CQ-5 : « remaining » ne sert qu'à une ligne corrigée (fixed)",
         ])
-        for option in ("Ne rien faire", "Laisser en l'état", "Confier la ligne à un dev",
-                       "La laisser aux devs", "Pas de changement", "Ne pas corriger",
-                       "RIEN FAIRE pour l'instant"):
+        for option in ("Ne rien faire", "Laisser en l'état", "Laisser en l\u2019état",
+                       "Laisser tel quel", "Confier la ligne à un dev", "La laisser aux devs",
+                       "Laisser aux devs", "Laisser à un dev", "Pas de changement",
+                       "Ne pas corriger", "RIEN FAIRE pour l'instant", "Ne rien changer"):
             with self.subTest(option=option):
                 refused = {**question, "question": {**asked, "options": ["Équipe", option],
                                                     "default": "Équipe"}}
@@ -1390,6 +1392,13 @@ class ValidateReportTest(unittest.TestCase):
                     f"ligne CQ-7 : « question.options » : « {option} » laisse la ligne en "
                     "l'état ; l'orchestrateur propose déjà de la laisser aux devs"
                 ])
+        for option in ("Laisser un alt vide (image décorative)",
+                       "Ne rien afficher si le champ est vide", "Laisser le lien ouvrir un onglet",
+                       "Ajouter le devis au devant de la page", "Changement de libellé"):
+            with self.subTest(accepted=option):
+                kept = {**question, "question": {**asked, "options": ["Équipe", option],
+                                                 "default": option}}
+                self.assertEqual(check(fixed, skipped, kept)[1], [])
         self.assertEqual(fix_guard.MAX_ABANDON, 300)
         abandon = "Abandon : " + "a" * (fix_guard.MAX_ABANDON - len("Abandon : "))
         self.assertEqual(check({**fixed, "attention": abandon}, skipped, question)[1], [])
