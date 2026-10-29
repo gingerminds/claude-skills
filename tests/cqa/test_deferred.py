@@ -21,6 +21,12 @@ class DeferredModuleTest(unittest.TestCase):
             deferred.add(self.run_dir, "other", "x")
         self.assertFalse((self.run_dir / "deferred.json").exists())
 
+    def test_fix_deferred_kinds(self):
+        self.assertIn("fix_question", deferred.KINDS)
+        self.assertNotIn("fix_publish", deferred.KINDS)
+        entry = deferred.add(self.run_dir, "fix_question", "Quel contact pour security.txt ?", "CQ-12")
+        self.assertEqual(entry["kind"], "fix_question")
+
     def test_empty_detail_is_refused(self):
         with self.assertRaises(ValueError):
             deferred.add(self.run_dir, "gap", "  ")
@@ -77,6 +83,27 @@ class DeferredCommandTest(AuditCase):
         code, out, err = self.run_main(["deferred", run_dir, "--resolve", "9"])
         self.assertEqual(code, 2)
         self.assertIn("9", err)
+
+    def test_deferred_lists_fix_kinds_apart(self):
+        run_dir = self.make_run()
+        self.run_json(["defer", run_dir, "--kind", "gap", "--detail", "écart"])
+        self.run_json(["defer", run_dir, "--kind", "fix_question", "--detail", "Quel contact ?",
+                       "--refs", "CQ-12"])
+        self.run_json(["defer", run_dir, "--kind", "question", "--detail", "Autre"])
+        audit = self.run_json(["deferred", run_dir])
+        self.assertEqual([item["id"] for item in audit["items"]], [1, 3])
+        fix = self.run_json(["deferred", run_dir, "--fix"])
+        self.assertEqual([item["id"] for item in fix["items"]], [2])
+        closed = self.run_json(["deferred", run_dir, "--fix", "--resolve", "2"])
+        self.assertEqual(closed["items"], [])
+        after = self.run_json(["deferred", run_dir])
+        self.assertEqual([item["id"] for item in after["items"]], [1, 3])
+        self.run_json(["deferred", run_dir, "--resolve", "1"])
+        self.assertEqual([i["id"] for i in self.run_json(["deferred", run_dir])["items"]], [3])
+
+    def test_report_labels_fix_kinds(self):
+        from cqa import report
+        self.assertEqual(report._DEFERRED_KINDS["fix_question"], "question de correctif")
 
     def test_a_damaged_queue_exits_with_a_usage_error(self):
         run_dir = self.make_run()

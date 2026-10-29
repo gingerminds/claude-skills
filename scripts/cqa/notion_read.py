@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from cqa.checklist import STATUS_STANDBY, fiche_filename, match_reference, normalize_row
-from cqa.comments import parse_verdict
+from cqa.comments import is_skill_comment, parse_verdict
 from cqa.notion_api import NotionClient, NotionError, extract_id
 
 FICHES_DIR = "fiches"
@@ -136,12 +136,12 @@ def human_comments(comments: list, bot_id: str, limit: int = 5) -> list:
     """Return the texts of the comments the skill did not write, the most recent first.
 
     A comment is the skill's own when the integration wrote it and it carries a known
-    "Verdict : ..." line (the rule of the comment replacement). Empty texts are left out.
+    "Verdict : ..." line or an "MR :" block (the rule of the comment replacement). Empty texts are left out.
     """
     others = []
     for entry in comments:
         text = "".join(part.get("plain_text", "") for part in entry.get("rich_text") or [])
-        own = (entry.get("created_by") or {}).get("id") == bot_id and parse_verdict(text)
+        own = (entry.get("created_by") or {}).get("id") == bot_id and is_skill_comment(text)
         if text.strip() and not own:
             others.append((entry.get("created_time") or "", text.strip()))
     others.sort(key=lambda item: item[0], reverse=True)

@@ -4,13 +4,18 @@ from datetime import date
 
 from cqa.comments import (
     CONFIDENCE_LABELS,
+    MAX_COMMENT_LENGTH,
+    MR_LABEL,
     VERDICT_LABELS,
     format_comment,
     format_excluded_comment,
+    format_mr_comment,
     format_page_summary,
     is_linkable_url,
+    is_skill_comment,
     parse_verdict,
     to_rich_text,
+    with_mr_block,
 )
 from cqa.secrets import scan_text
 
@@ -804,3 +809,83 @@ class SecretScanTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MR_URL = "https://gitlab.example.org/acme/shop/-/merge_requests/12"
+MR_URL_2 = "https://gitlab.example.org/acme/front/-/merge_requests/3"
+
+
+class MrBlockTest(unittest.TestCase):
+    def test_mr_label(self):
+        self.assertEqual(MR_LABEL, "MR :")
+
+    def test_mr_block_goes_before_the_footer(self):
+        text = with_mr_block(EXPECTED_KO_TEXT, [MR_URL, MR_URL_2])
+        lines = text.split("\n")
+        self.assertEqual(lines[-1], FOOTER)
+        self.assertEqual(lines[-5:], ["", "MR :", MR_URL, MR_URL_2, FOOTER])
+        self.assertEqual(text.split("\n\nMR :")[0], EXPECTED_KO_TEXT.rsplit("\n", 1)[0])
+
+    def test_mr_block_replaces_the_previous_block(self):
+        once = with_mr_block(EXPECTED_KO_TEXT, [MR_URL])
+        twice = with_mr_block(once, [MR_URL_2])
+        self.assertEqual(twice.count(MR_LABEL), 1)
+        self.assertNotIn(MR_URL, twice)
+        self.assertEqual(twice, with_mr_block(EXPECTED_KO_TEXT, [MR_URL_2]))
+
+    def test_mr_block_on_a_comment_without_footer(self):
+        text = with_mr_block("Verdict :\nÀ traiter\n\nConstat :\nx", [MR_URL])
+        self.assertEqual(text, f"Verdict :\nÀ traiter\n\nConstat :\nx\n\nMR :\n{MR_URL}")
+
+    def test_mr_block_too_long_is_refused(self):
+        with self.assertRaises(ValueError):
+            with_mr_block("x" * MAX_COMMENT_LENGTH, [MR_URL])
+
+    def test_format_comment_keeps_mr_links_when_shortening(self):
+        finding = {**F_KO, "summary": "long " * 600, "todo": "faire " * 300}
+        text = format_comment(
+            finding=finding,
+            row=ROW_79,
+            run_date=RUN_DATE,
+            lead_option=LEAD,
+            repos=[REPO_NUXT],
+            plugin_version=VERSION,
+            mr_links=[MR_URL, MR_URL_2],
+        )
+        self.assertLessEqual(len(text), MAX_COMMENT_LENGTH)
+        self.assertIn(f"\n\nMR :\n{MR_URL}\n{MR_URL_2}\n{FOOTER}", text)
+
+    def test_format_comment_without_links_is_unchanged(self):
+        text = format_comment(
+            finding=F_KO, row=ROW_79, run_date=RUN_DATE, lead_option=LEAD,
+            repos=[REPO_NUXT], plugin_version=VERSION,
+        )
+        self.assertEqual(text, EXPECTED_KO_TEXT)
+
+    def test_reduced_mr_comment_layout(self):
+        text = format_mr_comment(
+            row={"ref": 107},
+            run_date=date(2026, 10, 29),
+            lead_option="Camille D",
+            repos=[{"name": "shop", "web_url": "https://gitlab.example.org/acme/shop",
+                    "audited_sha": "abc1234" + "0" * 33}],
+            plugin_version="0.14.0",
+            urls=[MR_URL],
+        )
+        self.assertEqual(
+            text,
+            "Audit PRE-MEL · 29/10/2026 · lancé par Camille D\n\nMR :\n"
+            f"{MR_URL}\n"
+            "Réf CQ-107 · develop@abc1234 · gm:checklist-quality-audit 0.14.0",
+        )
+
+    def test_reduced_mr_comment_counts_as_the_skill_comment(self):
+        reduced = (
+            f"Audit PRE-MEL · 29/10/2026 · lancé par Camille D\n\nMR :\n{MR_URL}\n"
+            "Réf CQ-107 · develop@abc1234 · gm:checklist-quality-audit 0.14.0"
+        )
+        self.assertTrue(is_skill_comment(reduced))
+        self.assertTrue(is_skill_comment(EXPECTED_KO_TEXT))
+        self.assertFalse(is_skill_comment(f"MR : {MR_URL}"))
+        self.assertFalse(is_skill_comment(f"MR :\n{MR_URL}\nmerci"))
+        self.assertFalse(is_skill_comment("Réf CQ-1 ok"))

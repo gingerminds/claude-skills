@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import re
@@ -2737,6 +2739,171 @@ class RerunValidateAndSnapshotTest(AuditCase):
             json.loads(self.run_main(["validate", run_dir, "code-performance", "--rerun", "01"])[1]),
             {"ok": True, "errors": []},
         )
+
+
+class MrPlanTest(AuditCase):
+    URL = "https://gitlab.example.org/acme/shop/-/merge_requests/12"
+
+    def comments(self, run_dir):
+        plan = self.read(run_dir, "notion/plan.json")
+        return {op["ref"]: op["text"] for op in plan["ops"] if op["kind"] == "comment"}
+
+    def test_rerun_plan_keeps_the_mr_block(self):
+        run_dir = self.make_run()
+        self.run_json(["plan", run_dir])
+        plain = self.comments(run_dir)
+        self.write(run_dir, "fix/mr-links.json",
+                   {"links": {"103": [{"repo": "laravel", "url": self.URL, "iid": 12}]}})
+        self.run_json(["plan", run_dir])
+        linked = self.comments(run_dir)
+        self.assertIn(f"\n\nMR :\n{self.URL}\nRéf CQ-103", linked[103])
+        self.assertEqual({r: t for r, t in linked.items() if r != 103},
+                         {r: t for r, t in plain.items() if r != 103})
+        self.assertNotIn("MR :", plain[103])
+
+    def test_plan_without_the_file_is_unchanged(self):
+        run_dir = self.make_run()
+        self.run_json(["plan", run_dir])
+        first = self.read(run_dir, "notion/plan.json")
+        self.run_json(["plan", run_dir])
+        self.assertEqual(first, self.read(run_dir, "notion/plan.json"))
+        self.assertFalse(any("MR :" in op["text"] for op in first["ops"]))
+
+    def test_unreadable_links_file_is_a_usage_error(self):
+        run_dir = self.make_run()
+        (run_dir / "fix").mkdir()
+        (run_dir / "fix" / "mr-links.json").write_text("{", encoding="utf-8")
+        code, out, err = self.run_main(["plan", run_dir])
+        self.assertIn(code, (2, 6))
+        self.assertIn("mr-links.json", err)
+
+
+class MrClient:
+    """The part of the Notion client that cqa_notion.py mr-links reads."""
+
+    def __init__(self, threads):
+        self.threads = threads
+        self.calls = []
+
+    def comments(self, page_id):
+        self.calls.append(page_id)
+        return self.threads.get(page_id, [])
+
+
+def bot_comment(text, when="2026-10-20T10:00:00.000Z"):
+    return {
+        "id": "c-" + when,
+        "created_by": {"id": "bot-1"},
+        "created_time": when,
+        "rich_text": [{"plain_text": text}],
+    }
+
+
+class MrLinksCommandTest(AuditCase):
+    URL = "https://gitlab.example.org/acme/back/-/merge_requests/12"
+    URL_2 = "https://gitlab.example.org/acme/back/-/merge_requests/13"
+    FOOT = "Réf CQ-101 · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0"
+
+    def setUp(self):
+        self.run_dir = self.make_run()
+        self.write(self.run_dir, "fix/state.json", {"started_at": "2026-10-29T12:00:00Z", "stage": "notion", "push": "mr", "keys": {}})
+
+    def links(self, **by_ref):
+        self.write(
+            self.run_dir,
+            "fix/mr-links.json",
+            {"links": {ref: [{"repo": "laravel", "url": url, "iid": 1} for url in urls]
+                       for ref, urls in by_ref.items()}},
+        )
+
+    def run_links(self, threads):
+        import cqa_notion
+
+        client = MrClient(threads)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, NO_SECRETS, clear=True):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cqa_notion.main(["mr-links", str(self.run_dir)], client=client)
+        return code, out.getvalue(), err.getvalue()
+
+    def plan(self):
+        return self.read(self.run_dir, "fix/notion-plan.json")
+
+    def test_mr_links_builds_a_comment_only_plan(self):
+        existing = (
+            "Audit PRE-MEL · 20/10/2026 · lancé par Côme D\n\nVerdict :\nÀ traiter (confiance haute)\n\n"
+            f"Constat :\nx\n\nMR :\nhttps://gitlab.example.org/old\n{self.FOOT}"
+        )
+        self.links(**{"101": [self.URL, self.URL_2], "103": [self.URL]})
+        code, out, err = self.run_links({"page-101": [bot_comment(existing)]})
+        self.assertEqual(code, 0, err)
+        plan = self.plan()
+        validate_plan(plan)
+        self.assertEqual({op["kind"] for op in plan["ops"]}, {"comment"})
+        by_ref = {op["ref"]: op for op in plan["ops"]}
+        self.assertEqual(sorted(by_ref), [101, 103])
+        self.assertEqual(
+            by_ref[101]["text"],
+            "Audit PRE-MEL · 20/10/2026 · lancé par Côme D\n\nVerdict :\nÀ traiter (confiance haute)\n\n"
+            f"Constat :\nx\n\nMR :\n{self.URL}\n{self.URL_2}\n{self.FOOT}",
+        )
+        self.assertEqual(by_ref[101]["page_id"], "page-101")
+        self.assertEqual(
+            by_ref[103]["text"],
+            "Audit PRE-MEL · 29/10/2026 · lancé par Côme D\n\nMR :\n"
+            f"{self.URL}\nRéf CQ-103 · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0",
+        )
+        self.assertEqual(plan["copy_data_source_id"], "ds-copy")
+        self.assertTrue(plan["plan_id"])
+
+    def test_human_comments_are_not_taken_for_the_skill_comment(self):
+        human = {"id": "h", "created_by": {"id": "user-1"}, "created_time": "2026-10-21T10:00:00Z",
+                 "rich_text": [{"plain_text": f"Verdict :\nÀ traiter\n{self.FOOT}"}]}
+        self.links(**{"101": [self.URL]})
+        self.run_links({"page-101": [human]})
+        [op] = self.plan()["ops"]
+        self.assertTrue(op["text"].startswith("Audit PRE-MEL · 29/10/2026"))
+        self.assertNotIn("Verdict", op["text"])
+
+    def test_too_long_comment_falls_back_to_the_latest_finding(self):
+        existing = "Verdict :\nÀ traiter\n\nConstat :\n" + "y" * 1480 + "\n" + self.FOOT
+        self.links(**{"101": [self.URL]})
+        self.run_links({"page-101": [bot_comment(existing)]})
+        [op] = self.plan()["ops"]
+        self.assertLessEqual(len(op["text"]), 1500)
+        self.assertIn("La compression gzip est absente", op["text"])
+        self.assertIn(f"\n\nMR :\n{self.URL}\nRéf CQ-101", op["text"])
+        self.assertIn("29/10/2026", op["text"])
+
+    def test_too_long_comment_without_finding_gets_the_reduced_comment(self):
+        existing = "Verdict :\nÀ traiter\n\nConstat :\n" + "y" * 1480 + "\n" + self.FOOT.replace("101", "103")
+        (self.run_dir / "findings" / "code-securite.json").unlink()
+        self.links(**{"103": [self.URL]})
+        self.run_links({"page-103": [bot_comment(existing)]})
+        [op] = self.plan()["ops"]
+        self.assertTrue(op["text"].startswith("Audit PRE-MEL · 29/10/2026"))
+        self.assertNotIn("Verdict", op["text"])
+
+    def test_no_links_writes_an_empty_plan(self):
+        code, out, err = self.run_links({})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.plan()["ops"], [])
+
+    def test_unknown_ref_is_skipped_with_a_note(self):
+        self.links(**{"999": [self.URL]})
+        code, out, err = self.run_links({})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.plan()["ops"], [])
+        self.assertIn("CQ-999", err)
+
+    def test_plan_is_stable_and_applicable(self):
+        self.links(**{"103": [self.URL]})
+        self.run_links({})
+        first = self.plan()
+        self.run_links({})
+        self.assertEqual(first, self.plan())
+        plan, result, client = ApplyContractTest.apply(self, self.run_dir, "fix/notion-plan.json")
+        self.assertEqual(result["done"], 1)
 
 
 class RegistrationTest(AuditCase):

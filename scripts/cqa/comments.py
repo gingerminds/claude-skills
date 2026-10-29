@@ -28,6 +28,7 @@ CONFIDENCE_LABELS = {"high": "haute", "medium": "moyenne", "low": "basse"}
 
 MAX_COMMENT_LENGTH = 1500
 MAX_TEXT_LENGTH = 2000
+MR_LABEL = "MR :"
 
 _MAX_EVIDENCE = 5
 _SKILL = "gm:checklist-quality-audit"
@@ -46,6 +47,7 @@ _STATUS_ORDER = (
     STATUS_STANDBY,
 )
 _BLOCKING_LABEL = "Lignes bloquantes non conformes"
+_FOOTER_START = "Réf CQ-"
 
 _VERDICT_BY_LABEL = {label: verdict for verdict, label in VERDICT_LABELS.items()}
 _VERDICT_LINE = re.compile(r"\s*Verdict\s*:\s*(?P<label>.*?)\s*(?:\(confiance[^)]*\))?\s*")
@@ -64,6 +66,7 @@ def format_comment(
     lead_option: str,
     repos: list[dict],
     plugin_version: str,
+    mr_links: Optional[list[str]] = None,
 ) -> str:
     """Return the Notion comment of a finding, at most MAX_COMMENT_LENGTH characters.
 
@@ -72,6 +75,7 @@ def format_comment(
     "Écart code / préprod" appear only when their field is filled, and "Preuves" only when there is evidence. Beyond 5 pieces of evidence the rest
     becomes "et N autres preuves". A text still too long loses evidence from the end, then
     the summary is cut with an ellipsis, then the other lines if that is not enough.
+    mr_links adds the "MR :" block (one URL per line) after the last block, which stays whole.
     """
     verdict = VERDICT_LABELS[finding["verdict"]]
     confidence = CONFIDENCE_LABELS[finding["confidence"]]
@@ -82,6 +86,7 @@ def format_comment(
         evidence=[_evidence_line(item, repos) for item in finding.get("evidence") or []],
         extras=[(label, finding.get(key)) for key, label in _OPTIONAL_LINES],
         foot=_footer(row, repos, plugin_version),
+        mr=_mr_block(mr_links),
     )
 
 
@@ -103,6 +108,62 @@ def format_excluded_comment(
         evidence=[],
         extras=[],
         foot=_footer(row, repos, plugin_version),
+    )
+
+
+def format_mr_comment(
+    *,
+    row: dict,
+    run_date: date,
+    lead_option: str,
+    repos: list[dict],
+    plugin_version: str,
+    urls: list[str],
+) -> str:
+    """Return the reduced comment of a row with merge requests: header, "MR :" block, footer."""
+    parts = [_header(run_date, lead_option), "", *_mr_block(urls), _footer(row, repos, plugin_version)]
+    return _finish("\n".join(parts))
+
+
+def with_mr_block(text: str, urls: list[str]) -> str:
+    """Return the comment with its "MR :" block set to urls, placed before the footer.
+
+    The block is "MR :" then one URL per line, after the last block and a blank line, the
+    footer ("Réf CQ-...") right after it. An earlier block is replaced; without footer the
+    block ends the text. Raises ValueError when the result passes MAX_COMMENT_LENGTH.
+    """
+    lines = text.rstrip().split("\n")
+    foot = [lines.pop()] if lines and lines[-1].startswith(_FOOTER_START) else []
+    body, skipping = [], False
+    for line in lines:
+        if line.strip() == MR_LABEL:
+            skipping = True
+            continue
+        if skipping and line.strip():
+            continue
+        skipping = False
+        body.append(line)
+    while body and not body[-1].strip():
+        body.pop()
+    result = "\n".join([*body, "", *_mr_block(urls), *foot])
+    if len(result) > MAX_COMMENT_LENGTH:
+        raise ValueError(
+            f"Le bloc « {MR_LABEL} » ferait {len(result)} caractères (maximum {MAX_COMMENT_LENGTH})."
+        )
+    return result
+
+
+def is_skill_comment(text: str) -> bool:
+    """Return True when a comment the integration wrote is the skill's own.
+
+    It carries a known "Verdict : ..." line, or it is the reduced comment of a merge request:
+    a "MR :" line and a last line starting with "Réf CQ-".
+    """
+    if parse_verdict(text) is not None:
+        return True
+    lines = text.strip().splitlines()
+    return bool(lines) and lines[-1].startswith(_FOOTER_START) and any(
+        line.strip() == MR_LABEL for line in lines
     )
 
 
@@ -230,27 +291,38 @@ def parse_verdict(text: str) -> Optional[str]:
     return None
 
 
+def _mr_block(urls: Optional[list[str]]) -> list[str]:
+    return [MR_LABEL, *urls] if urls else []
+
+
 def _compose(
-    *, head: str, verdict: str, summary: str, evidence: list[str], extras: list[tuple], foot: str
+    *,
+    head: str,
+    verdict: str,
+    summary: str,
+    evidence: list[str],
+    extras: list[tuple],
+    foot: str,
+    mr: Optional[list[str]] = None,
 ) -> str:
     fields = [("Constat", _text(summary))]
     fields.extend((label, _text(value)) for label, value in extras)
     shown = min(len(evidence), _MAX_EVIDENCE)
-    text = _render(head, verdict, fields, evidence, shown, foot)
+    text = _render(head, verdict, fields, evidence, shown, foot, mr)
     while len(text) > MAX_COMMENT_LENGTH and shown:
         shown -= 1
-        text = _render(head, verdict, fields, evidence, shown, foot)
+        text = _render(head, verdict, fields, evidence, shown, foot, mr)
     for index, (label, value) in enumerate(fields):
         excess = len(text) - MAX_COMMENT_LENGTH
         if excess <= 0:
             break
         if value:
             fields[index] = (label, _shorten(value, excess))
-            text = _render(head, verdict, fields, evidence, shown, foot)
+            text = _render(head, verdict, fields, evidence, shown, foot, mr)
     return _finish(text)
 
 
-def _render(head, verdict, fields, evidence, shown, foot) -> str:
+def _render(head, verdict, fields, evidence, shown, foot, mr) -> str:
     (label, summary), *extras = fields
     blocks = [["Verdict :", verdict]]
     if summary:
@@ -262,6 +334,8 @@ def _render(head, verdict, fields, evidence, shown, foot) -> str:
             lines.append(f"- {_others(len(evidence) - shown, 'preuve')}")
         blocks.append(lines)
     blocks.extend([f"{name} :", text] for name, text in extras if text)
+    if mr:
+        blocks.append(mr)
     body = "\n\n".join("\n".join(block) for block in blocks)
     return f"{head}\n\n{body}\n{foot}"
 

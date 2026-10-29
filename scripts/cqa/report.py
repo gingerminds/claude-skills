@@ -47,6 +47,7 @@ _DEFERRED_KINDS = {
     "ssh_refused": "commande SSH refusée",
     "gap": "écart",
     "question": "question",
+    "fix_question": "question de correctif",
 }
 _EMPTY = {
     "Décompte par statut": "Aucun.",

@@ -836,6 +836,7 @@ class RecetteCommandTest(CliTestCase):
                     "MR : https://gitlab.example.org/acme/back/-/merge_requests/7",
                     "Premier avis",
                 ],
+                "mr_links": [],
             },
         )
         self.assertEqual(json.loads(out)["recette"], [79])
@@ -844,6 +845,36 @@ class RecetteCommandTest(CliTestCase):
         self.assertTrue(posts)
         self.assertTrue(all(call.url.split("?")[0].endswith("/query") for call in posts))
         self.assertEqual({call.method for call in transport.calls}, {"GET", "POST"})
+
+    def test_recette_gives_the_mr_links(self):
+        self.write_audit()
+        url = "https://gitlab.example.org/acme/back/-/merge_requests/7"
+        (self.run_dir / "fix").mkdir()
+        self.write_json("fix/mr-links.json", {"links": {"79": [{"repo": "back", "url": url, "iid": 7}]}})
+        reduced = (
+            "Audit PRE-MEL · 29/10/2026 · lancé par Camille D\n\nMR :\n" + url + "\n"
+            "Réf CQ-79 · develop@abc1234 · gm:checklist-quality-audit 0.14.0"
+        )
+        comments = {"c1": [dated_comment(reduced, "2026-10-03T10:00:00.000Z", BOT),
+                           dated_comment("Avis", "2026-10-02T10:00:00.000Z")]}
+        code, out, err, _ = self.run_recette(comments, options=["--refs", "CQ-81"])
+        self.assertEqual(code, 0, err)
+        found = {item["ref"]: item for item in self.read_json("notion/recette.json")["rows"]}
+        self.assertEqual(found[79]["mr_links"], [url])
+        self.assertEqual(found[81]["mr_links"], [])
+        self.assertEqual(found[79]["comments"], ["Avis"])
+
+    def test_recette_refuses_an_unreadable_links_file(self):
+        self.write_audit()
+        (self.run_dir / "fix").mkdir()
+        (self.run_dir / "fix" / "mr-links.json").write_text("{", encoding="utf-8")
+        code, _, err, _ = self.run_recette()
+        self.assertEqual(code, 2)
+        self.assertIn("mr-links.json", err)
+
+    def test_mr_links_command_is_registered(self):
+        code, _, _ = self.run_main(["mr-links", "--help"], None, {})
+        self.assertEqual(code, 0)
 
     def test_recette_command_is_registered(self):
         code, _, _ = self.run_main(["recette", "--help"], None, {})

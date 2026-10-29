@@ -288,6 +288,9 @@ def _register_audit(commands) -> None:
         commands, "deferred", "décisions mises de côté encore ouvertes", _cmd_deferred
     )
     sub.add_argument("--resolve", type=int, metavar="ID", help="ferme la décision ID")
+    sub.add_argument(
+        "--fix", action="store_true", help="liste les décisions du mode fix (fix_*) au lieu de celles de l'audit"
+    )
 
 
 def _cmd_project(args, services) -> int:
@@ -1074,7 +1077,7 @@ def _cmd_deferred(args, services) -> int:
     run_dir = args.run_dir.resolve()
     if args.resolve is not None:
         deferred.resolve(run_dir, args.resolve)
-    _emit({"items": deferred.open_items(run_dir)})
+    _emit({"items": deferred.open_items(run_dir, fix=args.fix)})
     return EXIT_OK
 
 
@@ -1207,6 +1210,7 @@ def _cmd_plan(args, services) -> int:
         missing_in_copy=missing,
         recette_refs=recette["refs"],
         comment_dates=_comment_dates(run_dir, sources),
+        mr_links=_mr_links(run_dir),
     )
     if args.recette is not None:
         plan["recette"] = {**recette, "rerun": f"{args.recette:02d}"}
@@ -1220,6 +1224,14 @@ def _cmd_plan(args, services) -> int:
     write_json(run_dir / "notion" / "plan.json", plan)
     _emit(plan["summary"])
     return EXIT_OK
+
+
+def _mr_links(run_dir: Path) -> dict:
+    """Return {ref: [url]} of the merge requests of a fix pass, {} without one."""
+    try:
+        return fix_state.read_mr_links(run_dir)
+    except ValueError as error:
+        raise UsageError(str(error))
 
 
 def _comment_dates(run_dir: Path, sources: dict) -> dict:

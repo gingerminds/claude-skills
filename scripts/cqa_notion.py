@@ -10,10 +10,18 @@ import os
 import re
 import subprocess
 import sys
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from cqa.checklist import parse_refs, validate_schema
-from cqa.comments import MAX_COMMENT_LENGTH
+from cqa import fix_state
+from cqa.comments import (
+    MAX_COMMENT_LENGTH,
+    format_comment,
+    format_mr_comment,
+    with_mr_block,
+)
+from cqa.findings import apply_guardrails
 from cqa.notion_api import NotionClient, NotionError, extract_id
 from cqa.notion_read import (
     assemble_rows,
@@ -25,9 +33,10 @@ from cqa.notion_read import (
     write_fiches,
     write_json,
 )
-from cqa.notion_write import ReferenceWriteRefused, apply_plan, validate_plan
-from cqa.plan import filter_plan, operation_key
+from cqa.notion_write import ReferenceWriteRefused, apply_plan, skill_comments, validate_plan
+from cqa.plan import filter_plan, operation_key, plan_digest
 from cqa.rerun import (
+    latest_findings,
     list_of,
     read_grounded_findings,
     recette_candidates,
@@ -103,6 +112,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--without", default="", help="Réf à retirer de la liste (CQ-3,CQ-12)")
     sub.add_argument("--refs", default="", help="Réf à ajouter, même non candidates (CQ-40)")
     sub.set_defaults(handler=_cmd_recette)
+    sub = commands.add_parser(
+        "mr-links",
+        help="prépare le bloc « MR : » des commentaires du skill (fix/notion-plan.json)",
+    )
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.set_defaults(handler=_cmd_mr_links)
     sub = commands.add_parser("apply", help="écrit un plan dans la copie (reprise possible)")
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument(
@@ -217,6 +232,7 @@ def _cmd_recette(args, client) -> int:
         "le dernier statut écrit par le skill se déduit du plan (statut d'avant l'audit), "
         "ce qui peut proposer à tort des lignes",
     )
+    links = _mr_links(run_dir)
     known = known_values_from_env()
     chosen = {item["ref"]: item for item in recette_candidates(rows, plan, applied)}
     context = _read_json(run_dir / "context.json")
@@ -258,11 +274,118 @@ def _cmd_recette(args, client) -> int:
         item = chosen[ref]
         texts = human_comments(client.comments(item["page_id"]), notion["bot_id"])
         item["comments"] = [redact(text, known) for text in texts]
+        item["mr_links"] = list(links.get(ref, []))
         result.append(item)
     (run_dir / "notion").mkdir(parents=True, exist_ok=True)
     write_json(run_dir / "notion" / "recette.json", {"rows": result})
     _emit({**counts, "recette": [item["ref"] for item in result], "code_modifie": sorted(changed)})
     return EXIT_OK
+
+
+def _mr_links(run_dir: Path) -> dict:
+    """Return {ref: [url]} of fix/mr-links.json, {} when absent; ValueError when unreadable."""
+    return fix_state.read_mr_links(run_dir)
+
+
+def _cmd_mr_links(args, client) -> int:
+    """Write fix/notion-plan.json: one comment per row put in merge requests (never a status)."""
+    run_dir = args.run_dir
+    notion = _notion_context(run_dir, "copy_data_source_id", "bot_id")
+    context = _read_json(run_dir / "context.json")
+    option = (context.get("lead") or {}).get("option")
+    if not isinstance(option, str) or not option.strip():
+        raise UsageError("context.json : « lead.option » est vide : le commentaire cite le lead.")
+    common = {
+        "run_date": _fix_date(run_dir),
+        "lead_option": option,
+        "repos": context.get("repos") or [],
+        "plugin_version": context.get("plugin_version") or "",
+    }
+    links = _mr_links(run_dir)
+    by_ref = {item["ref"]: item for item in _read_rows(run_dir) if isinstance(item, dict)}
+    findings = _latest_findings(run_dir, context) if links else {}
+    ops = []
+    for ref in sorted(links):
+        row = by_ref.get(ref)
+        if row is None:
+            _log(f"CQ-{ref} ne figure pas dans la copie : aucun commentaire pour cette ligne.")
+            continue
+        text = _mr_comment(client, row, links[ref], findings.get(ref), notion["bot_id"], common)
+        ops.append(
+            {
+                "key": operation_key("comment", row["page_id"], None, text),
+                "kind": "comment",
+                "page_id": row["page_id"],
+                "ref": ref,
+                "verdict": None,
+                "before": None,
+                "after": None,
+                "text": text,
+                "human_override": False,
+            }
+        )
+    plan = {
+        "run_id": context.get("run_id"),
+        "copy_data_source_id": notion["copy_data_source_id"],
+        "copy_page_id": notion.get("copy_page_id"),
+        "assignee_options": [],
+        "ops": ops,
+    }
+    plan["plan_id"] = plan_digest(plan)
+    write_json(run_dir / "fix" / "notion-plan.json", plan)
+    _emit({"comments": len(ops), "refs": [op["ref"] for op in ops]})
+    return EXIT_OK
+
+
+def _mr_comment(client, row: dict, urls: list, finding, bot_id: str, common: dict) -> str:
+    """Return the comment of a row with its merge requests: the skill's text plus the block.
+
+    The existing skill comment keeps its text. Without one the comment is reduced to the header,
+    the block and the footer. When the block does not fit, the comment is written again from the
+    latest finding of the row (reduced when there is none).
+    """
+    own = skill_comments(client.comments(row["page_id"]), bot_id)
+    if not own:
+        return format_mr_comment(row=row, urls=urls, **common)
+    existing = "".join(part.get("plain_text", "") for part in own[-1].get("rich_text") or [])
+    try:
+        return with_mr_block(existing, urls)
+    except ValueError:
+        pass
+    if finding is None:
+        return format_mr_comment(row=row, urls=urls, **common)
+    judged = apply_guardrails(finding, row, followup_done=True)
+    return format_comment(finding=judged, row=row, mr_links=urls, **common)
+
+
+def _latest_findings(run_dir: Path, context: dict) -> dict:
+    """Return {ref: latest valid finding} of the run, {} when lots.json is missing."""
+    try:
+        lots = json.loads((run_dir / "lots.json").read_text(encoding="utf-8"))["lots"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    if not isinstance(lots, list):
+        return {}
+    return latest_findings(
+        run_dir,
+        lots,
+        lambda lot, name: read_grounded_findings(run_dir, context, lot, name),
+    )
+
+
+def _fix_date(run_dir: Path) -> date:
+    """Return the local date the fix pass started, from fix/state.json."""
+    try:
+        state = fix_state.load(run_dir)
+    except FileNotFoundError:
+        raise UsageError("fix/state.json est introuvable : aucune passe de correctifs dans ce run.")
+    except fix_state.StateError as error:
+        raise UsageError(str(error))
+    try:
+        started = datetime.strptime(state["started_at"], "%Y-%m-%dT%H:%M:%SZ")
+    except (KeyError, TypeError, ValueError):
+        raise UsageError("fix/state.json : « started_at » est absent ou invalide.")
+    return started.replace(tzinfo=timezone.utc).astimezone().date()
 
 
 def _parse_refs(text: str) -> list:

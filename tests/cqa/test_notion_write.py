@@ -931,6 +931,31 @@ class CommentReplacementTest(ApplyTestCase):
         self.assertEqual((result["done"], result["skipped"]), (0, 1))
         self.assertEqual(self.notion.requests("PATCH"), [])
 
+    def test_reduced_mr_comment_counts_as_the_skill_comment(self):
+        reduced = (
+            "Audit PRE-MEL · 29/10/2026 · lancé par Camille D\n\nMR :\n"
+            "https://gitlab.example.org/acme/shop/-/merge_requests/12\n"
+            "Réf CQ-1 · develop@abc1234 · gm:checklist-quality-audit 0.14.0"
+        )
+        self.notion.add_comment(PAGE_1, reduced, comment_id="mine")
+        human = "MR : https://gitlab.example.org/acme/shop/-/merge_requests/9"
+        self.notion.add_comment(PAGE_1, human, author="user-1", comment_id="human")
+        text = verdict_blocks("Ok / Recetté")
+        result = self.apply(comment_op(PAGE_1, 1, text))
+        self.assertEqual(result["done"], 1)
+        self.assertEqual(self.notion.requests("POST"), [])
+        [update] = self.notion.requests("PATCH")
+        self.assertTrue(update.url.endswith("/comments/mine"))
+        self.assertEqual(sorted(self.notion.texts(PAGE_1)), sorted([text, human]))
+
+    def test_a_human_comment_with_an_mr_block_and_a_footer_is_never_touched(self):
+        mimic = "MR :\nhttps://gitlab.example.org/a/b/-/merge_requests/1\nRéf CQ-1 merci"
+        self.notion.add_comment(PAGE_1, mimic, author="user-1", comment_id="human")
+        text = verdict_blocks("Ok / Recetté")
+        self.apply(comment_op(PAGE_1, 1, text))
+        self.assertEqual(len(self.notion.requests("POST")), 1)
+        self.assertEqual(sorted(self.notion.texts(PAGE_1)), sorted([text, mimic]))
+
     def test_a_skill_comment_without_verdict_is_not_replaced(self):
         self.notion.add_comment(PAGE_1, "Synthèse sans verdict")
         self.apply(comment_op(PAGE_1, 1, verdict_text("Ok / Recetté")))

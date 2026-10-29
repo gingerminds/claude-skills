@@ -6,7 +6,9 @@ from pathlib import Path
 from cqa.checklist import parse_refs
 from cqa.notion_read import write_json
 
-KINDS = ("login", "ssh_refused", "gap", "question")
+AUDIT_KINDS = ("login", "ssh_refused", "gap", "question")
+FIX_KINDS = ("fix_question",)
+KINDS = AUDIT_KINDS + FIX_KINDS
 FILE = "deferred.json"
 
 
@@ -55,8 +57,13 @@ def all_items(run_dir: Path) -> list:
     return _read(run_dir)
 
 
-def open_items(run_dir: Path) -> list:
-    return [item for item in _read(run_dir) if not item.get("resolved")]
+def open_items(run_dir: Path, *, fix: bool = False) -> list:
+    """Return the open entries: those of the audit, or with fix those of the fix mode (fix_*)."""
+    return [
+        item
+        for item in _read(run_dir)
+        if not item.get("resolved") and str(item.get("kind")).startswith("fix_") == fix
+    ]
 
 
 def resolve(run_dir: Path, item_id: int) -> None:

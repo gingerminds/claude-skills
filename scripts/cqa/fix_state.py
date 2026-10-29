@@ -26,6 +26,36 @@ class StateError(ValueError):
     """A fix/state.json that cannot be read as a fix pass."""
 
 
+LINKS_FILE = "fix/mr-links.json"
+
+
+def read_mr_links(run_dir: Path) -> dict:
+    """Return {ref: [url, ...]} from fix/mr-links.json, {} when the file is absent.
+
+    Raises ValueError when the file cannot be read as {"links": {"<ref>": [{"url": ...}]}}.
+    """
+    try:
+        document = json.loads((Path(run_dir) / LINKS_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{LINKS_FILE} est illisible : {error}")
+    links = document.get("links") if isinstance(document, dict) else None
+    if not isinstance(links, dict):
+        raise ValueError(f"{LINKS_FILE} est illisible : « links » doit être un objet.")
+    found = {}
+    for key, entries in links.items():
+        urls = [
+            entry.get("url") if isinstance(entry, dict) else None
+            for entry in (entries if isinstance(entries, list) else [None])
+        ]
+        if not str(key).isdigit() or not all(isinstance(url, str) and url.strip() for url in urls):
+            raise ValueError(f"{LINKS_FILE} est illisible : « {key} » doit lister des entrées avec une « url ».")
+        if urls:
+            found[int(key)] = urls
+    return found
+
+
 def now() -> str:
     """Return the current UTC time as written in the state."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

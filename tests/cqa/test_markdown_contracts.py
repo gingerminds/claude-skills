@@ -401,6 +401,22 @@ class SkillTest(unittest.TestCase):
             _text(SKILL),
         )
 
+    def test_recette_gives_the_mr_links_to_the_agents(self):
+        for path in (
+            SKILL.parent.parent.parent / "agents" / "cqa-auditor.md",
+            SKILL.parent.parent.parent / "agents" / "cqa-browser.md",
+            REFERENCES / "lots.md",
+        ):
+            with self.subTest(path=path.name):
+                self.assertIn("mr_links", _text(path))
+        self.assertIn("mr_links", _section(_text(SKILL), "11. Recette"))
+
+    def test_deferred_step_ignores_the_fix_kinds(self):
+        step = _section(_text(SKILL), "8. Writing and synthesis")
+        step = step[step.index("**5. Deferred decisions and rerun**") :]
+        self.assertIn("`fix_`", step.split("- `login`:")[0])
+        self.assertIn("deferred --fix", step.split("- `login`:")[0])
+
     def test_recette_argument_and_section(self):
         text = _text(SKILL)
         self.assertIn("- `recette`:", _section(text, "2. Arguments"))

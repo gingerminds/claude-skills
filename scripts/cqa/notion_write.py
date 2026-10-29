@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from cqa.checklist import ref_label
-from cqa.comments import parse_verdict, to_rich_text
+from cqa.comments import is_skill_comment, to_rich_text
 from cqa.notion_api import NotionError
 from cqa.notion_read import assignee_options, write_json
 from cqa.secrets import scan_text
@@ -276,15 +276,20 @@ def _delete_all(client, comments: list) -> list:
     return failed
 
 
+def skill_comments(comments: list, bot_id: Optional[str]) -> list:
+    """Return the skill's comments among comments, the oldest first."""
+    return _skill_comments(comments, bot_id)
+
+
 def _skill_comments(comments: list, bot_id: Optional[str]) -> list:
-    """Return the comments the integration wrote with a verdict, the oldest first."""
+    """Return the skill's comments (the integration's, with a verdict or an "MR :" block), oldest first."""
     if bot_id is None:
         return []
     own = [
         comment
         for comment in comments
         if (comment.get("created_by") or {}).get("id") == bot_id
-        and parse_verdict(_plain_text(comment)) is not None
+        and is_skill_comment(_plain_text(comment))
     ]
     return sorted(own, key=lambda comment: comment.get("created_time") or "")
 
