@@ -23,7 +23,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `merge-review` | `/gm:merge-review` | Review côté reviewer d'une MR GitLab existante — fond, forme, langue, standards — charge le ticket Mantis lié et rédige une note + recommandation approve / request-changes. Stack-agnostique (via `gm:review`). |
 | `security` | `/gm:security` | Audit sécurité des dépendances et de l'infra — `composer audit` / `npm audit`, advisories CMS/framework, config Docker — priorisé par criticité réelle, avec correctifs ou marches à suivre. Stack-agnostique : les checks spécifiques (ex. SA Drupal) viennent de `stack/`. |
 | `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressources dédiées par techno quand elles existent. |
-| `checklist-quality-audit` | `/gm:checklist-quality-audit` (alias `/gm:cqa`) | Audit PRE-MEL de la checklist qualité d'un projet : vérifie le poste et que la préprod sert le code audité, évalue chaque ligne de la copie Notion du projet (code, préprod, boîte à outils Docker, navigateur), écrit statuts et commentaires de preuve après confirmation du lead, puis répartit le reste entre les devs. Lecture seule sur les repos, les serveurs et les bases. Prérequis : voir « Préparer son poste ». |
+| `checklist-quality-audit` | `/gm:checklist-quality-audit` (alias `/gm:cqa`) | Audit PRE-MEL de la checklist qualité d'un projet : vérifie le poste et que la préprod sert le code audité, évalue chaque ligne de la copie Notion du projet (code, préprod, boîte à outils Docker, navigateur), écrit statuts et commentaires de preuve après confirmation du lead, puis répartit le reste entre les devs. Lecture seule sur les repos, les serveurs et les bases, sauf le mode `fix`, qui corrige dans ses propres worktrees et livre une MR en brouillon par catégorie et par repo. Prérequis : voir « Préparer son poste ». |
 
 ## Installation
 
@@ -84,7 +84,8 @@ Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépar
   - `NOTION_TOKEN` : jeton de l'intégration Notion de l'agence.
   - `GM_CQA_REFERENCE` : URL de la page du modèle de la checklist (le skill refuse d'auditer le modèle lui-même).
 - **Registre Docker** : Docker installé (Docker Desktop sous macOS, Docker Engine sous Linux), puis `docker login registry.gitlab.gingerminds.fr` avec un token GitLab en lecture sur le registre (valeur dans Vaultwarden). Les images de la boîte à outils sont tirées au premier audit.
-- **`glab`** installé et authentifié sur le GitLab de l'agence (`glab auth status`) : il sert à retrouver le commit déployé en préprod.
+- **`glab`** installé et authentifié sur le GitLab de l'agence (`glab auth status`) : il sert à retrouver le commit déployé en préprod et, en mode `fix`, à pousser les branches et créer les MR (droit de push sur le projet ; un GitLab client demande sa propre authentification).
+- **Identité git** (`user.name`, `user.email`) configurée dans les repos du projet, pour le mode `fix` : les commits sont ceux du lead. Avec `commit.gpgSign`, la signature doit fonctionner sans saisie.
 - **Claude in Chrome** : extension installée et connectée, pour les contrôles navigateur. Le lead s'y connecte lui-même quand le site est protégé.
 
 ### Relancer et recetter : `rerun` et `recette`
@@ -110,6 +111,21 @@ Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépar
 - **Durée du crawl** : proposée au diagnostic ; en mode autonome, la proposition est utilisée telle quelle.
 - **Plugins WordPress** : le lead confirme lesquels sont custom ; les tiers sont exclus de Stylelint et de l'audit des dépendances.
 
+### Corriger : `fix`
+
+`/gm:cqa fix` (ou `/gm:checklist-quality-audit fix`) part d'un run d'audit existant, corrige les lignes ouvertes que le skill sait corriger et livre une MR en brouillon par catégorie et par repo.
+
+- **Lignes retenues** : statut « À traiter » ou « Mise en place partielle » dans la copie, colonne « Automatisation skill » à « Auto : détection + MR » ou « Semi-auto : MR à valider », dernier constat `ko` ou `partial`, ligne absente des MR de correctifs déjà ouvertes. Le lead en retire ou en ajoute (« Modifier la liste »), y compris une ligne « Détection seule » ou « Manuel ».
+- **Trois questions au lancement**, une à une : « Mode 100 % autonome ? », « Pousser les branches et créer les MR en brouillon ? » et « Ajouter le lien des MR dans Notion ? ». Pour un premier essai sur un projet : mode présent, une ou deux catégories.
+- **Déroulé** : une catégorie après l'autre, SÉCURITÉ d'abord. Pour chaque catégorie et chaque repo, un worktree dans le dossier du run, sur une branche `feature/checklist-qa-fix-<catégorie>` partie de `origin/develop` (ou reprise d'une MR ouverte). Le sous-agent `cqa-fixer` corrige, un commit par ligne (`fix(CQ-107): ...`) ; puis contrôles de syntaxe et stylelint, garde-fou sur les commits, relecture par le sous-agent `cqa-fix-reviewer`. Une ligne en problème a une seule nouvelle tentative, puis sort de la branche et passe en « Hors-scope » de la MR.
+- **Modes** : en mode présent, les questions sont posées au fil de l'eau et chaque catégorie est publiée dès qu'elle est relue. En mode autonome, ni question ni push avant la fin : les questions mises de côté sont posées à la fin, puis toutes les branches sont poussées, le lead présent (Claude Code peut demander de confirmer un push).
+- **Jamais** : toucher au dossier du dev (fichiers, branche courante, `develop` local, stash), lancer une commande du projet (conteneurs, `make`, `composer`, `npm`, tests), contacter la préprod ou un serveur, ajouter ou monter une dépendance, passer une MR en Ready, l'approuver ou la fusionner, changer un statut Notion. Les hooks git du repo ne tournent pas : la MR les déclare « Non lancé ».
+- **Vérifications** : la syntaxe (PHP, JavaScript, JSON, YAML) et stylelint tournent dans l'image `agence` de la boîte à outils, avec ses propres versions de PHP et de Node, qui peuvent différer de celles du projet. Le lint et les tests du projet restent au relecteur de la MR, avec leur commande, et au pipeline GitLab.
+- **`--dry-run`** : correctifs, commits et relectures sur des branches locales `dry-run/checklist-qa-fix-*`, jamais poussées ni reprises ; aucune MR, rien dans Notion.
+- **Notion** : avec l'accord du lead, le commentaire du skill de chaque ligne mise en MR reçoit un bloc « MR : » avec le lien ; une relance ou une recette le garde. Statuts et assignations ne changent pas.
+- **Reprise** : une passe interrompue se reprend (« Reprendre les correctifs ») ou s'abandonne (« Abandonner » : worktrees retirés, branches locales gardées). Une passe suivante complète les MR ouvertes sans reprendre leurs lignes.
+- **Fin** : synthèse dans `fix/synthese.md` et message prêt à coller pour l'équipe. Ensuite : relire et ajuster les MR, les fusionner, déployer en préprod, passer les lignes en « Mis en place », puis `/gm:cqa recette`.
+
 ## Structure
 
 ```
@@ -119,7 +135,9 @@ claude-skills/
 │   └── plugin.json          # manifeste du plugin "gm" (nom + version) — sert au dev local via --plugin-dir
 ├── agents/
 │   ├── cqa-auditor.md       # sous-agent d'analyse des lignes de checklist (code, préprod) : consommé par checklist-quality-audit
-│   └── cqa-browser.md       # sous-agent des contrôles navigateur (Claude in Chrome) : consommé par checklist-quality-audit
+│   ├── cqa-browser.md       # sous-agent des contrôles navigateur (Claude in Chrome) : consommé par checklist-quality-audit
+│   ├── cqa-fixer.md         # sous-agent du mode fix : corrige les lignes d'une catégorie dans son worktree
+│   └── cqa-fix-reviewer.md  # sous-agent du mode fix : relit, en lecture seule, les commits d'une passe du fixer
 ├── scripts/
 │   ├── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
 │   ├── cqa_fix.py  cqa_notion.py  cqa_plan.py  cqa_ssh_ro.py   # CLI de l'audit : mode correction, API Notion, plan, garde SSH en lecture seule
@@ -155,7 +173,7 @@ claude-skills/
     ├── security/SKILL.md    # générique : détecte la stack → charge stack/<x>/MAIN.md (security)
     ├── checklist-quality-audit/
     │   ├── SKILL.md         # orchestrateur de l'audit PRE-MEL
-    │   ├── references/      # lues au fil des étapes de l'audit
+    │   ├── references/      # lues au fil des étapes de l'audit (fix.md : conventions du mode fix)
     │   └── schemas/         # finding, fix-report et fix-review (contrats des sous-agents)
     ├── cqa/SKILL.md         # alias /gm:cqa de checklist-quality-audit
     └── archi-c4/

@@ -13,7 +13,7 @@ from cqa.secrets import scan_tree
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
-EXPECTED_VERSION = "0.13.0"
+EXPECTED_VERSION = "0.14.0"
 NEW_SKILL = "/gm:checklist-quality-audit"
 
 SCOPE = [
@@ -180,6 +180,12 @@ class PublicHygieneTest(unittest.TestCase):
             if path.is_file():
                 with self.subTest(script=path.name):
                     self.assertIn(path.name, readme)
+
+    def test_readme_lists_every_agent(self):
+        readme = read(ROOT / "README.md")
+        for path in sorted(ROOT.glob("agents/*.md")):
+            with self.subTest(agent=path.name):
+                self.assertIn(path.name, readme)
 
     def test_marketplace_lists_the_skill(self):
         marketplace = json.loads(MARKETPLACE_JSON.read_text(encoding="utf-8"))

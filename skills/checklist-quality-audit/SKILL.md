@@ -1,7 +1,7 @@
 ---
 name: checklist-quality-audit
-description: Runs the agency pre-launch (PRE-MEL) quality checklist audit on a project. Checks the workstation, verifies that the preprod runs the audited code, evaluates every row of the project's Notion checklist copy from the code, the preprod, a Docker toolbox and the browser, then writes statuses and evidence comments to that copy and splits the remaining rows between the devs. Use when the lead dev asks to run the quality checklist or a PRE-MEL audit, or invokes /gm:checklist-quality-audit or /gm:cqa.
-argument-hint: "[diagnostic | assign | rerun | recette] [--phase \"MEL J0\"] [--dry-run]"
+description: Runs the agency pre-launch (PRE-MEL) quality checklist audit on a project. Checks the workstation, verifies that the preprod runs the audited code, evaluates every row of the project's Notion checklist copy from the code, the preprod, a Docker toolbox and the browser, then writes statuses and evidence comments to that copy and splits the remaining rows between the devs. Its fix mode corrects the open rows it knows how to fix, in git worktrees of the run, and opens one draft merge request per category and repo. Use when the lead dev asks to run the quality checklist or a PRE-MEL audit, or invokes /gm:checklist-quality-audit or /gm:cqa.
+argument-hint: "[diagnostic | assign | rerun | recette | fix] [--phase \"MEL J0\"] [--dry-run]"
 disable-model-invocation: true
 ---
 
@@ -15,8 +15,8 @@ Load each reference with Read when its section starts, not before.
 
 ## 1. Imperative rules
 
-- **Read-only (v1).** Never modify a project repo: no checkout, switch, stash, pull, commit, install, file edit, runner start. Never write on a server or in a database, never submit a form, never deploy. When something needs one of these, give the lead the exact command and let them run it.
-- **Notion.** Write only through `cqa_notion.py apply` and `cqa_notion.py comment-page`, after the lead's consent: the answer to the question of section 4, or the confirmation of section 7 when that answer is missing. Never through another tool, never on the reference template (exit 8). Never create an option, a row or a page; never delete anything.
+- **Read-only (v1).** Never modify a project repo: no checkout, switch, stash, pull, commit, install, file edit, runner start. Never write on a server or in a database, never submit a form, never deploy. When something needs one of these, give the lead the exact command and let them run it. Exception, the `fix` mode only (section 12): it writes only in its own worktrees, under the run directory (`fix/<repo>/<slug>/wt`, on a branch of its own), and pushes only `feature/checklist-qa-fix-*` branches, after the lead's consent, always through `cqa_fix.py` and its sub-agents; the dev's checkout (working files, current branch, local `develop`, stash) never changes.
+- **Notion.** Write only through `cqa_notion.py apply` and `cqa_notion.py comment-page`, after the lead's consent: the answer to the question of section 4, or the confirmation of section 7 when that answer is missing; in the fix mode, the answer to « Ajouter le lien des MR dans Notion ? » (section 12). Never through another tool, never on the reference template (exit 8). Never create an option, a row or a page; never delete anything.
 - **Secrets (spec § 10).** Never print, write or hand to a sub-agent the value of `NOTION_TOKEN` or the preprod Basic Auth credentials. Never run `env`, `printenv` or `set`, never `echo` these variables: test their presence only, as in `references/context.md`.
 - **Basic Auth credentials.** Asked only after a 401, kept in this session, never stored. They go only as inline environment variables (`GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>'`) to `cqa_plan.py probe-target --auth-env` and `cqa-toolbox.sh`, and only when the session holds the Basic Auth credentials (accepted by `probe-target --auth-env`). `GM_AUDIT_AUTH_PASS` alone also goes, the same way, to the secret checks of `cqa_notion.py apply`, `cqa_notion.py comment-page` and `cqa_plan.py scan`. Never in a file, a URL, Notion, a sub-agent prompt or Chrome (the lead types it there).
 - **SSH (agency rule).** Ask which alias to use before any SSH command (aliases read in `~/.ssh/config`). Run every server command through `cqa_ssh_ro.py`, except the connection test `ssh -o BatchMode=yes <alias> true`. Exit 4 of the guard means "commande à faire confirmer par le lead": stop and ask, stating the impact, even if the lead asked to go faster (`references/server.md`). The rule holds in autonomous mode: only read commands run, and a write, a change, a restart or a command of uncertain impact (exit 4, or anything that needs the lead's confirmation) is never run, even in autonomous mode or confirmed in advance. It is recorded with `cqa_plan.py defer --kind ssh_refused` and put to the lead at the end.
@@ -35,10 +35,10 @@ Arguments: `$ARGUMENTS` (through the `/gm:cqa` alias, the alias gives them).
 - `assign`: go to section 9.
 - `rerun`: go to section 10. Re-evaluates a few rows of an existing run, not the whole audit.
 - `recette`: go to section 11. Checks the rows the devs fixed (set to « Mis en place » in the copy) and closes them if the fix holds.
-- `fix`: go to section 12. Corrects the open rows the audit knows how to fix, in worktrees of the run, one draft merge request per category and repo. Its conventions (branches, commits, sub-agents, questions, guard rails) are in `references/fix.md`.
+- `fix`: go to section 12. Corrects the open rows the audit knows how to fix, in worktrees of the run, one draft merge request per category and repo. Its conventions (branches, commits, sub-agents, questions, guard rails) are in `references/fix.md`. With `--dry-run` nothing leaves the workstation (section 12); `--phase` does not apply to it.
 - `--phase "<phase>"`: audit only the rows of that phase (`Cadrage`, `Build`, `Recette J-30`, `MEL J0`, `Post-MEL J+7`), stored as `phase_filter`. With `MEL J0` or `Post-MEL J+7`, section 4 asks whether the prod is live: the audit targets the prod only then.
 - `--dry-run`: everything except the Notion writes, stored as `dry_run`. Section 4 does not ask the Notion consent. Section 7 asks nothing and section 8 skips its Notion steps (apply, page comment); the synthesis and the final scan still run.
-- Anything else: show `/gm:checklist-quality-audit [diagnostic | assign | rerun | recette] [--phase "MEL J0"] [--dry-run]` and stop.
+- Anything else: show `/gm:checklist-quality-audit [diagnostic | assign | rerun | recette | fix] [--phase "MEL J0"] [--dry-run]` and stop.
 
 ## 3. Resume
 
@@ -53,6 +53,8 @@ Exit 2: the current folder is not in a git repo, or its name is not « Client - 
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 python3 "$S/cqa_plan.py" runs "<slug>"
 ```
+
+When a run of `runs` has `fix_pending` true (a fix pass started on it and not finished), tell the lead once « Une passe fix est inachevée : relancez /gm:checklist-quality-audit fix. » with its `run_id`; it does not change the choice below.
 
 A run is complete once its final scan has run: section 8 then writes `done.json` in it, and `runs` reports it as `done`. A run whose `done` is false is incomplete. Take the most recent incomplete run of `runs`, whatever its date, and ask « Le run <run_id> n'est pas terminé. » with « Reprendre ce run » and « Lancer un nouveau run »: « Reprendre ce run » comes first, as the recommended option, only when the run is of today (`run_id` starting with today's date); for an older run, give its date in the question and put « Lancer un nouveau run » first. To resume:
 
@@ -634,12 +636,372 @@ The verdicts give: `ok` becomes « Ok / Recetté »; `ok_human` leaves the row �
 
 8. End, in French, with the validated rows, the rows left to the lead, the refused rows with what is missing, and the blocking rows still open.
 
+## 12. Fix
+
+Corrects the open rows of an audited run that the skill knows how to fix, in git worktrees of the run directory, and delivers one draft merge request per key (one checklist category in one repo). Read `references/fix.md` first: its conventions (keys, passes, branches, commits, questions, correction pass, guard rails, report and review files) hold for every step below. The imperative rules of section 1 hold, with the `fix` exception of the read-only rule. One Bash call per step.
+
+- The fix mode never contacts the preprod, the prod or a server: no SSH, no Chrome, and it never asks the Basic Auth credentials. It never runs a command of the project (`docker compose`, `make`, `composer`, `npm`, its tests, a build).
+- On GitLab it only pushes `feature/checklist-qa-fix-*` branches as fast-forwards (never `--force`), creates draft merge requests assigned to the lead and adds to their description: it never marks a merge request Ready, never approves, merges or closes one. In Notion it only adds the « MR : » block to the skill's comments: no status, no assignment.
+- Sub-agents: `gm:cqa-fixer` and `gm:cqa-fix-reviewer`, one sub-agent at a time, one key at a time.
+- `--dry-run`: fixes, commits, checks and reviews run, the branches (`dry-run/checklist-qa-fix-<slug>`) stay in the dev's repo, nothing is pushed, no merge request, nothing in Notion: the push and Notion questions of step 3 are not asked. `--phase` does not apply: the pass takes the rows of the chosen run (a run audited with `--phase` gives only that phase's rows).
+- Until the launch questions of step 3, this invocation is interactive, whatever `mode` the audit stored. The answers of step 3 live in `fix/state.json` (`mode`, `push`, `notion`), never in `context.json`.
+
+**1. Run.**
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+python3 "$S/cqa_plan.py" project "$PWD"
+```
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+python3 "$S/cqa_plan.py" runs "<slug>"
+```
+
+Take the most recent run whose `fix_pending` is true, else the most recent run whose `lots` and `plan` are true, and ask « Utiliser le run <run_id> ? » with « Oui » and « Choisir un autre run » (then list the runs with their date and ask which one). No such run: say « Aucun run à corriger : lancez d'abord /gm:checklist-quality-audit. » and stop. Check its context, without asking the Basic Auth credentials (errors: show them and stop):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" context "$RUN" --check
+```
+
+When the run has `write_pending` true, say « Terminez d'abord l'écriture de l'audit (/gm:checklist-quality-audit rerun). » and stop. When it has `fix_pending` true, ask « Une passe fix est inachevée. » with « Reprendre les correctifs » and « Abandonner »:
+
+- « Abandonner »: abandon the pass, then go on with step 2 for a new pass. It removes the worktrees of the pass and prints `{"removed", "unpushed"}`: tell the lead which local branches keep commits not pushed (`unpushed`); they are never deleted.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" abandon "$RUN"
+```
+
+- « Reprendre les correctifs »: no launch question: `mode`, `push` and `notion` come from `fix/state.json`. Start the inhibitor (step 4), read `fix/state.json`, and resume at its `stage`: `keys` at step 5, `questions` at step 6, `notion` at step 7, `summary` at step 8. At the stages `keys` and `questions`, first take the keys in the order of `keys`, each from its `step`:
+  - `selected`: 5.a (`start`), then the rest of step 5.
+  - `started`: a fixer pass on the rows still `pending` (5.b).
+  - `fixed`: first the questions not handled yet (5.c: present mode, the rows still `question`; autonomous mode, those not set aside yet, as the list of step 6 shows), then 5.d.
+  - `checked`: `guard` (5.d), then the review of each pass whose rows are fixed and whose review is not in `reviews` (5.e), then the problems (5.f).
+  - `reviewed`: present mode, the publication (5.g); autonomous mode, nothing until step 6.
+  - `published`: `finish` (5.g).
+  - `done`: nothing.
+
+  Before the step, a pass started without its report (a pass in `bases` above the key's `pass`) is run again from its `pass-start` (5.b), with its rows and its notes file; a row already sent in the `problems` of a `notes-<M>.json` has had its correction pass (5.f). At step 6, an open entry whose row is no longer `question` in `fix/state.json` is settled: close it without asking.
+
+**2. Diagnostic.** Read the copy again, as the devs left it:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_notion.py" rows "$RUN"
+```
+
+GitLab access and state of each repo (its `git fetch origin` only moves the remote refs of the dev's repo):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" doctor "$RUN"
+```
+
+It writes `fix/doctor.json` and prints `{"repos": [{"repo", "host", "project", "status", "user", "base", "identity", "fetched", "ahead"}]}`. Keep for the presentation, in French:
+
+- `status`: `ok` (push and draft merge request possible); `no_push` (no right to push on the project), `glab_missing` (`glab` not installed), `unauthenticated` (the lead runs `glab auth login --hostname <host>`): local branches only for that repo; `not_gitlab`: its rows are left to the devs.
+- `identity` false: no `user.name` or `user.email` in the repo, the commits would fail: the lead sets them before the launch (the commits are theirs).
+- `fetched` false: `git fetch origin` failed, the branches would start from a stale `origin/<base>`.
+- `ahead`: the commits of `origin/<base>` since the audited commit; every row is checked again on the current code before it is fixed.
+
+Commit signing, one call per repo (`path` of `context.json`):
+
+```bash
+git -C "<path>" config --get commit.gpgSign
+```
+
+`true`: say « Les commits du repo <repo> sont signés (commit.gpgSign) : la signature doit fonctionner sans saisie (agent déjà déverrouillé), sinon les commits du fixer échoueront. »
+
+Toolbox, for the checks of the changed files (`references/fix.md`, section 9):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+bash "$S/cqa-toolbox.sh" doctor
+```
+
+`docker` false or `docker_version` null: the checks run with the host's binaries, else are declared not run; say so. `images.agence` null: the first `check` downloads the `agence` image, unless the lead pulls it before (`cqa-toolbox.sh pull`, `references/diagnostic.md`, section 6).
+
+Then list the candidates:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" candidates "$RUN"
+```
+
+It writes `fix/candidates.json` and prints `{"keys": [{"key", "repo", "category", "slug", "push_ready", "rows"}], "left": [{"ref", "title", "category", "reason", "url"}], "flights", "notes", "estimate_min"}`. `keys` come SÉCURITÉ first, then in the order of the copy. No key: show the rows left (`left`, by reason), say « Aucune ligne à corriger. » and stop.
+
+**3. Presentation and launch questions.** Present, in French, before anything is created: per category then per repo, the rows to fix (ref, title, « Auto » or « Semi-auto » from `semi_auto`, the assigned devs `assignees`, the « À faire » in short from `todo`); the rows left to the devs grouped by `reason`, with the link `url` of the merge request when there is one; the `notes`; the repos that will get local branches only (`push_ready` false) and why; the facts of step 2; the number of merge requests planned (one per key); the estimated time (`estimate_min` minutes). When the project has no fix merge request or branch yet (in `flights`, every repo has `open`, `closed`, `merged` and `branches` empty), add: « Premier essai sur ce projet : je conseille le mode présent et une ou deux catégories seulement (« Modifier la liste »), pour juger la qualité des MR avant une passe complète. »
+
+Ask « Lancer ces correctifs ? » with « Lancer », « Modifier la liste » and « Annuler ». « Modifier la liste »: the lead removes refs, or adds some in « Autre », a « Détection seule » or « Manuel » row they judge fixable included; run `candidates` again with `--without` (rows removed) and `--refs` (rows added), repeating every earlier one (the options are not cumulative between runs), then present again. « Annuler »: stop, nothing was created.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" candidates "$RUN" --refs CQ-40 --without CQ-3,CQ-12
+```
+
+Once the list is accepted, one question at a time:
+
+1. « Mode 100 % autonome ? » with « Oui, je m'absente » (`autonomous`: no question and no push before the end of the pass) and « Non, je reste disponible » (`present`: questions asked as they come, each key published as soon as it is reviewed).
+2. « Pousser les branches et créer les MR en brouillon ? » with « Pousser et créer les MR en brouillon » (`mr`), « Garder les branches en local » (`local`: the lead pushes them; no merge request, nothing in Notion) and « Annuler » (stop, nothing was created). Not asked with `--dry-run` (`dry_run`), nor when no key is `push_ready` (`local`; say so).
+3. « Ajouter le lien des MR dans Notion ? » with « Oui » (`yes`) and « Ne rien écrire » (`no`). Asked only with `mr`; otherwise `no`.
+
+Open the pass with the answers:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" open "$RUN" --mode <autonomous|present> --push <mr|local|dry_run> --notion <yes|no>
+```
+
+It writes `fix/state.json` (stage `keys`, every key at step `selected`) and archives a finished earlier pass in `fix/_history/`.
+
+**4. Keep the workstation awake** for the whole pass:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+bash "$S/cqa-keepawake.sh" start "$RUN"
+```
+
+Tell the lead « Le poste ne se mettra pas en veille pendant la passe de correction. Gardez l'écran ouvert : sur un Mac, rabattre l'écran le met en veille malgré tout. », and, as in section 6, how to release it by hand: « Si cette session s'arrête avant la fin de la passe, libérez le poste avec : bash "<scripts>/cqa-keepawake.sh" stop "<run_dir>" ». Release it (step 8) on every path that ends the pass.
+
+**5. Keys.** One key at a time, in the order of `keys`, SÉCURITÉ first, then the order of the copy; `<repo>/<slug>` is the key. In autonomous mode, ask the lead nothing until step 6: what needs them is set aside with the kind `fix_question` (the command of 5.c), with the key at the start of `--detail`, in French, and `--refs` only for the rows concerned.
+
+a. Branch and worktree:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" start "$RUN" "<repo>/<slug>"
+```
+
+It prints `{"branch", "worktree", "base", "start_sha", "reused", "done_refs"}`: a new branch from `origin/<base>`, or the branch of an open merge request or of an unmerged fix branch taken over (`reused`); `done_refs` are rows already on that branch (`done_before`), never fixed again. Run again on a key that has its branch, it gives back the same branch and worktree.
+
+b. Fixer pass `N`: the key's `pass` in `fix/state.json` plus 1 (1 for a new key). Right before each dispatch, record the base of the pass and keep the printed `base`: it is the `Base` of the review of pass N.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" pass-start "$RUN" "<repo>/<slug>" --pass <N>
+```
+
+Dispatch `gm:cqa-fixer` with the line, exactly:
+
+```
+Run dir: <run_dir>. Fix: <repo>/<slug>. Worktree: <path>. Pass: <N>. Rows: CQ-3, CQ-12. Notes: <path|none>. Follow your instructions.
+```
+
+`Worktree` is the absolute `worktree` that `start` printed. Pass 1: `Rows` are the rows of the key still `pending` in `fix/state.json`, and `Notes: none`. A later pass: the rows it answers (5.c) or corrects (5.f), and `Notes: fix/<repo>/<slug>/notes-<N>.json`, written before the dispatch with Write, in the format of `references/fix.md`, section 1. Then validate the report again (the fixer validated it too):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" validate "$RUN" "<repo>/<slug>" report --pass <N>
+```
+
+It prints `{"ok", "errors", "rows", "dev_checkout_changed"}`, `rows` giving the refs per outcome (`fixed`, `skipped`, `question`).
+
+- Exit 6, or a fixer that returned without a valid report: `pass-start` again (it keeps the base it recorded), dispatch the fixer once more, the dispatch line followed by the `errors`, and validate again. Still invalid: the key is left (below). Exit 2 (worktree or state not as expected): show the message; the key is left.
+- Rows skipped with « commit refusé par git : <cause> » (commit signing, git identity, a lock): the cause does not depend on the rows, and the next keys may fail the same way. Present mode: tell the lead at once; autonomous mode: set it aside. The rows stay skipped with that reason; a later fix pass takes them again once the cause is fixed.
+- A fixer that stopped on uncommitted changes in the worktree (its one-line return): never clean it. Show them to the lead in present mode, then ask « Le worktree de <repo>/<slug> a des modifications non commitées (ci-dessus). » with « C'est réglé, reprendre » (dispatch again) and « Laisser cette clé » (the key is left); in autonomous mode, set it aside and go on with the next key.
+
+```bash
+git -C "<worktree>" -c core.hooksPath=/dev/null -c core.fsmonitor=false status --short
+```
+
+- `dev_checkout_changed` other than `null` (`{"paths", "head", "branch", "stash"}`): the dev's own checkout changed during the pass, not through the skill. Present mode: tell the lead at once, in French, the paths and whether HEAD, the branch or the stash moved, and that the pass changed nothing there. Autonomous mode: set it aside with that detail. Never undo anything; go on.
+
+c. Questions: the rows of `rows.question`. Each `question` of `report-<N>.json` has a `text`, 2 to 4 `options` and the `default` the fixer would apply.
+
+- Present mode: ask them now, one at a time, with the fixer's options, plus « Laisser aux devs » while there are fewer than 4, saying which option is the default. Write the answers in `notes-<N+1>.json` (`answers`; `problems` empty) and run one fixer pass on the answered rows (5.b with N+1) before 5.d. An answered row is never asked again: « Laisser aux devs » is an answer too (the fixer skips the row with « laissée aux devs par le lead »).
+- Autonomous mode: set each question aside, then go on without the row (it waits for step 6):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" defer "$RUN" --kind fix_question --detail "<repo>/<slug> : <texte de la question>" --refs CQ-12
+```
+
+d. Checks of the changed files, then the guard:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" check "$RUN" "<repo>/<slug>"
+```
+
+It runs the syntax checks and stylelint on the files changed in `<start_sha>..HEAD`, writes `checks.json` and prints `{"checks", "not_run", "failed_refs"}`: `failed_refs` are the rows whose commits touch a failed file.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" guard "$RUN" "<repo>/<slug>"
+```
+
+It prints `{"ok", "problems"}`, one problem per commit and path (`{"sha", "ref", "path", "reason"}`), and exits 5 when there is one.
+
+e. Review: for each fixer pass not reviewed yet (absent from `reviews` of the key) that has fixed rows (`outcome` `fixed` and `pass` N in `fix/state.json`, as `rows.fixed` of its `validate` listed them), in pass order, dispatch `gm:cqa-fix-reviewer` with the line, exactly:
+
+```
+Run dir: <run_dir>. Review: <repo>/<slug>. Worktree: <path>. Base: <sha>. Pass: <N>. Follow your instructions.
+```
+
+`Base` is the `base` that `pass-start` printed for pass N (`bases["<N>"]` of the key in `fix/state.json`). A pass without fixed rows needs no review. Then:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" validate "$RUN" "<repo>/<slug>" review --pass <N>
+```
+
+It prints `{"ok", "errors", "blocking"}`. Exit 6: dispatch the reviewer once more with the `errors`, and validate again; still invalid: the key is left (below).
+
+f. Problems, once the reviews of e are recorded. A row has a problem when it is in `failed_refs`, when a guard problem names its commit (the problem's `ref`, or a `sha` among the row's `commits` in `fix/state.json`), when a review lists it in `blocking`, or when the fixer gave it up (its `attention` in `fix/state.json` starts with « Abandon : »). Each row gets at most one correction pass:
+
+- One correction pass, on the rows with a problem that the fixer did not give up and that no earlier `notes-<M>.json` of the key lists in `problems`: write `notes-<N>.json` with their `problems` (`source` `guard`, `check` or `review`, `detail` in French as `references/fix.md`, section 1 says), then 5.b, 5.d and 5.e once, for that pass only (its review has its own `Base`).
+- Then every row that still has a problem leaves the branch, whatever the problem and whether it had a correction pass or not: no second correction pass follows. One call per reason, in French, 300 characters at most (the fixer's « Abandon : » text, the reviewer's notes, the failed check or the guard reason), then run `guard` again:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" drop "$RUN" "<repo>/<slug>" --refs CQ-12 --reason "<raison en français>"
+```
+
+  It prints `{"dropped", "also_dropped"}`: `also_dropped` are rows whose fix depended on a removed commit; keep them for the end message.
+- A problem on an inherited commit goes neither to the fixer nor to `drop` (which refuses `done_before` rows and refs outside the key, exit 5): a guard problem on a commit that no row of the key lists in its `commits` (a commit of a taken-over branch, at or before its head), or a `failed_refs` row that is `done_before`. It goes to the lead: present mode, tell them at once; autonomous mode, set it aside. A guard problem left there keeps the key from publication (`publish` exits 5, below).
+
+The key is now at `reviewed` (no row `pending`, every pass with fixed rows reviewed without a blocking row); otherwise it is left (below).
+
+g. Publication. In autonomous mode the key stops at `reviewed`, with its branch and its worktree: nothing is pushed and no merge request is created during the pass (Claude Code may ask the lead to confirm a push); step 6 publishes every key. In present mode, publish the key now:
+
+- `push` `local` or `dry_run`, or a key whose `push_ready` is false: no publication, only `finish` (below), which keeps the branch in the dev's repo.
+- Otherwise `mr-body`, `publish`, then `finish`.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" mr-body "$RUN" "<repo>/<slug>"
+```
+
+It writes `mr-title.txt` and `mr.md` for a new merge request, or `mr-addition.md` for a merge request already open (a section « Ajouts du <date> » and « Hors-scope » updated; the rest of its description, which the reviewer may have edited, is kept), and prints `{"title", "file", "kind", "fixed", "covered", "waiting", "out_of_scope"}`.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" publish "$RUN" "<repo>/<slug>"
+```
+
+It checks everything again (guard, every new commit reported, the merge request still open on GitLab, the remote branch not diverged), pushes the branch as a fast-forward, then creates the draft merge request assigned to the lead, or adds to its description, and prints `{"branch", "head", "pushed", "mr", "created", "updated", "links"}`. By exit code:
+
+- 0: `finish`. With the `note` « Aucun commit sur la branche : ni push ni MR. », nothing left the workstation: `finish` too.
+- 2 with « Description de MR périmée : relancez mr-body. », or with a merge request already open for the branch: `mr-body` again, then `publish` once more.
+- Any other 2 (a push or `glab` failure), 5 (refused by a guard: remote branch diverged, merge request merged or closed, guard problem, commit not reported) or 7 (a secret in the title or the description: give the labels, never a value; the same for an exit 7 of `mr-body`): show the message and ask the lead on the spot « La publication de <repo>/<slug> a échoué : <message> » with « Relancer la publication » (once the lead fixed the cause: `mr-body` again, then `publish`) and « Garder la branche en local ». Never force anything.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" finish "$RUN" "<repo>/<slug>"
+```
+
+It removes the worktree (exit 5 while it has uncommitted changes: show them to the lead, never clean them) and prints `{"removed", "branch", "kept_local", "unpushed"}`. After « Garder la branche en local »:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" finish "$RUN" "<repo>/<slug>" --keep-local
+```
+
+A key is left when it cannot reach `reviewed` (a report or a review still invalid, uncommitted changes the lead leaves): its branch and worktree stay as they are, nothing is published, and the end message names them (step 8). Go on with the next key.
+
+**6. Deferred questions and publication at the end.** Once every key went through step 5:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" stage "$RUN" questions
+```
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" deferred "$RUN" --fix
+```
+
+It prints `{"items"}`, the open entries of the fix mode (`id`, `kind`, `detail`, `refs`). The lead is back: go through them one at a time, in French, with AskUserQuestion. A row question: ask it with the options of the row (its `question` in the last report of the key that holds it), plus « Laisser aux devs » while there are fewer than 4. Any other entry (a changed checkout, rows refused by git, uncommitted changes, a problem left to the lead): say it and ask what it needs; for uncommitted changes, « C'est réglé, reprendre » (the key goes on from its `step`, as on a resume, step 1) or « Laisser cette clé ». Then, for each key with answers, in the order of `keys`: `start` (5.a, it gives the key back its worktree), write `notes-<N>.json` with the `answers`, and run 5.b to 5.f for the answered rows. A row left without answer goes to « Hors-scope » of its merge request. Close each entry once settled (a question once the pass of its key is reviewed):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_plan.py" deferred "$RUN" --resolve <id>
+```
+
+Then publish every key still at `reviewed`, SÉCURITÉ first, the lead present, as in 5.g (`mr-body`, `publish` and `finish`, or `finish` alone for a local branch). In autonomous mode this is the first push of the pass: Claude Code may ask the lead to confirm each one, and a publication failure is asked on the spot.
+
+**7. Notion.** Move the pass to this stage in every case:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" stage "$RUN" notion
+```
+
+Then, only when the pass has `notion` true (the consent of step 3), build the comments: one per row put in a merge request, the skill's comment with its « MR : » block (or a comment reduced to the block when the row has none), never a status:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_notion.py" mr-links "$RUN"
+```
+
+It writes `fix/notion-plan.json` and prints `{"comments", "refs"}`. With `comments` 0, skip the write. Otherwise:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_notion.py" apply "$RUN" --plan fix/notion-plan.json
+```
+
+Exit codes as in section 8, step 1: 0, go on; 7, show each blocked operation (ref, kind, reason, never its text) and go on; 3, once the cause is fixed run it once more (it resumes where it stopped), still 3: say « Écriture Notion interrompue : la passe reste reprenable, relancez /gm:checklist-quality-audit fix plus tard. », release the workstation (step 8) and stop; 8 or 2: show the message and go on, nothing was written. Keep the refs of `replace_failed` (a skill comment that could not be replaced, so a second one was created).
+
+**8. Summary.**
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" stage "$RUN" summary
+```
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" summary "$RUN" --replace-failed CQ-3,CQ-12
+```
+
+Pass `--replace-failed` only with the refs kept at step 7. It writes `fix/synthese.md`, closes the pass and its open `fix_question` entries, and prints `{"text", "team_message"}`. Exit 7: a secret in the text: give the labels, never a value; nothing was written. Then release the workstation:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+bash "$S/cqa-keepawake.sh" stop "$RUN"
+```
+
+End, in French: show `text`, then the keys left (step 5) with their branch and worktree, the rows `also_dropped` with the row they depended on, and the message for the team, ready to paste (`team_message`).
+
 ## Exit codes
 
 | Script | Codes |
 |---|---|
 | `cqa_notion.py` | 0 success; 2 environment or usage; 3 Notion API or network (token refused, page not shared with the integration); 6 schema of the copy not v2; 7 at least one write blocked; 8 write refused on the template |
 | `cqa_plan.py` | 0 success; 2 usage or missing file (the message names the command to run first); 6 invalid `context.json` or findings; 7 secret found by `scan` |
+| `cqa_fix.py` | 0 success; 2 usage or environment (also a failed push or `glab` call, a stale merge request description, a worktree missing: the message says what to run); 5 refused by a guard (the message says why: guard problem, remote branch diverged, merge request merged or closed, commit not reported, local or dry-run pass, uncommitted changes); 6 invalid `context.json`, report, review or state; 7 secret found in a merge request text or the summary |
 | `cqa_ssh_ro.py` | 0 success; 1 remote failure (command or file missing on the server); 2 usage; 4 refused, to be confirmed by the lead |
 | `cqa-keepawake.sh` | 0 success, also without any inhibitor on the workstation (warning only); 2 usage |
 | `cqa-toolbox.sh` | 0 success; 1 at least one tool failed (the manifest is written); 2 usage or environment; `run` returns the code of the tool (3: target unreachable or 401) |
