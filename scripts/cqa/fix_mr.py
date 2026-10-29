@@ -338,24 +338,31 @@ def _attention(rows: dict, reports: list, reviews: list, since: int) -> list:
     return notes
 
 
-def _covered(rows: dict, info: dict) -> list:
-    """Return [(pass, {"ref", "title", "by", "url"})] for the skipped rows whose reason says
-    « corrigé par le commit de CQ-x », while CQ-x is still fixed in the key (or was already on
-    the branch): their fix ships in the MR with CQ-x, so they are no « Hors-scope » row.
+def covered_refs(rows: dict) -> dict:
+    """Return {ref: by} for the skipped rows whose reason says « corrigé par le commit de
+    CQ-<by> », while CQ-<by> is still fixed in the key (or was already on the branch): their
+    fix ships in the MR with CQ-<by>, so they are no « Hors-scope » row nor a row left.
     """
-    found = []
-    for ref, row in sorted(rows.items(), key=lambda item: int(item[0])):
-        if row.get("outcome") != "skipped":
+    found = {}
+    for ref, row in rows.items():
+        if not isinstance(row, dict) or row.get("outcome") != "skipped":
             continue
         match = _COVERED_REASON.match(row.get("reason") or "")
         if match is None:
             continue
         by = int(match.group(1))
-        if (rows.get(str(by)) or {}).get("outcome") not in ("fixed", "done_before"):
-            continue
-        about = info.get(int(ref), {})
-        found.append((row.get("pass") or 0, {
-            "ref": int(ref), "title": about.get("title"), "by": by,
+        if (rows.get(str(by)) or {}).get("outcome") in ("fixed", "done_before"):
+            found[int(ref)] = by
+    return found
+
+
+def _covered(rows: dict, info: dict) -> list:
+    """Return [(pass, {"ref", "title", "by", "url"})] for the rows of covered_refs, by ref."""
+    found = []
+    for ref, by in sorted(covered_refs(rows).items()):
+        about = info.get(ref, {})
+        found.append((rows[str(ref)].get("pass") or 0, {
+            "ref": ref, "title": about.get("title"), "by": by,
             "url": notion_url(about.get("page_id")),
         }))
     return found

@@ -1107,6 +1107,21 @@ class PublishTest(MrCase):
         self.assertEqual(self.key()["step"], "published")
         self.assertFalse((self.run_dir / "fix" / "mr-links.json").exists())
 
+    def test_summary_names_the_empty_branch_left_by_a_publication_without_commit(self):
+        """M4: « Aucun commit sur la branche » leaves the branch, empty, in the dev's repo."""
+        self.reviewed(fix=False)
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.assertEqual(self.cli("publish", KEY)[0], 0)
+        self.assertEqual(self.cli("finish", KEY)[0], 0)
+        self.assertEqual(self.head(self.repo, f"refs/heads/{self.branch}"),
+                         self.head(self.repo, "refs/remotes/origin/develop"))
+        code, out, err = self.cli("summary")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        local = result["text"].split("## Branches restées en local\n\n", 1)[1].split("\n\n")[0]
+        self.assertEqual(local, f"- front : {self.branch} (aucun commit)")
+        self.assertEqual(result["team_message"], f"{RUN_ID}\nAucun correctif préparé.")
+
     def test_publish_refuses_during_an_autonomous_pass(self):
         """I1: an autonomous pass pushes nothing during its key loop (stage keys)."""
         for fix in (True, False):
@@ -1131,6 +1146,20 @@ class PublishTest(MrCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.remote(self.branch), self.head(self.worktree))
         self.assertEqual(self.key()["step"], "published")
+
+    def test_publish_links_the_rows_covered_by_another_fix(self):
+        """R17: a row « couverte par le correctif de CQ-x » ships in the MR: it gets its link."""
+        self.reviewed()
+        state = self.state()
+        state["keys"][KEY]["rows"]["5"].update(
+            reason="corrigé par le commit de CQ-3 d'une passe précédente")
+        fix_state.save(self.run_dir, state)
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 0, err)
+        link = [{"repo": "front", "url": MR_URL, "iid": 12}]
+        self.assertEqual(self.links(), {"links": {"3": link, "5": link}})
+        self.assertEqual(json.loads(out)["links"], [3, 5])
 
 
 class FinishTest(MrCase):

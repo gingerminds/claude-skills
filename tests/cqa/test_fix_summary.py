@@ -6,7 +6,7 @@ from pathlib import Path
 from cqa import deferred, fix_state
 from tests.cqa.test_cli_fix import FixCase
 
-LONG_DASH = "—"
+LONG_DASH = "\u2014"
 
 
 def row(outcome, reason=None):
@@ -151,6 +151,25 @@ class SummaryTest(SummaryCase):
         message = json.loads(self.summary()[1])["team_message"]
         self.assertEqual(message, (
             "Boutique Exemple\nCorrectifs préparés en branches locales : 2 branches."))
+
+    def test_team_message_counts_one_branch_in_the_singular(self):
+        self.write_state(push="local", front_mr=False)
+        state = fix_state.load(self.run_dir)
+        state["keys"]["back/seo"]["branch"] = None
+        fix_state.save(self.run_dir, state)
+        message = json.loads(self.summary()[1])["team_message"]
+        self.assertEqual(message, (
+            "Boutique Exemple\nCorrectifs préparés en branches locales : 1 branche."))
+
+    def test_a_row_covered_by_another_fix_ships_in_the_mr(self):
+        """A row « couverte par le correctif de CQ-x » is fixed by the MR, not left to the devs."""
+        state = fix_state.load(self.run_dir)
+        state["keys"]["front/securite"]["rows"]["13"]["reason"] = (
+            "corrigé par le commit de CQ-3 d'une passe précédente")
+        fix_state.save(self.run_dir, state)
+        text = json.loads(self.summary()[1])["text"]
+        self.assertNotIn("Treize", section(text, "Laissées aux devs"))
+        self.assertIn("- CQ-13 : Treize (couverte par le correctif de CQ-3)", section(text, "MR"))
 
     def test_summary_closes_the_pass(self):
         deferred.add(self.run_dir, "question", "Question de l'audit", "CQ-3")

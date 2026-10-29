@@ -347,6 +347,7 @@ def _cmd_start(args, services: Services) -> int:
             row["outcome"] = "done_before"
     if key.get("step") in ("selected", "done"):
         key["step"] = "started"
+        key.pop("empty_branch", None)
     fix_state.save(run_dir, state)
     _emit({
         "branch": key["branch"], "worktree": str(worktree), "base": key["base"],
@@ -767,7 +768,8 @@ def _cmd_publish(args, services: Services) -> int:
     Nothing leaves the machine before every check passed: local pass, autonomous pass still
     in its key loop, step, branch name, state of the MR on GitLab, fresh description files,
     secrets, guard, every new commit reported by the fixer, and a remote branch that HEAD
-    contains. The push is a fast-forward of that one branch, never forced.
+    contains. The push is a fast-forward of that one branch, never forced. Rows covered by
+    the fix of another row ship in the MR, so they get its link too.
     """
     run = services.run
     run_dir = args.run_dir.resolve()
@@ -786,7 +788,7 @@ def _cmd_publish(args, services: Services) -> int:
     worktree = _key_worktree(run_dir, key, run)
     links = _read_links(run_dir)
     if key.get("mr") is None and _ahead_of_base(worktree, run, key["base"]) == 0:
-        _published(run_dir, state, key)
+        _published(run_dir, state, key, empty=True)
         _emit({"branch": branch, "head": fix_git.rev(worktree, run, "HEAD"), "pushed": False,
                "mr": None, "created": False, "updated": False, "links": [],
                "note": NOTHING_TO_PUBLISH})
@@ -853,8 +855,9 @@ def _cmd_publish(args, services: Services) -> int:
         created = True
     elif current is not None:
         updated = _add_to_mr(run, host, worktree, project_ref, key["mr"]["iid"], current, text)
-    refs = sorted(int(ref) for ref, row in key["rows"].items()
-                  if row.get("outcome") in ("fixed", "done_before"))
+    refs = sorted({int(ref) for ref, row in key["rows"].items()
+                   if row.get("outcome") in ("fixed", "done_before")}
+                  | set(fix_mr.covered_refs(key["rows"])))
     write_json(run_dir / LINKS_FILE, fix_mr.merge_links(links, key["repo"], key["mr"], refs))
     _published(run_dir, state, key)
     _emit({"branch": branch, "head": head, "pushed": pushed, "mr": key["mr"], "created": created,
@@ -1192,10 +1195,14 @@ def _add_to_mr(run, host: str, worktree: Path, project_ref: str, iid: int, curre
     return True
 
 
-def _published(run_dir: Path, state: dict, key: dict) -> None:
-    """Record the publication: an addition later only describes the passes after this one."""
+def _published(run_dir: Path, state: dict, key: dict, *, empty: bool = False) -> None:
+    """Record the publication: an addition later only describes the passes after this one.
+
+    empty marks a branch left without any commit in the dev's repo; the summary names it.
+    """
     key["step"] = "published"
     key["published_pass"] = key.get("pass") or 0
+    key["empty_branch"] = empty
     fix_state.save(run_dir, state)
 
 
@@ -1238,7 +1245,6 @@ def _cmd_summary(args, services: Services) -> int:
         project=name if isinstance(name, str) and name.strip() else run_dir.name,
         state=state, candidates=candidates, checks=checks, replace_failed=failed,
     )
-    deferred.open_items(run_dir, fix=True)
     labels = scan_text(f"{found['text']}\n{found['team_message']}", known_values_from_env())
     if labels:
         raise SecretFound(
