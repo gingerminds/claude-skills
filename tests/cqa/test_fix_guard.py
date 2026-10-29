@@ -29,6 +29,20 @@ SUBJECT_TOO_LONG = "sujet de plus de 72 caractères"
 REWRITTEN = "historique réécrit : le départ de la passe n'est plus dans la branche"
 
 
+def problem(sha, ref, path, reason, kind, line=None, label=None, waivable=False):
+    """A problem as the guard prints it."""
+    return {"sha": sha, "ref": ref, "path": path, "line": line, "label": label,
+            "reason": reason, "kind": kind, "waivable": waivable}
+
+
+def secret(sha, ref, path, label, line):
+    """A secret problem: a heuristic label is a suspect, waivable on a line of a file."""
+    heuristic = label in ("credential_assignment", "credential_define")
+    return problem(sha, ref, path, f"secret détecté ({label})",
+                   "suspect" if heuristic else "content", line, label,
+                   heuristic and path is not None)
+
+
 def write(root, path, content):
     target = Path(root) / path
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -78,10 +92,8 @@ class GuardPathTest(RepoCase):
         first = self.add("fix(securite CQ-3): touch a plugin",
                          {"web/app/plugins/acme-forms/x.php": "<?php", "composer.lock": "{}"})
         self.assertEqual(self.check(repo), [
-            {"sha": first, "ref": 3, "path": "composer.lock", "reason": DEPENDENCIES,
-             "kind": "content"},
-            {"sha": first, "ref": 3, "path": "web/app/plugins/acme-forms/x.php",
-             "reason": THIRD_PARTY, "kind": "content"},
+            problem(first, 3, "composer.lock", DEPENDENCIES, "content"),
+            problem(first, 3, "web/app/plugins/acme-forms/x.php", THIRD_PARTY, "content"),
         ])
         refused = {
             "package.json": DEPENDENCIES,
@@ -144,14 +156,14 @@ class GuardMessageTest(RepoCase):
         real_git(self.repo, "merge", "-q", "--no-ff", "-m", "Merge branch 'side'", "side")
         merge = real_git(self.repo, "rev-parse", "HEAD")
         self.assertCountEqual(self.check(), [
-            {"sha": bare, "ref": None, "path": None, "reason": BAD_MESSAGE, "kind": "form"},
-            {"sha": glued, "ref": None, "path": None, "reason": BAD_MESSAGE, "kind": "form"},
-            {"sha": legacy, "ref": 107, "path": None, "reason": BAD_MESSAGE, "kind": "form"},
-            {"sha": stray, "ref": 999, "path": None, "reason": OUT_OF_MR, "kind": "form"},
-            {"sha": coauthor, "ref": 107, "path": None, "reason": ATTRIBUTION, "kind": "form"},
-            {"sha": generated, "ref": 107, "path": None, "reason": ATTRIBUTION, "kind": "form"},
-            {"sha": session, "ref": 107, "path": None, "reason": ATTRIBUTION, "kind": "form"},
-            {"sha": merge, "ref": None, "path": None, "reason": MERGE, "kind": "content"},
+            problem(bare, None, None, BAD_MESSAGE, "form"),
+            problem(glued, None, None, BAD_MESSAGE, "form"),
+            problem(legacy, 107, None, BAD_MESSAGE, "form"),
+            problem(stray, 999, None, OUT_OF_MR, "form"),
+            problem(coauthor, 107, None, ATTRIBUTION, "form"),
+            problem(generated, 107, None, ATTRIBUTION, "form"),
+            problem(session, 107, None, ATTRIBUTION, "form"),
+            problem(merge, None, None, MERGE, "content"),
         ])
 
     def test_guard_checks_section_and_subject_length(self):
@@ -164,10 +176,10 @@ class GuardMessageTest(RepoCase):
         long = self.add(exact + "y", {"d.php": "1"})
         both = self.add("fix(qualite CQ-3): " + "z" * fix_names.SUBJECT_MAX, {"e.php": "1"})
         self.assertEqual(self.check(rows=rows), [
-            {"sha": crossed, "ref": 3, "path": None, "reason": SECTION_MISMATCH, "kind": "form"},
-            {"sha": long, "ref": 3, "path": None, "reason": SUBJECT_TOO_LONG, "kind": "form"},
-            {"sha": both, "ref": 3, "path": None, "reason": SECTION_MISMATCH, "kind": "form"},
-            {"sha": both, "ref": 3, "path": None, "reason": SUBJECT_TOO_LONG, "kind": "form"},
+            problem(crossed, 3, None, SECTION_MISMATCH, "form"),
+            problem(long, 3, None, SUBJECT_TOO_LONG, "form"),
+            problem(both, 3, None, SECTION_MISMATCH, "form"),
+            problem(both, 3, None, SUBJECT_TOO_LONG, "form"),
         ])
         self.assertEqual(fix_guard.SECTION_MISMATCH, SECTION_MISMATCH)
         self.assertEqual(fix_guard.SUBJECT_TOO_LONG, SUBJECT_TOO_LONG)
@@ -176,35 +188,55 @@ class GuardMessageTest(RepoCase):
         known = ["s3cr3t-value"]
         aws = "AKIA" + "IOSFODNN7EXAMPLE"
         message = self.add("fix(securite CQ-3): rotate s3cr3t-value", {"a.txt": "a"},
+                           "DB_PASSWORD=hunter22",
                            "Co-Authored-By: Claude <noreply@example.test>")
         content = self.add("fix(seo CQ-3): add a key",
-                           {"web/key.php": f"<?php\n$key = '{aws}';\n", "x.min.js": "x"})
-        found = {(problem["sha"], problem["reason"]): problem["kind"]
-                 for problem in self.check(known=known)}
+                           {"web/key.php": f"<?php\n$key = '{aws}';\n$password = 'hunter2hunter2';\n",
+                            "x.min.js": "x"})
+        found = {(item["sha"], item["reason"]): (item["kind"], item["waivable"])
+                 for item in self.check(known=known)}
         self.assertEqual(found, {
-            (message, ATTRIBUTION): "form",
-            (message, KNOWN_SECRET): "content",
-            (content, SECTION_MISMATCH): "form",
-            (content, "secret détecté (aws_key)"): "content",
-            (content, MINIFIED): "content",
+            (message, ATTRIBUTION): ("form", False),
+            (message, KNOWN_SECRET): ("content", False),
+            (message, "secret détecté (credential_assignment)"): ("suspect", False),
+            (content, SECTION_MISMATCH): ("form", False),
+            (content, "secret détecté (aws_key)"): ("content", False),
+            (content, "secret détecté (credential_assignment)"): ("suspect", True),
+            (content, MINIFIED): ("content", False),
         })
-        self.assertEqual((fix_guard.FORM, fix_guard.CONTENT), ("form", "content"))
+        self.assertEqual((fix_guard.FORM, fix_guard.CONTENT, fix_guard.SUSPECT),
+                         ("form", "content", "suspect"))
+        self.assertEqual(fix_guard.HEURISTIC_SECRET_LABELS,
+                         {"credential_assignment", "credential_define"})
         real_git(self.repo, "reset", "-q", "--hard", self.start)
         self.add("fix(securite CQ-3): start again", {"b.txt": "b"})
         self.start = message
-        self.assertEqual(self.check(), [{"sha": message, "ref": None, "path": None,
-                                         "reason": REWRITTEN, "kind": "content"}])
+        self.assertEqual(self.check(), [problem(message, None, None, REWRITTEN, "content")])
 
-    def test_guard_flags_literal_credentials_only(self):
+    def test_guard_reports_heuristic_alerts_as_waivable_suspects(self):
         expression = ("<?php\n$password = isset( $_POST['pass1'] ) ? (string) "
                       "wp_unslash( $_POST['pass1'] ) : '';\n")
-        self.add("fix(securite CQ-3): read the password field", {"login.php": expression})
+        read = self.add("fix(securite CQ-3): read the password field", {"login.php": expression})
         literal = self.add("fix(securite CQ-3): set a password",
-                           {"seed.php": "<?php\n$password = 'hunter2hunter2';\n"})
+                           {"seed.php": "<?php\n// Seed.\n$password = 'hunter2hunter2';\n"})
+        defined = self.add("fix(securite CQ-3): define the password",
+                           {"conf.php": "<?php\ndefine( 'DB_PASSWORD', 'Adm1nP@ss2024' );\n"})
         self.assertEqual(self.check(), [
-            {"sha": literal, "ref": 3, "path": "seed.php",
-             "reason": "secret détecté (credential_assignment)", "kind": "content"},
+            secret(read, 3, "login.php", "credential_assignment", 2),
+            secret(literal, 3, "seed.php", "credential_assignment", 3),
+            secret(defined, 3, "conf.php", "credential_define", 2),
         ])
+
+    def test_guard_names_the_line_of_a_secret_in_a_later_hunk(self):
+        write(self.repo, "big.php", "".join(f"<?php // {index}\n" for index in range(20)))
+        real_git(self.repo, "add", "big.php")
+        real_git(self.repo, "commit", "-q", "-m", "chore: before the pass")
+        self.start = real_git(self.repo, "rev-parse", "HEAD")
+        lines = [f"<?php // {index}\n" for index in range(20)]
+        lines[2] = "$a = 1;\n"
+        lines[14] = "$password = 'hunter2hunter2';\n"
+        sha = self.add("fix(securite CQ-3): edit big", {"big.php": "".join(lines)})
+        self.assertEqual(self.check(), [secret(sha, 3, "big.php", "credential_assignment", 15)])
 
     def test_guard_scans_only_added_lines(self):
         known = ["s3cr3t-value"]
@@ -216,8 +248,7 @@ class GuardMessageTest(RepoCase):
         aws = "AKIA" + "IOSFODNN7EXAMPLE"
         added = self.add("fix(securite CQ-3): add a key", {"new.php": f"<?php\n$key = '{aws}';\n"})
         self.assertEqual(self.check(known=known), [
-            {"sha": added, "ref": 3, "path": "new.php", "reason": "secret détecté (aws_key)",
-             "kind": "content"},
+            secret(added, 3, "new.php", "aws_key", 2),
         ])
 
     def test_guard_names_a_path_with_a_space_or_an_accent(self):
@@ -227,10 +258,8 @@ class GuardMessageTest(RepoCase):
         accented = self.add("fix(securite CQ-3): add an accented file", {"web/clé.php": content})
         reason = "secret détecté (aws_key)"
         self.assertEqual(self.check(), [
-            {"sha": spaced, "ref": 3, "path": "web/my file.php", "reason": reason,
-             "kind": "content"},
-            {"sha": accented, "ref": 3, "path": "web/clé.php", "reason": reason,
-             "kind": "content"},
+            secret(spaced, 3, "web/my file.php", "aws_key", 2),
+            secret(accented, 3, "web/clé.php", "aws_key", 2),
         ])
 
 
@@ -286,9 +315,8 @@ class GuardCommandTest(GitCase):
         )
         self.assertEqual(code, 5, err)
         self.assertEqual(json.loads(out), {"ok": False, "problems": [
-            {"sha": leaked, "ref": 3, "path": "web/config.php", "reason": KNOWN_SECRET,
-             "kind": "content"},
-            {"sha": message, "ref": 5, "path": None, "reason": KNOWN_SECRET, "kind": "content"},
+            secret(leaked, 3, "web/config.php", "known_value", 2),
+            secret(message, 5, None, "known_value", 1),
         ]})
         self.assertNotIn("s3cr3t-value", out)
         self.assertNotIn("s3cr3t-value", err)
@@ -312,15 +340,15 @@ class GuardCommandTest(GitCase):
                            encoding="utf-8")
         code, out, err = self.guard_staged("--staged", "--message-file", str(message))
         self.assertEqual(code, 5, err)
+        vendor = real_git(worktree, "rev-parse", ":vendor/acme/a.php")
+        key_blob = real_git(worktree, "rev-parse", ":web/key.php")
         content = [
-            {"sha": None, "ref": 3, "path": "vendor/acme/a.php", "reason": DEPENDENCY_DIR,
-             "kind": "content"},
-            {"sha": None, "ref": 3, "path": "web/key.php", "reason": "secret détecté (aws_key)",
-             "kind": "content"},
+            problem(vendor, 3, "vendor/acme/a.php", DEPENDENCY_DIR, "content"),
+            secret(key_blob, 3, "web/key.php", "aws_key", 2),
         ]
         self.assertEqual(json.loads(out), {"ok": False, "problems": [
-            {"sha": None, "ref": 3, "path": None, "reason": BAD_MESSAGE, "kind": "form"},
-            {"sha": None, "ref": 3, "path": None, "reason": ATTRIBUTION, "kind": "form"},
+            problem(None, 3, None, BAD_MESSAGE, "form"),
+            problem(None, 3, None, ATTRIBUTION, "form"),
             *content,
         ]})
         self.assertEqual(self.head(worktree), head)
@@ -330,8 +358,8 @@ class GuardCommandTest(GitCase):
         code, out, err = self.guard_staged("--staged", "--message-file", str(message))
         self.assertEqual(code, 5, err)
         self.assertEqual(json.loads(out)["problems"], [
-            {"sha": None, "ref": 5, "path": None, "reason": SECTION_MISMATCH, "kind": "form"},
-            {"sha": None, "ref": 5, "path": None, "reason": SUBJECT_TOO_LONG, "kind": "form"},
+            problem(None, 5, None, SECTION_MISMATCH, "form"),
+            problem(None, 5, None, SUBJECT_TOO_LONG, "form"),
             *[{**problem, "ref": 5} for problem in content],
         ])
         real_git(worktree, "reset", "-q")
@@ -341,10 +369,23 @@ class GuardCommandTest(GitCase):
             fix_names.git(worktree, subprocess.run, "add", "--", "web/login.php").returncode, 0)
         message.write_text("fix(securite CQ-3): read the password field\n\nThe audit found it.\n",
                            encoding="utf-8")
+        blob = real_git(worktree, "rev-parse", ":web/login.php")
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out)["problems"],
+                         [secret(blob, 3, "web/login.php", "credential_assignment", 2)])
+        code, out, err = self.run_main(["waive-secret", self.run_dir, KEY, "--sha", blob, "--path",
+                                        "web/login.php", "--line", "2", "--label",
+                                        "credential_assignment"])
+        self.assertEqual(code, 0, err)
         code, out, err = self.guard_staged("--staged", "--message-file", str(message))
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out), {"ok": True, "problems": []})
         self.assertEqual(self.head(worktree), head)
+        committed = self.commit_files(worktree, "fix(securite CQ-3): read the password field", {})
+        self.assertNotEqual(committed, head)
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual((code, json.loads(out)), (0, {"ok": True, "problems": []}), err)
         for options in (["--staged"], ["--message-file", str(message)],
                         ["--staged", "--message-file", str(self.root / "absent.txt")]):
             with self.subTest(options=options):
@@ -359,6 +400,116 @@ class GuardCommandTest(GitCase):
         done = fix_names.git(worktree, subprocess.run, "commit", "-q", "-m", message)
         self.assertEqual(done.returncode, 0, done.stderr)
         return self.head(worktree)
+
+
+class SecretWaiverTest(GitCase):
+    """The lead waives a heuristic secret alert (credential_assignment, credential_define) for
+    one line of one commit; no other secret is ever waivable, and the value is never stored."""
+
+    WORDPRESS = ("$password = isset( $_POST['pass1'] ) ? (string) wp_unslash( $_POST['pass1'] ) "
+                 ": '';")
+
+    def setUp(self):
+        super().setUp()
+        self.open_pass()
+        started = self.start_ok()
+        self.worktree, self.start_sha = Path(started["worktree"]), started["start_sha"]
+
+    def commit(self, message, files):
+        for path, content in files.items():
+            write(self.worktree, path, content)
+            self.assertEqual(
+                fix_names.git(self.worktree, subprocess.run, "add", "--", path).returncode, 0)
+        done = fix_names.git(self.worktree, subprocess.run, "commit", "-q", "-m", message)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return self.head(self.worktree)
+
+    def guard(self, env=None):
+        code, out, err = self.run_main(["guard", self.run_dir, KEY], env=env)
+        return code, json.loads(out)["problems"]
+
+    def waive(self, sha, path, line, label, env=None):
+        return self.run_main(["waive-secret", self.run_dir, KEY, "--sha", sha, "--path", path,
+                              "--line", str(line), "--label", label], env=env)
+
+    def test_the_cq107_false_positive_is_waived_by_the_lead(self):
+        sha = self.commit("fix(securite CQ-3): read the password field",
+                          {"web/login.php": f"<?php\n{self.WORDPRESS}\n"})
+        expected = secret(sha, 3, "web/login.php", "credential_assignment", 2)
+        self.assertEqual(self.guard(), (5, [expected]))
+        self.assertEqual((expected["kind"], expected["waivable"]), ("suspect", True))
+        code, out, err = self.waive(sha, "web/login.php", 2, "credential_assignment")
+        self.assertEqual(code, 0, err)
+        waiver = json.loads(out)["waiver"]
+        self.assertEqual(set(waiver), {"sha", "path", "line", "label", "at"})
+        self.assertEqual((waiver["sha"], waiver["path"], waiver["line"], waiver["label"]),
+                         (sha, "web/login.php", 2, "credential_assignment"))
+        self.assertEqual(self.key()["secret_waivers"], [waiver])
+        self.assertEqual(self.guard(), (0, []))
+        self.assertEqual(self.waive(sha, "web/login.php", 2, "credential_assignment")[0], 0)
+        self.assertEqual(len(self.key()["secret_waivers"]), 1)
+        state = (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8")
+        for text in ("$_POST", "wp_unslash", "pass1", "isset"):
+            self.assertNotIn(text, state)
+        again = self.commit("fix(securite CQ-3): read it on the profile page",
+                            {"web/profile.php": f"<?php\n// Profile.\n{self.WORDPRESS}\n"})
+        self.assertEqual(self.guard(),
+                         (5, [secret(again, 3, "web/profile.php", "credential_assignment", 3)]))
+
+    def test_only_a_heuristic_alert_the_guard_reports_may_be_waived(self):
+        env = {"GM_AUDIT_AUTH_PASS": "s3cr3t-value"}
+        aws = "AKIA" + "IOSFODNN7EXAMPLE"
+        known = self.commit("fix(securite CQ-3): read the value",
+                            {"web/config.php": "<?php\n$auth = 's3cr3t-value';\n",
+                             "web/key.php": f"<?php\n$key = '{aws}';\n"})
+        literal = self.commit("fix(securite CQ-3): seed a password",
+                              {"web/seed.php": "<?php\n$password = 'hunter2hunter2';\n"})
+        code, problems = self.guard(env)
+        self.assertEqual(problems, [
+            secret(known, 3, "web/config.php", "known_value", 2),
+            secret(known, 3, "web/key.php", "aws_key", 2),
+            secret(literal, 3, "web/seed.php", "credential_assignment", 2),
+        ])
+        refused = {
+            "known_value": (known, "web/config.php", 2, "known_value"),
+            "aws_key": (known, "web/key.php", 2, "aws_key"),
+            "hors de la passe": (self.start_sha, "web/seed.php", 2, "credential_assignment"),
+            "inconnu": ("f" * 40, "web/seed.php", 2, "credential_assignment"),
+            "autre ligne": (literal, "web/seed.php", 3, "credential_assignment"),
+            "autre chemin": (literal, "web/other.php", 2, "credential_assignment"),
+            "autre label": (literal, "web/seed.php", 2, "credential_define"),
+            "ligne 0": (literal, "web/seed.php", 0, "credential_assignment"),
+        }
+        for case, args in refused.items():
+            with self.subTest(case=case):
+                code, out, err = self.waive(*args, env=env)
+                self.assertEqual(code, 2, err)
+                self.assertEqual(out, "")
+                self.assertTrue(err.strip())
+                self.assertNotIn("s3cr3t-value", err)
+                self.assertNotIn("secret_waivers", self.key())
+        code, out, err = self.waive(literal, "web/seed.php", 2, "credential_assignment", env=env)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("hunter2", out)
+        self.assertNotIn("hunter2", (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(self.guard(env), (5, problems[:2]))
+
+    def test_a_drop_moves_the_waivers_to_the_rewritten_commits(self):
+        dropped = self.commit("fix(securite CQ-5): add b", {"b5.txt": "b"})
+        sha = self.commit("fix(securite CQ-3): read the password field",
+                          {"web/login.php": f"<?php\n{self.WORDPRESS}\n"})
+        state = self.state()
+        state["keys"][KEY]["rows"]["5"].update(outcome="fixed", commits=[dropped])
+        state["keys"][KEY]["rows"]["3"].update(outcome="fixed", commits=[sha])
+        fix_state.save(self.run_dir, state)
+        self.assertEqual(self.waive(sha, "web/login.php", 2, "credential_assignment")[0], 0)
+        code, out, err = self.run_main(["drop", self.run_dir, KEY, "--refs", "CQ-5", "--reason",
+                                        "Revue bloquante : échappement manquant."])
+        self.assertEqual(code, 0, err)
+        rewritten = self.key()["rows"]["3"]["commits"][0]
+        self.assertNotEqual(rewritten, sha)
+        self.assertEqual([waiver["sha"] for waiver in self.key()["secret_waivers"]], [rewritten])
+        self.assertEqual(self.guard(), (0, []))
 
 
 class ValidateTest(GitCase):
@@ -805,8 +956,7 @@ class DropTest(GitCase):
         code, out, err = self.run_main(["guard", self.run_dir, KEY])
         self.assertEqual(code, 5)
         self.assertEqual(json.loads(out)["problems"], [
-            {"sha": started["start_sha"], "ref": None, "path": None,
-             "reason": fix_guard.REWRITTEN, "kind": "content"}])
+            problem(started["start_sha"], None, None, fix_guard.REWRITTEN, "content")])
         code, result, err = self.drop(KEY, "CQ-3")
         self.assertEqual(code, 5)
         self.assertIn("réécrit", err)

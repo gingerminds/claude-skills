@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cqa.secrets import known_values_from_env, redact, scan_text, scan_tree
+from cqa.secrets import known_values_from_env, redact, scan_lines, scan_text, scan_tree
 
 JWT = ".".join(["eyJhbGciOiJub25lIn0", "eyJzdWIiOiJ0ZXN0In0", "c2lnbmF0dXJlLXZhbHVl"])
 
@@ -300,21 +300,12 @@ class NonSecretTest(unittest.TestCase):
         self.assertEqual(redact(text, []), "password : type=password\nDB_PASSWORD=[secret masqué]")
 
 
-class LiteralCredentialsTest(unittest.TestCase):
-    """The guard of the fix mode flags a literal value only (design 4.2.1): an expression, a
-    call, a superglobal, a variable or an operator on the right is not a secret."""
+class CodeCredentialsTest(unittest.TestCase):
+    """Credentials in code, as the audit and the guard of the fix mode both scan them: the same
+    strict rule; the guard lets the lead waive a heuristic alert instead (fix_guard)."""
 
     WORDPRESS = ("$password = isset( $_POST['pass1'] ) ? (string) wp_unslash( $_POST['pass1'] ) "
                  ": '';")
-    EXPRESSIONS = [
-        WORDPRESS,
-        "$token = !empty( $_GET['t'] ) ? sanitize_text_field( wp_unslash( $_GET['t'] ) ) : null;",
-        "$password = (string) $request->get( 'password' );",
-        "$secret = wp_unslash( $_POST['secret'] ?? '' );",
-        WORDPRESS + " // phpcs:ignore WordPress.Security.NonceVerification.Missing",
-        "$password = wp_generate_password( 24, false );",
-        "$token = $this->tokens->create( $user->ID, array( 'expires' => 3600 ) );",
-    ]
     STILL_SECRETS = [
         "$password = 'hunter2hunter2';",
         "DB_PASSWORD=hunter22 # prod",
@@ -323,7 +314,7 @@ class LiteralCredentialsTest(unittest.TestCase):
         "password=isset(x)&token=abcd1234efgh5678",
         "PASSWORD=(hunter22)",
         "password: hunter22 (prod)",
-        # Round 1: a bare token that only looks like a call, a negation or a cast.
+        # A bare token that only looks like a call, a negation or a cast.
         "DB_PASSWORD=Adm1n(2024)!",
         "DB_PASSWORD=Adm1n(2024",
         "API_KEY=sk(4f9a8b7c6d5e4f3a2b1c)z",
@@ -339,7 +330,7 @@ class LiteralCredentialsTest(unittest.TestCase):
         "$password = (string) Adm1nP4ss;",
         "$password = isset( $x ) ? $y : 2024;",
         "password = isset(",
-        # Round 2: a quoted operand of the value (outside any call) is a literal.
+        # A quoted fallback or concatenated part of the value.
         "$password = getenv( 'DB_PASSWORD' ) ?: 'AZERTY2024';",
         WORDPRESS[:-3] + "'AZERTY2024';",
         "'password' => getenv( 'DB_PASSWORD' ) ?: 'PROD_DB_2024',",
@@ -349,27 +340,11 @@ class LiteralCredentialsTest(unittest.TestCase):
         "$password = isset( $x ) ? $x : 'AZERTY2024' . $suffix;",
     ]
 
-    def test_literal_only_credentials(self):
+    def test_strict_rule_flags_every_known_credential_form(self):
         self.assertEqual(scan_text(self.WORDPRESS, []), ["credential_assignment"])
-        for text in self.EXPRESSIONS:
-            with self.subTest(text=text):
-                self.assertEqual(scan_text(text, [], literal_credentials=True), [])
         for text in self.STILL_SECRETS:
-            for mode in (False, True):
-                with self.subTest(text=text, literal_credentials=mode):
-                    self.assertEqual(scan_text(text, [], literal_credentials=mode),
-                                     ["credential_assignment"])
-        for text, _ in NonSecretTest.SECRETS:
             with self.subTest(text=text):
-                labels = scan_text(text, [], literal_credentials=True)
-                self.assertEqual(labels[0], "credential_assignment")
-                self.assertTrue(set(labels[1:]) <= {"mysql_password_option"}, labels)
-        for label, text in PATTERN_CASES:
-            with self.subTest(label=label, text=text[:30]):
-                self.assertEqual(scan_text(text, [], literal_credentials=True), [label])
-        for text in NonSecretTest.NON_SECRETS + CLEAN_TEXTS:
-            with self.subTest(text=text):
-                self.assertEqual(scan_text(text, [], literal_credentials=True), [])
+                self.assertEqual(scan_text(text, []), ["credential_assignment"])
 
     DEFINED = [
         "define( 'DB_PASSWORD', 'Adm1nP@ss2024' );",
@@ -398,24 +373,44 @@ class LiteralCredentialsTest(unittest.TestCase):
 
     def test_defined_credentials(self):
         for text in self.DEFINED:
-            for mode in (False, True):
-                with self.subTest(text=text, literal_credentials=mode):
-                    self.assertEqual(scan_text(text, [], literal_credentials=mode),
-                                     ["credential_define"])
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, []), ["credential_define"])
             with self.subTest(redact=text):
                 masked = redact(text, [])
                 self.assertIn("[secret masqué]", masked)
                 self.assertEqual(scan_text(masked, []), [])
                 self.assertEqual(redact(masked, []), masked)
         for text in self.NOT_DEFINED:
-            for mode in (False, True):
-                with self.subTest(text=text, literal_credentials=mode):
-                    self.assertEqual(scan_text(text, [], literal_credentials=mode), [])
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, []), [])
         self.assertEqual(redact("define( 'DB_PASSWORD', 'Adm1nP@ss2024' );", []),
                          "define( 'DB_PASSWORD', '[secret masqué]' );")
 
-    def test_redact_keeps_masking_expressions(self):
+    def test_redact_masks_the_whole_expression(self):
         self.assertEqual(redact(self.WORDPRESS, []), "$password = [secret masqué]")
+
+    def test_scan_lines_names_the_line_of_each_label(self):
+        aws = "AKIA" + "IOSFODNN7EXAMPLE"
+        text = "\n".join([
+            "<?php",
+            self.WORDPRESS,
+            "$name = 'x';",
+            f"$key = '{aws}'; // s3cr3t-value",
+            "define(",
+            "    'DB_PASSWORD',",
+            "    'Adm1nP@ss2024'",
+            ");",
+            "s3cr3t-value",
+        ])
+        self.assertEqual(scan_lines(text, ["s3cr3t-value", ""]), [
+            ("credential_assignment", 2),
+            ("known_value", 4), ("aws_key", 4),
+            ("credential_define", 5),
+            ("known_value", 9),
+        ])
+        self.assertEqual(sorted({label for label, _ in scan_lines(text, ["s3cr3t-value"])}),
+                         sorted(scan_text(text, ["s3cr3t-value"])))
+        self.assertEqual(scan_lines("rien à signaler", ["s3cr3t-value"]), [])
 
 
 class ProcessAndKubeSecretsTest(unittest.TestCase):

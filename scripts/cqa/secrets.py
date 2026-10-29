@@ -1,4 +1,5 @@
 """Detect and mask secrets. Scans report labels, never values."""
+import bisect
 import fnmatch
 import os
 import re
@@ -132,32 +133,10 @@ _ACCESSOR_CALL = re.compile(
 _HARMLESS_LITERAL = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+|[A-Z][A-Z0-9_]*")
 # A value cut at a space before "(" or "[" is a call or index: its arguments stay masked.
 _OPENING_BRACKET = re.compile(r"[ \t]*(?:\(|\[(?!secret masqué\]))")
-# Literal mode (the guard of the fix mode): an unquoted value is an expression only when its
-# first bare word is exactly a call opener ("isset(", "!empty(") or a cast ("(string)"), the
-# statement goes on after it, and every word of the statement is code (see _is_code_word). A
-# shell expansion ($(...), ${...}, :-) keeps the rules above, since its words may be the value.
-_CASTS = frozenset({"string", "int", "integer", "bool", "boolean", "float", "double", "array",
-                    "object"})
-_OPENER = re.compile(r"!?[A-Za-z_][\w.\\]*\(|\((?:" + "|".join(sorted(_CASTS)) + r")\)",
-                     re.IGNORECASE)
-_SHELL_EXPANSION = re.compile(r"\$[({]|`|:-")
-_CODE_WORD = re.compile(
-    r"(?P<var>\$+[A-Za-z_]\w*)"
-    r"|(?P<member>(?:\?->|->|::)[A-Za-z_]\w*)"
-    r"|(?P<name>[A-Za-z_][\w\\]*(?:\.[A-Za-z_][\w\\]*)*)"
-    r"|(?P<number>[0-9][\w.]*)"
-)
-_CODE_KEYWORDS = frozenset({"null", "true", "false", "none", "nil", "undefined", "and", "or",
-                            "xor", "not", "new", "instanceof", "clone", "is", "in"})
 
 
-def _is_non_secret(match: re.Match, literal: bool = False) -> bool:
-    """True when a credential match is a form field description or a pure code expression.
-
-    With literal, an unquoted value is also no secret when it is an expression (see
-    _is_expression) whose quoted literals are all harmless; a quoted operand of that
-    expression, outside any bracket, is harmless only when empty (see _is_harmless_operand).
-    """
+def _is_non_secret(match: re.Match) -> bool:
+    """True when a credential match is a form field description or a pure code expression."""
     value = match.group("val")
     if match.group("q"):
         f_string = "f" in (match.group("sp") or "").lower()
@@ -176,74 +155,10 @@ def _is_non_secret(match: re.Match, literal: bool = False) -> bool:
         or bool(_CODE_CALL.fullmatch(expression))
         or (value.startswith(":") and text[match.start("val") - 1:match.start("val")] == ":")
     )
-    expression = False
-    if not is_code and literal:
-        is_code = expression = _is_expression(rest)
     if not is_code or ":-" in rest:
         return False
     literals = list(_QUOTED_LITERAL.finditer(rest)) + list(_N_LITERAL.finditer(rest))
-    if expression:
-        return all(_is_harmless_operand(rest, literal) for literal in literals)
     return all(_is_harmless_literal(rest, literal) for literal in literals)
-
-
-def _is_harmless_operand(rest: str, literal: re.Match) -> bool:
-    """Judge a quoted literal of an expression (literal mode): inside a bracket of its
-    statement (a call argument, an index) by _is_harmless_literal, outside any bracket (an
-    operand: a fallback, a concatenated part) harmless only when empty. A literal after the
-    statement (in a trailing comment) keeps _is_harmless_literal."""
-    code = _QUOTED_LITERAL.sub(lambda found: " " * len(found.group(0)), rest)
-    statement = _statement(code)
-    if literal.start() >= len(statement) or _depth(statement[:literal.start()]) > 0:
-        return _is_harmless_literal(rest, literal)
-    return not literal.group(2)
-
-
-def _is_expression(rest: str) -> bool:
-    """True when the value (rest: from the value to the end of its line) is an expression
-    without any literal part: its first bare word is exactly a call opener or a cast, the
-    statement goes on after it, there is no shell expansion, and every word of the statement
-    (up to its first ";" outside brackets) is code. Quoted literals are judged by the caller.
-    """
-    words = rest.split(None, 1)
-    if len(words) < 2 or not _OPENER.fullmatch(words[0]) or _SHELL_EXPANSION.search(rest):
-        return False
-    code = _statement(_QUOTED_LITERAL.sub(lambda found: " " * len(found.group(0)), rest))
-    return all(_is_code_word(code, found) for found in _CODE_WORD.finditer(code))
-
-
-def _statement(code: str) -> str:
-    """Return code up to its first ";" outside brackets (a trailing comment is left out)."""
-    depth = 0
-    for index, char in enumerate(code):
-        if char in "([":
-            depth += 1
-        elif char in ")]":
-            depth -= 1
-        elif char == ";" and depth <= 0:
-            return code[:index]
-    return code
-
-
-def _is_code_word(code: str, found: re.Match) -> bool:
-    """True for a variable, a member, a called name, a class before :: or ->, a keyword, a
-    cast, or a whole number inside brackets (an argument or an index). Any other word is a
-    literal part of the value."""
-    kind, start, end = found.lastgroup, found.start(), found.end()
-    if kind in ("var", "member"):
-        return True
-    word = found.group().lower()
-    if kind == "number":
-        return word.isdigit() and _depth(code[:start]) > 0
-    if code[end:end + 1] == "(" or code[end:end + 2] in ("::", "->") or code[end:end + 3] == "?->":
-        return True
-    if word in _CODE_KEYWORDS:
-        return True
-    return word in _CASTS and code[start - 1:start] == "(" and code[end:end + 1] == ")"
-
-
-def _depth(code: str) -> int:
-    return code.count("(") + code.count("[") - code.count(")") - code.count("]")
 
 
 def _is_reference(text: str) -> bool:
@@ -292,28 +207,43 @@ _PATTERNS = (
 )
 
 
-def scan_text(text: str, known_values: list[str], *, literal_credentials: bool = False) -> list[str]:
-    """Return the labels found in text, each once, in a fixed order.
-
-    With literal_credentials (the guard of the fix mode only), credential_assignment flags a
-    literal value only, a quoted string or a bare token: an expression on the right (a call,
-    a cast, a negation) whose quoted literals are all harmless is no secret.
-    """
+def scan_text(text: str, known_values: list[str]) -> list[str]:
+    """Return the labels found in text, each once, in a fixed order."""
     labels = []
     if any(value in text for value in known_values if value):
         labels.append("known_value")
-    labels.extend(
-        label for label, pattern in _PATTERNS if _search(pattern, text, literal_credentials)
-    )
+    labels.extend(label for label, pattern in _PATTERNS if _search(pattern, text))
     return labels
 
 
-def _search(pattern: re.Pattern, text: str, literal: bool = False) -> bool:
-    return any(not _skipped(pattern, m, literal) for m in pattern.finditer(text))
+def scan_lines(text: str, known_values: list[str]) -> list[tuple[str, int]]:
+    """Return the (label, line) pairs found in text, line counted from 1 where a match starts.
+
+    The labels are those of scan_text; each pair comes once, by line, then in the order of
+    scan_text. A value is never returned.
+    """
+    starts = [0] + [index + 1 for index, char in enumerate(text) if char == "\n"]
+    found = set()
+    for value in {value for value in known_values if value}:
+        found.update(("known_value", _line_of(starts, match.start()))
+                     for match in re.finditer(re.escape(value), text))
+    for label, pattern in _PATTERNS:
+        found.update((label, _line_of(starts, match.start()))
+                     for match in pattern.finditer(text) if not _skipped(pattern, match))
+    order = ["known_value"] + [label for label, _ in _PATTERNS]
+    return sorted(found, key=lambda pair: (pair[1], order.index(pair[0])))
 
 
-def _skipped(pattern: re.Pattern, match: re.Match, literal: bool = False) -> bool:
-    return pattern is _CREDENTIAL and _is_non_secret(match, literal)
+def _line_of(starts: list, offset: int) -> int:
+    return bisect.bisect_right(starts, offset)
+
+
+def _search(pattern: re.Pattern, text: str) -> bool:
+    return any(not _skipped(pattern, m) for m in pattern.finditer(text))
+
+
+def _skipped(pattern: re.Pattern, match: re.Match) -> bool:
+    return pattern is _CREDENTIAL and _is_non_secret(match)
 
 
 def redact(text: str, known_values: list[str]) -> str:

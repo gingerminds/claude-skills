@@ -10,6 +10,7 @@ from urllib.parse import unquote
 import cqa_fix
 from cqa import fix_mr, fix_state
 from tests.cqa.test_fix_git import BASE, GitCase, HOST, KEY, PREFIX, flight, mr
+from tests.cqa.test_fix_guard import problem
 from tests.cqa.test_git_tools import commit, git as real_git
 
 SECTION = ["--section", "securite"]
@@ -899,7 +900,7 @@ class PublishTest(MrCase):
         self.fix_row_5()
         code, out, err = self.cli("guard", KEY)
         self.assertEqual(code, 5)
-        expected = [{"sha": oops, "ref": None, "path": None, "reason": BAD_MESSAGE, "kind": "form"}]
+        expected = [problem(oops, None, None, BAD_MESSAGE, "form")]
         self.assertEqual(json.loads(out)["problems"], expected)
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         code, out, err = self.cli("publish", KEY)
@@ -951,8 +952,7 @@ class PublishTest(MrCase):
         code, out, err = self.cli("guard", KEY)
         self.assertEqual(code, 5)
         self.assertEqual(json.loads(out)["problems"],
-                         [{"sha": stray, "ref": 40, "path": None, "reason": "Réf hors de cette MR",
-                           "kind": "form"}])
+                         [problem(stray, 40, None, "Réf hors de cette MR", "form")])
 
     def test_publish_refuses_a_commit_the_fixer_did_not_report(self):
         self.reviewed()
