@@ -13,7 +13,7 @@ _MIN_ENV_LENGTH = 6
 
 _PRIVATE_KEY = re.compile(
     r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"
-    r"[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----|\Z)"
+    r"[\s\S]*?(?:(?P<end>-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----)|\Z)"
 )
 _AWS = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _GITLAB = re.compile(r"\bgl(?:pat|dt|rt|ptt|cbt|oas|ft|imt|agent|soat)-[0-9A-Za-z_.\-]{20,}")
@@ -233,8 +233,10 @@ def scan_spans(text: str, known_values: list[str]) -> list[tuple[str, int, int]]
     """Return the (label, first line, last line) of every match in text, lines counted from 1
     on "\\n" only (a "\\r" is part of its line, as git counts it).
 
-    A define( or a private key written over several lines spans them. Each triple comes once,
-    by first line, then in the order of scan_text, then by last line. A value is never returned.
+    A define( or a private key written over several lines spans them; a private key without
+    its END line spans its first line only (the match runs to the end of the text). Each
+    triple comes once, by first line, then in the order of scan_text, then by last line. A
+    value is never returned.
     """
     starts = [0] + [index + 1 for index, char in enumerate(text) if char == "\n"]
     found = set()
@@ -242,8 +244,13 @@ def scan_spans(text: str, known_values: list[str]) -> list[tuple[str, int, int]]
         found.update(("known_value", *_span_of(starts, match))
                      for match in re.finditer(re.escape(value), text))
     for label, pattern in _PATTERNS:
-        found.update((label, *_span_of(starts, match))
-                     for match in pattern.finditer(text) if not _skipped(pattern, match))
+        for match in pattern.finditer(text):
+            if _skipped(pattern, match):
+                continue
+            first, last = _span_of(starts, match)
+            if pattern is _PRIVATE_KEY and match.group("end") is None:
+                last = first
+            found.add((label, first, last))
     order = ["known_value"] + [label for label, _ in _PATTERNS]
     return sorted(found, key=lambda item: (item[1], order.index(item[0]), item[2]))
 

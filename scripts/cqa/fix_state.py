@@ -114,7 +114,7 @@ def _waivers_ok(value) -> bool:
         and isinstance(item.get("path"), str) and item["path"] != ""
         and isinstance(item.get("line"), int) and not isinstance(item["line"], bool)
         and item["line"] >= 1
-        and item.get("label") in WAIVABLE_LABELS
+        and isinstance(item.get("label"), str) and item["label"] in WAIVABLE_LABELS
         for item in value
     )
 

@@ -7,11 +7,16 @@ from pathlib import Path
 from unittest import mock
 
 from cqa import fix_guard, fix_names, fix_state
+from tests.cqa.test_cli_fix import GITLEAKS_DOWN
 from tests.cqa.test_fix_git import BASE, GitCase, IDENTITY, KEY, flight, mr
 from tests.cqa.test_git_tools import commit, git as real_git
 
 SCHEMAS = Path(__file__).resolve().parents[2] / "skills" / "checklist-quality-audit" / "schemas"
 SECTION = ["--section", "securite"]
+# A made-up Stripe-shaped key: gitleaks flags it (stripe-access-token), the home rule does not
+# unless a credential keyword precedes it.
+STRIPE = "sk_live_" + "51Hx9k2LmN8pQ7rS3tU6vW0xY4zA1bC5dE2fG8hJ3kL6mN9pQ"
+GITLEAKS = "gitleaks:stripe-access-token"
 
 THIRD_PARTY = "code tiers (third_party_paths)"
 DEPENDENCY_DIR = "dossier de dépendances"
@@ -74,10 +79,11 @@ class RepoCase(unittest.TestCase):
         real_git(self.repo, "commit", "-q", "-m", message, *paragraphs)
         return real_git(self.repo, "rev-parse", "HEAD")
 
-    def check(self, repo=None, rows=(3, 12, 107), known=()):
+    def check(self, repo=None, rows=(3, 12, 107), known=(), gitleaks=None):
         sections = rows if isinstance(rows, dict) else {ref: "securite" for ref in rows}
         return fix_guard.check_commits(
-            self.repo, self.start, sections, repo or {"name": "front"}, list(known), subprocess.run
+            self.repo, self.start, sections, repo or {"name": "front"}, list(known), subprocess.run,
+            gitleaks=gitleaks,
         )
 
     @staticmethod
@@ -280,15 +286,31 @@ class GuardContentTest(RepoCase):
         return real_git(self.repo, "rev-parse", "HEAD")
 
     def test_a_carriage_return_hides_nothing(self):
+        """A lone \\r (not followed by \\n) keeps the line whole for git and for the scan; the
+        alert on such a line is a suspect the lead cannot waive, since an editor would show
+        the lead another line than the one judged."""
         for case, content in (
             ("lone CR", b"<?php // note\r" + self.PASSWORD.encode() + b"\n"),
             ("CR line endings", b"<?php\r// a\r" + self.PASSWORD.encode() + b"\r"),
         ):
             with self.subTest(case=case):
                 sha = self.add_bytes("fix(securite CQ-3): x", {"web/cr.php": content})
-                self.assertEqual(self.check(),
-                                 [secret(sha, 3, "web/cr.php", "credential_assignment", 1)])
+                expected = secret(sha, 3, "web/cr.php", "credential_assignment", 1)
+                self.assertEqual(self.check(), [{**expected, "waivable": False}])
                 self.start = sha
+        sha = self.add_bytes("fix(securite CQ-3): y",
+                             {"web/crlf.php": b"<?php\r\n" + self.PASSWORD.encode() + b"\r\n"})
+        self.assertEqual(self.check(), [secret(sha, 3, "web/crlf.php", "credential_assignment", 2)])
+
+    def test_unchanged_lines_between_two_hunks_are_never_added(self):
+        """diff.interHunkContext of the dev's config would merge two hunks and show the lines
+        between them as context: the guard asks for none."""
+        real_git(self.repo, "config", "diff.interHunkContext", "10")
+        lines = ["<?php", "// 2", "// 3", "// 4", self.PASSWORD, "// 6", "// 7", "// 8", "// 9"]
+        self.start = self.add("chore: before", {"web/m.php": "\n".join(lines) + "\n"})
+        lines[1], lines[7] = "// two", "// eight"
+        self.add("fix(securite CQ-3): x", {"web/m.php": "\n".join(lines) + "\n"})
+        self.assertEqual(self.check(), [])
 
     def test_a_secret_over_several_lines_is_reported_when_one_of_its_lines_is_added(self):
         self.start = self.add("chore: before",
@@ -317,6 +339,73 @@ class GuardContentTest(RepoCase):
         sha = self.add("fix(securite CQ-3): x", {"my dir/a b.php": "\n".join(lines) + "\n"})
         self.assertEqual(self.check(), [
             secret(sha, 3, "my dir/a b.php", "credential_assignment", line) for line in (4, 21, 26)
+        ])
+
+
+class GitleaksTest(RepoCase):
+    """gitleaks reads, once per guard call, the same content as the home rule (the changed
+    files whole and the messages); a finding becomes a content problem, never waivable, at
+    its commit, file and line, when one of its lines is added."""
+
+    LINE = f"$stripe = '{STRIPE}';"
+
+    def scanner(self, calls, finder=None):
+        def scan(text):
+            calls.append(text)
+            if finder is not None:
+                return finder(text)
+            return [("stripe-access-token", number, number)
+                    for number, line in enumerate(text.split("\n"), start=1) if STRIPE in line]
+        return scan
+
+    def test_findings_map_back_to_their_commit_file_and_line(self):
+        self.start = self.add("chore: before", {"web/old.php": f"<?php\n{self.LINE}\n"})
+        first = self.add("fix(securite CQ-3): pay", {
+            "web/pay.php": f"<?php\n$x = 1;\n{self.LINE}\n",
+            "web/old.php": f"<?php\n{self.LINE}\n// note\n",
+        })
+        second = self.add("fix(securite CQ-12): rotate", {"docs/a.md": f"{self.LINE}\n"},
+                          f"Old key: {STRIPE}")
+        calls = []
+        problems = self.check(gitleaks=self.scanner(calls))
+        self.assertEqual(problems, [
+            secret(first, 3, "web/pay.php", GITLEAKS, 3),
+            secret(second, 12, None, GITLEAKS, 3),
+            secret(second, 12, "docs/a.md", GITLEAKS, 1),
+        ])
+        self.assertEqual({(item["kind"], item["waivable"]) for item in problems}, {("content", False)})
+        self.assertEqual(len(calls), 1)
+        for part in ("fix(securite CQ-3): pay", "$x = 1;", "// note", "fix(securite CQ-12): rotate",
+                     f"Old key: {STRIPE}"):
+            with self.subTest(part=part):
+                self.assertIn(part, calls[0])
+        self.assertLess(calls[0].index("fix(securite CQ-3): pay"), calls[0].index("$x = 1;"))
+        self.assertLess(calls[0].index("// note"), calls[0].index("fix(securite CQ-12): rotate"))
+
+    def test_without_a_scanner_or_with_an_unavailable_one_the_home_rule_runs_alone(self):
+        sha = self.add("fix(securite CQ-3): pay",
+                       {"web/pay.php": f"<?php\n{self.LINE}\n$password = 'hunter2hunter2';\n"})
+        home = [secret(sha, 3, "web/pay.php", "credential_assignment", 3)]
+        self.assertEqual(self.check(), home)
+        calls = []
+        self.assertEqual(self.check(gitleaks=self.scanner(calls, lambda text: None)), home)
+        self.assertEqual(len(calls), 1)
+        calls = []
+        self.assertEqual(self.check(gitleaks=self.scanner(calls)),
+                         home + [secret(sha, 3, "web/pay.php", GITLEAKS, 2)])
+
+    def test_a_finding_over_several_lines_is_kept_when_one_of_them_is_added(self):
+        self.start = self.add("chore: before", {"web/k.php": "<?php\n// a\n// b\n// c\n"})
+        sha = self.add("fix(securite CQ-3): x", {"web/k.php": "<?php\n// a\n// b\n// changed\n"})
+
+        def finder(text):
+            at = text.split("\n").index("// a") + 1
+            return [("private-key", at, at + 2), ("other-rule", at, at + 1),
+                    ("tail-rule", at + 2, at + 50)]
+
+        self.assertEqual(self.check(gitleaks=self.scanner([], finder)), [
+            secret(sha, 3, "web/k.php", "gitleaks:private-key", 2),
+            secret(sha, 3, "web/k.php", "gitleaks:tail-rule", 4),
         ])
 
 
@@ -378,7 +467,7 @@ class GuardCommandTest(GitCase):
         self.fixer_commit(started["worktree"], "follow.txt", "fix(securite CQ-3): follow up")
         code, out, err = self.run_main(["guard", self.run_dir, KEY])
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), {"ok": True, "problems": []})
+        self.assertEqual(json.loads(out), {"ok": True, "problems": [], "note": None})
         earlier = fix_guard.check_commits(
             Path(started["worktree"]), before, {3: "securite", 5: "securite"}, {"name": "front"},
             [], subprocess.run,
@@ -401,7 +490,7 @@ class GuardCommandTest(GitCase):
         self.assertEqual(json.loads(out), {"ok": False, "problems": [
             secret(leaked, 3, "web/config.php", "known_value", 2),
             secret(message, 5, None, "known_value", 1),
-        ]})
+        ], "note": None})
         self.assertNotIn("s3cr3t-value", out)
         self.assertNotIn("s3cr3t-value", err)
         self.assertEqual(self.run_main(["guard", self.run_dir, KEY])[0], 0)
@@ -434,7 +523,7 @@ class GuardCommandTest(GitCase):
             problem(None, 3, None, BAD_MESSAGE, "form"),
             problem(None, 3, None, ATTRIBUTION, "form"),
             *content,
-        ]})
+        ], "note": None})
         self.assertEqual(self.head(worktree), head)
         self.assertEqual(real_git(worktree, "diff", "--cached", "--name-only").splitlines(),
                          ["vendor/acme/a.php", "web/key.php"])
@@ -464,18 +553,110 @@ class GuardCommandTest(GitCase):
         self.assertEqual(code, 0, err)
         code, out, err = self.guard_staged("--staged", "--message-file", str(message))
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), {"ok": True, "problems": []})
+        self.assertEqual(json.loads(out), {"ok": True, "problems": [], "note": None})
         self.assertEqual(self.head(worktree), head)
         committed = self.commit_files(worktree, "fix(securite CQ-3): read the password field", {})
         self.assertNotEqual(committed, head)
         code, out, err = self.run_main(["guard", self.run_dir, KEY])
-        self.assertEqual((code, json.loads(out)), (0, {"ok": True, "problems": []}), err)
+        self.assertEqual((code, json.loads(out)), (0, {"ok": True, "problems": [], "note": None}), err)
         for options in (["--staged"], ["--message-file", str(message)],
                         ["--staged", "--message-file", str(self.root / "absent.txt")]):
             with self.subTest(options=options):
                 code, out, err = self.guard_staged(*options)
                 self.assertEqual(code, 2, err)
                 self.assertEqual(out, "")
+
+    def test_guard_reports_gitleaks_findings_without_the_value(self):
+        self.gitleaks = {STRIPE: "stripe-access-token"}
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        sha = self.commit_files(worktree, "fix(securite CQ-3): pay",
+                                {"web/pay.php": f'<?php\napi_key = "{STRIPE}"\n'})
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual(code, 5, err)
+        found = secret(sha, 3, "web/pay.php", GITLEAKS, 2)
+        self.assertEqual(json.loads(out), {"ok": False, "problems": [
+            secret(sha, 3, "web/pay.php", "credential_assignment", 2), found,
+        ], "note": None})
+        self.assertEqual((found["kind"], found["waivable"]), ("content", False))
+        for text in (out, err):
+            self.assertNotIn(STRIPE, text)
+            self.assertNotIn("CANARY", text)
+        self.assertEqual(len(self.toolbox_inputs), 1)
+        self.assertIn(f'api_key = "{STRIPE}"', self.toolbox_inputs[0])
+        self.assertIn("fix(securite CQ-3): pay", self.toolbox_inputs[0])
+        for path in self.toolbox_paths[0]:
+            self.assertFalse(path.exists(), path)
+        self.assertEqual(list(self.run_dir.rglob("gitleaks.json")), [])
+        waive = ["waive-secret", self.run_dir, KEY, "--sha", sha, "--path", "web/pay.php",
+                 "--line", "2", "--label"]
+        code, out, err = self.run_main(waive + [GITLEAKS])
+        self.assertEqual((code, out), (2, ""))
+        self.assertNotIn(STRIPE, err)
+        code, out, err = self.run_main(waive + ["credential_assignment"])
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out)["problems"], [found])
+        self.assertNotIn(STRIPE, (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8"))
+
+    def test_guard_keeps_the_home_rule_next_to_gitleaks(self):
+        self.gitleaks = {}
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        sha = self.commit_files(worktree, "fix(securite CQ-3): env", {
+            "web/.env.dist": "DB_PASSWORD=Adm1n(2024)!\n",
+            "web/login.php": f"<?php\n{SecretWaiverTest.WORDPRESS}\n",
+        })
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual(code, 5, err)
+        problems = [secret(sha, 3, "web/.env.dist", "credential_assignment", 1),
+                    secret(sha, 3, "web/login.php", "credential_assignment", 2)]
+        self.assertEqual(json.loads(out), {"ok": False, "problems": problems, "note": None})
+        self.assertTrue(all(item["kind"] == "suspect" and item["waivable"] for item in problems))
+        self.assertEqual(len(self.toolbox_inputs), 1)
+        self.assertIn("DB_PASSWORD=Adm1n(2024)!", self.toolbox_inputs[0])
+
+    def test_guard_without_gitleaks_notes_the_fallback(self):
+        self.gitleaks = None
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        self.commit_files(worktree, "fix(securite CQ-3): clean", {"web/a.php": "<?php\n"})
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {"ok": True, "problems": [], "note": GITLEAKS_DOWN})
+        self.assertIn("Docker", err)
+        sha = self.commit_files(worktree, "fix(securite CQ-3): read the password field",
+                                {"web/login.php": f"<?php\n{SecretWaiverTest.WORDPRESS}\n"})
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out), {"ok": False, "problems": [
+            secret(sha, 3, "web/login.php", "credential_assignment", 2)], "note": GITLEAKS_DOWN})
+        self.assertEqual(len(self.toolbox_inputs), 2)
+
+    def test_staged_guard_uses_gitleaks(self):
+        self.gitleaks = {STRIPE: "stripe-access-token"}
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        head = self.head(worktree)
+        write(worktree, "web/pay.php", f"<?php\n$stripe = '{STRIPE}';\n")
+        self.assertEqual(fix_names.git(worktree, subprocess.run, "add", "--", "web/pay.php").returncode, 0)
+        message = self.root / "message.txt"
+        message.write_text(f"fix(securite CQ-3): pay\n\nOld key {STRIPE}\n", encoding="utf-8")
+        blob = real_git(worktree, "rev-parse", ":web/pay.php")
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out), {"ok": False, "problems": [
+            secret(None, 3, None, GITLEAKS, 3),
+            secret(blob, 3, "web/pay.php", GITLEAKS, 2),
+        ], "note": None})
+        self.assertEqual(self.head(worktree), head)
+        self.assertEqual(len(self.toolbox_inputs), 1)
+        self.assertNotIn(STRIPE, out + err)
+        self.gitleaks = None
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {"ok": True, "problems": [], "note": GITLEAKS_DOWN})
 
     def commit_files(self, worktree, message, files):
         for path, content in files.items():
@@ -564,6 +745,9 @@ class SecretWaiverTest(GitCase):
             ("line as bool", [{**good, "line": True}]),
             ("unknown label", [{**good, "label": "aws_key"}]),
             ("empty label", [{**good, "label": ""}]),
+            ("label as list", [{**good, "label": ["credential_assignment"]}]),
+            ("label as object", [{**good, "label": {"credential_assignment": 1}}]),
+            ("line as object", [{**good, "line": {}}]),
         ):
             with self.subTest(case=case):
                 state = self.state_text()
@@ -587,6 +771,21 @@ class SecretWaiverTest(GitCase):
     def state_text(self):
         """The state as written, without the check of load (a malformed one is being fixed)."""
         return json.loads((self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8"))
+
+    def test_a_line_with_a_lone_carriage_return_is_never_waived(self):
+        path = self.worktree / "web" / "cr.php"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"<?php // note\r" + self.WORDPRESS.encode() + b"\n")
+        self.assertEqual(fix_names.git(self.worktree, subprocess.run, "add", "--", "web/cr.php").returncode, 0)
+        done = fix_names.git(self.worktree, subprocess.run, "commit", "-q", "-m", "fix(securite CQ-3): cr")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        sha = self.head(self.worktree)
+        expected = {**secret(sha, 3, "web/cr.php", "credential_assignment", 1), "waivable": False}
+        self.assertEqual(self.guard(), (5, [expected]))
+        code, out, err = self.waive(sha, "web/cr.php", 1, "credential_assignment")
+        self.assertEqual((code, out), (2, ""))
+        self.assertNotIn("secret_waivers", self.key())
+        self.assertEqual(self.guard(), (5, [expected]))
 
     def test_only_a_heuristic_alert_the_guard_reports_may_be_waived(self):
         env = {"GM_AUDIT_AUTH_PASS": "s3cr3t-value"}

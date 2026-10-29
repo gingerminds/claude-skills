@@ -16,12 +16,66 @@ from tests.cqa.test_cli_prepare import clean_environ
 REMOTE = "git@gitlab.example.org:acme/shop.git"
 
 
+GITLEAKS_DOWN = "gitleaks indisponible : contrôle maison seul"
+CANARY = "CANARY-VALUE-NEVER-COPIED"
+
+
+def is_secrets_call(command) -> bool:
+    """True for the launcher call of the guard: bash .../cqa-toolbox.sh secrets <in> <out_dir>."""
+    return (len(command) == 5 and command[0] == "bash" and command[2] == "secrets"
+            and Path(command[1]).name == "cqa-toolbox.sh")
+
+
+def fake_gitleaks(command, rules):
+    """Answer the launcher's secrets command as the toolbox would, without Docker.
+
+    rules maps the text of a line to the RuleID gitleaks gives it; the report lists one
+    finding per flagged line of <in>, Match and Secret being canaries. rules None stands for
+    a workstation without Docker (exit 2, nothing written).
+    """
+    if rules is None:
+        return subprocess.CompletedProcess(
+            command, 2, "", "Docker est introuvable : installez Docker Desktop (macOS) ou "
+                            "Docker Engine (Linux).\n")
+    text = Path(command[3]).read_bytes().decode("utf-8", "replace")
+    findings = []
+    for number, line in enumerate(text.split("\n"), start=1):
+        for needle, rule in rules.items():
+            if needle in line:
+                findings.append({
+                    "Description": rule, "StartLine": number, "EndLine": number,
+                    "StartColumn": 1, "EndColumn": 2, "Match": CANARY, "Secret": CANARY,
+                    "File": "", "SymlinkFile": "", "Commit": "", "Entropy": 4.2, "Author": "",
+                    "Email": "", "Date": "", "Message": "", "Tags": [], "RuleID": rule,
+                    "Fingerprint": f":{rule}:{number}",
+                })
+    (Path(command[4]) / "gitleaks.json").write_text(json.dumps(findings), encoding="utf-8")
+    return subprocess.CompletedProcess(command, 0, "", "")
+
+
 class FixCase(unittest.TestCase):
+    """The fix commands with the toolbox simulated: the guard's gitleaks call never starts a
+    container. gitleaks maps the text of a line to the RuleID the fake reports ({} finds
+    nothing); None stands for a workstation without Docker. toolbox_inputs keeps what each
+    call fed gitleaks."""
+
+    gitleaks = {}
+
     def run_main(self, argv, run=subprocess.run, env=None):
+        if not hasattr(self, "toolbox_inputs"):
+            self.toolbox_inputs, self.toolbox_paths = [], []
+
+        def runner(command, **kwargs):
+            if is_secrets_call(command):
+                self.toolbox_inputs.append(Path(command[3]).read_bytes().decode("utf-8", "replace"))
+                self.toolbox_paths.append((Path(command[3]), Path(command[4])))
+                return fake_gitleaks(command, self.gitleaks)
+            return run(command, **kwargs)
+
         out, err = io.StringIO(), io.StringIO()
         with clean_environ(env):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = cqa_fix.main([str(item) for item in argv], run=run)
+                code = cqa_fix.main([str(item) for item in argv], run=runner)
         return code, out.getvalue(), err.getvalue()
 
 

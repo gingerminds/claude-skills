@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import quote
 
-from cqa import deferred, fix_checks, fix_git, fix_gitlab, fix_guard, fix_mr, fix_names, fix_rows, fix_state, fix_summary
+from cqa import deferred, fix_checks, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_state, fix_summary
 from cqa.checklist import parse_refs, ref_label
 from cqa.notion_read import write_json, write_text
 from cqa.project import project_name
@@ -31,6 +31,8 @@ EXIT_USAGE = 2
 EXIT_REFUSED = 5
 EXIT_CONTEXT = 6
 EXIT_SECRET = 7
+# The launcher of the Docker toolbox, next to this script (check, secrets).
+LAUNCHER = Path(__file__).resolve().parent / "cqa-toolbox.sh"
 
 UNFINISHED = "Une passe fix est inachevée : reprenez-la ou abandonnez-la (cqa_fix.py abandon)."
 UNFINISHED_V2 = "Passe v2 inachevée : abandonnez-la (cqa_fix.py abandon), puis relancez fix."
@@ -683,15 +685,18 @@ def _cmd_guard(args, services: Services) -> int:
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
     worktree = _key_worktree(run_dir, key, services.run)
+    scanner = fix_gitleaks.Gitleaks(services.run, LAUNCHER)
     if message is None:
-        problems = _guard_problems(run_dir, key, worktree, services.run)
+        problems = _guard_problems(run_dir, key, worktree, services.run, gitleaks=scanner)
         where = f"sur la branche {key['branch']}"
     else:
         problems = _unwaived(key, worktree, services.run,
-                             _staged_problems(run_dir, key, worktree, message, services.run),
+                             _staged_problems(run_dir, key, worktree, message, services.run,
+                                              gitleaks=scanner),
                              staged=True)
         where = "dans l'index et le message prévu, ne commitez pas en l'état"
-    _emit({"ok": not problems, "problems": problems})
+    _note(scanner)
+    _emit({"ok": not problems, "problems": problems, "note": scanner.note})
     if problems:
         print(f"Garde-fou : {len(problems)} problème(s) {where}, détail dans « problems ».",
               file=sys.stderr)
@@ -706,11 +711,18 @@ def _commit_message(text: str) -> str:
     return "\n".join(lines).strip("\n")
 
 
-def _staged_problems(run_dir: Path, key: dict, worktree: Path, message: str, run) -> list:
+def _staged_problems(run_dir: Path, key: dict, worktree: Path, message: str, run,
+                     gitleaks=None) -> list:
     repo = _repo(run_dir, key["repo"])
     _third_party(repo)
     return fix_guard.check_staged(worktree, message, _row_sections(key), repo,
-                                  known_values_from_env(), run)
+                                  known_values_from_env(), run, gitleaks=gitleaks)
+
+
+def _note(scanner) -> None:
+    """Tell the lead, on stderr, when gitleaks did not run (the home rules ran alone)."""
+    if scanner.note:
+        print(f"{scanner.note} ({scanner.reason})", file=sys.stderr)
 
 
 def _cmd_waive_secret(args, services: Services) -> int:
@@ -832,8 +844,7 @@ def _cmd_check(args, services: Services) -> int:
     checks = []
     if files:
         checks = fix_checks.run_checks(
-            services.run, Path(__file__).resolve().parent / "cqa-toolbox.sh", check_dir, worktree,
-            key["repo"], files, added, third_party,
+            services.run, LAUNCHER, check_dir, worktree, key["repo"], files, added, third_party,
         )
     refs = fix_checks.failed_refs(worktree, key["start_sha"], checks, services.run)
     not_run = [{**item, "why": fix_checks.NOT_RUN_WHY} for item in fix_checks.project_commands(worktree)]
@@ -1160,7 +1171,9 @@ def _cmd_publish(args, services: Services) -> int:
     if key.get("mr_body") != _body_stamp(run_dir, key, worktree, run):
         raise UsageError(STALE_BODY)
     _refuse_secrets(text if title is None else f"{title}\n{text}", "rien n'a été poussé")
-    problems = _guard_problems(run_dir, key, worktree, run)
+    scanner = fix_gitleaks.Gitleaks(run, LAUNCHER)
+    problems = _guard_problems(run_dir, key, worktree, run, gitleaks=scanner)
+    _note(scanner)
     if problems:
         _emit({"ok": False, "problems": problems})
         print(f"Garde-fou : {len(problems)} problème(s) sur la branche {branch}, rien n'a été "
@@ -1397,9 +1410,10 @@ def _find_open_mr(run, host: str, encoded: str, branch: str) -> Optional[dict]:
 
 
 def _guard_problems(run_dir: Path, key: dict, worktree: Path, run, *,
-                    waivers: bool = True) -> list:
+                    waivers: bool = True, gitleaks=None) -> list:
     """Run the guard on <start_sha>..HEAD of the key, less the problems the lead waived
-    (waive-secret) unless waivers is False.
+    (waive-secret) unless waivers is False; gitleaks is the fix_gitleaks.Gitleaks of the
+    call, None to run the home rules alone (waive-secret: no gitleaks finding is waivable).
 
     The commits a taken-over branch carried between start_sha and its head (never pushed) are
     judged like the others, except that a ref outside the key is not held against them.
@@ -1408,6 +1422,7 @@ def _guard_problems(run_dir: Path, key: dict, worktree: Path, run, *,
     _third_party(repo)
     problems = fix_guard.check_commits(
         worktree, key["start_sha"], _row_sections(key), repo, known_values_from_env(), run,
+        gitleaks=gitleaks,
     )
     inherited = _inherited_commits(worktree, key, run)
     problems = [problem for problem in problems

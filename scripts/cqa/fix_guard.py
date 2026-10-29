@@ -6,13 +6,16 @@ the pass (a reviewer's suggestion, a merge of develop) is never judged again; be
 it judges the index and the planned message the same way. It names the labels of the secrets
 it finds and their line, never their values, with the same strict rules as the audit: every
 changed file is scanned whole, as committed (bytes, no newline translation), and a secret is
-reported when one of its lines is added. Each problem has a kind: "form" (the message:
+reported when one of its lines is added. gitleaks of the toolbox (fix_gitleaks), when the
+caller gives it, reads the same content once per call; its findings ("gitleaks:<RuleID>")
+are content, never waivable. Each problem has a kind: "form" (the message:
 convention, section, length, attribution, ref) is fixed by rewriting the message; "content"
 (paths, secrets, merge, rewritten history) drops the row; "suspect" is a heuristic secret
 alert (HEURISTIC_SECRET_LABELS) that the lead may waive for one line of a file (waivable, see
 cqa_fix.py waive-secret) or treat as content. A waiver is keyed on the content of the file
 (its blob): it holds while the file is unchanged, whatever its commit.
 """
+import bisect
 import fnmatch
 import json
 import re
@@ -115,8 +118,9 @@ _AS_IS = re.compile(
     r"|(?:à une?|aux) (?:devs?|développeur(?:se)?s?))\b",
     re.IGNORECASE,
 )
-_DIFF = ("-U0", "--text", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
-         "--src-prefix=a/", "--dst-prefix=b/")
+# No context at all, whatever diff.interHunkContext says: the hunk headers count added lines.
+_DIFF = ("-U0", "--inter-hunk-context=0", "--text", "--no-color", "--no-ext-diff",
+         "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/")
 # A hunk header of a patch without context: the added lines of the new file are +start,count.
 _HUNK = re.compile(rb"@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@")
 _C_ESCAPE = re.compile(r'\\([0-7]{3}|[abtnvfr"\\])')
@@ -144,7 +148,7 @@ def path_reason(path: str, repo: dict, *, gitlink: bool = False) -> Optional[str
 
 
 def check_commits(worktree: Path, start_sha: str, rows: dict, repo: dict, known: list,
-                  run) -> list:
+                  run, gitleaks=None) -> list:
     """Return the problems of the commits of <start_sha>..HEAD in worktree, oldest first.
 
     rows maps every ref of the key (done_before included) to the alias of its section (None
@@ -156,10 +160,11 @@ def check_commits(worktree: Path, start_sha: str, rows: dict, repo: dict, known:
     None; kind is FORM, CONTENT or SUSPECT, and only a suspect of a file is waivable. Every
     file a commit changes is scanned whole, as committed; a secret is reported, at the line
     where it starts, when one of its lines is added by the commit. The messages are scanned
-    whole.
+    whole. gitleaks, when given, is called once with all that content joined
+    (fix_gitleaks.Gitleaks) and its findings come last, as content problems.
     """
     worktree = Path(worktree)
-    problems = []
+    problems, segments = [], []
     if not fix_git.is_ancestor(worktree, run, start_sha, "HEAD"):
         problems.append(_problem(start_sha, None, None, REWRITTEN, CONTENT))
     for commit in fix_git.commits_in_range(worktree, run, start_sha):
@@ -174,28 +179,40 @@ def check_commits(worktree: Path, start_sha: str, rows: dict, repo: dict, known:
             _added_ranges(worktree, run, f"git show {sha[:12]}", "-c", "core.quotePath=true",
                           "show", "--format=", "--no-show-signature", *_DIFF, sha),
             lambda path, sha=sha: _blob_text(worktree, run, f"{sha}:{path}"),
+            segments,
         )
-    return problems
+    return problems + _gitleaks_problems(gitleaks, segments)
 
 
 def check_staged(worktree: Path, message: str, rows: dict, repo: dict, known: list,
-                 run) -> list:
+                 run, gitleaks=None) -> list:
     """Return the problems of the next commit, before it is made: the index of worktree
-    against HEAD, with message as its message. rows, repo and known as for check_commits;
-    each problem has the ref of the planned subject, and as sha the blob of its path in the
-    index (None for the message or a deleted path). Nothing is written.
+    against HEAD, with message as its message. rows, repo, known and gitleaks as for
+    check_commits; each problem has the ref of the planned subject, and as sha the blob of
+    its path in the index (None for the message or a deleted path), whose content is what
+    the scan read. Nothing is written.
     """
     worktree = Path(worktree)
     ref = fix_names.ref_of_subject(message.split("\n", 1)[0])
+    blobs = _staged_blobs(worktree, run)
+
+    def read(path):
+        blob = blobs.get(path)
+        if blob is None:
+            raise fix_git.GitRefused(f"l'index n'a pas de blob pour {path} (fusion en cours ?) : "
+                                     "rien n'a été contrôlé.")
+        return _blob_text(worktree, run, blob)
+
+    segments = []
     problems = _change_problems(
         None, ref, message, rows, repo, known,
         _changed_paths(worktree, run, "git diff --cached", "diff", "--cached", "-z", "--raw",
                        "--no-renames"),
         _added_ranges(worktree, run, "git diff --cached", "-c", "core.quotePath=true", "diff",
                       "--cached", *_DIFF),
-        lambda path: _blob_text(worktree, run, f":{path}"),
+        read, segments,
     )
-    blobs = _staged_blobs(worktree, run)
+    problems += _gitleaks_problems(gitleaks, segments)
     for item in problems:
         if item["path"] is not None:
             item["sha"] = blobs.get(item["path"])
@@ -406,16 +423,20 @@ def _secret(sha, ref, path, label: str, line: int) -> dict:
 
 
 def _change_problems(sha, ref, message: str, rows: dict, repo: dict, known: list, paths: list,
-                     added: dict, read) -> list:
+                     added: dict, read, segments: list) -> list:
     """Return the problems of one change: its message, its paths, the secrets of its files.
 
     added maps every changed path to the lines it adds in the new file; read(path) gives the
     whole new content of a path (a gitlink has none and is a path problem already). A secret
-    whose span meets an added line is reported at the line where it starts.
+    whose span meets an added line is reported at the line where it starts; on a line that
+    holds a lone "\\r" it is never waivable, since an editor would show the lead another line
+    than the one git and the scan read. Every text scanned (the message, then each file) is
+    appended to segments as (sha, ref, path, added lines, text) for gitleaks.
     """
     problems = [_problem(sha, ref, None, reason, kind)
                 for reason, kind in _message_reasons(message, rows)]
     problems += [_secret(sha, ref, None, label, line) for label, line in scan_lines(message, known)]
+    segments.append((sha, ref, None, None, message))
     gitlinks = set()
     for path, gitlink in paths:
         reason = path_reason(path, repo, gitlink=gitlink)
@@ -426,10 +447,60 @@ def _change_problems(sha, ref, message: str, rows: dict, repo: dict, known: list
     for path, lines in added.items():
         if not lines or path in gitlinks:
             continue
-        problems += [_secret(sha, ref, path, label, first)
-                     for label, first, last in scan_spans(read(path), known)
-                     if not lines.isdisjoint(range(first, last + 1))]
+        text = read(path)
+        segments.append((sha, ref, path, lines, text))
+        rows_of = text.split("\n")
+        for label, first, last in scan_spans(text, known):
+            if lines.isdisjoint(range(first, last + 1)):
+                continue
+            found = _secret(sha, ref, path, label, first)
+            if found["waivable"] and _lone_cr(rows_of, first, last):
+                found["waivable"] = False
+            problems.append(found)
     return problems
+
+
+def _lone_cr(lines: list, first: int, last: int) -> bool:
+    """True when a line of first..last (1-based, split on "\\n") holds a "\\r" that no "\\n"
+    follows: git and the scan see one line where an editor shows two."""
+    for number in range(first, min(last, len(lines)) + 1):
+        line = lines[number - 1]
+        if "\r" in line[:-1] or (line.endswith("\r") and number == len(lines)):
+            return True
+    return False
+
+
+def _gitleaks_problems(gitleaks, segments: list) -> list:
+    """Run gitleaks once on the segments joined and map its findings back to their segment.
+
+    gitleaks(text) returns [(rule, first, last)] on the joined text, None when it did not
+    run (the caller reports that). A finding of a file is kept when its span meets an added
+    line of that file, one of a message always; each becomes a content problem
+    "gitleaks:<rule>" at the line where it starts, in segment order, then by line and rule.
+    """
+    if gitleaks is None or not segments:
+        return []
+    texts = [text if text.endswith("\n") else text + "\n" for *_, text in segments]
+    findings = gitleaks("".join(texts))
+    if not findings:
+        return []
+    starts, total = [], 1
+    for text in texts:
+        starts.append(total)
+        total += text.count("\n")
+    found = set()
+    for rule, first, last in findings:
+        if not 1 <= first < total:
+            continue
+        index = bisect.bisect_right(starts, first) - 1
+        _, _, path, lines, _ = segments[index]
+        end = (starts[index + 1] if index + 1 < len(starts) else total) - 1
+        local_first = first - starts[index] + 1
+        local_last = min(max(last, first), end) - starts[index] + 1
+        if path is None or not lines.isdisjoint(range(local_first, local_last + 1)):
+            found.add((index, local_first, rule))
+    return [_secret(segments[index][0], segments[index][1], segments[index][2],
+                    f"gitleaks:{rule}", line) for index, line, rule in sorted(found)]
 
 
 def _message_reasons(message: str, rows: dict) -> list:

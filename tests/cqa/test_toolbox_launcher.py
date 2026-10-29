@@ -706,6 +706,97 @@ class AllTest(LauncherCase):
         self.assertEqual("skipped", self.read_json("tools/schemathesis/result.json")["status"])
 
 
+class SecretsTest(LauncherCase):
+    """secrets <in_file> <out_dir>: gitleaks on the content of a file, offline and read-only,
+    for the guard of the fix mode."""
+
+    def setUp(self):
+        super().setUp()
+        self.in_dir = self.tmp / "guard in"
+        self.in_dir.mkdir()
+        self.in_file = self.in_dir / "input.txt"
+        self.in_file.write_text("<?php\n$x = 1;\n", encoding="utf-8")
+        self.out_dir = self.tmp / "guard out"
+        self.out_dir.mkdir()
+
+    def secrets(self, *args, **extra):
+        return self.launch("secrets", *(args or (str(self.in_file), str(self.out_dir))), **extra)
+
+    def docker_runs(self):
+        return [call for call in self.calls() if call[:1] == ["run"]]
+
+    def test_secrets_command_runs_offline(self):
+        result = self.secrets(**SECRETS)
+        self.assertEqual(0, result.returncode, result.stderr)
+        runs = self.docker_runs()
+        self.assertEqual(1, len(runs))
+        call = runs[0]
+        self.assertTrue(has_pair(call, "--network", "none"))
+        self.assertTrue(has_pair(call, "--pull", "never"))
+        self.assertIn("--rm", call)
+        self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
+        self.assertTrue(has_pair(call, "--env", "HOME=/tmp"))
+        self.assertTrue(has_pair(call, "--tmpfs", "/tmp"))
+        self.assertTrue(has_pair(call, "-v", f"{self.in_file}:/in/input:ro"))
+        self.assertTrue(has_pair(call, "-v", f"{self.out_dir}:/out"))
+        mounts = [call[i + 1] for i in range(len(call) - 1) if call[i] == "-v"]
+        self.assertEqual(2, len(mounts))
+        self.assertEqual(["HOME=/tmp"], env_args(call))
+        for secret in ("GM_AUDIT_AUTH_USER", "GM_AUDIT_AUTH_PASS", "cqa-user", "pass-xyz-123"):
+            self.assertNotIn(secret, " ".join(call))
+        options, image, arguments = split_run(call)
+        self.assertEqual("gitleaks", image)
+        self.assertTrue(has_pair(options, "--entrypoint", "sh"))
+        self.assertEqual("-c", arguments[0])
+        script = arguments[1]
+        for needle in ("gitleaks stdin", "--report-format json", "--report-path /out/gitleaks.json",
+                       "--exit-code 0", "--no-banner", "-l error", "</in/input"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, script)
+        self.assertNotIn("--redact", script)
+        self.assertEqual("[]", (self.out_dir / "gitleaks.json").read_text(encoding="utf-8"))
+        self.assertEqual("<?php\n$x = 1;\n", self.in_file.read_text(encoding="utf-8"))
+        self.assertEqual(["input.txt"], [path.name for path in self.in_dir.iterdir()])
+        self.assertEqual(["gitleaks.json"], [path.name for path in self.out_dir.iterdir()])
+
+    def test_secrets_replaces_a_stale_report(self):
+        (self.out_dir / "gitleaks.json").write_text("stale", encoding="utf-8")
+        self.assertEqual(0, self.secrets().returncode)
+        self.assertEqual("[]", (self.out_dir / "gitleaks.json").read_text(encoding="utf-8"))
+
+    def test_secrets_without_docker_or_image_exits_2_before_any_run(self):
+        result = self.secrets(CQA_STUB_MISSING="gitleaks")
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("gitleaks", result.stderr)
+        self.assertIn("cqa-toolbox.sh pull", result.stderr)
+        self.assertEqual([], self.docker_runs())
+        self.assertFalse((self.out_dir / "gitleaks.json").exists())
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name in ("python3", "uname", "dirname", "basename", "id"):
+            (bin_dir / name).symlink_to(shutil.which(name))
+        result = self.secrets(path=str(bin_dir))
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Docker", result.stderr)
+
+    def test_secrets_usage_and_failures(self):
+        for args in (
+            [],
+            [str(self.in_file)],
+            [str(self.in_file), str(self.out_dir), "extra"],
+            [str(self.tmp / "absent.txt"), str(self.out_dir)],
+            [str(self.in_file), str(self.tmp / "absent")],
+        ):
+            with self.subTest(args=args):
+                result = self.launch("secrets", *args)
+                self.assertEqual(2, result.returncode, (args, result.stderr))
+        self.assertEqual([], self.docker_runs())
+        result = self.secrets(CQA_STUB_FAIL="gitleaks stdin")
+        self.assertEqual(1, result.returncode)
+        self.assertIn("gitleaks", result.stderr)
+        self.assertFalse((self.out_dir / "gitleaks.json").exists())
+
+
 class RefusalsTest(LauncherCase):
     def test_usage_errors(self):
         for args in (

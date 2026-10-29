@@ -438,6 +438,16 @@ class CodeCredentialsTest(unittest.TestCase):
                          [(label, first) for label, first, _ in scan_spans(text, ["s3cr3t-value"])])
         self.assertEqual(scan_spans("rien à signaler", ["s3cr3t-value"]), [])
 
+    def test_an_unclosed_private_key_spans_its_first_line_only(self):
+        """Without an END line the audit still flags the key, but the guard must not take every
+        later line of the file for part of it."""
+        text = "\n".join(["<?php", "-----BEGIN RSA PRIVATE KEY-----", "MIIEowIBAAKCAQEA",
+                          "// a", "// b"])
+        self.assertEqual(scan_text(text, []), ["private_key"])
+        self.assertEqual(scan_spans(text, []), [("private_key", 2, 2)])
+        closed = text + "\n-----END RSA PRIVATE KEY-----\n// c"
+        self.assertEqual(scan_spans(closed, []), [("private_key", 2, 6)])
+
 
 class ProcessAndKubeSecretsTest(unittest.TestCase):
     """A database password on a command line (ps auxww) and a kubeconfig key (F2, F16)."""

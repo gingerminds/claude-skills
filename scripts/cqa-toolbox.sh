@@ -6,6 +6,7 @@
 #   cqa-toolbox.sh run <run_dir> <tool> [--followup]
 #   cqa-toolbox.sh all <run_dir>
 #   cqa-toolbox.sh check <check_dir> <worktree> <repo_name>
+#   cqa-toolbox.sh secrets <in_file> <out_dir>
 #
 # Exit codes: 0 success, 1 tool failure, 2 usage or environment; "run" passes through the
 # exit code of the tool container. Secret values never appear on a command line: they are
@@ -53,6 +54,7 @@ usage() {
   say "  cqa-toolbox.sh run <dossier_du_run> <outil> [--followup]"
   say "  cqa-toolbox.sh all <dossier_du_run>"
   say "  cqa-toolbox.sh check <dossier_de_controle> <worktree> <nom_du_repo>"
+  say "  cqa-toolbox.sh secrets <fichier_d_entree> <dossier_de_sortie>"
   say "Outils : ${ALL_TOOLS[*]}"
   exit 2
 }
@@ -637,6 +639,39 @@ cmd_check() {
   fi
 }
 
+# secrets <in_file> <out_dir>: gitleaks (default rules) on the content of <in_file>, for the
+# guard of the fix mode: the input mounted read-only, no network, no credentials, no download.
+# Writes <out_dir>/gitleaks.json (a JSON array of findings) and nothing else; exit 2 without
+# Docker or the gitleaks image, 1 when gitleaks fails.
+cmd_secrets() {
+  local in_file out_dir uid_gid ref
+  [ "$#" -eq 2 ] || usage
+  require_docker
+  [ -f "$1" ] || die "Le fichier d'entrée est introuvable : $1"
+  [ -d "$2" ] || die "Le dossier de sortie est introuvable : $2"
+  in_file="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+  out_dir="$(cd "$2" && pwd)"
+  case "$in_file$out_dir" in
+    *:*) die "Les chemins du contrôle ne doivent pas contenir « : » (montage Docker)." ;;
+  esac
+  ref="$(image_ref gitleaks)"
+  docker image inspect "$ref" >/dev/null 2>&1 </dev/null \
+    || die "L'image gitleaks de la boîte à outils est absente ($ref) : lancez cqa-toolbox.sh pull."
+  uid_gid="$(id -u):$(id -g)"
+  rm -f -- "$out_dir/gitleaks.json" || return 1
+  docker run --rm --pull never --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+    -v "$in_file:/in/input:ro" -v "$out_dir:/out" \
+    --entrypoint sh "$ref" -c 'exec gitleaks stdin --report-format json --report-path /out/gitleaks.json --exit-code 0 --no-banner -l error </in/input' \
+    </dev/null || {
+    say "secrets : gitleaks a échoué."
+    return 1
+  }
+  if [ ! -f "$out_dir/gitleaks.json" ]; then
+    say "secrets : gitleaks n'a pas écrit de rapport."
+    return 1
+  fi
+}
+
 main() {
   [ "$#" -ge 1 ] || usage
   local sub="$1"
@@ -653,6 +688,7 @@ main() {
     run) cmd_run "$@" ;;
     all) cmd_all "$@" ;;
     check) cmd_check "$@" ;;
+    secrets) cmd_secrets "$@" ;;
     *) usage ;;
   esac
 }

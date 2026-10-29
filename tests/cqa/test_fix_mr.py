@@ -9,8 +9,9 @@ from urllib.parse import unquote
 
 import cqa_fix
 from cqa import fix_mr, fix_state
+from tests.cqa.test_cli_fix import GITLEAKS_DOWN
 from tests.cqa.test_fix_git import BASE, GitCase, HOST, KEY, PREFIX, flight, mr
-from tests.cqa.test_fix_guard import problem
+from tests.cqa.test_fix_guard import GITLEAKS, STRIPE, problem, secret
 from tests.cqa.test_git_tools import commit, git as real_git
 
 SECTION = ["--section", "securite"]
@@ -965,6 +966,37 @@ class PublishTest(MrCase):
         self.assertTrue(err.strip().endswith("Rien n'a été poussé."))
         self.assertEqual(self.remote(self.branch), "")
         self.assertEqual(self.glab_args("mr"), [])
+
+    def test_publish_refuses_a_gitleaks_finding_without_the_value(self):
+        self.reviewed()
+        self.gitleaks = {STRIPE: "stripe-access-token"}
+        (self.worktree / "pay.txt").write_text(f"$stripe = '{STRIPE}';\n", encoding="utf-8")
+        for args in (("add", "pay.txt"),
+                     ("commit", "-q", "-m", "fix(securite CQ-3): pay", "-m", f"Old key {STRIPE}")):
+            result = cqa_fix.fix_names.git(self.worktree, subprocess.run, *args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        leak = self.head(self.worktree)
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out), {"ok": False, "problems": [
+            secret(leak, 3, None, GITLEAKS, 3),
+            secret(leak, 3, "pay.txt", GITLEAKS, 1),
+        ]})
+        self.assertNotIn(STRIPE, out + err)
+        self.assertIn("rien n'a été poussé", err)
+        self.assertEqual(self.remote(self.branch), "")
+        self.assertEqual(self.glab_args("mr"), [])
+        self.assertEqual(len(self.toolbox_inputs), 1)
+
+    def test_publish_without_gitleaks_says_so_and_goes_on(self):
+        self.reviewed()
+        self.gitleaks = None
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertIn(GITLEAKS_DOWN, err)
+        self.assertTrue(json.loads(out)["pushed"])
 
     def test_publish_refuses_a_pass_commit_of_a_row_done_before(self):
         self.take_over_local_branch("fix(securite CQ-3): earlier fix")
