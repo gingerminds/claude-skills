@@ -29,6 +29,7 @@ MERGE = "commit de fusion"
 ATTRIBUTION = "ligne d'attribution dans le message"
 REWRITTEN = "historique réécrit : le départ de la passe n'est plus dans la branche"
 OUT_OF_PASS = "commit hors de la passe {number} : {sha}"
+UNREVIEWED_PASS = "la revue de la passe {number} n'est pas enregistrée"
 
 # Core and contributed code of each stack (repos[].stack of context.json). Patterns are
 # matched segment by segment, case aside: "**" stands for any number of folders, and a
@@ -129,16 +130,19 @@ def check_commits(worktree: Path, start_sha: str, rows: set, repo: dict, known: 
 
 
 def validate_report(document, *, key: str, number: int, rows: dict, commits: list,
-                    pass_commits: Optional[set] = None) -> tuple:
+                    pass_commits: Optional[set] = None, reviewed: Optional[set] = None) -> tuple:
     """Return (rows for the state, errors in French) for fix/<repo>/<slug>/report-<number>.json.
 
     rows are the state rows of the key ({"3": {...}}), commits those of <start_sha>..HEAD
     (fix_git.commits_in_range). pass_commits, when given, holds the SHAs of
     bases[number]..HEAD: a commit a fixed row reports for the first time (not yet among its
-    state commits) must be one of them, so that the review of the pass reads it. Every problem is reported in one pass, because the fixer
-    rewrites its file once. The rows come back only when there is no error, each as
-    {"ref", "outcome", "reason", "commits" (full SHAs), "attention"}; a question keeps its
-    text in reason.
+    state commits) must be one of them, so that the review of the pass reads it. reviewed,
+    when given, holds the passes whose review is recorded: a row already fixed in an earlier
+    pass may be reported again only once that pass is reviewed, since a row fixed again
+    belongs to the new pass, whose review does not read its earlier commits. Every problem
+    of a row is reported in one pass, because the fixer rewrites its file once. The rows come
+    back only when there is no error, each as {"ref", "outcome", "reason", "commits" (full
+    SHAs), "attention"}; a question keeps its text in reason.
     """
     if not isinstance(document, dict):
         return [], ['le rapport doit être un objet JSON {"key", "pass", "rows"}']
@@ -154,20 +158,24 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
         if ref is None:
             continue
         seen[ref] += 1
-        settled = _SETTLED.get(rows[str(ref)].get("outcome"))
+        current = rows[str(ref)]
+        settled = _SETTLED.get(current.get("outcome"))
         if settled:
             errors.append(f"ligne {ref_label(ref)} : {settled}")
             continue
         problems, entry = _report_row(item, ref, known, subjects)
         if entry is not None and pass_commits is not None:
-            recorded = set(rows[str(ref)].get("commits") or [])
-            problems = [
+            recorded = set(current.get("commits") or [])
+            problems += [
                 OUT_OF_PASS.format(number=number, sha=sha[:12]) for sha in entry["commits"]
                 if sha not in recorded and sha not in pass_commits
             ]
-            entry = None if problems else entry
+        earlier = current.get("pass")
+        if (reviewed is not None and current.get("outcome") == "fixed" and _is_int(earlier)
+                and earlier < number and earlier not in reviewed):
+            problems.append(UNREVIEWED_PASS.format(number=earlier))
         errors.extend(f"ligne {ref_label(ref)} : {problem}" for problem in problems)
-        if entry is not None:
+        if not problems:
             entries.append(entry)
     errors.extend(_duplicates(seen))
     pending = sorted(int(ref) for ref, row in rows.items() if row.get("outcome") == "pending")
@@ -353,7 +361,11 @@ def _row_ref(item, index: int, known: set, errors: list) -> Optional[int]:
 
 
 def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
-    """Return (problems, state entry or None) for one row of a report."""
+    """Return (problems, state entry) for one row of a report.
+
+    The entry is None only when the outcome is unknown: with any other problem it still
+    comes back, so that the caller checks its commits too and reports everything at once.
+    """
     outcome = item.get("outcome")
     if outcome not in REPORT_OUTCOMES:
         return [
@@ -382,11 +394,9 @@ def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
         reason = question.get("text") if isinstance(question, dict) else None
     if outcome != "fixed" and ref in subjects.values():
         problems.append("commit sur la branche pour une ligne non corrigée")
-    if problems:
-        return problems, None
     entry = {"ref": ref, "outcome": outcome, "reason": reason, "commits": shas,
              "attention": attention}
-    return [], entry
+    return problems, entry
 
 
 def _commits(value, refs: set, subjects: dict) -> tuple:

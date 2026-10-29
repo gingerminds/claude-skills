@@ -1537,6 +1537,27 @@ class FixAgentsTest(unittest.TestCase):
         self.assertIn("--no-ext-diff --no-textconv", _section(fixer, "Hard rules"))
         self.assertIn("authored with the lead's git identity", _section(reference, "3. Commits"))
 
+    def test_a_row_of_an_unreviewed_pass_is_never_reported_again(self):
+        """Fix round 4: the review of a pass comes before any new report of its rows, a started
+        pass keeps the key from reviewed, and a row covered by another fix is a correctif."""
+        reference = _text(FIX_MD)
+        for section, needles in (
+            ("1. Keys", ("« ligne CQ-x : la revue de la passe p n'est pas enregistrée »",
+                         "brings it back to `fixed`", "keeps the key from `reviewed`")),
+            ("4. Self-evaluation", ("« corrigé par le commit de CQ-<ref> d'une passe précédente »",
+                                    "listed under « Correctifs »")),
+            ("6. Correction pass", ("only once review p is recorded",)),
+        ):
+            for needle in needles:
+                with self.subTest(section=section, needle=needle):
+                    self.assertIn(needle, _section(reference, section))
+        fixer = _text(FIXER)
+        for needle in ("« la revue de la passe p n'est pas enregistrée »",
+                       "under « Correctifs » as covered"):
+            with self.subTest(agent="fixer", needle=needle):
+                self.assertIn(needle, fixer)
+        self.assertIn("is not yours either", _section(fixer, "Rows of the pass"))
+
     def test_fix_reference_examples_pass_validation(self):
         blocks = [json.loads(block) for block in _JSON_BLOCK.findall(_text(FIX_MD))]
         report = next(block for block in blocks

@@ -359,7 +359,8 @@ def _cmd_pass_start(args, services: Services) -> int:
     N must not be lower than a pass already started, and no report of pass N or later may be
     validated yet. Starting the same pass again before its report keeps its first base, so that
     the commits of an interrupted run stay in bases[N]..HEAD; the base moves to HEAD only when
-    it is no longer in the branch.
+    it is no longer in the branch. A reviewed key goes back to fixed: it is never reviewed in
+    the middle of a pass (see _every_pass_reviewed).
     """
     run_dir = args.run_dir.resolve()
     if args.number < 1:
@@ -379,17 +380,17 @@ def _cmd_pass_start(args, services: Services) -> int:
             f"déjà validé ; la passe suivante est la passe {reported + 1}."
         )
     worktree = _key_worktree(run_dir, key, services.run)
-    kept = bases.get(str(args.number))
-    if fix_git.is_sha(kept) and fix_git.is_ancestor(worktree, services.run, kept, "HEAD"):
-        _emit({"pass": args.number, "base": kept})
-        return EXIT_OK
-    head = fix_names.git_out(worktree, services.run, "rev-parse", "--verify", "--quiet", "HEAD")
-    if not fix_git.is_sha(head):
-        raise fix_git.GitRefused(f"git rev-parse HEAD a échoué dans {worktree}.")
-    bases[str(args.number)] = head
-    key["bases"] = bases
+    base = bases.get(str(args.number))
+    if not (fix_git.is_sha(base) and fix_git.is_ancestor(worktree, services.run, base, "HEAD")):
+        base = fix_names.git_out(worktree, services.run, "rev-parse", "--verify", "--quiet", "HEAD")
+        if not fix_git.is_sha(base):
+            raise fix_git.GitRefused(f"git rev-parse HEAD a échoué dans {worktree}.")
+        bases[str(args.number)] = base
+        key["bases"] = bases
+    if key.get("step") == "reviewed":
+        key["step"] = "fixed"
     fix_state.save(run_dir, state)
-    _emit({"pass": args.number, "base": head})
+    _emit({"pass": args.number, "base": base})
     return EXIT_OK
 
 
@@ -415,6 +416,7 @@ def _cmd_validate(args, services: Services) -> int:
         entries, errors = fix_guard.validate_report(
             document, key=args.key, number=args.number, rows=key["rows"], commits=commits,
             pass_commits=pass_commits,
+            reviewed={int(number) for number in _recorded(key, "reviews")},
         )
     errors = closed + errors
     summary = {outcome: [] for outcome in fix_guard.REPORT_OUTCOMES}
@@ -657,12 +659,17 @@ def _reports(key: dict) -> list:
 
 
 def _every_pass_reviewed(key: dict) -> bool:
-    """True when the key may be reviewed (R14): no row is pending and, for every pass p with
-    rows fixed in it, review p is recorded and blocks none of them.
+    """True when the key may be reviewed (R14): no pass is in progress, no row is pending and,
+    for every pass p with rows fixed in it, review p is recorded and blocks none of them.
 
-    A row fixed again in a later pass belongs to that pass: an earlier blocking verdict on it no
-    longer counts. A dropped row is no longer fixed.
+    A pass is in progress from pass-start until its report is validated (R16): a base recorded
+    for a pass later than every validated report. A row fixed again in a later pass belongs to
+    that pass: an earlier blocking verdict on it no longer counts. A dropped row is no longer
+    fixed.
     """
+    started = max((int(number) for number in _recorded(key, "bases")), default=0)
+    if started > (key.get("pass") or 0):
+        return False
     rows = [row for row in key["rows"].values() if isinstance(row, dict)]
     if any(row.get("outcome") == "pending" for row in rows):
         return False
@@ -721,9 +728,10 @@ def _cmd_mr_body(args, services: Services) -> int:
         changed, set(branch_refs), since=since,
     )
     category = key.get("category") or ""
+    count = len(found["fixed"]) + len(found["covered"])
     if key.get("mr"):
         text = fix_mr.addition(**found)
-        name, stale, kind, count = "mr-addition.md", "mr.md", "update", len(found["fixed"])
+        name, stale, kind = "mr-addition.md", "mr.md", "update"
     else:
         notion = context.get("notion") if isinstance(context.get("notion"), dict) else {}
         text = fix_mr.body(
@@ -731,7 +739,7 @@ def _cmd_mr_body(args, services: Services) -> int:
             **found,
         )
         name, stale, kind = "mr.md", "mr-addition.md", "create"
-        count = len(found["fixed"]) + len(found["earlier"])
+        count += len(found["earlier"])
     title = fix_mr.title(category, count)
     _refuse_secrets(f"{title}\n{text}", "rien n'a été écrit")
     folder = _key_folder(run_dir, key)
@@ -744,6 +752,7 @@ def _cmd_mr_body(args, services: Services) -> int:
     _emit({
         "title": title, "file": f"fix/{key['repo']}/{key['slug']}/{name}", "kind": kind,
         "fixed": [row["ref"] for row in found["fixed"]],
+        "covered": [row["ref"] for row in found["covered"]],
         "waiting": [row["ref"] for row in found["waiting"]],
         "out_of_scope": [row["ref"] for row in found["left"]],
     })

@@ -166,6 +166,24 @@ class TitleAndBodyTest(unittest.TestCase):
             section(text, "Contexte"),
         )
 
+    def test_rows_covered_by_an_earlier_fix_close_the_correctifs_section(self):
+        covered = [{"ref": 109, "title": "Champ de recherche", "by": 107, "url": None},
+                   {"ref": 110, "title": None, "by": 107, "url": "https://www.notion.so/p110"}]
+        text = full_body(covered=covered)
+        self.assertEqual(section(text, "Correctifs")[-2:], [
+            "- CQ-109 : Champ de recherche : couverte par le correctif de CQ-107",
+            "- CQ-110 : sans titre : couverte par le correctif de CQ-107 ([Notion](https://www.notion.so/p110))",
+        ])
+        alone = full_body(fixed=[], covered=covered[:1], attention=[], waiting=[], left=[])
+        self.assertEqual(section(alone, "Correctifs"),
+                         ["- CQ-109 : Champ de recherche : couverte par le correctif de CQ-107"])
+        added = fix_mr.addition(fixed=[], checks=None, not_run=[], attention=[], waiting=[],
+                                left=[], covered=covered[:1])
+        self.assertEqual(added, "### Correctifs\n\n"
+                                "- CQ-109 : Champ de recherche : couverte par le correctif de CQ-107\n")
+        self.assertEqual(fix_mr.addition(fixed=[], checks=None, not_run=[], attention=[],
+                                         waiting=[], left=[]), "")
+
 
 class MaterialTest(unittest.TestCase):
     def setUp(self):
@@ -239,6 +257,32 @@ class MaterialTest(unittest.TestCase):
         ])
         self.assertEqual(section(text, "Correctifs")[0], "### CQ-3 : Trois")
         self.assertIn(ROW_URL, "\n".join(section(text, "Correctifs")))
+
+    def test_a_row_covered_by_the_fix_of_another_row_is_a_correctif_not_hors_scope(self):
+        """« corrigé par le commit de CQ-x » ships in the MR through CQ-x; it is listed under
+        « Correctifs » as covered, unless CQ-x left the branch."""
+        reason = "corrigé par le commit de CQ-{} d'une passe précédente"
+        self.key["rows"]["7"] = {"outcome": "skipped", "reason": reason.format(3), "commits": [],
+                                 "pass": 2, "attention": None}
+        self.key["rows"]["8"] = {"outcome": "skipped", "reason": reason.format(6), "commits": [],
+                                 "pass": 2, "attention": None}
+        self.candidates["keys"][0]["rows"] += [
+            {"ref": 7, "title": "Sept", "page_id": "p7"}, {"ref": 8, "title": "Huit", "page_id": "p8"},
+        ]
+        found = self.material()
+        self.assertEqual(found["covered"],
+                         [{"ref": 7, "title": "Sept", "by": 3, "url": "https://www.notion.so/p7"}])
+        self.assertEqual([item["ref"] for item in found["left"]], [5, 6, 8, 40, 41, 42, 43, 52, 53])
+        text = fix_mr.body(run_id=RUN_ID, category="SÉCURITÉ", copy_url=None, **found)
+        fixes = section(text, "Correctifs")
+        self.assertEqual(fixes[0], "### CQ-3 : Trois")
+        self.assertEqual(fixes[-1], "- CQ-7 : Sept : couverte par le correctif de CQ-3 "
+                                    "([Notion](https://www.notion.so/p7))")
+        out = "\n".join(section(text, "Hors-scope"))
+        self.assertNotIn("CQ-7", out)
+        self.assertIn(f"- CQ-8 : Huit : {reason.format(6)}", out)
+        self.assertEqual(self.material(since=1)["covered"], found["covered"])
+        self.assertEqual(self.material(since=2)["covered"], [])
 
     def test_attention_accumulates_over_reviews(self):
         reports = [(1, {"rows": [
@@ -500,8 +544,8 @@ class MrBodyTest(MrCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out), {
             "title": "Checklist PRE-MEL : correctifs SECURITE (1 ligne)",
-            "file": "fix/front/securite/mr.md", "kind": "create", "fixed": [3], "waiting": [],
-            "out_of_scope": [5],
+            "file": "fix/front/securite/mr.md", "kind": "create", "fixed": [3], "covered": [],
+            "waiting": [], "out_of_scope": [5],
         })
         self.assertEqual((self.folder / "mr-title.txt").read_text(encoding="utf-8"),
                          "Checklist PRE-MEL : correctifs SECURITE (1 ligne)\n")
@@ -520,6 +564,22 @@ class MrBodyTest(MrCase):
         self.assertEqual(section(text, "Hors-scope"),
                          ["- CQ-5 : Ligne 5 : Demande une décision de l'équipe UI/UX."])
         self.assertFalse((self.folder / "mr-addition.md").exists())
+
+    def test_mr_body_counts_and_lists_a_row_covered_by_another_fix(self):
+        self.reviewed()
+        state = self.state()
+        state["keys"][KEY]["rows"]["5"].update(
+            reason="corrigé par le commit de CQ-3 d'une passe précédente")
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.cli("mr-body", KEY)
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual((result["title"], result["fixed"], result["covered"], result["out_of_scope"]),
+                         ("Checklist PRE-MEL : correctifs SECURITE (2 lignes)", [3], [5], []))
+        text = (self.folder / "mr.md").read_text(encoding="utf-8")
+        self.assertEqual(section(text, "Correctifs")[-1],
+                         "- CQ-5 : Ligne 5 : couverte par le correctif de CQ-3")
+        self.assertNotIn("## Hors-scope", text)
 
     def test_mr_body_writes_an_addition_when_the_key_has_an_mr(self):
         self.open_mr()

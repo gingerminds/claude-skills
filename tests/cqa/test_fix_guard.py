@@ -362,6 +362,9 @@ class ValidateTest(GitCase):
         first = self.fixer_commit(self.worktree, "a.php", "fix(CQ-3): add the header")
         self.write_doc("report-1.json", self.report(first))
         self.assertEqual(self.validate("report")[0], 0)
+        self.write_doc("review-1.json", {"key": KEY, "pass": 1, "attention": [], "rows": [
+            {"ref": 3, "verdict": "blocking", "notes": "L'en-tête manque sur les 404."}]})
+        self.assertEqual(self.validate("review")[0], 0)
         self.pass_start(2)
         second = self.fixer_commit(self.worktree, "b.php", "fix(CQ-3): cover the 404 page")
         correction = self.report(second, number=2)
@@ -966,6 +969,101 @@ class PassReviewTest(GitCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.key()["rows"]["3"]["outcome"], "pending")
         self.assertEqual(self.key()["step"], "started")
+
+    def raw_report(self, number, *rows):
+        self.write_doc(f"report-{number}.json", {"key": KEY, "pass": number, "rows": list(rows)})
+        code, out, err = self.run_main(["validate", self.run_dir, KEY, "report", "--pass", str(number)])
+        return code, json.loads(out) if out else None, err
+
+    def test_a_row_fixed_in_an_unreviewed_pass_is_never_reported_again(self):
+        """A row fixed again belongs to the new pass, whose review does not read its earlier
+        commits: re-reporting it waits for the review of the pass that fixed it."""
+        first, second = self.first_pass()
+        self.assertEqual(self.pass_start(2)[0], 0)
+        before = json.dumps(self.key(), sort_keys=True)
+        skipped = {"ref": 5, "outcome": "skipped", "reason": "Laissée aux devs par le lead."}
+        code, out, err = self.raw_report(2, self.fixed(3, first), self.fixed(12, second), skipped)
+        self.assertEqual(code, 6, err)
+        self.assertEqual(out["errors"], [
+            "ligne CQ-3 : la revue de la passe 1 n'est pas enregistrée",
+            "ligne CQ-12 : la revue de la passe 1 n'est pas enregistrée",
+        ])
+        self.assertEqual(json.dumps(self.key(), sort_keys=True), before)
+        third = self.fixer_commit(self.worktree, "a3-fix.txt", "fix(CQ-3): fix the check")
+        again = {**self.fixed(3, third), "commits": [first, third]}
+        code, out, err = self.raw_report(2, again, skipped)
+        self.assertEqual(code, 6, err)
+        self.assertEqual(out["errors"], ["ligne CQ-3 : la revue de la passe 1 n'est pas enregistrée"])
+        self.assertEqual(json.dumps(self.key(), sort_keys=True), before)
+        self.review(1, r3="ok", r12="ok")
+        code, out, err = self.raw_report(2, again, skipped)
+        self.assertEqual(code, 0, err)
+        row = self.key()["rows"]["3"]
+        self.assertEqual((row["pass"], row["commits"]), (2, [first, third]))
+        self.assertEqual(self.key()["step"], "fixed")
+        self.review(2, r3="ok")
+        self.assertEqual(self.key()["step"], "reviewed")
+
+    def test_a_started_pass_without_report_keeps_the_key_from_reviewed(self):
+        """R16: between pass-start N and the validated report N, the key is never reviewed."""
+        first, second = self.first_pass()
+        self.review(1, r3="ok", r12="blocking")
+        self.assertEqual(self.key()["step"], "fixed")
+        self.assertEqual(self.pass_start(2)[0], 0)
+        code, out, err = self.run_main(["drop", self.run_dir, KEY, "--refs", "CQ-12",
+                                        "--reason", "Revue bloquante."])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.key()["step"], "fixed")
+        self.review(1, r3="ok")
+        self.assertEqual(self.key()["step"], "fixed")
+        third = self.fixer_commit(self.worktree, "c5.txt", "fix(CQ-5): add the contact")
+        self.report(2, self.fixed(5, third))
+        self.assertEqual(self.key()["step"], "fixed")
+        self.review(2, r5="ok")
+        self.assertEqual(self.key()["step"], "reviewed")
+        self.assertEqual(self.pass_start(3)[0], 0)
+        self.assertEqual(self.key()["step"], "fixed")
+        self.assertEqual(self.pass_start(3)[0], 0)
+        self.report(3)
+        self.assertEqual(self.key()["step"], "reviewed")
+
+
+class ValidateReportTest(unittest.TestCase):
+    """fix_guard.validate_report alone: every problem of a row comes out of one run."""
+
+    def test_every_problem_of_a_row_is_reported_in_one_run(self):
+        first, second = "a" * 40, "b" * 40
+        rows = {"3": {"outcome": "fixed", "commits": [first], "pass": 1},
+                "5": {"outcome": "pending"}}
+        commits = [{"sha": first, "ref": 3}, {"sha": second, "ref": 5}]
+        document = {"key": KEY, "pass": 2, "rows": [
+            {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "commits": [second[:12]]},
+            {"ref": 3, "outcome": "fixed", "change": "Corrige a.", "uat": "Lire a.",
+             "commits": [first], "attention": "x" * (fix_guard.MAX_NOTE + 1)},
+        ]}
+        entries, errors = fix_guard.validate_report(
+            document, key=KEY, number=2, rows=rows, commits=commits, pass_commits=set(),
+            reviewed=set(),
+        )
+        self.assertEqual(entries, [])
+        self.assertEqual(errors, [
+            "ligne CQ-5 : « uat » est obligatoire : un texte en français de 600 caractères au plus",
+            f"ligne CQ-5 : commit hors de la passe 2 : {second[:12]}",
+            f"ligne CQ-3 : « attention » dépasse {fix_guard.MAX_NOTE} caractères ({fix_guard.MAX_NOTE + 1})",
+            "ligne CQ-3 : la revue de la passe 1 n'est pas enregistrée",
+        ])
+        document["rows"][0]["uat"] = "Lire b."
+        document["rows"][1]["attention"] = None
+        entries, errors = fix_guard.validate_report(
+            document, key=KEY, number=2, rows=rows, commits=commits, pass_commits={second},
+            reviewed={1},
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual([entry["ref"] for entry in entries], [5, 3])
+        entries, errors = fix_guard.validate_report(
+            document, key=KEY, number=2, rows=rows, commits=commits,
+        )
+        self.assertEqual((errors, len(entries)), ([], 2))
 
 
 class SchemaTest(unittest.TestCase):

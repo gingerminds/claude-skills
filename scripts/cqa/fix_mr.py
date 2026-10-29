@@ -25,6 +25,9 @@ _SHORT_SHA = 8
 _HORS_SCOPE_LINE = re.compile(r"^## Hors-scope[ \t]*\r?$", re.MULTILINE)
 _TOP_HEADING = re.compile(r"^#{1,2}[ \t]", re.MULTILINE)
 _MR_URL = re.compile(r"https?://\S+?/-/merge_requests/([0-9]+)\b")
+# The reason of a row skipped because the commit of another row, in an earlier pass, fixed it.
+_COVERED_REASON = re.compile(r"^corrigé par le commit de CQ-([0-9]+)(?![0-9])")
+COVERED = "couverte par le correctif de {ref}"
 
 
 def title(category: str, count: int) -> str:
@@ -41,14 +44,16 @@ def notion_url(page_id) -> Optional[str]:
 
 
 def body(*, run_id: str, category: str, copy_url: Optional[str], fixed: list, checks, not_run: list,
-         attention: list, waiting: list, left: list, earlier: list = ()) -> str:
+         attention: list, waiting: list, left: list, earlier: list = (), covered: list = ()) -> str:
     """Return the description of a new MR; empty sections are left out.
 
     fixed: [{"ref", "title", "url", "semi_auto", "human_check", "summary", "change", "uat",
     "commits"}]; checks: the entries of checks.json (None when it is missing); not_run:
     [{"name", "command"}]; attention: remarks; waiting: [{"ref", "title", "text", "url"}];
     left: [{"ref", "title", "reason", "url"}]; earlier: [{"ref", "title"}], the fixes the
-    branch carried before this pass. Raises ValueError for a run id that is no date.
+    branch carried before this pass; covered: [{"ref", "title", "by", "url"}], the rows the
+    commit of row "by" also fixes, listed after the fixes. Raises ValueError for a run id that
+    is no date.
     """
     started = run_start(run_id)
     context = [f"Audit PRE-MEL du {started:%d/%m/%Y} (run {run_id}), catégorie {category}."]
@@ -62,7 +67,7 @@ def body(*, run_id: str, category: str, copy_url: Optional[str], fixed: list, ch
         )
         context.append(f"La branche porte aussi des correctifs d'une passe précédente : {names}.")
     parts = [("Contexte", "\n\n".join(context))]
-    parts += _sections(2, fixed, checks, not_run, attention, waiting, verify=True)
+    parts += _sections(2, fixed, covered, checks, not_run, attention, waiting, verify=True)
     if left:
         parts.append((HORS_SCOPE, hors_scope(left)))
     parts.append(("Suite", SUITE))
@@ -70,12 +75,12 @@ def body(*, run_id: str, category: str, copy_url: Optional[str], fixed: list, ch
 
 
 def addition(*, fixed: list, checks, not_run: list, attention: list, waiting: list, left: list,
-             earlier: list = ()) -> str:
+             earlier: list = (), covered: list = ()) -> str:
     """Return the text of mr-addition.md: the new sub-sections, then the « ## Hors-scope » list.
 
     The checks are shown only with new fixed rows. split_addition reads the file back.
     """
-    parts = _sections(3, fixed, checks, not_run, attention, waiting, verify=bool(fixed))
+    parts = _sections(3, fixed, covered, checks, not_run, attention, waiting, verify=bool(fixed))
     text = _render(3, parts).rstrip("\n") if parts else ""
     if left:
         text = (text + "\n\n" if text else "") + f"## {HORS_SCOPE}\n\n{hors_scope(left)}"
@@ -152,8 +157,8 @@ def material(key: dict, candidates: dict, notion_rows: list, reports: list, revi
 
     reports and reviews are [(N, document)]; checks is checks.json (None when missing);
     changed the files of <start_sha>..HEAD; branch_refs the refs of the commit subjects of
-    origin/<base>..HEAD. Only fixed rows, reports and reviews of passes after since count
-    (the passes an earlier publish already described).
+    origin/<base>..HEAD. Only fixed and covered rows, reports and reviews of passes after
+    since count (the passes an earlier publish already described).
     """
     info = _row_info(key, candidates, notion_rows)
     rows = key["rows"]
@@ -161,6 +166,7 @@ def material(key: dict, candidates: dict, notion_rows: list, reports: list, revi
         int(ref) for ref, row in rows.items()
         if row.get("outcome") == "fixed" and (row.get("pass") or 0) > since
     )
+    covered = _covered(rows, info)
     latest = _latest_fixed(reports)
     fixed = []
     for ref in fixed_refs:
@@ -178,6 +184,7 @@ def material(key: dict, candidates: dict, notion_rows: list, reports: list, revi
     titles.update({ref: row.get("title") for ref, row in info.items() if row.get("title")})
     return {
         "fixed": fixed,
+        "covered": [item for number, item in covered if number > since],
         "checks": _current_checks(checks, changed),
         "not_run": [{"name": item.get("name"), "command": item.get("command")}
                     for item in (checks or {}).get("not_run") or [] if isinstance(item, dict)],
@@ -188,17 +195,22 @@ def material(key: dict, candidates: dict, notion_rows: list, reports: list, revi
             for ref, row in sorted(rows.items(), key=lambda item: int(item[0]))
             if row.get("outcome") == "question"
         ],
-        "left": _left(key, candidates, info, branch_refs),
+        "left": _left(key, candidates, info, branch_refs, {item["ref"] for _, item in covered}),
         "earlier": [{"ref": ref, "title": titles.get(ref)}
                     for ref in sorted(set(branch_refs) - all_fixed)],
     }
 
 
-def _sections(level: int, fixed, checks, not_run, attention, waiting, *, verify: bool) -> list:
+def _sections(level: int, fixed, covered, checks, not_run, attention, waiting, *,
+              verify: bool) -> list:
     sub = "#" * (level + 1)
     parts = []
-    if fixed:
-        parts.append(("Correctifs", "\n\n".join(_fix(sub, row) for row in fixed)))
+    if fixed or covered:
+        blocks = [_fix(sub, row) for row in fixed]
+        if covered:
+            blocks.append("\n".join(_listed(item, COVERED.format(ref=ref_label(item["by"])))
+                                    for item in covered))
+        parts.append(("Correctifs", "\n\n".join(blocks)))
     if verify:
         parts.append(("Vérification", "\n".join(f"- {line}" for line in _verification(checks, not_run))))
     if attention:
@@ -326,12 +338,37 @@ def _attention(rows: dict, reports: list, reviews: list, since: int) -> list:
     return notes
 
 
-def _left(key: dict, candidates: dict, info: dict, branch_refs: set) -> list:
-    """Return the open rows of the key's category that this MR does not fix, sorted by ref."""
+def _covered(rows: dict, info: dict) -> list:
+    """Return [(pass, {"ref", "title", "by", "url"})] for the skipped rows whose reason says
+    « corrigé par le commit de CQ-x », while CQ-x is still fixed in the key (or was already on
+    the branch): their fix ships in the MR with CQ-x, so they are no « Hors-scope » row.
+    """
+    found = []
+    for ref, row in sorted(rows.items(), key=lambda item: int(item[0])):
+        if row.get("outcome") != "skipped":
+            continue
+        match = _COVERED_REASON.match(row.get("reason") or "")
+        if match is None:
+            continue
+        by = int(match.group(1))
+        if (rows.get(str(by)) or {}).get("outcome") not in ("fixed", "done_before"):
+            continue
+        about = info.get(int(ref), {})
+        found.append((row.get("pass") or 0, {
+            "ref": int(ref), "title": about.get("title"), "by": by,
+            "url": notion_url(about.get("page_id")),
+        }))
+    return found
+
+
+def _left(key: dict, candidates: dict, info: dict, branch_refs: set,
+          covered: set = frozenset()) -> list:
+    """Return the open rows of the key's category that this MR does not fix, sorted by ref;
+    covered holds the refs of the skipped rows another fix of the MR covers (_covered)."""
     mr_url = (key.get("mr") or {}).get("url")
     found = {}
     for ref, row in key["rows"].items():
-        if row.get("outcome") in ("skipped", "dropped"):
+        if row.get("outcome") in ("skipped", "dropped") and int(ref) not in covered:
             found[int(ref)] = _out(int(ref), info, row.get("reason"))
     for item in candidates.get("left") or []:
         ref = item.get("ref") if isinstance(item, dict) else None
