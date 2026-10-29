@@ -928,7 +928,7 @@ class CheckTest(LauncherCase):
         before = sorted(p.name for p in self.tmp.iterdir())
         self.assertEqual(0, self.check().returncode)
         self.assertEqual([], list(self.worktree.iterdir()))
-        self.assertEqual(before + [], sorted(p.name for p in self.tmp.iterdir() if p.name != "docker.log"))
+        self.assertEqual(before, sorted(p.name for p in self.tmp.iterdir() if p.name != "docker.log"))
 
     def test_check_failures_and_environment(self):
         result = self.check(CQA_STUB_FAIL="--entrypoint sh")
@@ -961,8 +961,13 @@ class CheckTest(LauncherCase):
         (repo / "b.js").write_text("let x = 1;\n", encoding="utf-8")
         (repo / "c.yml").write_text("a: 1\n", encoding="utf-8")
         (repo / "d.txt").write_text("x", encoding="utf-8")
+        (repo / ".vscode").mkdir()
+        (repo / ".vscode" / "settings.json").write_text("{// c\n}", encoding="utf-8")
+        (repo / "tsconfig.json").write_text("{// c\n}", encoding="utf-8")
+        (repo / "mytsconfig.json").write_text("{// c\n}", encoding="utf-8")
         listing = self.tmp / "in.txt"
-        listing.write_text("good.json\nbad.json\na.js\nb.js\nc.yml\nd.txt\n", encoding="utf-8")
+        listing.write_text("good.json\nbad.json\na.js\nb.js\nc.yml\nd.txt\n.vscode/settings.json\n"
+                           "tsconfig.json\nmytsconfig.json\n", encoding="utf-8")
         script = match.group(1).replace("/repos/", f"{root}/repos/").replace("</in/files.txt", f"<{listing}")
         result = subprocess.run(["sh", "-c", script, "sh", "front"], capture_output=True, text=True)
         self.assertEqual(0, result.returncode, result.stderr)
@@ -974,6 +979,9 @@ class CheckTest(LauncherCase):
         self.assertEqual(("ok", "node --check"), status["b.js"])
         self.assertIn(status["c.yml"][0], ("ok", "skip"))
         self.assertNotIn("d.txt", status)
+        self.assertEqual(("skip", "json"), status[".vscode/settings.json"])
+        self.assertEqual(("skip", "json"), status["tsconfig.json"])
+        self.assertEqual(("ko", "json"), status["mytsconfig.json"])
         self.assertTrue(all(len(row) == 4 for row in rows))
 
 

@@ -567,6 +567,9 @@ while IFS= read -r f || [ -n "$f" ]; do
         emit skip "node --check" "$f" "node absent de l'image"
       fi
       ;;
+    tsconfig.json | */tsconfig.json | jsconfig.json | */jsconfig.json | .eslintrc.json | */.eslintrc.json | devcontainer.json | */devcontainer.json | .devcontainer.json | */.devcontainer.json | .vscode/*.json | */.vscode/*.json)
+      emit skip json "$f" "JSON avec commentaires possible, non contrôlé"
+      ;;
     *.json)
       if have node; then
         if out="$(node -e "$JSON_JS" "$p" 2>&1)"; then emit ok json "$f" ""; else emit ko json "$f" "$(first_error "$out")"; fi

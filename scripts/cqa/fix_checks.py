@@ -13,6 +13,7 @@ from cqa import fix_guard, fix_names
 
 NOT_RUN_WHY = "à lancer dans l'environnement du projet (shared/runner.md)"
 TOOLBOX_DOWN = "boîte à outils indisponible"
+UNSUPPORTED = "Nom de fichier"
 STYLELINT = "stylelint (configuration du projet)"
 CHECKLIST_RULES = ("selector-class-pattern", "max-nesting-depth")
 STYLE_EXTENSIONS = (".css", ".scss", ".sass", ".less", ".vue")
@@ -36,7 +37,7 @@ def project_commands(worktree: Path) -> list:
     found = []
     makefile = _read(worktree / "Makefile")
     for target in _MAKE_TARGETS:
-        if re.search(rf"^{target}[ \t]*:", makefile, re.MULTILINE):
+        if re.search(rf"^{target}[ \t]*:(?!=|:=)", makefile, re.MULTILINE):
             found.append({"name": f"Makefile ({target})", "command": f"make {target}"})
     scripts = _scripts(worktree / "composer.json")
     for name in _COMPOSER_SCRIPTS:
@@ -46,7 +47,7 @@ def project_commands(worktree: Path) -> list:
     for name in _NPM_SCRIPTS:
         if name in scripts:
             found.append({"name": f"package.json ({name})", "command": f"npm run {name}"})
-    if (worktree / ".husky").is_dir():
+    if (worktree / ".husky" / "pre-commit").is_file():
         found.append({"name": "Hooks husky (pre-commit)", "command": "sh .husky/pre-commit"})
     if (worktree / "grumphp.yml").is_file() or (worktree / "grumphp.yml.dist").is_file():
         found.append({"name": "GrumPHP", "command": "vendor/bin/grumphp run"})
@@ -56,15 +57,14 @@ def project_commands(worktree: Path) -> list:
 
 
 def changed_files(worktree: Path, start_sha: str, run) -> list:
-    """Return the files the key's commits add or modify, sorted; paths git cannot list are skipped."""
+    """Return the files the key's commits add or modify, sorted."""
     result = fix_names.git(
         worktree, run, "diff", "--name-only", "--diff-filter=AM", "--no-renames", "-z",
         f"{start_sha}..HEAD",
     )
     if result.returncode != 0:
         raise ValueError(f"git diff a échoué : {result.stderr.strip()}")
-    paths = [path for path in result.stdout.split("\0") if path]
-    return sorted(path for path in paths if "\n" not in path and "\t" not in path)
+    return sorted(path for path in result.stdout.split("\0") if path)
 
 
 def added_lines(worktree: Path, start_sha: str, run) -> dict:
@@ -153,8 +153,12 @@ def run_checks(run, launcher: Path, check_dir: Path, worktree: Path, repo: str, 
     then what the launcher writes (syntax.tsv, tools/stylelint/).
     """
     extensions = STYLE_EXTENSIONS + tuple(ext for _, exts in SYNTAX.values() for ext in exts)
+    wanted = [path for path in files if path.endswith(extensions)]
+    odd = [path for path in wanted if "\n" in path or "\t" in path]
+    files = [path for path in files if "\n" not in path and "\t" not in path]
+    unsupported = [_check(UNSUPPORTED, "not_run", odd, "nom de fichier non pris en charge")] if odd else []
     if not any(path.endswith(extensions) for path in files):
-        return []
+        return unsupported
     check_dir = Path(check_dir)
     check_dir.mkdir(parents=True, exist_ok=True)
     (check_dir / "files.txt").write_text("".join(f"{path}\n" for path in files), encoding="utf-8")
@@ -183,7 +187,7 @@ def run_checks(run, launcher: Path, check_dir: Path, worktree: Path, repo: str, 
             checks.append(_stylelint_check(check_dir, repo, files, added))
         else:
             checks.append(_check(STYLELINT, "not_run", [], TOOLBOX_DOWN))
-    return checks
+    return checks + unsupported
 
 
 def _syntax_check(label: str, wanted: list, entries: list, missing: str) -> dict:
@@ -207,26 +211,26 @@ def _stylelint_check(check_dir: Path, repo: str, files: list, added: dict) -> di
     if not isinstance(report, list) or not configs:
         return _check(STYLELINT, "not_run", [], "stylelint n'a pas produit de résultat")
     applied = {}
+    prefix = f"{repo}/"
     for config in configs:
         if isinstance(config, dict) and isinstance(config.get("files"), list):
             for name in config["files"]:
-                applied[name] = config.get("applied")
-    prefix = f"{repo}/"
-    styled = [path for path in files if path.endswith(STYLE_EXTENSIONS) and prefix + path in applied]
+                applied[_unprefixed(str(name), prefix)] = config.get("applied")
+    styled = [path for path in files if path.endswith(STYLE_EXTENSIONS) and path in applied]
     if not styled:
         return _check(STYLELINT, "not_run", [], "aucun fichier évalué par stylelint")
-    counted = [path for path in styled if applied[prefix + path] != "checklist"]
+    counted = [path for path in styled if applied[path] != "checklist"]
+    errors = [entry for entry in report if isinstance(entry, dict) and entry.get("severity") == "error"]
+    if any(_unprefixed(str(entry.get("file")), prefix) not in applied for entry in errors):
+        return _check(STYLELINT, "not_run", [], "format de rapport stylelint inattendu")
     if not counted:
         return _check(STYLELINT, "not_run", [], "configuration du projet non chargée")
     found = []
-    for entry in report:
-        if not isinstance(entry, dict) or entry.get("severity") != "error":
-            continue
-        file = str(entry.get("file"))
-        path = file[len(prefix):] if file.startswith(prefix) else None
+    for entry in errors:
+        path = _unprefixed(str(entry.get("file")), prefix)
         if path not in counted or entry.get("line") not in added.get(path, ()):
             continue
-        if applied[file] != "project" and entry.get("rule") in CHECKLIST_RULES:
+        if applied[path] != "project" and entry.get("rule") in CHECKLIST_RULES:
             continue
         found.append((path, entry))
     if not found:
@@ -236,6 +240,10 @@ def _stylelint_check(check_dir: Path, repo: str, files: list, added: dict) -> di
     more = len(found) - len(shown)
     detail = " ; ".join(shown) + (f" ; et {more} autre(s)" if more > 0 else "")
     return _check(STYLELINT, "failed", sorted({path for path, _ in found}), detail)
+
+
+def _unprefixed(name: str, prefix: str) -> str:
+    return name[len(prefix):] if name.startswith(prefix) else name
 
 
 def _check(name: str, status: str, files: list, detail: str) -> dict:

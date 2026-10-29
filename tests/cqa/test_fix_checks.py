@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from cqa import fix_checks, fix_names
+from cqa import fix_checks, fix_names, fix_state
 from tests.cqa.test_fix_git import GitCase
 
 KEY = "front/securite"
@@ -23,6 +23,14 @@ def write(root, path, content):
     target = Path(root) / path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
+
+
+def commit_files(case, worktree, message, files):
+    for path, content in files.items():
+        write(worktree, path, content)
+        fix_names.git(worktree, subprocess.run, "add", "--", path)
+    result = fix_names.git(worktree, subprocess.run, "commit", "-q", "-m", message)
+    case.assertEqual(result.returncode, 0, result.stderr)
 
 
 def done(code=0, out="", err=""):
@@ -48,6 +56,13 @@ class ProjectCommandsTest(unittest.TestCase):
         )
         self.assertIn("Hooks husky (pre-commit)", [item["name"] for item in commands])
         self.assertTrue(all(set(item) == {"name", "command"} for item in commands))
+
+    def test_project_commands_ignore_make_variables_and_husky_without_pre_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write(tmp, "Makefile", "test := x\nlint ?= y\nphpcs ::= z\nlint::\n\tx\n")
+            write(tmp, ".husky/commit-msg", "x\n")
+            commands = fix_checks.project_commands(Path(tmp))
+        self.assertEqual([item["command"] for item in commands], ["make lint"])
 
     def test_project_commands_of_an_empty_or_broken_project(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,6 +181,38 @@ class RunChecksTest(unittest.TestCase):
                 check = self.by_name(self.checks(["a.scss"], added))[STYLE]
                 self.assertEqual(check["status"], status)
 
+    def test_stylelint_accepts_report_files_with_or_without_the_repo_prefix(self):
+        for prefixed in (True, False):
+            with self.subTest(prefixed=prefixed):
+                self.check_dir = self.root / f"check-{prefixed}"
+                name = "front/a.css" if prefixed else "a.css"
+                self.configs = [{"source": None, "applied": "project", "files": [name], "config": {}}]
+                self.report = [{"file": name, "line": 1, "column": 1, "rule": "color-hex-length",
+                                "severity": "error", "text": "x"}]
+                check = self.by_name(self.checks(["a.css"], {"a.css": {1}}))[STYLE]
+                self.assertEqual((check["status"], check["files"]), ("failed", ["a.css"]))
+
+    def test_stylelint_reports_an_unexpected_report_format(self):
+        self.configs = [{"source": None, "applied": "project", "files": ["front/a.css"], "config": {}}]
+        self.report = [{"file": "/abs/elsewhere/a.css", "line": 1, "column": 1,
+                        "rule": "color-hex-length", "severity": "error", "text": "x"}]
+        check = self.by_name(self.checks(["a.css"], {"a.css": {1}}))[STYLE]
+        self.assertEqual(check, {"name": STYLE, "status": "not_run", "files": [],
+                                 "detail": "format de rapport stylelint inattendu"})
+
+    def test_a_file_name_with_a_tab_or_newline_is_reported_not_dropped(self):
+        self.tsv = "ok\tphp -l\ta.php\t\n"
+        checks = self.by_name(self.checks(["a.php", "b\tc.php", "d\ne.js", "notes\t.md"]))
+        self.assertEqual(checks[PHP]["files"], ["a.php"])
+        self.assertEqual(checks["Nom de fichier"], {
+            "name": "Nom de fichier", "status": "not_run", "files": ["b\tc.php", "d\ne.js"],
+            "detail": "nom de fichier non pris en charge"})
+        self.assertEqual((self.check_dir / "files.txt").read_text(encoding="utf-8"), "a.php\n")
+        self.calls.clear()
+        only = self.checks(["b\tc.php"])
+        self.assertEqual([c["name"] for c in only], ["Nom de fichier"])
+        self.assertEqual(self.calls, [])
+
     def test_stylelint_is_not_run_without_the_project_configuration(self):
         self.configs = [{"source": None, "applied": "checklist", "files": ["front/a.css"], "config": {}}]
         self.report = [{"file": "front/a.css", "line": 1, "column": 1, "rule": "color-hex-length",
@@ -237,11 +284,7 @@ class CheckCommandTest(GitCase):
         return worktree
 
     def commit(self, worktree, message, files):
-        for path, content in files.items():
-            write(worktree, path, content)
-            fix_names.git(worktree, subprocess.run, "add", "--", path)
-        result = fix_names.git(worktree, subprocess.run, "commit", "-q", "-m", message)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        commit_files(self, worktree, message, files)
 
     def check(self):
         code, out, err = self.run_main(["check", self.run_dir, KEY], run=self.run_fake)
@@ -280,8 +323,7 @@ class CheckCommandTest(GitCase):
         self.commit(worktree, "fix(CQ-3): theme", {"a.php": "<?php\n"})
         state = self.state()
         state["keys"][KEY]["step"] = "reviewed"
-        fix_state_save = __import__("cqa.fix_state", fromlist=["save"]).save
-        fix_state_save(self.run_dir, state)
+        fix_state.save(self.run_dir, state)
         folder = self.run_dir / "fix" / "front" / "securite" / "check"
         write(folder, "stale.txt", "old")
         self.tsv = "ok\tphp -l\ta.php\t\n"
@@ -319,11 +361,7 @@ class GitFilesTest(GitCase):
         start = self.key()["start_sha"]
 
         def commit(message, files):
-            for path, content in files.items():
-                write(worktree, path, content)
-                fix_names.git(worktree, subprocess.run, "add", "--", path)
-            result = fix_names.git(worktree, subprocess.run, "commit", "-q", "-m", message)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            commit_files(self, worktree, message, files)
 
         commit("fix(CQ-3): first", {"web/a.php": "<?php\n", "dir with space/é.css": "a {}\nb {}\n"})
         commit("fix(CQ-5): second", {"web/b.php": "<?php\n", "web/a.php": "<?php\n// more\n"})
