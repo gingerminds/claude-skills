@@ -238,6 +238,24 @@ def fingerprint_changes(before: dict, after: dict) -> Optional[dict]:
     return changes if any(changes.values()) else None
 
 
+def dev_checkout_alert(key: dict, repo_path, run) -> Optional[dict]:
+    """Return what changed in the dev's checkout since the last alert of the key (or since its
+    start), as fingerprint_changes does, or None.
+
+    An alert moves the reference (key["dev_fingerprint"]) to the current fingerprint, so that
+    one change is reported once; the caller saves the state. A key without a reference gives
+    None.
+    """
+    before = key.get("dev_fingerprint")
+    if not isinstance(before, dict):
+        return None
+    after = dev_fingerprint(repo_path, run)
+    changes = fingerprint_changes(before, after)
+    if changes is not None:
+        key["dev_fingerprint"] = after
+    return changes
+
+
 def _checked(repo_path, run, label: str, *args: str) -> str:
     result = fix_names.git(repo_path, run, *args)
     if result.returncode != 0:

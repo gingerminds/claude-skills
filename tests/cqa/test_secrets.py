@@ -299,6 +299,54 @@ class NonSecretTest(unittest.TestCase):
         self.assertEqual(redact(text, []), "password : type=password\nDB_PASSWORD=[secret masqué]")
 
 
+class LiteralCredentialsTest(unittest.TestCase):
+    """The guard of the fix mode flags a literal value only (design 4.2.1): an expression, a
+    call, a superglobal, a variable or an operator on the right is not a secret."""
+
+    WORDPRESS = ("$password = isset( $_POST['pass1'] ) ? (string) wp_unslash( $_POST['pass1'] ) "
+                 ": '';")
+    EXPRESSIONS = [
+        WORDPRESS,
+        "$token = !empty( $_GET['t'] ) ? sanitize_text_field( wp_unslash( $_GET['t'] ) ) : null;",
+        "$password = (string) $request->get( 'password' );",
+        "$secret = wp_unslash( $_POST['secret'] ?? '' );",
+    ]
+    STILL_SECRETS = [
+        "$password = 'hunter2hunter2';",
+        "DB_PASSWORD=hunter22 # prod",
+        "$password = isset( $x ) ? 'Adm1nP@ss2024' : '';",
+        "$password = wp_hash( 'Adm1nP@ss2024' );",
+        "password=isset(x)&token=abcd1234efgh5678",
+        "PASSWORD=(hunter22)",
+        "password: hunter22 (prod)",
+    ]
+
+    def test_literal_only_credentials(self):
+        self.assertEqual(scan_text(self.WORDPRESS, []), ["credential_assignment"])
+        for text in self.EXPRESSIONS:
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, [], literal_credentials=True), [])
+        for text in self.STILL_SECRETS:
+            for mode in (False, True):
+                with self.subTest(text=text, literal_credentials=mode):
+                    self.assertEqual(scan_text(text, [], literal_credentials=mode),
+                                     ["credential_assignment"])
+        for text, _ in NonSecretTest.SECRETS:
+            with self.subTest(text=text):
+                labels = scan_text(text, [], literal_credentials=True)
+                self.assertEqual(labels[0], "credential_assignment")
+                self.assertTrue(set(labels[1:]) <= {"mysql_password_option"}, labels)
+        for label, text in PATTERN_CASES:
+            with self.subTest(label=label, text=text[:30]):
+                self.assertEqual(scan_text(text, [], literal_credentials=True), [label])
+        for text in NonSecretTest.NON_SECRETS + CLEAN_TEXTS:
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, [], literal_credentials=True), [])
+
+    def test_redact_keeps_masking_expressions(self):
+        self.assertEqual(redact(self.WORDPRESS, []), "$password = [secret masqué]")
+
+
 class ProcessAndKubeSecretsTest(unittest.TestCase):
     """A database password on a command line (ps auxww) and a kubeconfig key (F2, F16)."""
 

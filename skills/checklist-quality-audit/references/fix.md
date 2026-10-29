@@ -57,7 +57,7 @@ git -C "<worktree>" -c core.hooksPath=/dev/null -c core.fsmonitor=false commit -
 
 - Name the files of the change one by one (a deleted file too). Never `git add -A`, `git add .`, `git add -u`, `git commit -a`, never a wildcard.
 - `-c core.hooksPath=/dev/null`: the hooks of the repo (husky, GrumPHP, CaptainHook...) never run, since they rely on the dev's environment or on `node_modules`. The merge request declares them « Non lancé », with their command. `-c core.fsmonitor=false` does the same for a file monitor configured in the repo. Every git command of the fix mode in a worktree carries both options.
-- **Subject**: `type(CQ-107): imperative summary`, in English, 72 characters at most, with a ref of the key. It must match `^(fix|feat|refactor|chore|perf|docs|style)\(CQ-([0-9]+)\): \S`.
+- **Subject**: `type(<alias> CQ-107): imperative summary`, in English, 72 characters at most, with a ref of the key and the alias of its section (`securite`, `qualite`, `accessibilite`, `seo`, `eco`, `rgpd`, `process`). It must match `^(fix|feat|refactor|chore|perf|docs|style)\(([a-z0-9]+) CQ-([0-9]+)\): \S`. The v2 form `type(CQ-107): ...` is refused for a new commit.
 
 | Type | Use |
 |---|---|
@@ -72,7 +72,7 @@ git -C "<worktree>" -c core.hooksPath=/dev/null -c core.fsmonitor=false commit -
 - **Body**: short, in English: what the audit found, then what the commit changes. Plain text: no `$`, backtick, double quote or backslash in the subject or the body (the shell expands them inside the double quotes). For example:
 
 ```text
-fix(CQ-107): escape the search form label
+fix(securite CQ-107): escape the search form label
 
 The audit found the search form label printed without escaping.
 Escape it with esc_html() in searchform.php.
@@ -144,7 +144,7 @@ Reasons of a skipped row, in French, 300 characters at most, precise enough for 
 
 ## 7. Guard rails
 
-Written in the instructions of the sub-agents, and checked in code: `cqa_fix.py guard` reads every commit of `<start_sha>..HEAD` before any push and prints one problem per commit and path, with the reason in French (quoted below). A commit refused once goes back to the fixer, then its row leaves the branch (section 6).
+Written in the instructions of the sub-agents, and checked in code: `cqa_fix.py guard` reads every commit of `<start_sha>..HEAD` before any push and prints one problem per commit and path, with the reason in French (quoted below) and its `kind`: `form` for the message, `content` for the paths, the secrets, a merge commit or a rewritten history. `cqa_fix.py guard <run_dir> <key> --staged --message-file <file>` checks the index of the worktree and the planned message the same way, before the commit. A commit refused once goes back to the fixer, then its row leaves the branch (section 6).
 
 - **Where to write**: only in the worktrees of the run directory (`fix/<repo>/<slug>/wt`) and in the files of the key's folder that belong to each agent. Never in the dev's folder, their local `develop`, or the stash the worktrees share with the dev's repo (hence never `git stash`). The fixer and the reviewer may read, but never write nor run anything in, the dev's repo (`repos[].path` of `context.json`): only its `vendor/`, `node_modules/` and the core of the stack, which the worktree lacks, to know the APIs the code calls.
 - **No server, no project command**: no command on the preprod, the prod or any server (`ssh`, `scp`, `rsync`, a database client); nothing in the project's environment (`docker compose`, `make`, `composer`, `npm`, `yarn`, `pnpm`, `npx`, `drush`, `wp`, `php artisan`, a test suite, a linter of the project, a build); no network request. Notion is written only by the orchestrator, after the lead agreed, for the link of the merge requests.
@@ -157,7 +157,7 @@ Written in the instructions of the sub-agents, and checked in code: `cqa_fix.py 
   - the dependency manifests and lock files (« dépendances : aucun ajout ni montée en v2.0 »): `composer.json`, `composer.lock`, `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`.
 - **No secret** in the code or a message (« secret détecté (<label>) »): the added lines and the messages are scanned for the values the session knows and for common patterns. A secret value a fix needs gives a question or a skipped row, never a value in the code (section 5).
 - **Dependencies**: no new dependency, no version change (major or not), no package script.
-- **Git**: a subject `type(CQ-xx): ...` (« message de commit hors convention ») with a ref of the key (« Réf hors de cette MR »); no merge commit (« commit de fusion »); no attribution line (« ligne d'attribution dans le message »); the history kept, `start_sha` staying an ancestor of `HEAD` (« historique réécrit : le départ de la passe n'est plus dans la branche »); no tag; push of `feature/checklist-qa-fix-*` branches only, never `--force`, never towards `develop`, `main`, `master` or `release`.
+- **Git**: a subject `type(<alias> CQ-xx): ...` (« message de commit hors convention ») with a ref of the key (« Réf hors de cette MR ») and the alias of its section (« section du commit différente de celle de la ligne »), 72 characters at most (« sujet de plus de 72 caractères »); no merge commit (« commit de fusion »); no attribution line (« ligne d'attribution dans le message »); the history kept, `start_sha` staying an ancestor of `HEAD` (« historique réécrit : le départ de la passe n'est plus dans la branche »); no tag; push of `feature/checklist-qa-fix-*` branches only, never `--force`, never towards `develop`, `main`, `master` or `release`.
 - **GitLab**: a draft merge request assigned to the lead who runs the skill, without reviewer or label (the lead shares out the review), and the updates of its description. Nothing else: never Ready, approval, merge or closing.
 
 ## 8. Report and review files

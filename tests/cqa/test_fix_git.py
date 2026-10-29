@@ -671,7 +671,7 @@ class SectionTest(GitCase):
                 {"ref": 5, "outcome": "skipped", "reason": "Hors du repo."}]
         code, result, err = self.validate("report", 1, both)
         self.assertEqual(code, 6, err)
-        self.assertTrue(any("CQ-5" in error for error in result["errors"]), result)
+        self.assertEqual(result["errors"], ["ligne CQ-5 : Réf d'une autre section (qualite)"])
         self.assertEqual(self.key()["rows"]["5"]["outcome"], "pending")
         code, result, err = self.validate("report", 1, both[:1])
         self.assertEqual(code, 0, err)

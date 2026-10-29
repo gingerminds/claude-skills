@@ -29,10 +29,24 @@ class ParseSubjectTest(unittest.TestCase):
         for subject in ("fix(securite): x", "fix(securite CQ-107):x", "Merge branch 'develop'"):
             self.assertIsNone(fix_names.parse_subject(subject))
 
+    def test_the_guard_subject_is_the_015_form(self):
+        self.assertTrue(fix_names.SUBJECT.match("fix(securite CQ-107): add headers"))
+        for subject in ("fix(CQ-107): add headers", "fix(Securite CQ-107): x", "wip(seo CQ-1): x"):
+            self.assertIsNone(fix_names.SUBJECT.match(subject))
+
     def test_ref_of_subject_accepts_both_forms(self):
         self.assertEqual(fix_names.ref_of_subject("feat(seo CQ-3): x"), 3)
         self.assertEqual(fix_names.ref_of_subject("feat(CQ-3): x"), 3)
         self.assertIsNone(fix_names.ref_of_subject("feat(seo): x"))
+
+
+class DocumentationTest(unittest.TestCase):
+    def test_documentation_files(self):
+        for path in ("README.md", "docs/guide.rst", "docs/intro.adoc", "CHANGELOG.MD"):
+            self.assertTrue(fix_names.is_documentation(path), path)
+        for path in ("robots.txt", "web/.well-known/security.txt", "llms.txt", "ads.txt",
+                     "notes.txt", "README", "docs/md", "index.php"):
+            self.assertFalse(fix_names.is_documentation(path), path)
 
 
 class BranchTest(unittest.TestCase):

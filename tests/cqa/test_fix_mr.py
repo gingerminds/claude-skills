@@ -492,7 +492,7 @@ class MrCase(GitCase):
         self.assertEqual(self.cli("pass-start", KEY, "--pass", "1", *SECTION)[0], 0)
         rows = [{"ref": 5, "outcome": "skipped", "reason": "Demande une décision de l'équipe UI/UX."}]
         if fix:
-            self.fixed = self.fixer_commit(self.worktree, "a3.txt", "fix(CQ-3): add a")
+            self.fixed = self.fixer_commit(self.worktree, "a3.txt", "fix(securite CQ-3): add a")
             rows.insert(0, {"ref": 3, "outcome": "fixed", "change": "Ajoute a.", "uat": "Lire a.",
                             "commits": [self.fixed], "attention": "Vérifier le cache du CDN."})
         else:
@@ -529,7 +529,7 @@ class MrCase(GitCase):
     def open_mr(self, state="opened", description="## Contexte\n\nTexte du relecteur.\n"):
         """A branch pushed by an earlier pass, with its MR !12, taken over by start."""
         branch = BASE
-        self.push_branch(branch, "fix(CQ-107): add headers")
+        self.push_branch(branch, "fix(securite CQ-107): add headers")
         self.write_run(flight(open=[mr(12, branch, [107])]))
         self.gitlab.add(12, branch, description, state)
         return branch
@@ -757,7 +757,7 @@ class PublishTest(MrCase):
         self.assertEqual(self.cli("finish", KEY)[0], 0)
         self.assertEqual(self.start_ok()["branch"], self.branch)
         self.assertEqual(self.cli("pass-start", KEY, "--pass", "2", *SECTION)[0], 0)
-        self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
+        self.fixer_commit(self.worktree, "b5.txt", "fix(securite CQ-5): add b")
         self.write_doc("report-2.json", {"key": KEY, "pass": 2, "rows": [
             {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.",
              "commits": [self.head(self.worktree)]}]})
@@ -857,7 +857,7 @@ class PublishTest(MrCase):
         self.reviewed()
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         self.assertEqual(self.cli("pass-start", KEY, "--pass", "2", *SECTION)[0], 0)
-        self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
+        self.fixer_commit(self.worktree, "b5.txt", "fix(securite CQ-5): add b")
         self.write_doc("report-2.json", {"key": KEY, "pass": 2, "rows": [
             {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.",
              "commits": [self.head(self.worktree)]}]})
@@ -883,8 +883,8 @@ class PublishTest(MrCase):
     def test_publish_checks_a_taken_over_branch_never_pushed(self):
         branch = BASE
         real_git(self.repo, "checkout", "-q", "-b", branch)
-        commit(self.repo, "s3.txt", "fix(CQ-3): earlier fix")
-        commit(self.repo, "s40.txt", "fix(CQ-40): earlier fix of another row")
+        commit(self.repo, "s3.txt", "fix(securite CQ-3): earlier fix")
+        commit(self.repo, "s40.txt", "fix(securite CQ-40): earlier fix of another row")
         oops = commit(self.repo, "oops.txt", "oops: no ref")
         real_git(self.repo, "checkout", "-q", "develop")
         base = self.head(self.repo, "refs/remotes/origin/develop")
@@ -899,7 +899,7 @@ class PublishTest(MrCase):
         self.fix_row_5()
         code, out, err = self.cli("guard", KEY)
         self.assertEqual(code, 5)
-        expected = [{"sha": oops, "ref": None, "path": None, "reason": BAD_MESSAGE}]
+        expected = [{"sha": oops, "ref": None, "path": None, "reason": BAD_MESSAGE, "kind": "form"}]
         self.assertEqual(json.loads(out)["problems"], expected)
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         code, out, err = self.cli("publish", KEY)
@@ -911,7 +911,7 @@ class PublishTest(MrCase):
     def test_publish_links_the_rows_already_on_the_branch(self):
         branch = BASE
         real_git(self.repo, "checkout", "-q", "-b", branch)
-        commit(self.repo, "s3.txt", "fix(CQ-3): earlier fix")
+        commit(self.repo, "s3.txt", "fix(securite CQ-3): earlier fix")
         real_git(self.repo, "checkout", "-q", "develop")
         self.write_run(flight(branches=[{"branch": branch, "where": "local", "refs": [3]}]))
         self.open_pass()
@@ -938,7 +938,7 @@ class PublishTest(MrCase):
         shas = [commit(self.repo, f"inherited-{index}.txt", subject)
                 for index, subject in enumerate(subjects)]
         real_git(self.repo, "checkout", "-q", "develop")
-        refs = sorted({int(found) for found in re.findall(r"\(CQ-([0-9]+)\)", " ".join(subjects))})
+        refs = sorted({int(found) for found in re.findall(r" CQ-([0-9]+)\)", " ".join(subjects))})
         self.write_run(flight(branches=[{"branch": branch, "where": "local", "refs": refs}]))
         self.open_pass()
         started = self.start_ok()
@@ -946,35 +946,36 @@ class PublishTest(MrCase):
         return shas
 
     def test_guard_waives_stray_refs_of_inherited_commits_only(self):
-        self.take_over_local_branch("fix(CQ-3): earlier fix", "fix(CQ-40): earlier fix of another row")
-        stray = self.fixer_commit(self.worktree, "p40.txt", "fix(CQ-40): pass work outside the key")
+        self.take_over_local_branch("fix(securite CQ-3): earlier fix", "fix(securite CQ-40): earlier fix of another row")
+        stray = self.fixer_commit(self.worktree, "p40.txt", "fix(securite CQ-40): pass work outside the key")
         code, out, err = self.cli("guard", KEY)
         self.assertEqual(code, 5)
         self.assertEqual(json.loads(out)["problems"],
-                         [{"sha": stray, "ref": 40, "path": None, "reason": "Réf hors de cette MR"}])
+                         [{"sha": stray, "ref": 40, "path": None, "reason": "Réf hors de cette MR",
+                           "kind": "form"}])
 
     def test_publish_refuses_a_commit_the_fixer_did_not_report(self):
         self.reviewed()
-        extra = self.fixer_commit(self.worktree, "extra.txt", "fix(CQ-3): extra change")
+        extra = self.fixer_commit(self.worktree, "extra.txt", "fix(securite CQ-3): extra change")
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         code, out, err = self.cli("publish", KEY)
         self.assertEqual(code, 5)
-        self.assertIn(f"commit non rapporté par le fixer : {extra[:12]} fix(CQ-3): extra change", err)
+        self.assertIn(f"commit non rapporté par le fixer : {extra[:12]} fix(securite CQ-3): extra change", err)
         self.assertNotIn(self.fixed[:12], err)
         self.assertTrue(err.strip().endswith("Rien n'a été poussé."))
         self.assertEqual(self.remote(self.branch), "")
         self.assertEqual(self.glab_args("mr"), [])
 
     def test_publish_refuses_a_pass_commit_of_a_row_done_before(self):
-        self.take_over_local_branch("fix(CQ-3): earlier fix")
+        self.take_over_local_branch("fix(securite CQ-3): earlier fix")
         self.assertEqual(self.key()["rows"]["3"]["outcome"], "done_before")
-        more = self.fixer_commit(self.worktree, "more3.txt", "fix(CQ-3): more on a done row")
+        more = self.fixer_commit(self.worktree, "more3.txt", "fix(securite CQ-3): more on a done row")
         self.fix_row_5()
         self.assertEqual(self.cli("guard", KEY)[0], 0)
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         code, out, err = self.cli("publish", KEY)
         self.assertEqual(code, 5)
-        self.assertIn(f"commit non rapporté par le fixer : {more[:12]} fix(CQ-3): more on a done row",
+        self.assertIn(f"commit non rapporté par le fixer : {more[:12]} fix(securite CQ-3): more on a done row",
                       err)
         self.assertEqual(self.remote(self.branch), "")
 
@@ -997,7 +998,7 @@ class PublishTest(MrCase):
         """Fix CQ-5 in pass 1 of a key whose CQ-3 is done_before, then review: reviewed."""
         self.assertEqual(self.cli("section-start", KEY, *SECTION)[0], 0)
         self.assertEqual(self.cli("pass-start", KEY, "--pass", "1", *SECTION)[0], 0)
-        sha = self.fixer_commit(self.worktree, "b5.txt", "fix(CQ-5): add b")
+        sha = self.fixer_commit(self.worktree, "b5.txt", "fix(securite CQ-5): add b")
         self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [
             {"ref": 5, "outcome": "fixed", "change": "Ajoute b.", "uat": "Lire b.", "commits": [sha]}]})
         self.assertEqual(self.cli("validate", KEY, "report", "--pass", "1")[0], 0)

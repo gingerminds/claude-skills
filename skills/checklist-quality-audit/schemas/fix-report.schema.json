@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Report of the fixer for one key and one pass of the fix mode",
-  "description": "Content of fix/<repo>/<slug>/report-<N>.json, checked by cqa_fix.py validate <run_dir> <key> report --pass <N> (exit 6 with the list of errors). One row per row of the dispatch; every row still pending in the state must be there. Texts a reviewer or a lead dev reads (change, uat, reason, question, attention) are written in French. A valid report updates the rows of fix/state.json.",
+  "description": "Content of fix/<repo>/report-<N>.json, checked by cqa_fix.py validate <run_dir> <key> report --pass <N> (exit 6 with the list of errors). One row per row of the dispatch, all of the section of pass N; every row of that section still pending in the state must be there. Texts a reviewer or a lead dev reads (change, uat, remaining, reason, question, attention) are written in French. A valid report updates the rows of fix/state.json.",
   "type": "object",
   "required": ["key", "pass", "rows"],
   "properties": {
     "key": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[a-z0-9]+(-[a-z0-9]+)*$",
-      "description": "Key <repo>/<slug>, as in the Fix: field of the dispatch."
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Key of the pass: the name of the repo, as in the Fix: field of the dispatch."
     },
     "pass": {
       "type": "integer",
@@ -18,7 +18,7 @@
     "rows": {
       "type": "array",
       "items": {"$ref": "#/$defs/row"},
-      "description": "One entry per row. A ref that is not a row of the key, or that appears twice, is rejected."
+      "description": "One entry per row. A ref that is not a row of the section of the pass (« Réf d'une autre section (<alias>) », « Réf hors de cette clé »), or that appears twice, is rejected."
     }
   },
   "$defs": {
@@ -44,6 +44,12 @@
           "maxLength": 600,
           "description": "Required for fixed: the manual acceptance test a reviewer runs, in French, 1 to 600 characters."
         },
+        "remaining": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "fixed only, optional: what is left to do when the commits fix the row in part, in French, 1 to 300 characters. The merge request, the summary and Notion mark the row « partiel » with it."
+        },
         "commits": {
           "type": "array",
           "items": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
@@ -65,7 +71,7 @@
         "attention": {
           "type": ["string", "null"],
           "maxLength": 400,
-          "description": "Optional: what the reviewer should look at closely, in French (for a Semi-auto row, the À valider of the finding)."
+          "description": "Optional: what the reviewer should look at closely, in French (for a Semi-auto row, the À valider of the finding). A row given up after its commits starts with « Abandon : » and then holds 300 characters at most."
         }
       },
       "allOf": [
@@ -112,7 +118,7 @@
           "maxItems": 4,
           "uniqueItems": true,
           "items": {"type": "string", "minLength": 1, "maxLength": 200},
-          "description": "The possible answers, in French, 2 to 4."
+          "description": "The possible answers, in French, 2 to 4, each checked in the code like a fix. Never an option that leaves the row as it is (« ne rien faire », « laisser à un dev », « pas de changement »...): the orchestrator already offers to leave the row to the devs, and validate refuses such an option."
         },
         "default": {
           "type": "string",
@@ -123,7 +129,7 @@
   },
   "examples": [
     {
-      "key": "front/securite",
+      "key": "front",
       "pass": 1,
       "rows": [
         {
@@ -131,6 +137,7 @@
           "outcome": "fixed",
           "change": "Ajoute les en-têtes de sécurité dans la configuration du serveur web du thème.",
           "uat": "Ouvrir la page d'accueil et vérifier l'en-tête X-Content-Type-Options dans les outils du navigateur.",
+          "remaining": null,
           "commits": ["1a2b3c4d5e6f"],
           "reason": null,
           "question": null,

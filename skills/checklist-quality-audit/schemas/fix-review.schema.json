@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Review of the commits of one key and one pass of the fix mode",
-  "description": "Content of fix/<repo>/<slug>/review-<N>.json, written by the read-only reviewer and checked by cqa_fix.py validate <run_dir> <key> review --pass <N> (exit 6 with the list of errors). Every row the fixer reported fixed in pass N needs a verdict. A blocking verdict sends the row back to the fixer for one more attempt; still blocking after it, the row is dropped from the branch. Notes and remarks are written in French.",
+  "description": "Content of fix/<repo>/review-<N>.json, written by the read-only reviewer (or by the orchestrator for a light review) and checked by cqa_fix.py validate <run_dir> <key> review --pass <N> (exit 6 with the list of errors). Every row the fixer reported fixed in pass N needs a verdict. A blocking verdict sends the row back to the fixer for one more attempt; still blocking after it, the row is dropped from the branch. An ok verdict whose fix is right but whose texts are not carries corrections instead. Notes, corrections and remarks are written in French.",
   "type": "object",
   "required": ["key", "pass", "rows", "attention"],
   "properties": {
     "key": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[a-z0-9]+(-[a-z0-9]+)*$",
-      "description": "Key <repo>/<slug> of the dispatch."
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Key of the pass: the name of the repo, as in the Review: field of the dispatch."
     },
     "pass": {
       "type": "integer",
@@ -43,21 +43,36 @@
           "type": ["string", "null"],
           "maxLength": 600,
           "description": "Required for blocking: what is wrong and what to change, in French, 1 to 600 characters. Optional for ok."
+        },
+        "corrections": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/corrections"}],
+          "description": "ok only, optional: the texts of the report to replace, when the fix is right but a text is wrong or incomplete. validate records them in rows[ref].corrections of fix/state.json, and the merge request uses them instead of the report's texts."
         }
       },
       "if": {"properties": {"verdict": {"const": "blocking"}}},
       "then": {
         "required": ["notes"],
-        "properties": {"notes": {"type": "string", "minLength": 1}}
+        "properties": {"notes": {"type": "string", "minLength": 1}, "corrections": {"type": "null"}}
       }
+    },
+    "corrections": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "change": {"type": ["string", "null"], "minLength": 1, "maxLength": 600, "description": "What changed, in French, instead of the report's change."},
+        "uat": {"type": ["string", "null"], "minLength": 1, "maxLength": 600, "description": "The acceptance test, in French, instead of the report's uat."},
+        "attention": {"type": ["string", "null"], "minLength": 1, "maxLength": 400, "description": "What to look at closely, in French, instead of the report's attention (300 characters at most when it starts with « Abandon : »)."},
+        "remaining": {"type": ["string", "null"], "minLength": 1, "maxLength": 300, "description": "What is left to do for a partial fix, in French, instead of the report's remaining."}
+      },
+      "description": "Text corrections of an ok verdict; a field left out or null keeps the report's text."
     }
   },
   "examples": [
     {
-      "key": "front/securite",
+      "key": "front",
       "pass": 1,
       "rows": [
-        {"ref": 107, "verdict": "ok", "notes": null},
+        {"ref": 107, "verdict": "ok", "notes": null, "corrections": {"uat": "Ouvrir la page d'accueil et vérifier l'en-tête X-Content-Type-Options dans l'onglet Réseau des outils du navigateur."}},
         {"ref": 112, "verdict": "blocking", "notes": "La valeur n'est pas échappée à l'affichage : utiliser esc_html()."}
       ],
       "attention": ["La règle d'en-tête s'applique aussi aux fichiers statiques : vérifier le cache du CDN."]

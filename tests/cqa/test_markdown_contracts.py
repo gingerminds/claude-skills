@@ -1500,7 +1500,7 @@ class FixAgentsTest(unittest.TestCase):
             fix_guard.THIRD_PARTY, fix_guard.DEPENDENCY_DIR, fix_guard.CORE, fix_guard.SUBMODULE,
             fix_guard.MINIFIED, fix_guard.DEPENDENCIES, fix_guard.SECRET.format(label="<label>"),
             fix_guard.BAD_MESSAGE, fix_guard.OUT_OF_KEY, fix_guard.MERGE, fix_guard.ATTRIBUTION,
-            fix_guard.REWRITTEN,
+            fix_guard.REWRITTEN, fix_guard.SECTION_MISMATCH, fix_guard.SUBJECT_TOO_LONG,
         ):
             with self.subTest(reason=reason):
                 self.assertIn(f"« {reason} »", guard)

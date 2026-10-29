@@ -890,9 +890,17 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" guard "$RUN" "<repo>/<slug>"
 ```
 
-It prints `{"ok", "problems"}`, one problem per commit and path (`{"sha", "ref", "path", "reason"}`), and exits 5 when there is one.
+It prints `{"ok", "problems"}`, one problem per commit and path (`{"sha", "ref", "path", "reason", "kind"}`, `kind` being `form` for a problem of the message and `content` for the others), and exits 5 when there is one.
 
-e. Review: for each fixer pass not reviewed yet (absent from `reviews` of the key) that has fixed rows (`outcome` `fixed` and `pass` N in `fix/state.json`, as `rows.fixed` of its `validate` listed them), in pass order, dispatch `gm:cqa-fix-reviewer` with the line, exactly:
+e. Review: for each fixer pass not reviewed yet (absent from `reviews` of the key) that has fixed rows (`outcome` `fixed` and `pass` N in `fix/state.json`, as `rows.fixed` of its `validate` listed them), in pass order, first read the scope of its diff:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" review-scope "$RUN" "<repo>/<slug>" --pass <N>
+```
+
+It prints `{"light", "lines", "files"}` for the diff `bases["<N>"]..HEAD`: `light` is true when every file is documentation (`*.md`, `*.rst`, `*.adoc`) and the added plus removed lines are 40 at most. When `light` is true, write `review-<N>.json` yourself, by the rules of `gm:cqa-fix-reviewer`; otherwise dispatch `gm:cqa-fix-reviewer` with the line, exactly:
 
 ```
 Run dir: <run_dir>. Review: <repo>/<slug>. Worktree: <path>. Base: <sha>. Pass: <N>. Follow your instructions.

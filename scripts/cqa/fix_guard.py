@@ -2,8 +2,11 @@
 reports and the reviewer's verdicts.
 
 The guard judges only the commits of <start_sha>..HEAD: what a reused branch carried before
-the pass (a reviewer's suggestion, a merge of develop) is never judged again. It names the
-labels of the secrets it finds, never their values.
+the pass (a reviewer's suggestion, a merge of develop) is never judged again; before a commit,
+it judges the index and the planned message the same way. It names the labels of the secrets
+it finds, never their values, and reads credentials as literal values only. Each problem has a
+kind: "form" (the message: convention, section, length, attribution, ref) is fixed by
+rewriting the message; "content" (paths, secrets, merge, rewritten history) drops the row.
 """
 import fnmatch
 import json
@@ -25,11 +28,16 @@ DEPENDENCIES = "dépendances : aucun ajout ni montée en v2.0"
 SECRET = "secret détecté ({label})"
 BAD_MESSAGE = "message de commit hors convention"
 OUT_OF_KEY = "Réf hors de cette MR"
+SECTION_MISMATCH = "section du commit différente de celle de la ligne"
+SUBJECT_TOO_LONG = f"sujet de plus de {fix_names.SUBJECT_MAX} caractères"
 MERGE = "commit de fusion"
 ATTRIBUTION = "ligne d'attribution dans le message"
 REWRITTEN = "historique réécrit : le départ de la passe n'est plus dans la branche"
 OUT_OF_PASS = "commit hors de la passe {number} : {sha}"
 UNREVIEWED_PASS = "la revue de la passe {number} n'est pas enregistrée"
+OTHER_SECTION = "Réf d'une autre section ({alias})"
+FORM = "form"
+CONTENT = "content"
 
 # Core and contributed code of each stack (repos[].stack of context.json). Patterns are
 # matched segment by segment, case aside: "**" stands for any number of folders, and a
@@ -62,8 +70,16 @@ MAX_TEXT = 600
 MAX_REASON = 300
 MAX_NOTE = 400
 MAX_OPTION = 200
+MAX_REMAINING = 300
+MAX_ABANDON = 300
 MIN_OPTIONS = 2
 MAX_OPTIONS = 4
+# The text corrections a review may give with an ok verdict, and their limits.
+CORRECTION_LIMITS = {"change": MAX_TEXT, "uat": MAX_TEXT, "attention": MAX_NOTE,
+                     "remaining": MAX_REMAINING}
+# A pass whose diff is documentation only, this many added plus removed lines at most, is
+# reviewed by the orchestrator itself.
+LIGHT_REVIEW_LINES = 40
 
 _GITLINK = "160000"
 # Rows a report may no longer change: their state outcome and the error that names them.
@@ -75,6 +91,12 @@ _SETTLED = {
 _ATTRIBUTION = re.compile(r"\W*(?:co-authored-by\s*:|claude-session\s*:|generated with\b)",
                           re.IGNORECASE)
 _SHORT_SHA = re.compile(r"[0-9a-f]{7,64}")
+_ABANDON = re.compile(r"\s*abandon\s*:", re.IGNORECASE)
+# An option that leaves the row as it is: the orchestrator already offers to leave it to a dev.
+_AS_IS = ("ne rien", "rien faire", "laisser", "à un dev", "aux devs", "pas de changement",
+          "ne pas corriger")
+_DIFF = ("-U0", "--text", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
+         "--src-prefix=a/", "--dst-prefix=b/")
 _C_ESCAPE = re.compile(r'\\([0-7]{3}|[abtnvfr"\\])')
 _C_ESCAPED = {"a": "\a", "b": "\b", "t": "\t", "n": "\n", "v": "\v", "f": "\f", "r": "\r",
               '"': '"', "\\": "\\"}
@@ -99,41 +121,91 @@ def path_reason(path: str, repo: dict, *, gitlink: bool = False) -> Optional[str
     return None
 
 
-def check_commits(worktree: Path, start_sha: str, rows: set, repo: dict, known: list, run) -> list:
+def check_commits(worktree: Path, start_sha: str, rows: dict, repo: dict, known: list,
+                  run) -> list:
     """Return the problems of the commits of <start_sha>..HEAD in worktree, oldest first.
 
-    rows holds every ref of the key (done_before included); repo is the context.json entry
-    (stack, third_party_paths); known holds the secret values of the session. Each problem
-    is {"sha", "ref", "path", "reason"}: ref is the ref of the commit subject (the stray one
-    for "Réf hors de cette MR"), path is None for a problem of the whole commit. Only the
-    added lines of the diffs, and the messages, are scanned for secrets.
+    rows maps every ref of the key (done_before included) to the alias of its section (None
+    when unknown); repo is the context.json entry (stack, third_party_paths); known holds the
+    secret values of the session. Each problem is {"sha", "ref", "path", "reason", "kind"}:
+    ref is the ref of the commit subject (the stray one for "Réf hors de cette MR"), path is
+    None for a problem of the whole commit, kind is FORM or CONTENT. Only the added lines of
+    the diffs, and the messages, are scanned for secrets.
     """
     worktree = Path(worktree)
     problems = []
     if not fix_git.is_ancestor(worktree, run, start_sha, "HEAD"):
-        problems.append(_problem(start_sha, None, None, REWRITTEN))
+        problems.append(_problem(start_sha, None, None, REWRITTEN, CONTENT))
     for commit in fix_git.commits_in_range(worktree, run, start_sha):
         sha, ref = commit["sha"], commit["ref"]
         if len(commit["parents"]) > 1:
-            problems.append(_problem(sha, ref, None, MERGE))
+            problems.append(_problem(sha, ref, None, MERGE, CONTENT))
             continue
-        for reason in _message_reasons(commit["message"], ref, rows, known):
-            problems.append(_problem(sha, ref, None, reason))
-        for path, gitlink in _changed_paths(worktree, run, sha):
-            reason = path_reason(path, repo, gitlink=gitlink)
-            if reason:
-                problems.append(_problem(sha, ref, path, reason))
-        for path, lines in _added_lines(worktree, run, sha).items():
-            for label in scan_text("\n".join(lines), known):
-                problems.append(_problem(sha, ref, path, SECRET.format(label=label)))
+        problems += _change_problems(
+            sha, ref, commit["message"], rows, repo, known,
+            _changed_paths(worktree, run, f"git diff-tree {sha[:12]}", "diff-tree", "-r", "-z",
+                           "--raw", "--root", "--no-renames", "--no-commit-id", sha),
+            _added_lines(worktree, run, f"git show {sha[:12]}", "-c", "core.quotePath=true",
+                         "show", "--format=", "--no-show-signature", *_DIFF, sha),
+        )
     return problems
 
 
+def check_staged(worktree: Path, message: str, rows: dict, repo: dict, known: list,
+                 run) -> list:
+    """Return the problems of the next commit, before it is made: the index of worktree
+    against HEAD, with message as its message. rows, repo and known as for check_commits;
+    each problem has sha None and the ref of the planned subject. Nothing is written.
+    """
+    worktree = Path(worktree)
+    ref = fix_names.ref_of_subject(message.split("\n", 1)[0])
+    return _change_problems(
+        None, ref, message, rows, repo, known,
+        _changed_paths(worktree, run, "git diff --cached", "diff", "--cached", "-z", "--raw",
+                       "--no-renames"),
+        _added_lines(worktree, run, "git diff --cached", "-c", "core.quotePath=true", "diff",
+                     "--cached", *_DIFF),
+    )
+
+
+def review_scope(worktree: Path, run, base: str) -> dict:
+    """Return {"light", "lines", "files"} for the diff base..HEAD that the review of a pass reads.
+
+    files lists its paths, sorted; lines counts its added plus removed lines. light is True
+    when every file is documentation (fix_names.is_documentation), none binary, and lines is
+    LIGHT_REVIEW_LINES at most: the orchestrator then writes the review itself.
+    """
+    result = fix_names.git(
+        Path(worktree), run, "diff", "--numstat", "-z", "--no-renames", "--no-ext-diff",
+        "--no-textconv", base, "HEAD",
+    )
+    if result.returncode != 0:
+        raise fix_git.GitRefused(f"git diff {base[:12]}..HEAD a échoué : {result.stderr.strip()}")
+    files, lines, binary = [], 0, False
+    for record in result.stdout.split("\0"):
+        fields = record.split("\t", 2)
+        if len(fields) != 3:
+            continue
+        added, removed, path = fields
+        files.append(path)
+        if added.isdigit() and removed.isdigit():
+            lines += int(added) + int(removed)
+        else:
+            binary = True
+    files.sort()
+    light = (not binary and lines <= LIGHT_REVIEW_LINES
+             and all(fix_names.is_documentation(path) for path in files))
+    return {"light": light, "lines": lines, "files": files}
+
+
 def validate_report(document, *, key: str, number: int, rows: dict, commits: list,
-                    pass_commits: Optional[set] = None, reviewed: Optional[set] = None) -> tuple:
+                    pass_commits: Optional[set] = None, reviewed: Optional[set] = None,
+                    sections: Optional[dict] = None) -> tuple:
     """Return (rows for the state, errors in French) for fix/<repo>/report-<number>.json.
 
-    rows are the state rows of the key ({"3": {...}}), commits those of <start_sha>..HEAD
+    rows are the state rows of the pass's section ({"3": {...}}); sections, when given, maps
+    every ref of the key ({"9": "qualite"}) so that a row of another section is named as
+    such. commits are those of <start_sha>..HEAD
     (fix_git.commits_in_range). pass_commits, when given, holds the SHAs of
     bases[number]..HEAD: a commit a fixed row reports for the first time (not yet among its
     state commits) must be one of them, so that the review of the pass reads it. reviewed,
@@ -142,7 +214,8 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
     belongs to the new pass, whose review does not read its earlier commits. Every problem
     of a row is reported in one pass, because the fixer rewrites its file once. The rows come
     back only when there is no error, each as {"ref", "outcome", "reason", "commits" (full
-    SHAs), "attention"}; a question keeps its text in reason.
+    SHAs), "attention", "remaining"}; a question keeps its text in reason, and remaining (what
+    is left to do after a partial fix) is None but for a fixed row.
     """
     if not isinstance(document, dict):
         return [], ['le rapport doit être un objet JSON {"key", "pass", "rows"}']
@@ -154,7 +227,7 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
     subjects = {commit["sha"]: commit["ref"] for commit in commits}
     entries, seen = [], Counter()
     for index, item in enumerate(items, start=1):
-        ref = _row_ref(item, index, known, errors)
+        ref = _row_ref(item, index, known, errors, sections)
         if ref is None:
             continue
         seen[ref] += 1
@@ -190,7 +263,9 @@ def validate_review(document, *, key: str, number: int, rows: dict) -> tuple:
 
     Every row the fixer reported fixed in this pass needs a verdict, and only those rows may
     get one (a row fixed in another pass belongs to that pass's review); a blocking verdict
-    needs notes, which tell the fixer what to change.
+    needs notes, which tell the fixer what to change. An ok verdict may carry text corrections
+    ({"change", "uat", "attention", "remaining"}, see review_corrections) instead of a
+    correction pass for a text alone.
     """
     if not isinstance(document, dict):
         return [], ['la revue doit être un objet JSON {"key", "pass", "rows", "attention"}']
@@ -231,6 +306,7 @@ def validate_review(document, *, key: str, number: int, rows: dict) -> tuple:
             continue
         check = _text if verdict == "blocking" else _optional
         problems = check(item.get("notes"), "notes", MAX_TEXT)
+        problems += _corrections(item.get("corrections"), verdict)
         errors.extend(f"ligne {ref_label(ref)} : {problem}" for problem in problems)
         if verdict == "blocking":
             blocking.append(ref)
@@ -245,30 +321,64 @@ def validate_review(document, *, key: str, number: int, rows: dict) -> tuple:
     return ([] if errors else sorted(set(blocking))), errors
 
 
-def _problem(sha: str, ref, path, reason: str) -> dict:
-    return {"sha": sha, "ref": ref, "path": path, "reason": reason}
+def review_corrections(document) -> dict:
+    """Return {ref: {field: text}}, the text corrections of the ok verdicts of a valid review;
+    a field left null is no correction."""
+    found = {}
+    for item in document.get("rows") or []:
+        value = item.get("corrections") if item.get("verdict") == "ok" else None
+        if isinstance(value, dict):
+            texts = {name: value[name] for name in CORRECTION_LIMITS
+                     if isinstance(value.get(name), str)}
+            if texts:
+                found[item["ref"]] = texts
+    return found
 
 
-def _message_reasons(message: str, ref, rows: set, known: list) -> list:
+def _problem(sha, ref, path, reason: str, kind: str) -> dict:
+    return {"sha": sha, "ref": ref, "path": path, "reason": reason, "kind": kind}
+
+
+def _change_problems(sha, ref, message: str, rows: dict, repo: dict, known: list, paths: list,
+                     added: dict) -> list:
+    """Return the problems of one change: its message, its paths, the secrets of its lines."""
+    problems = [_problem(sha, ref, None, reason, kind)
+                for reason, kind in _message_reasons(message, rows, known)]
+    for path, gitlink in paths:
+        reason = path_reason(path, repo, gitlink=gitlink)
+        if reason:
+            problems.append(_problem(sha, ref, path, reason, CONTENT))
+    for path, lines in added.items():
+        for label in scan_text("\n".join(lines), known, literal_credentials=True):
+            problems.append(_problem(sha, ref, path, SECRET.format(label=label), CONTENT))
+    return problems
+
+
+def _message_reasons(message: str, rows: dict, known: list) -> list:
+    """Return the (reason, kind) pairs of a commit message, convention first."""
+    subject = message.split("\n", 1)[0]
+    alias, ref = fix_names.parse_subject(subject) or (None, None)
     reasons = []
-    if ref is None:
-        reasons.append(BAD_MESSAGE)
-    elif ref not in rows:
-        reasons.append(OUT_OF_KEY)
+    if not fix_names.SUBJECT.match(subject):
+        reasons.append((BAD_MESSAGE, FORM))
+    if ref is not None and ref not in rows:
+        reasons.append((OUT_OF_KEY, FORM))
+    elif alias is not None and rows.get(ref) is not None and alias != rows[ref]:
+        reasons.append((SECTION_MISMATCH, FORM))
+    if len(subject) > fix_names.SUBJECT_MAX:
+        reasons.append((SUBJECT_TOO_LONG, FORM))
     if any(_ATTRIBUTION.match(line) for line in message.split("\n")[1:]):
-        reasons.append(ATTRIBUTION)
-    reasons.extend(SECRET.format(label=label) for label in scan_text(message, known))
+        reasons.append((ATTRIBUTION, FORM))
+    reasons.extend((SECRET.format(label=label), CONTENT)
+                   for label in scan_text(message, known, literal_credentials=True))
     return reasons
 
 
-def _changed_paths(worktree: Path, run, sha: str) -> list:
-    """Return (path, is a submodule) for every path the commit adds, changes or deletes."""
-    result = fix_names.git(
-        worktree, run, "diff-tree", "-r", "-z", "--raw", "--root", "--no-renames",
-        "--no-commit-id", sha,
-    )
+def _changed_paths(worktree: Path, run, label: str, *args: str) -> list:
+    """Return (path, is a submodule) for every path a raw diff (-z) adds, changes or deletes."""
+    result = fix_names.git(worktree, run, *args)
     if result.returncode != 0:
-        raise fix_git.GitRefused(f"git diff-tree {sha[:12]} a échoué : {result.stderr.strip()}")
+        raise fix_git.GitRefused(f"{label} a échoué : {result.stderr.strip()}")
     fields = result.stdout.split("\0")
     changes, index = [], 0
     while index < len(fields):
@@ -283,15 +393,11 @@ def _changed_paths(worktree: Path, run, sha: str) -> list:
     return changes
 
 
-def _added_lines(worktree: Path, run, sha: str) -> dict:
-    """Return {path: [added lines]} of the commit's diff with its parent, binary files included."""
-    result = fix_names.git(
-        worktree, run, "-c", "core.quotePath=true", "show", "--format=", "-U0", "--text",
-        "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-show-signature",
-        "--src-prefix=a/", "--dst-prefix=b/", sha,
-    )
+def _added_lines(worktree: Path, run, label: str, *args: str) -> dict:
+    """Return {path: [added lines]} of a patch with no context, binary files included."""
+    result = fix_names.git(worktree, run, *args)
     if result.returncode != 0:
-        raise fix_git.GitRefused(f"git show {sha[:12]} a échoué : {result.stderr.strip()}")
+        raise fix_git.GitRefused(f"{label} a échoué : {result.stderr.strip()}")
     added, path, in_hunk = {}, None, False
     for line in result.stdout.split("\n"):
         if line.startswith("diff --git "):
@@ -352,8 +458,10 @@ def _header_errors(document: dict, key: str, number: int) -> list:
     return errors
 
 
-def _row_ref(item, index: int, known: set, errors: list) -> Optional[int]:
-    """Return the ref of a row of the key, or None after adding the error."""
+def _row_ref(item, index: int, known: set, errors: list,
+             sections: Optional[dict] = None) -> Optional[int]:
+    """Return the ref of a known row, or None after adding the error; sections names the
+    section of a row of the key that is not known (another section)."""
     if not isinstance(item, dict):
         errors.append(f"ligne n° {index} : doit être un objet JSON")
         return None
@@ -362,7 +470,9 @@ def _row_ref(item, index: int, known: set, errors: list) -> Optional[int]:
         errors.append(f"ligne n° {index} : « ref » doit être un entier (107 pour CQ-107)")
         return None
     if ref not in known:
-        errors.append(f"ligne {ref_label(ref)} : Réf hors de cette clé")
+        alias = (sections or {}).get(str(ref))
+        reason = OTHER_SECTION.format(alias=alias) if alias else "Réf hors de cette clé"
+        errors.append(f"ligne {ref_label(ref)} : {reason}")
         return None
     return ref
 
@@ -379,7 +489,13 @@ def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
             f"« outcome » inconnu : {_shown(outcome)} (attendu : fixed, skipped ou question)"
         ], None
     attention = item.get("attention")
-    problems = _optional(attention, "attention", MAX_NOTE)
+    problems = _attention(attention, "attention")
+    remaining = item.get("remaining")
+    if remaining is not None and outcome != "fixed":
+        problems.append("« remaining » ne sert qu'à une ligne corrigée (fixed)")
+        remaining = None
+    elif outcome == "fixed":
+        problems += _optional(remaining, "remaining", MAX_REMAINING)
     covered = item.get("covered_by")
     if covered is not None and outcome != "fixed":
         problems.append("« covered_by » ne sert qu'à une ligne corrigée (fixed)")
@@ -402,7 +518,7 @@ def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
     if outcome != "fixed" and ref in subjects.values():
         problems.append("commit sur la branche pour une ligne non corrigée")
     entry = {"ref": ref, "outcome": outcome, "reason": reason, "commits": shas,
-             "attention": attention}
+             "attention": attention, "remaining": remaining}
     return problems, entry
 
 
@@ -441,10 +557,43 @@ def _question(value) -> list:
     ):
         problems.append(f"« question.options » : {MIN_OPTIONS} à {MAX_OPTIONS} options, chacune "
                         f"un texte non vide de {MAX_OPTION} caractères au plus")
-    elif len(set(options)) != len(options):
-        problems.append("« question.options » : une option est en double")
-    elif value.get("default") not in options:
-        problems.append("« question.default » doit reprendre l'une des options")
+    else:
+        if len(set(options)) != len(options):
+            problems.append("« question.options » : une option est en double")
+        elif value.get("default") not in options:
+            problems.append("« question.default » doit reprendre l'une des options")
+        problems += [
+            f"« question.options » : « {option} » laisse la ligne en l'état ; l'orchestrateur "
+            "propose déjà de la laisser aux devs"
+            for option in options if any(words in option.casefold() for words in _AS_IS)
+        ]
+    return problems
+
+
+def _attention(value, name: str) -> list:
+    """Check an attention text: MAX_NOTE at most, MAX_ABANDON for a row given up."""
+    if isinstance(value, str) and _ABANDON.match(value) and len(value) > MAX_ABANDON:
+        return [f"« {name} » : un abandon (« Abandon : ») fait {MAX_ABANDON} caractères au plus "
+                f"({len(value)})"]
+    return _optional(value, name, MAX_NOTE)
+
+
+def _corrections(value, verdict) -> list:
+    """Check the text corrections of a verdict: an ok one only, known fields, their limits."""
+    if value is None:
+        return []
+    if verdict != "ok":
+        return ["« corrections » ne sert qu'à un verdict ok"]
+    if not isinstance(value, dict):
+        return ['« corrections » doit être un objet {"change", "uat", "attention", "remaining"}']
+    expected = ", ".join(CORRECTION_LIMITS)
+    problems = [f"« corrections » : champ inconnu « {name} » (attendu : {expected})"
+                for name in value if name not in CORRECTION_LIMITS]
+    for name, limit in CORRECTION_LIMITS.items():
+        if name == "attention":
+            problems += _attention(value.get(name), f"corrections.{name}")
+        else:
+            problems += _optional(value.get(name), f"corrections.{name}", limit)
     return problems
 
 

@@ -112,10 +112,23 @@ _ACCESSOR_CALL = re.compile(
 _HARMLESS_LITERAL = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+|[A-Z][A-Z0-9_]*")
 # A value cut at a space before "(" or "[" is a call or index: its arguments stay masked.
 _OPENING_BRACKET = re.compile(r"[ \t]*(?:\(|\[(?!secret masqué\]))")
+# Literal mode (the guard of the fix mode): an unquoted value that starts as code (a call, a
+# negated call or variable, a cast) is an expression, never a literal. A shell expansion
+# ($(...), ${...}, :-) keeps the rules above, since its words may be the value.
+_EXPRESSION_START = re.compile(
+    r"(?:![ \t]*)?[A-Za-z_][\w.\\]*\(|![ \t]*\$[A-Za-z_]"
+    r"|\((?:string|int|integer|bool|boolean|float|double|array|object)\)",
+    re.IGNORECASE,
+)
+_SHELL_EXPANSION = re.compile(r"\$[({]|`|:-")
 
 
-def _is_non_secret(match: re.Match) -> bool:
-    """True when a credential match is a form field description or a pure code expression."""
+def _is_non_secret(match: re.Match, literal: bool = False) -> bool:
+    """True when a credential match is a form field description or a pure code expression.
+
+    With literal, an unquoted value is also no secret when it is an expression whose quoted
+    literals are all harmless (see _is_expression).
+    """
     value = match.group("val")
     if match.group("q"):
         f_string = "f" in (match.group("sp") or "").lower()
@@ -134,10 +147,22 @@ def _is_non_secret(match: re.Match) -> bool:
         or bool(_CODE_CALL.fullmatch(expression))
         or (value.startswith(":") and text[match.start("val") - 1:match.start("val")] == ":")
     )
+    if not is_code and literal:
+        is_code = _is_expression(value, rest)
     if not is_code or ":-" in rest:
         return False
     literals = list(_QUOTED_LITERAL.finditer(rest)) + list(_N_LITERAL.finditer(rest))
     return all(_is_harmless_literal(rest, literal) for literal in literals)
+
+
+def _is_expression(value: str, rest: str) -> bool:
+    """True when an unquoted value starts an expression (call, cast, negation) that holds no
+    shell expansion and hides no other credential assignment in its first word."""
+    return (
+        bool(_EXPRESSION_START.match(rest))
+        and not _SHELL_EXPANSION.search(rest)
+        and _CREDENTIAL.search(value) is None
+    )
 
 
 def _is_reference(text: str) -> bool:
@@ -185,21 +210,28 @@ _PATTERNS = (
 )
 
 
-def scan_text(text: str, known_values: list[str]) -> list[str]:
-    """Return the labels found in text, each once, in a fixed order."""
+def scan_text(text: str, known_values: list[str], *, literal_credentials: bool = False) -> list[str]:
+    """Return the labels found in text, each once, in a fixed order.
+
+    With literal_credentials (the guard of the fix mode only), credential_assignment flags a
+    literal value only, a quoted string or a bare token: an expression on the right (a call,
+    a cast, a negation) whose quoted literals are all harmless is no secret.
+    """
     labels = []
     if any(value in text for value in known_values if value):
         labels.append("known_value")
-    labels.extend(label for label, pattern in _PATTERNS if _search(pattern, text))
+    labels.extend(
+        label for label, pattern in _PATTERNS if _search(pattern, text, literal_credentials)
+    )
     return labels
 
 
-def _search(pattern: re.Pattern, text: str) -> bool:
-    return any(not _skipped(pattern, m) for m in pattern.finditer(text))
+def _search(pattern: re.Pattern, text: str, literal: bool = False) -> bool:
+    return any(not _skipped(pattern, m, literal) for m in pattern.finditer(text))
 
 
-def _skipped(pattern: re.Pattern, match: re.Match) -> bool:
-    return pattern is _CREDENTIAL and _is_non_secret(match)
+def _skipped(pattern: re.Pattern, match: re.Match, literal: bool = False) -> bool:
+    return pattern is _CREDENTIAL and _is_non_secret(match, literal)
 
 
 def redact(text: str, known_values: list[str]) -> str:

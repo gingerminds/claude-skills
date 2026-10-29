@@ -141,6 +141,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = _command(commands, "guard", "garde-fou sur les commits d'une clé", _cmd_guard)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help=KEY_HELP)
+    sub.add_argument("--staged", action="store_true",
+                     help="contrôle l'index du worktree et le message prévu, avant le commit")
+    sub.add_argument("--message-file", type=Path,
+                     help="fichier du message du commit prévu (avec --staged)")
+    sub = _command(commands, "review-scope", "diff d'une passe : relecture allégée ou non",
+                   _cmd_review_scope)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help=KEY_HELP)
+    sub.add_argument("--pass", dest="number", type=int, required=True, help="numéro de la passe")
     sub = _command(commands, "drop", "retire des lignes de la branche d'une clé", _cmd_drop)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help=KEY_HELP)
@@ -578,6 +587,7 @@ def _cmd_validate(args, services: Services) -> int:
             document, key=args.key, number=args.number, rows=_pass_rows(key, args.number),
             commits=commits, pass_commits=pass_commits,
             reviewed={int(number) for number in _recorded(key, "reviews")},
+            sections={ref: row.get("section") for ref, row in key["rows"].items()},
         )
     errors = closed + errors
     summary = {outcome: [] for outcome in fix_guard.REPORT_OUTCOMES}
@@ -590,14 +600,18 @@ def _cmd_validate(args, services: Services) -> int:
                 commits = previous + [sha for sha in entry["commits"] if sha not in previous]
             row.update(
                 outcome=entry["outcome"], reason=entry["reason"], commits=commits,
-                attention=entry["attention"], **{"pass": args.number},
+                attention=entry["attention"], remaining=entry["remaining"],
+                **{"pass": args.number},
             )
+            # The texts of a new report replace those an earlier review corrected.
+            row.pop("corrections", None)
             summary[entry["outcome"]].append(entry["ref"])
         key["step"] = "fixed"
         key["pass"] = max(key.get("pass") or 0, args.number)
         key["reports"] = sorted(set(_reports(key)) | {args.number})
         if _every_pass_reviewed(key):
             _raise_step(key, "reviewed")
+    if changed is not None or not errors:
         fix_state.save(run_dir, state)
     _emit({
         "ok": not errors, "errors": errors,
@@ -616,7 +630,8 @@ def _pass_rows(key: dict, number: int) -> dict:
 
 
 def _validate_review(run_dir: Path, state: dict, key: dict, args, document, errors: list) -> int:
-    """Check review-<N>.json and record its blocking rows; see _every_pass_reviewed."""
+    """Check review-<N>.json and record its blocking rows (see _every_pass_reviewed) and the
+    text corrections of its ok verdicts, in rows[ref]["corrections"]."""
     blocking = []
     if document is not None:
         blocking, errors = fix_guard.validate_review(
@@ -627,6 +642,13 @@ def _validate_review(run_dir: Path, state: dict, key: dict, args, document, erro
         reviews = _recorded(key, "reviews")
         reviews[str(args.number)] = {"blocking": blocking}
         key["reviews"] = reviews
+        corrections = fix_guard.review_corrections(document)
+        for item in document["rows"]:
+            row = key["rows"][str(item["ref"])]
+            if item["ref"] in corrections:
+                row["corrections"] = corrections[item["ref"]]
+            else:
+                row.pop("corrections", None)
         if _every_pass_reviewed(key):
             _raise_step(key, "reviewed")
         fix_state.save(run_dir, state)
@@ -635,16 +657,67 @@ def _validate_review(run_dir: Path, state: dict, key: dict, args, document, erro
 
 
 def _cmd_guard(args, services: Services) -> int:
+    """Run the guard on the commits of the key, or with --staged on the index of its worktree
+    and the message of the commit to come (--message-file); nothing is committed."""
+    if args.staged != (args.message_file is not None):
+        raise UsageError("--staged et --message-file vont ensemble : l'index du worktree et le "
+                         "fichier du message du commit prévu.")
+    message = None
+    if args.staged:
+        try:
+            message = _commit_message(args.message_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError) as error:
+            raise UsageError(f"--message-file : {args.message_file} est illisible ({error}).")
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
     worktree = _key_worktree(run_dir, key, services.run)
-    problems = _guard_problems(run_dir, key, worktree, services.run)
+    if message is None:
+        problems = _guard_problems(run_dir, key, worktree, services.run)
+        where = f"sur la branche {key['branch']}"
+    else:
+        repo = _repo(run_dir, key["repo"])
+        _third_party(repo)
+        problems = fix_guard.check_staged(worktree, message, _row_sections(key), repo,
+                                          known_values_from_env(), services.run)
+        where = "dans l'index et le message prévu, ne commitez pas en l'état"
     _emit({"ok": not problems, "problems": problems})
     if problems:
-        print(f"Garde-fou : {len(problems)} problème(s) sur la branche {key['branch']}, "
-              "détail dans « problems ».", file=sys.stderr)
+        print(f"Garde-fou : {len(problems)} problème(s) {where}, détail dans « problems ».",
+              file=sys.stderr)
         return EXIT_REFUSED
+    return EXIT_OK
+
+
+def _commit_message(text: str) -> str:
+    """Return the message git commit -F would record: trailing spaces and blank lines at
+    either end removed (comment lines are kept, as git does without an editor)."""
+    lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
+    return "\n".join(lines).strip("\n")
+
+
+def _row_sections(key: dict) -> dict:
+    """Return {ref: alias of its section} for every row of the key."""
+    return {int(ref): row.get("section") for ref, row in key["rows"].items()}
+
+
+def _cmd_review_scope(args, services: Services) -> int:
+    """Print whether review N may be light: the diff of bases[N]..HEAD is documentation only
+    and fix_guard.LIGHT_REVIEW_LINES lines at most (see fix_guard.review_scope)."""
+    run_dir = args.run_dir.resolve()
+    if args.number < 1:
+        raise UsageError("--pass : un numéro de passe à partir de 1 est attendu.")
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    base = _recorded(key, "bases").get(str(args.number))
+    if not fix_git.is_sha(base):
+        raise UsageError(f"Passe {args.number} non commencée : lancez d'abord cqa_fix.py "
+                         f"pass-start --pass {args.number}.")
+    worktree = _key_worktree(run_dir, key, services.run)
+    if not fix_git.is_ancestor(worktree, services.run, base, "HEAD"):
+        raise UsageError(f"La base de la passe {args.number} ({base[:12]}) n'est plus dans la "
+                         f"branche : relancez cqa_fix.py pass-start --pass {args.number}.")
+    _emit(fix_guard.review_scope(worktree, services.run, base))
     return EXIT_OK
 
 
@@ -1239,8 +1312,7 @@ def _guard_problems(run_dir: Path, key: dict, worktree: Path, run) -> list:
     repo = _repo(run_dir, key["repo"])
     _third_party(repo)
     problems = fix_guard.check_commits(
-        worktree, key["start_sha"], {int(ref) for ref in key["rows"]}, repo,
-        known_values_from_env(), run,
+        worktree, key["start_sha"], _row_sections(key), repo, known_values_from_env(), run,
     )
     inherited = _inherited_commits(worktree, key, run)
     return [problem for problem in problems
@@ -1499,11 +1571,10 @@ def _read_key_file(run_dir: Path, key: dict, name: str) -> tuple:
 
 
 def _dev_checkout_changed(run_dir: Path, key: dict, run):
-    before = key.get("dev_fingerprint")
-    if not isinstance(before, dict):
+    """Return the changes of the dev's checkout since the last alert (fix_state.dev_checkout_alert)."""
+    if not isinstance(key.get("dev_fingerprint"), dict):
         return None
-    after = fix_state.dev_fingerprint(_repo_path(run_dir, key["repo"]), run)
-    return fix_state.fingerprint_changes(before, after)
+    return fix_state.dev_checkout_alert(key, _repo_path(run_dir, key["repo"]), run)
 
 
 def _labels(refs) -> str:

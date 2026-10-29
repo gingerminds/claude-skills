@@ -19,9 +19,13 @@ SECTION_ALIASES = {
     "PROCESS INTERNE": "process",
 }
 COMMIT_TYPES = ("fix", "feat", "refactor", "chore", "perf", "docs", "style")
-SUBJECT = re.compile(r"^(fix|feat|refactor|chore|perf|docs|style)\(CQ-([0-9]+)\): \S")
+# The subject the guard accepts for a new commit: type(<alias> CQ-<n>): summary.
+SUBJECT = re.compile(r"^(fix|feat|refactor|chore|perf|docs|style)\(([a-z0-9]+) CQ-([0-9]+)\): \S")
+# Documentation for the light review and the tolerant replay; never a file the site serves.
+DOC_SUFFIXES = (".md", ".rst", ".adoc")
 
 
+# Also reads the v2 subject type(CQ-<n>): summary, still found in the commits of a v2 MR.
 _SUBJECT_PARTS = re.compile(
     r"^(?:fix|feat|refactor|chore|perf|docs|style)\((?:([a-z0-9]+) )?CQ-([0-9]+)\): \S"
 )
@@ -37,6 +41,11 @@ def ref_of_subject(subject: str) -> Optional[int]:
     """Return the checklist ref of a commit subject, in the 0.15 or the v2 form, else None."""
     parsed = parse_subject(subject)
     return parsed[1] if parsed else None
+
+
+def is_documentation(path: str) -> bool:
+    """Return True for a *.md, *.rst or *.adoc file (robots.txt, llms.txt... never are)."""
+    return path.casefold().endswith(DOC_SUFFIXES)
 
 
 def section_alias(category: str) -> str:
