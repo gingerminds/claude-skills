@@ -8,11 +8,13 @@ gitleaks matched stays on disk; only RuleID, StartLine and EndLine are read from
 """
 import json
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
 
 GITLEAKS_DOWN = "gitleaks indisponible : contrôle maison seul"
+UNREADABLE = "rapport gitleaks illisible"
 REPORT = "gitleaks.json"
 INPUT = "input.txt"
 _MAX_REASON = 300
@@ -39,22 +41,24 @@ class Gitleaks:
                 ["bash", str(self.launcher), "secrets", str(source), str(out_dir)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
             )
-            findings = _findings(out_dir / REPORT) if done.returncode == 0 else None
+            findings = (_findings(out_dir / REPORT, _line_count(text))
+                        if done.returncode == 0 else None)
         finally:
-            shutil.rmtree(folder, ignore_errors=True)
+            _remove(folder)
         if findings is None:
             self.note = GITLEAKS_DOWN
-            self.reason = (_last_line(done.stderr) if done.returncode != 0
-                           else "rapport gitleaks illisible")
+            self.reason = _last_line(done.stderr) if done.returncode != 0 else UNREADABLE
         return findings
 
 
-def _findings(path: Path) -> Optional[list]:
-    """Return [(rule, first, last)] of a gitleaks JSON report, None when it cannot be read.
+def _findings(path: Path, lines: int) -> Optional[list]:
+    """Return [(rule, first, last)] of a gitleaks JSON report on an input of lines lines, None
+    when it cannot be read.
 
-    A report without finding may be an empty array or null. Any other shape, or an entry
-    without a rule or valid lines, makes the whole report unreadable: a finding is never
-    dropped quietly.
+    A report without finding may be an empty array or null. Any other shape, an entry
+    without a rule or valid lines, or a finding that starts beyond the input, makes the
+    whole report unreadable: a finding is never dropped quietly. An end beyond the input is
+    cut to it.
     """
     try:
         report = json.loads(path.read_text(encoding="utf-8"))
@@ -69,10 +73,25 @@ def _findings(path: Path) -> Optional[list]:
         if not isinstance(entry, dict):
             return None
         rule, first, last = entry.get("RuleID"), entry.get("StartLine"), entry.get("EndLine")
-        if not isinstance(rule, str) or not rule or not _is_line(first) or not _is_line(last):
+        if (not isinstance(rule, str) or not rule or not _is_line(first) or not _is_line(last)
+                or first > lines):
             return None
-        found.append((rule, first, max(first, last)))
+        found.append((rule, first, min(max(first, last), lines)))
     return found
+
+
+def _line_count(text: str) -> int:
+    return text.count("\n") + (0 if text.endswith("\n") or not text else 1)
+
+
+def _remove(folder: Path) -> None:
+    """Remove the temporary folder; when that fails, name it to the lead (never its content)."""
+    try:
+        shutil.rmtree(folder)
+    except OSError as error:
+        print(f"Attention : le dossier temporaire {folder} n'a pas pu être supprimé "
+              f"({error.strerror or error}) : supprimez-le à la main, il contient le texte "
+              "contrôlé par gitleaks.", file=sys.stderr)
 
 
 def _is_line(value) -> bool:

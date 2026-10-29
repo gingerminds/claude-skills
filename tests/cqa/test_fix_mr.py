@@ -982,12 +982,30 @@ class PublishTest(MrCase):
         self.assertEqual(json.loads(out), {"ok": False, "problems": [
             secret(leak, 3, None, GITLEAKS, 3),
             secret(leak, 3, "pay.txt", GITLEAKS, 1),
-        ]})
+        ], "note": None})
         self.assertNotIn(STRIPE, out + err)
         self.assertIn("rien n'a été poussé", err)
         self.assertEqual(self.remote(self.branch), "")
         self.assertEqual(self.glab_args("mr"), [])
         self.assertEqual(len(self.toolbox_inputs), 1)
+
+    def test_publish_refusal_carries_the_gitleaks_note(self):
+        self.reviewed()
+        self.gitleaks = None
+        wordpress = ("$password = isset( $_POST['pass1'] ) ? (string) wp_unslash( $_POST['pass1'] ) "
+                     ": '';")
+        (self.worktree / "login.php").write_text(f"<?php\n{wordpress}\n", encoding="utf-8")
+        for args in (("add", "login.php"), ("commit", "-q", "-m", "fix(securite CQ-3): read")):
+            result = cqa_fix.fix_names.git(self.worktree, subprocess.run, *args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        sha = self.head(self.worktree)
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out), {"ok": False, "problems": [
+            secret(sha, 3, "login.php", "credential_assignment", 2)], "note": GITLEAKS_DOWN})
+        self.assertIn(GITLEAKS_DOWN, err)
+        self.assertEqual(self.remote(self.branch), "")
 
     def test_publish_without_gitleaks_says_so_and_goes_on(self):
         self.reviewed()

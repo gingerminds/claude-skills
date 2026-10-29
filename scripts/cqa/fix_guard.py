@@ -491,7 +491,8 @@ def _gitleaks_problems(gitleaks, segments: list) -> list:
     found = set()
     for rule, first, last in findings:
         if not 1 <= first < total:
-            continue
+            # fix_gitleaks.Gitleaks refuses such a report; never skip one quietly here.
+            raise ValueError(f"résultat gitleaks hors de l'entrée (ligne {first} sur {total - 1})")
         index = bisect.bisect_right(starts, first) - 1
         _, _, path, lines, _ = segments[index]
         end = (starts[index + 1] if index + 1 < len(starts) else total) - 1

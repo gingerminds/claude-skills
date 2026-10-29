@@ -1175,7 +1175,7 @@ def _cmd_publish(args, services: Services) -> int:
     problems = _guard_problems(run_dir, key, worktree, run, gitleaks=scanner)
     _note(scanner)
     if problems:
-        _emit({"ok": False, "problems": problems})
+        _emit({"ok": False, "problems": problems, "note": scanner.note})
         print(f"Garde-fou : {len(problems)} problème(s) sur la branche {branch}, rien n'a été "
               "poussé : détail dans « problems ».", file=sys.stderr)
         return EXIT_REFUSED

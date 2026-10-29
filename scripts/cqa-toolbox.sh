@@ -641,8 +641,10 @@ cmd_check() {
 
 # secrets <in_file> <out_dir>: gitleaks (default rules) on the content of <in_file>, for the
 # guard of the fix mode: the input mounted read-only, no network, no credentials, no download.
-# Writes <out_dir>/gitleaks.json (a JSON array of findings) and nothing else; exit 2 without
-# Docker or the gitleaks image, 1 when gitleaks fails.
+# Inline "gitleaks:allow" comments are ignored (a fixer never waives a finding) and the values
+# are redacted from the report (RuleID, StartLine and EndLine stay). Writes
+# <out_dir>/gitleaks.json (a JSON array of findings) and nothing else; exit 2 without Docker
+# or the gitleaks image, 1 when gitleaks fails.
 cmd_secrets() {
   local in_file out_dir uid_gid ref
   [ "$#" -eq 2 ] || usage
@@ -661,7 +663,7 @@ cmd_secrets() {
   rm -f -- "$out_dir/gitleaks.json" || return 1
   docker run --rm --pull never --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
     -v "$in_file:/in/input:ro" -v "$out_dir:/out" \
-    --entrypoint sh "$ref" -c 'exec gitleaks stdin --report-format json --report-path /out/gitleaks.json --exit-code 0 --no-banner -l error </in/input' \
+    --entrypoint sh "$ref" -c 'exec gitleaks stdin --report-format json --report-path /out/gitleaks.json --exit-code 0 --no-banner -l error --ignore-gitleaks-allow --redact=100 </in/input' \
     </dev/null || {
     say "secrets : gitleaks a échoué."
     return 1

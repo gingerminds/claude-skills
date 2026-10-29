@@ -750,10 +750,10 @@ class SecretsTest(LauncherCase):
         self.assertEqual("-c", arguments[0])
         script = arguments[1]
         for needle in ("gitleaks stdin", "--report-format json", "--report-path /out/gitleaks.json",
-                       "--exit-code 0", "--no-banner", "-l error", "</in/input"):
+                       "--exit-code 0", "--no-banner", "-l error", "--ignore-gitleaks-allow",
+                       "--redact=100", "</in/input"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, script)
-        self.assertNotIn("--redact", script)
         self.assertEqual("[]", (self.out_dir / "gitleaks.json").read_text(encoding="utf-8"))
         self.assertEqual("<?php\n$x = 1;\n", self.in_file.read_text(encoding="utf-8"))
         self.assertEqual(["input.txt"], [path.name for path in self.in_dir.iterdir()])

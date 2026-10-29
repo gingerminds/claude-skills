@@ -408,6 +408,16 @@ class GitleaksTest(RepoCase):
             secret(sha, 3, "web/k.php", "gitleaks:tail-rule", 4),
         ])
 
+    def test_a_finding_outside_the_input_is_never_skipped_quietly(self):
+        """fix_gitleaks.Gitleaks refuses such a report (home rule alone, with the note); a
+        scanner that still hands one over is a programming error, not a silent skip."""
+        self.add("fix(securite CQ-3): x", {"web/k.php": "<?php\n"})
+        for first in (0, 10 ** 6):
+            with self.subTest(first=first):
+                with self.assertRaises(ValueError) as caught:
+                    self.check(gitleaks=self.scanner([], lambda text: [("rule", first, first)]))
+                self.assertIn("gitleaks", str(caught.exception))
+
 
 class UnwaivedTest(unittest.TestCase):
     def test_a_waiver_covers_a_waivable_problem_of_the_same_blob_only(self):
