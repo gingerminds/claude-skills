@@ -1782,6 +1782,91 @@ class FixAgentsTest(unittest.TestCase):
         self.assertTrue(blocking)
         self.assertTrue(fix_guard.review_corrections(review))
 
+    def test_fixer_routes_staged_guard_problems_by_path(self):
+        """Fix round 1, item 1: a secret in the message is path null (suspect or content),
+        never form: the fixer corrects the message, whatever the kind."""
+        text = _text(FIXER)
+        self.assertIn(
+            "`path` null: the problem is in the message, whatever its `kind`: correct "
+            "`<message file>` (never quote a value from the code in it) and guard again.", text)
+        self.assertNotIn("a secret pattern", text)
+        self.assertLess(text.index("`path` null: the problem is in the message"),
+                        text.index("`kind` `content`"))
+
+    def test_lead_alerts_committed_by_the_fixer_go_through_attention(self):
+        """Fix round 1, item 2 (ruling P16): every problem left a waivable suspect on a
+        checked line, each noted in the row's attention; the reviewer leaves it to the lead."""
+        notice = "« Alerte de secret à confirmer par le lead : <chemin>, ligne <n> »"
+        fixer = _text(FIXER)
+        for needle in (
+            "You may commit only when every problem left is a `suspect` with `waivable` true, "
+            "each on a line you checked and that holds no written value",
+            notice,
+            "never the content of the line",
+        ):
+            with self.subTest(agent="fixer", needle=needle):
+                self.assertIn(needle, fixer)
+        reviewer = _text(FIX_REVIEWER)
+        for needle in ("« Alerte de secret à confirmer par le lead »",
+                       "is the lead's call: `blocking` only when a value is actually written there"):
+            with self.subTest(agent="reviewer", needle=needle):
+                self.assertIn(needle, reviewer)
+        commits = _section(_text(FIX_MD), "3. Commits")
+        for needle in (notice, "in the row's `attention`", "every problem left"):
+            with self.subTest(reference=needle):
+                self.assertIn(needle, commits)
+
+    def test_fix_agents_may_run_their_own_plugin_commands(self):
+        """Fix round 1, item 3: the no-code rule leaves the plugin commands aside."""
+        for path in (FIXER, FIX_REVIEWER):
+            with self.subTest(agent=path.name):
+                self.assertIn("(the plugin commands of these instructions aside)",
+                              _section(_text(path), "Hard rules"))
+        self.assertNotIn("they are the only exception", _text(FIXER))
+
+    def test_fixer_never_skips_a_row_with_commits(self):
+        """Fix round 1, items 4, 5 and 10."""
+        text = _text(FIXER)
+        for needle in (
+            "other than a `retry` row",
+            "only a row without commits is `skipped`",
+            "undo your change of that line; a fix that needs it becomes a question or a "
+            "skipped row (given up if the row already has commits)",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        self.assertNotIn("take a secret value out of the code", text)
+
+    def test_partial_fixes_and_questions_do_not_overlap(self):
+        """Fix round 1, items 6 and 7."""
+        evaluation = _section(_text(FIX_MD), "4. Self-evaluation")
+        for needle in ("only when nothing useful can be done in the repo",
+                       "is a question (section 5), not `remaining`",
+                       "unless the lead added them (`lead` true)"):
+            with self.subTest(reference=needle):
+                self.assertIn(needle, evaluation)
+        fixer = _text(FIXER)
+        for needle in ("only when nothing useful can be done in the repo", "never `remaining`"):
+            with self.subTest(agent=needle):
+                self.assertIn(needle, fixer)
+
+    def test_a_guard_problem_without_a_row_fails_the_section(self):
+        """Fix round 1, items 1 and 8 (ruling P17): a secret in a message is reworded, a
+        content problem without a row ends the section as failed."""
+        correction = _section(_text(FIX_MD), "6. Correction pass")
+        for needle in ("`path` null and a `label`, whatever its `kind`",
+                       "names no row (`ref` null: a merge commit, a rewritten history)",
+                       "changed outside the pass",
+                       "`cqa_fix.py section-end --failed`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, correction)
+
+    def test_reviewer_reads_the_stack_core_at_the_top_of_the_state(self):
+        """Fix round 1, item 9."""
+        text = _text(FIX_REVIEWER)
+        self.assertIn('the top-level `stack_core["<repo>"]`', _section(text, "Inputs"))
+        self.assertNotIn("(each with its `section`), and `stack_core`.", text)
+
     def test_skill_routes_fix_to_section_12_and_the_reference(self):
         arguments = _section(_text(SKILL), "2. Arguments")
         self.assertIn("- `fix`: go to section 12.", arguments)
