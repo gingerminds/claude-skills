@@ -35,16 +35,18 @@ COVERED = "couverte par le correctif de {ref}"
 
 
 def title(count: int, sections: int) -> str:
-    """Return the MR title: « Checklist PRE-MEL : correctifs (5 lignes, 2 sections) »."""
-    rows = "ligne" if count <= 1 else "lignes"
-    parts = "section" if sections <= 1 else "sections"
-    return _clean(f"Checklist PRE-MEL : correctifs ({count} {rows}, {sections} {parts})")
+    """Return the MR title: « Checklist PRE-MEL : correctifs (5 lignes, 2 sections) », or
+    « (5 lignes) » when no counted row has a section."""
+    scope = f"{count} {'ligne' if count <= 1 else 'lignes'}"
+    if sections:
+        scope += f", {sections} {'section' if sections == 1 else 'sections'}"
+    return _clean(f"Checklist PRE-MEL : correctifs ({scope})")
 
 
 def title_counts(found: dict, *, earlier: bool = True) -> tuple:
     """Return (rows, sections) for the title from the values of material: the fixed and covered
     rows, with the earlier ones of the branch for a new MR (earlier), and the sections that
-    hold them."""
+    hold them (an earlier row outside the key has none)."""
     items = list(found["fixed"]) + list(found["covered"])
     if earlier:
         items += list(found["earlier"])
@@ -194,23 +196,25 @@ def merge_links(document: dict, repo: str, mr: dict, refs: list,
     """Return the links file with the MR added to each ref, without a URL twice for a ref.
 
     An entry is {"repo", "url", "iid", "partial", "status_before"}, from details
-    ({ref: link_details}). An entry already there for the URL takes the current partial and
-    keeps its status_before, the status before the pass that first linked the row (it only
-    fills a missing one). document is left untouched.
+    ({ref: link_details}). An entry already there for the URL takes the partial of a row
+    fixed in the key (partial None, a row not fixed here, leaves it alone) and keeps its
+    status_before, the status before the pass that first linked the row (it only fills a
+    missing one). document is left untouched.
     """
     details = details or {}
     links = {ref: [dict(entry) for entry in entries]
              for ref, entries in document.get("links", {}).items()}
     for ref in refs:
         detail = details.get(int(ref)) or {}
-        partial, status = bool(detail.get("partial")), detail.get("status_before")
+        partial, status = detail.get("partial"), detail.get("status_before")
         entries = links.setdefault(str(ref), [])
         found = next((entry for entry in entries if entry.get("url") == mr["url"]), None)
         if found is None:
-            entries.append({"repo": repo, "url": mr["url"], "iid": mr["iid"], "partial": partial,
-                            "status_before": status})
+            entries.append({"repo": repo, "url": mr["url"], "iid": mr["iid"],
+                            "partial": bool(partial), "status_before": status})
             continue
-        found["partial"] = partial
+        if partial is not None:
+            found["partial"] = bool(partial)
         if found.get("status_before") is None:
             found["status_before"] = status
     return {"links": links}
@@ -219,7 +223,8 @@ def merge_links(document: dict, repo: str, mr: dict, refs: list,
 def link_details(key: dict, candidates: dict, notion_rows: list, refs) -> dict:
     """Return {ref: {"partial", "status_before"}} for the links of refs.
 
-    partial: the row is fixed with something left to do (remaining_of); status_before: the
+    partial: for a row fixed in the key, whether it has something left to do (remaining_of),
+    None for another row (already on the branch, covered by another fix); status_before: the
     status of the copy read at launch, from the rows of fix/candidates.json, else rows.json,
     None when neither has it.
     """
@@ -229,8 +234,12 @@ def link_details(key: dict, candidates: dict, notion_rows: list, refs) -> dict:
         ref, status = row.get("ref"), row.get("status")
         if isinstance(ref, int) and isinstance(status, str) and status.strip():
             statuses.setdefault(ref, status)
-    return {int(ref): {"partial": remaining_of(key["rows"].get(str(ref)) or {}) is not None,
-                       "status_before": statuses.get(int(ref))} for ref in refs}
+    details = {}
+    for ref in refs:
+        row = key["rows"].get(str(ref)) or {}
+        partial = remaining_of(row) is not None if row.get("outcome") == "fixed" else None
+        details[int(ref)] = {"partial": partial, "status_before": statuses.get(int(ref))}
+    return details
 
 
 def remaining_of(row: dict) -> Optional[str]:

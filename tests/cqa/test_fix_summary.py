@@ -118,7 +118,6 @@ class SummaryTest(SummaryCase):
     def test_optional_sections_are_left_out(self):
         state = fix_state.load(self.run_dir)
         state["keys"]["back"]["kept_local"] = False
-        state["notion"] = False
         fix_state.save(self.run_dir, state)
         text = json.loads(self.summary()[1])["text"]
         self.assertNotIn("## Branches restées en local", text)
@@ -230,13 +229,17 @@ class SummaryTest(SummaryCase):
         self.assertIn("Lignes passées « En review » : 2 (CQ-3, CQ-12).", section(text, "Notion"))
         self.assertNotIn(LONG_DASH, text)
 
-    def test_review_status_count_needs_the_notion_agreement(self):
-        state = fix_state.load(self.run_dir)
-        state["notion"] = False
-        fix_state.save(self.run_dir, state)
+    def test_review_status_count_needs_the_option(self):
+        """The count of rows moved to « En review » is printed only when --in-review gives it."""
         self.assertEqual(self.summary("--in-review", "oops")[0], 2)
-        text = json.loads(self.summary("--in-review", "CQ-3")[1])["text"]
+        state = fix_state.load(self.run_dir)
+        self.assertTrue(state["notion"])
+        text = json.loads(self.summary()[1])["text"]
         self.assertNotIn("En review", text)
+        state["finished_at"] = None
+        fix_state.save(self.run_dir, state)
+        text = json.loads(self.summary("--in-review", "")[1])["text"]
+        self.assertIn("Lignes passées « En review » : 0.", section(text, "Notion"))
 
     def test_summary_closes_the_pass(self):
         deferred.add(self.run_dir, "question", "Question de l'audit", "CQ-3")

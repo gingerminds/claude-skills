@@ -205,8 +205,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("--replace-failed", default="",
                      help="Réf dont le commentaire du skill n'a pas pu être remplacé")
-    sub.add_argument("--in-review", default="",
-                     help="Réf passées « En review » dans Notion, séparées par des virgules")
+    sub.add_argument("--in-review",
+                     help="Réf passées « En review » dans Notion, séparées par des virgules "
+                          "(\"\" pour aucune) ; sans l'option, la synthèse n'en parle pas")
     sub = _command(commands, "abandon", "abandonne la passe en cours", _cmd_abandon)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     return parser
@@ -406,8 +407,9 @@ def _cmd_start(args, services: Services) -> int:
         )
         key.update(opened, base=base, worktree=str(worktree), dev_fingerprint=fingerprint)
     else:
-        if key.pop("branch_deleted", None):
+        if key.get("branch_deleted"):
             _restore_branch(path, services.run, key)
+            key.pop("branch_deleted")
         fix_git.reopen(path, services.run, branch=key["branch"], push=state["push"], worktree=worktree)
     done_refs = fix_git.refs_between(
         path, services.run, f"refs/remotes/origin/{key['base']}",
@@ -430,10 +432,18 @@ def _cmd_start(args, services: Services) -> int:
 
 def _restore_branch(path, run, key: dict) -> None:
     """Create again, at start_sha, the branch without commit that finish deleted
-    (_delete_empty_branch); a branch of that name found again is left as it is."""
+    (_delete_empty_branch). A branch of that name found again is taken only at start_sha:
+    on another commit it is someone else's, and start exits 2 without touching it."""
     branch = key["branch"]
-    if fix_git.rev(path, run, f"refs/heads/{branch}") is not None:
+    head = fix_git.rev(path, run, f"refs/heads/{branch}")
+    if head == key["start_sha"]:
         return
+    if head is not None:
+        raise UsageError(
+            f"La branche {branch}, supprimée à la fin de la passe parce qu'elle était vide, "
+            f"existe de nouveau sur un autre commit ({head[:12]}) : elle n'est pas reprise. "
+            "Renommez-la, ou abandonnez la passe (cqa_fix.py abandon), puis relancez."
+        )
     created = fix_names.git(path, run, "branch", "--no-track", branch, key["start_sha"])
     if created.returncode != 0:
         raise fix_git.GitRefused(
@@ -1570,8 +1580,9 @@ def _cmd_finish(args, services: Services) -> int:
 
     --keep-local lets a reviewed key of a pushing pass end without publication (push refused,
     glab failure, lead's choice): its branch stays in the dev's repo, kept_local in the state.
-    A branch the pass left without any commit is then deleted (_delete_empty_branch):
-    branch_deleted in the output and in the state.
+    A branch the pass created and left without any commit is then deleted
+    (_delete_empty_branch): branch_deleted in the output and in the state; otherwise
+    branch_kept says why the branch stays.
     """
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
@@ -1601,41 +1612,53 @@ def _cmd_finish(args, services: Services) -> int:
             )
         fix_git.remove_worktree(path, services.run, worktree)
         removed = str(worktree)
-    deleted = _delete_empty_branch(path, services.run, key)
+    kept = _delete_empty_branch(path, services.run, key)
     key["step"] = "done"
     key["kept_local"] = kept_local
-    if deleted:
+    if kept is None:
         key["branch_deleted"] = True
     fix_state.save(run_dir, state)
     _emit({"removed": removed, "branch": key["branch"], "kept_local": kept_local,
-           "branch_deleted": deleted,
+           "branch_deleted": kept is None, "branch_kept": kept,
            "unpushed": fix_git.unpushed(path, services.run, key["branch"])})
     return EXIT_OK
 
 
-def _delete_empty_branch(path, run, key: dict) -> bool:
-    """Delete the key's local branch when the pass left it without any commit; True once done.
+def _delete_empty_branch(path, run, key: dict) -> Optional[str]:
+    """Delete the key's local branch when this pass created it and left it without any
+    commit; return None once deleted, else why it stays (in French).
 
-    Only a pass branch whose head is still start_sha, checked out in no worktree (the dev's
-    own checkout included) and absent from origin goes; git update-ref deletes it only while
-    it points at start_sha, so a branch with a commit is never deleted. When origin cannot be
-    asked, the branch stays.
+    Only a pass branch that the pass created (never a taken-over one: reused or taken_head,
+    whatever its head), whose head is still start_sha (the origin/<base> it started from) and
+    whose commits are all on origin, checked out in no worktree (the dev's own checkout
+    included) and absent from origin goes. git update-ref deletes it only while it points at
+    start_sha, so a branch with a commit is never deleted. When origin cannot be asked, the
+    branch stays.
     """
     branch, start = key["branch"], key["start_sha"]
+    if key.get("reused") or key.get("taken_head"):
+        return "branche reprise d'une passe précédente : jamais supprimée"
     if not any(fix_names.is_pass_branch(branch, base)
                for base in (fix_names.BRANCH_BASE, fix_names.DRY_RUN_BASE)):
-        return False
+        return "ce n'est pas une branche de passe"
     try:
-        if fix_git.rev(path, run, f"refs/heads/{branch}") != start:
-            return False
+        head = fix_git.rev(path, run, f"refs/heads/{branch}")
+        if head is None:
+            return "branche introuvable dans le repo"
+        if head != start:
+            return "la branche porte des commits de la passe"
+        if fix_git.unpushed(path, run, branch):
+            return "la branche porte des commits absents d'origin"
         if any(entry["branch"] == branch for entry in fix_git.worktrees(path, run)):
-            return False
+            return "branche extraite dans un worktree ou dans votre repo"
         if fix_git.remote_has(path, run, branch):
-            return False
+            return "branche présente sur origin"
     except fix_git.GitRefused:
-        return False
+        return "origin injoignable : branche gardée"
     deleted = fix_names.git(path, run, "update-ref", "-d", f"refs/heads/{branch}", start)
-    return deleted.returncode == 0
+    if deleted.returncode != 0:
+        return f"git update-ref a échoué : {deleted.stderr.strip()}"
+    return None
 
 
 def _need_reviewed(key: dict, name: str, command: str) -> None:
@@ -1989,7 +2012,7 @@ def _cmd_summary(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     failed = parse_refs(args.replace_failed)
-    in_review = parse_refs(args.in_review)
+    in_review = None if args.in_review is None else parse_refs(args.in_review)
     context = _load_context(run_dir)
     candidates = _read_run_json(run_dir, "fix/candidates.json", "cqa_fix.py candidates")
     checks = {name: _optional_key_json(run_dir, key, "checks.json")

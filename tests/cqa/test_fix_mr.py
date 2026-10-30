@@ -264,7 +264,7 @@ class MaterialTest(unittest.TestCase):
     def test_hors_scope_lists_left_rows_of_the_category(self):
         self.key["mr"] = {"iid": 12, "url": MR_URL}
         found = self.material()
-        text = fix_mr.body(run_id=RUN_ID, category="SÉCURITÉ", copy_url=None, **found)
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
         self.assertEqual(section(text, "Hors-scope"), [
             "### SÉCURITÉ",
             "- CQ-5 : Cinq : Demande une décision du client. ([Notion](https://www.notion.so/p5))",
@@ -296,7 +296,7 @@ class MaterialTest(unittest.TestCase):
                          [{"ref": 7, "title": "Sept", "by": 3, "url": "https://www.notion.so/p7",
                            "section": "securite"}])
         self.assertEqual([item["ref"] for item in found["left"]], [5, 6, 8, 40, 42, 43, 52, 53])
-        text = fix_mr.body(run_id=RUN_ID, category="SÉCURITÉ", copy_url=None, **found)
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
         fixes = section(text, "Correctifs")
         self.assertEqual(fixes[:2], ["### SÉCURITÉ", "#### CQ-3 : Trois"])
         self.assertEqual(fixes[-1], "- CQ-7 : Sept : couverte par le correctif de CQ-3 "
@@ -320,7 +320,7 @@ class MaterialTest(unittest.TestCase):
             "Nommer la constante.", "Ajouter un test.", "CQ-3 : Vérifier le cache du CDN.",
         ])
         self.assertEqual({note["section"] for note in found["attention"]}, {"securite"})
-        text = fix_mr.body(run_id=RUN_ID, category="SÉCURITÉ", copy_url=None, **found)
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
         self.assertEqual(section(text, "Points d'attention"), [
             "### SÉCURITÉ", "- Nommer la constante.", "- Ajouter un test.",
             "- CQ-3 : Vérifier le cache du CDN.",
@@ -486,6 +486,10 @@ class SectionLayoutTest(unittest.TestCase):
         self.assertEqual(fix_mr.title(4, 2), "Checklist PRE-MEL : correctifs (4 lignes, 2 sections)")
         self.assertEqual(fix_mr.title(1, 1), "Checklist PRE-MEL : correctifs (1 ligne, 1 section)")
         self.assertEqual(fix_mr.title_counts(found), (4, 2))
+        outside = {"fixed": [], "covered": [], "earlier": [{"ref": 2, "title": None, "section": None}]}
+        self.assertEqual(fix_mr.title_counts(outside), (1, 0))
+        self.assertEqual(fix_mr.title(1, 0), "Checklist PRE-MEL : correctifs (1 ligne)")
+        self.assertEqual(fix_mr.title(3, 0), "Checklist PRE-MEL : correctifs (3 lignes)")
         added = fix_mr.addition(**{name: value for name, value in found.items()
                                    if name != "earlier"})
         self.assertTrue(added.startswith(
@@ -544,12 +548,15 @@ class SectionLayoutTest(unittest.TestCase):
                    "status_before": "À traiter"},
                   {"repo": "front", "url": MR_URL, "iid": 12, "partial": False,
                    "status_before": "À traiter"}],
-            "9": [{"repo": "front", "url": MR_URL, "iid": 12}]}}
+            "9": [{"repo": "front", "url": MR_URL, "iid": 12}],
+            "10": [{"repo": "front", "url": MR_URL, "iid": 12, "partial": True,
+                    "status_before": "À traiter"}]}}
         before = json.dumps(earlier)
         details = {3: {"partial": True, "status_before": "En review"},
-                   4: {"partial": False, "status_before": "Mise en place partielle"},
-                   9: {"partial": False, "status_before": "À traiter"}}
-        merged = fix_mr.merge_links(earlier, "front", {"iid": 12, "url": MR_URL}, [3, 4, 9],
+                   4: {"partial": None, "status_before": "Mise en place partielle"},
+                   9: {"partial": False, "status_before": "À traiter"},
+                   10: {"partial": None, "status_before": "En review"}}
+        merged = fix_mr.merge_links(earlier, "front", {"iid": 12, "url": MR_URL}, [3, 4, 9, 10],
                                     details)
         self.assertEqual(json.dumps(earlier), before)
         self.assertEqual(merged["links"], {
@@ -561,13 +568,15 @@ class SectionLayoutTest(unittest.TestCase):
                    "status_before": "Mise en place partielle"}],
             "9": [{"repo": "front", "url": MR_URL, "iid": 12, "partial": False,
                    "status_before": "À traiter"}],
+            "10": [{"repo": "front", "url": MR_URL, "iid": 12, "partial": True,
+                    "status_before": "À traiter"}],
         })
         self.assertEqual(
             fix_mr.link_details(self.key, self.candidates, [{"ref": 3, "status": "À traiter"}],
                                 [3, 4, 5]),
             {3: {"partial": False, "status_before": "À traiter"},
              4: {"partial": True, "status_before": None},
-             5: {"partial": False, "status_before": None}})
+             5: {"partial": None, "status_before": None}})
         self.candidates["keys"][0]["sections"][0]["rows"][1]["status"] = "Mise en place partielle"
         self.assertEqual(
             fix_mr.link_details(self.key, self.candidates,
@@ -1543,60 +1552,119 @@ class FinishTest(MrCase):
                                 f"refs/heads/{branch}"], capture_output=True, text=True)
         return found.stdout.strip() or None
 
+    def finish(self):
+        """Run finish; return its output, checked: the worktree is gone, no git call forced
+        anything, and the state records the deletion as the output says."""
+        code, out, err = self.cli("finish", KEY)
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertFalse(self.worktree.exists())
+        self.assertEqual(self.key().get("branch_deleted", False), result["branch_deleted"])
+        self.assertEqual(result["branch_kept"] is None, result["branch_deleted"])
+        for command in self.gitlab.git:
+            self.assertNotIn("-D", command)
+            if "branch" in command:
+                self.assertFalse({"-f", "--force"} & set(command[command.index("branch"):]))
+        return result
+
+    def assert_deleted(self, result):
+        self.assertTrue(result["branch_deleted"])
+        self.assertIsNone(self.head_of(self.branch))
+        self.assertTrue(any("update-ref" in command and "-d" in command
+                            for command in self.gitlab.git))
+
+    def assert_kept(self, result, head, why):
+        self.assertFalse(result["branch_deleted"])
+        self.assertIn(why, result["branch_kept"])
+        self.assertEqual(self.head_of(self.branch), head)
+
     def test_finish_deletes_only_an_empty_local_branch(self):
-        """A key left without any commit loses its local branch at finish; a branch with
-        commits, checked out elsewhere or on origin stays, and nothing is ever forced."""
-        for case in ("local", "dry_run", "published", "commits", "checked_out", "on_origin"):
-            with self.subTest(case=case):
-                push = case if case in ("local", "dry_run") else (
-                    "mr" if case == "published" else "local")
-                self.reviewed(push=push, fix=case == "commits")
-                start = self.key()["start_sha"]
-                if case == "published":
-                    self.assertEqual(self.cli("mr-body", KEY)[0], 0)
-                    self.assertEqual(self.cli("publish", KEY)[0], 0)
-                if case == "checked_out":
-                    real_git(self.repo, "checkout", "-q", "--ignore-other-worktrees", self.branch)
-                if case == "on_origin":
-                    real_git(self.repo, "push", "-q", "origin", f"{start}:refs/heads/{self.branch}")
-                code, out, err = self.cli("finish", KEY)
-                self.assertEqual(code, 0, err)
-                result = json.loads(out)
-                deleted = case in ("local", "dry_run", "published")
-                self.assertEqual(result["branch_deleted"], deleted)
-                self.assertFalse(self.worktree.exists())
-                self.assertEqual(self.key().get("branch_deleted", False), deleted)
-                self.assertEqual(self.head_of(self.branch),
-                                 None if deleted else (self.fixed if case == "commits" else start))
-                for command in self.gitlab.git:
-                    self.assertNotIn("-D", command)
-                    self.assertNotIn("--force", command[command.index("branch"):]
-                                     if "branch" in command else [])
-                if deleted:
-                    code, out, err = self.cli("summary")
-                    self.assertEqual(code, 0, err)
-                    self.assertNotIn("## Branches restées en local", json.loads(out)["text"])
-                else:
-                    self.assertEqual(self.run_main(["abandon", self.run_dir])[0], 0)
-                if case == "checked_out":
-                    real_git(self.repo, "checkout", "-q", "develop")
-                    real_git(self.repo, "branch", "-q", "-D", self.branch)
-                if case == "on_origin":
-                    real_git(self.repo, "push", "-q", "origin", f":refs/heads/{self.branch}")
-                    real_git(self.repo, "branch", "-q", "-D", self.branch)
-                if case == "commits":
-                    real_git(self.repo, "branch", "-q", "-D", self.branch)
-                self.gitlab.git.clear()
+        """A branch this pass created and left without any commit goes at finish."""
+        self.reviewed(push="local", fix=False)
+        self.assert_deleted(self.finish())
+        code, out, err = self.cli("summary")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("## Branches restées en local", json.loads(out)["text"])
+
+    def test_finish_deletes_an_empty_dry_run_branch(self):
+        self.reviewed(push="dry_run", fix=False)
+        self.assertTrue(self.branch.startswith("dry-run/"))
+        self.assert_deleted(self.finish())
+
+    def test_finish_deletes_the_empty_branch_of_a_publication_without_commit(self):
+        self.reviewed(fix=False)
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.assertEqual(self.cli("publish", KEY)[0], 0)
+        self.assert_deleted(self.finish())
+
+    def test_finish_keeps_a_branch_with_commits(self):
+        self.reviewed(push="local")
+        self.assert_kept(self.finish(), self.fixed, "commit")
+
+    def test_finish_keeps_an_empty_branch_checked_out_elsewhere(self):
+        self.reviewed(push="local", fix=False)
+        start = self.key()["start_sha"]
+        real_git(self.repo, "checkout", "-q", "--ignore-other-worktrees", self.branch)
+        self.assert_kept(self.finish(), start, "extraite")
+
+    def test_finish_keeps_an_empty_branch_that_origin_has(self):
+        self.reviewed(push="local", fix=False)
+        start = self.key()["start_sha"]
+        real_git(self.repo, "push", "-q", "origin", f"{start}:refs/heads/{self.branch}")
+        self.assert_kept(self.finish(), start, "origin")
+
+    def test_finish_keeps_an_empty_branch_when_origin_is_unreachable(self):
+        self.reviewed(push="local", fix=False)
+        start = self.key()["start_sha"]
+        self.gitlab.fail_git = "ls-remote"
+        self.assert_kept(self.finish(), start, "origin")
+
+    def test_finish_keeps_a_taken_over_branch_without_new_commits(self):
+        """A local pass takes over a pass branch that an earlier local pass left with its
+        commits, and adds nothing: start_sha is that branch's head, which finish must keep."""
+        real_git(self.repo, "checkout", "-q", "-b", BASE)
+        earlier = commit(self.repo, "s3.txt", "fix(securite CQ-3): earlier fix")
+        real_git(self.repo, "checkout", "-q", "develop")
+        self.write_run(flight(branches=[{"branch": BASE, "where": "local", "refs": [3]}]))
+        self.open_pass(push="local")
+        started = self.start_ok()
+        self.worktree, self.branch = Path(started["worktree"]), started["branch"]
+        self.assertEqual((started["reused"], started["start_sha"]), ("branch", earlier))
+        self.assertEqual(self.cli("section-start", KEY, *SECTION)[0], 0)
+        self.assertEqual(self.cli("pass-start", KEY, "--pass", "1", *SECTION)[0], 0)
+        self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [
+            {"ref": 5, "outcome": "skipped", "reason": "Demande une décision de l'équipe UI/UX."}]})
+        self.assertEqual(self.cli("validate", KEY, "report", "--pass", "1")[0], 0)
+        self.settle()
+        self.assertEqual(self.key()["step"], "reviewed")
+        self.assert_kept(self.finish(), earlier, "reprise")
+        self.assertEqual(self.head(self.repo, f"refs/heads/{BASE}"), earlier)
 
     def test_start_after_finish_restores_a_deleted_empty_branch(self):
         self.reviewed(push="local", fix=False)
         start = self.key()["start_sha"]
-        self.assertTrue(json.loads(self.cli("finish", KEY)[1])["branch_deleted"])
+        self.assert_deleted(self.finish())
         started = self.start_ok()
         self.assertEqual((started["branch"], started["start_sha"]), (self.branch, start))
         self.assertEqual(self.head(self.worktree), start)
         self.assertEqual(self.head_of(self.branch), start)
         self.assertNotIn("branch_deleted", self.key())
+
+    def test_start_after_finish_refuses_a_branch_recreated_elsewhere(self):
+        """The name of a deleted empty branch came back on another commit: start never takes
+        it as the pass branch."""
+        self.reviewed(push="local", fix=False)
+        self.assert_deleted(self.finish())
+        other = self.advance_develop()
+        real_git(self.repo, "fetch", "-q", "origin")
+        real_git(self.repo, "branch", "-q", "--no-track", self.branch, other)
+        code, out, err = self.start()
+        self.assertEqual(code, 2, err)
+        self.assertIn(f"La branche {self.branch}", err)
+        self.assertIn("n'est pas reprise", err)
+        self.assertEqual(self.head_of(self.branch), other)
+        self.assertFalse(self.worktree.exists())
+        self.assertTrue(self.key()["branch_deleted"])
 
     def test_finish_refuses_a_dirty_worktree(self):
         self.reviewed(push="local")

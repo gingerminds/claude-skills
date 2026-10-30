@@ -995,7 +995,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" finish "$RUN" "<repo>/<slug>"
 ```
 
-It removes the worktree (exit 5 while it has uncommitted changes: show them to the lead, never clean them), deletes the local branch only when the pass left it without any commit (its head is still the start, no checkout has it, origin does not have it) and prints `{"removed", "branch", "kept_local", "branch_deleted", "unpushed"}`. After « Garder la branche en local »:
+It removes the worktree (exit 5 while it has uncommitted changes: show them to the lead, never clean them), deletes the local branch only when this pass created it and left it without any commit (never a taken-over branch; its head is still the start, no checkout has it, origin does not have it) and prints `{"removed", "branch", "kept_local", "branch_deleted", "branch_kept", "unpushed"}` (`branch_kept`: why the branch stays). After « Garder la branche en local »:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

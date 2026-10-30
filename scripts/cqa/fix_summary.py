@@ -3,6 +3,8 @@
 Everything here is pure: the caller reads the run files and passes plain values. Texts are in
 French and never hold a long dash.
 """
+from typing import Optional
+
 from cqa import fix_mr, fix_rows
 from cqa.checklist import ref_label
 
@@ -20,13 +22,13 @@ _RAN = ("passed", "failed")
 
 
 def summary(*, project: str, state: dict, candidates: dict, checks: dict,
-            replace_failed: list = (), in_review: list = ()) -> dict:
+            replace_failed: list = (), in_review: Optional[list] = None) -> dict:
     """Return {"text", "team_message"}, both headed by the project name.
 
     state: fix/state.json; candidates: fix/candidates.json; checks: {key name: checks.json
     document or None}; replace_failed: refs whose skill comment could not be replaced;
-    in_review: refs the Notion stage moved to « En review » (counted when the lead agreed to
-    the Notion writing and an MR exists). Partial rows are marked with what is left to do; a
+    in_review: refs the Notion stage moved to « En review », counted only when given (None:
+    no line). Partial rows are marked with what is left to do; a
     failed section (with its reason and its leftover patch) and a reorder conflict are named.
     """
     info = _titles(candidates)
@@ -42,7 +44,7 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
     local = _local_lines(state)
     if local:
         parts.append(("Branches restées en local", "\n".join(local)))
-    notion = _notion_lines(state, replace_failed, in_review)
+    notion = _notion_lines(replace_failed, in_review)
     if notion:
         parts.append(("Notion", "\n".join(notion)))
     parts.append(("Suite", SUITE))
@@ -139,9 +141,9 @@ def _sentence(text) -> str:
     return text if text.endswith((".", "!", "?")) else f"{text}."
 
 
-def _notion_lines(state: dict, replace_failed, in_review) -> list:
+def _notion_lines(replace_failed, in_review) -> list:
     lines = []
-    if state.get("notion") and any(key.get("mr") for key in state["keys"].values()):
+    if in_review is not None:
         refs = sorted(set(in_review))
         listed = f" ({', '.join(ref_label(ref) for ref in refs)})" if refs else ""
         lines.append(f"Lignes passées « En review » : {len(refs)}{listed}.")
