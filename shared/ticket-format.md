@@ -4,7 +4,14 @@ Template of the note produced by `/gm:ticket-refine` and posted on the Mantis ti
 
 ## Rendering
 
-Mantis Markdown rendering is not guaranteed, so the note must read well as plain text: uppercase section titles followed by `:`, `- ` or `1.` lists, no table, no HTML.
+Mantis renders **BBCode**, not Markdown. Use only these tags:
+
+- `[b]…[/b]` for section titles; `[u][b]…[/b][/u]` for the two part headers;
+- `[list]` / `[list=1]` with one `[*]` per item, closed by `[/list]` (nested lists allowed); no blank line inside a list block;
+- `[code]…[/code]` for an error message or a log excerpt quoted from the ticket;
+- `[i]`, `[s]`, `[quote]` only if genuinely needed.
+
+No Markdown (`**`, `#`, `- ` or `1.` lists, backticks), no table, no HTML. The first two lines (marker and verdict) stay plain text with no tag: they are a parsing contract. The `[gm:ticket-refine]` marker is not a BBCode tag and is displayed as is.
 
 ## Template (output in French)
 
@@ -13,40 +20,57 @@ Mantis Markdown rendering is not guaranteed, so the note must read well as plain
 Verdict : <prêt | prêt avec hypothèses | pas prêt — ce qui manque, sans tiret cadratin>
 <si la note remplace une précédente : Remplace la note de qualification du <JJ/MM/AAAA>.>
 
-=== POUR LE CHEF DE PROJET ===
+[u][b]POUR LE CHEF DE PROJET[/b][/u]
 
-OBJECTIF :
+[b]OBJECTIF :[/b]
 <une ou deux phrases, sans jargon technique>
 
-HORS PÉRIMÈTRE :
-- <ce que le ticket ne couvre pas> | (rien à signaler)
+[b]HORS PÉRIMÈTRE :[/b]
+[list]
+[*]<ce que le ticket ne couvre pas>
+[/list]
+<ou, si rien : (rien à signaler)>
 
-QUESTIONS OUVERTES (à transmettre au client) :
-1. <question formulée pour être copiée telle quelle au client> | (aucune)
+[b]QUESTIONS OUVERTES (à transmettre au client) :[/b]
+[list=1]
+[*]<question formulée pour être copiée telle quelle au client>
+[/list]
+<ou, si rien : (aucune)>
 
-COMMENT RECETTER :
-- <étapes de vérification compréhensibles par un non-développeur>
+[b]COMMENT RECETTER :[/b]
+[list]
+[*]<étape de vérification compréhensible par un non-développeur>
+[/list]
 
-=== POUR LE DEV ===
+[u][b]POUR LE DEV[/b][/u]
 
-OBSERVÉ / ATTENDU :            <section présente uniquement pour un bug>
-- Observé : <comportement actuel>
-- Attendu : <comportement voulu>
+[b]OBSERVÉ / ATTENDU :[/b]            <section présente uniquement pour un bug>
+[list]
+[*]Observé : <comportement actuel>
+[*]Attendu : <comportement voulu>
+[/list]
 
-REPRODUCTION :
-- Environnement : <local | preprod | prod> — URL : <url>
-- Compte / rôle : <rôle, jamais d'identifiants>
-- Données : <conditions de données nécessaires>
-- Étapes :
-  1. <étape>
-- Fréquence : <systématique | intermittent | inconnue>
+[b]REPRODUCTION :[/b]
+[list]
+[*]Environnement : <local | preprod | prod> — URL : <url>
+[*]Compte / rôle : <rôle, jamais d'identifiants>
+[*]Données : <conditions de données nécessaires>
+[*]Étapes :
+[list=1]
+[*]<étape>
+[/list]
+[*]Fréquence : <systématique | intermittent | inconnue>
+[/list]
 <ou, pour un bug dont les étapes manquent : Non reproductible en l'état : <ce qui manque pour reproduire>>
 <ou, pour un ticket qui n'est pas un bug : Sans objet (demande / évolution) : <comment observer l'état actuel, si utile>>
 
-CRITÈRES D'ACCEPTATION :
-1. <critère vérifiable par une observation concrète> <(inféré) si déduit> | (aucun critère vérifiable en l'état)
+[b]CRITÈRES D'ACCEPTATION :[/b]
+[list=1]
+[*]<critère vérifiable par une observation concrète> <(inféré) si déduit>
+[/list]
+<ou, si aucun : (aucun critère vérifiable en l'état)>
 
-ENVIRONNEMENT DE VÉRIFICATION :
+[b]ENVIRONNEMENT DE VÉRIFICATION :[/b]
 <local | preprod | prod (lecture seule)> — <pourquoi>
 ```
 
@@ -65,4 +89,4 @@ ENVIRONNEMENT DE VÉRIFICATION :
 - Never include credentials or passwords.
 - The project-manager part has no technical jargon.
 - Open questions are worded so they can be forwarded to the client as-is.
-- Keep the note to about 60 lines at most.
+- Keep the note to about 60 lines of content at most (lines holding only `[list]`, `[list=1]` or `[/list]` do not count).
