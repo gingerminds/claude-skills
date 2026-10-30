@@ -42,7 +42,7 @@ class SummaryCase(FixCase):
         (self.run_dir / "fix" / "front").mkdir(parents=True)
         (self.run_dir / "fix" / "back").mkdir(parents=True)
         (self.run_dir / "context.json").write_text(
-            json.dumps({"name": "Boutique Exemple"}), encoding="utf-8")
+            json.dumps({"name": "Nom du contexte"}), encoding="utf-8")
         cand = lambda ref, title, **more: {"ref": ref, "title": title, **more}
         candidates = {
             "keys": [
@@ -118,6 +118,7 @@ class SummaryTest(SummaryCase):
     def test_optional_sections_are_left_out(self):
         state = fix_state.load(self.run_dir)
         state["keys"]["back"]["kept_local"] = False
+        state["notion"] = False
         fix_state.save(self.run_dir, state)
         text = json.loads(self.summary()[1])["text"]
         self.assertNotIn("## Branches restées en local", text)
@@ -176,6 +177,66 @@ class SummaryTest(SummaryCase):
         text = json.loads(self.summary()[1])["text"]
         self.assertNotIn("Treize", section(text, "Laissées aux devs"))
         self.assertIn("- CQ-13 : Treize (couverte par le correctif de CQ-3)", section(text, "MR"))
+
+    def test_team_message_starts_with_the_project_name(self):
+        """The project name recorded by open heads the synthesis and the team message, never
+        the run id nor the « name » of context.json."""
+        result = json.loads(self.summary()[1])
+        self.assertEqual(result["team_message"].split("\n")[0], "Boutique Exemple")
+        self.assertEqual(result["text"].split("\n")[0],
+                         "# Boutique Exemple : synthèse de la passe de correction")
+        for absent in ("Nom du contexte", self.run_dir.name):
+            self.assertNotIn(absent, result["team_message"])
+        state = fix_state.load(self.run_dir)
+        state["project_name"] = None
+        state["finished_at"] = None
+        fix_state.save(self.run_dir, state)
+        (self.run_dir / "context.json").write_text(json.dumps({
+            "name": "Nom du contexte", "project": {"name": "Acme - Boutique"},
+            "repos": [{"name": "front", "path": "/tmp/Acme - Autre - WordPress"}]}),
+            encoding="utf-8")
+        result = json.loads(self.summary()[1])
+        self.assertEqual(result["team_message"].split("\n")[0], "Acme - Boutique")
+
+    def test_summary_marks_partial_rows_failed_sections_and_reorder_conflicts(self):
+        state = fix_state.load(self.run_dir)
+        front, back = state["keys"]["front"], state["keys"]["back"]
+        front["rows"]["3"]["remaining"] = "Traduire la page anglaise."
+        front["rows"]["12"].update(remaining="Reste du rapport.",
+                                   corrections={"remaining": "Reste relu."})
+        front["sections"].append({
+            "category": "QUALITÉ", "alias": "qualite", "refs": [16], "state": "failed",
+            "reason": "Revue illisible.",
+            "leftover": {"patch": "fix/front/leftover-1.patch", "base": "b" * 40,
+                         "untracked": ["notes.txt"]}})
+        front["rows"]["16"] = row("dropped", "Revue illisible.", section="qualite")
+        back["reorder_conflicts"] = ["fix(seo CQ-20): add the canonical link"]
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary("--in-review", "CQ-3,CQ-12")
+        self.assertEqual(code, 0, err)
+        text = json.loads(out)["text"]
+        mr = section(text, "MR")
+        self.assertIn("Lignes mises en MR : 2, dont 2 partielles.", mr)
+        self.assertIn("- CQ-3 : Trois (partielle, reste à faire : Traduire la page anglaise.)", mr)
+        self.assertIn("- CQ-12 : Douze (Semi-auto) (partielle, reste à faire : Reste relu.)", mr)
+        self.assertNotIn("Reste du rapport.", text)
+        self.assertEqual(section(text, "Points d'attention").strip().split("\n"), [
+            "- front : section QUALITÉ non aboutie : Revue illisible. Modifications non "
+            "commitées sauvées dans fix/front/leftover-1.patch.",
+            "- back : Commits non rangés par section : conflit de rejeu "
+            "(`fix(seo CQ-20): add the canonical link`).",
+        ])
+        self.assertIn("Revue illisible. :\n- CQ-16 : sans titre", section(text, "Laissées aux devs"))
+        self.assertIn("Lignes passées « En review » : 2 (CQ-3, CQ-12).", section(text, "Notion"))
+        self.assertNotIn(LONG_DASH, text)
+
+    def test_review_status_count_needs_the_notion_agreement(self):
+        state = fix_state.load(self.run_dir)
+        state["notion"] = False
+        fix_state.save(self.run_dir, state)
+        self.assertEqual(self.summary("--in-review", "oops")[0], 2)
+        text = json.loads(self.summary("--in-review", "CQ-3")[1])["text"]
+        self.assertNotIn("En review", text)
 
     def test_summary_closes_the_pass(self):
         deferred.add(self.run_dir, "question", "Question de l'audit", "CQ-3")

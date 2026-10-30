@@ -974,7 +974,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" mr-body "$RUN" "<repo>/<slug>"
 ```
 
-It writes `mr-title.txt` and `mr.md` for a new merge request, or `mr-addition.md` for a merge request already open (a section « Ajouts du <date> » and « Hors-scope » updated; the rest of its description, which the reviewer may have edited, is kept), and prints `{"title", "file", "kind", "fixed", "covered", "waiting", "out_of_scope"}`.
+It needs every section of the key settled or failed (exit 2 names the one that is not: `section-end` first). It writes `mr-title.txt` and `mr.md` for a new merge request, or `mr-addition.md` for a merge request already open (a section « Ajouts du <date> » and « Hors-scope » updated; the rest of its description, which the reviewer may have edited, is kept), its rows grouped by section in the order of the commits, and prints `{"title", "file", "kind", "sections", "fixed", "partial", "covered", "waiting", "out_of_scope"}`.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -984,7 +984,7 @@ python3 "$S/cqa_fix.py" publish "$RUN" "<repo>/<slug>"
 
 It checks everything again (guard, every new commit reported, the merge request still open on GitLab, the remote branch not diverged), pushes the branch as a fast-forward, then creates the draft merge request assigned to the lead, or adds to its description, and prints `{"branch", "head", "pushed", "mr", "created", "updated", "links"}`. By exit code:
 
-- 0: `finish`. With the `note` « Aucun commit sur la branche : ni push ni MR. », nothing left the workstation: `finish` too (the empty branch stays in the dev's repo, and the summary names it).
+- 0: `finish`. With the `note` « Aucun commit sur la branche : ni push ni MR. », nothing left the workstation: `finish` too (it deletes the empty branch; the summary names one it had to keep).
 - 2 with « Description de MR périmée : relancez mr-body. », or with a merge request already open for the branch: `mr-body` again, then `publish` once more.
 - 5 with « La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé. », or with « La MR !<iid> est fusionnée » or « fermée » (« relancez une passe fix »): no retry can pass, so no question: tell the lead on the spot, then `finish --keep-local` (the branch stays in the dev's repo; the lead integrates the remote commits by hand, or a later fix pass starts a new branch).
 - Any other 2 (a push or `glab` failure), 5 (refused by a guard: guard problem, commit not reported) or 7 (a secret in the title or the description: give the labels, never a value; the same for an exit 7 of `mr-body`): show the message and ask the lead on the spot « La publication de <repo>/<slug> a échoué : <message> » with « Relancer la publication » (once the lead fixed the cause: `mr-body` again, then `publish`) and « Garder la branche en local ». Never force anything.
@@ -995,7 +995,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" finish "$RUN" "<repo>/<slug>"
 ```
 
-It removes the worktree (exit 5 while it has uncommitted changes: show them to the lead, never clean them) and prints `{"removed", "branch", "kept_local", "unpushed"}`. After « Garder la branche en local »:
+It removes the worktree (exit 5 while it has uncommitted changes: show them to the lead, never clean them), deletes the local branch only when the pass left it without any commit (its head is still the start, no checkout has it, origin does not have it) and prints `{"removed", "branch", "kept_local", "branch_deleted", "unpushed"}`. After « Garder la branche en local »:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"

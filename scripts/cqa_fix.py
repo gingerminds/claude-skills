@@ -194,7 +194,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    _cmd_publish)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help=KEY_HELP)
-    sub = _command(commands, "finish", "retire le worktree d'une clé publiée", _cmd_finish)
+    sub = _command(commands, "finish",
+                   "retire le worktree d'une clé publiée, et sa branche locale restée sans commit",
+                   _cmd_finish)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help=KEY_HELP)
     sub.add_argument("--keep-local", action="store_true",
@@ -203,6 +205,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("--replace-failed", default="",
                      help="Réf dont le commentaire du skill n'a pas pu être remplacé")
+    sub.add_argument("--in-review", default="",
+                     help="Réf passées « En review » dans Notion, séparées par des virgules")
     sub = _command(commands, "abandon", "abandonne la passe en cours", _cmd_abandon)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     return parser
@@ -402,6 +406,8 @@ def _cmd_start(args, services: Services) -> int:
         )
         key.update(opened, base=base, worktree=str(worktree), dev_fingerprint=fingerprint)
     else:
+        if key.pop("branch_deleted", None):
+            _restore_branch(path, services.run, key)
         fix_git.reopen(path, services.run, branch=key["branch"], push=state["push"], worktree=worktree)
     done_refs = fix_git.refs_between(
         path, services.run, f"refs/remotes/origin/{key['base']}",
@@ -420,6 +426,18 @@ def _cmd_start(args, services: Services) -> int:
         "start_sha": key["start_sha"], "reused": key["reused"], "done_refs": done_refs,
     })
     return EXIT_OK
+
+
+def _restore_branch(path, run, key: dict) -> None:
+    """Create again, at start_sha, the branch without commit that finish deleted
+    (_delete_empty_branch); a branch of that name found again is left as it is."""
+    branch = key["branch"]
+    if fix_git.rev(path, run, f"refs/heads/{branch}") is not None:
+        return
+    created = fix_names.git(path, run, "branch", "--no-track", branch, key["start_sha"])
+    if created.returncode != 0:
+        raise fix_git.GitRefused(
+            f"La branche {branch} n'a pas pu être recréée : {created.stderr.strip()}")
 
 
 def _cmd_pass_start(args, services: Services) -> int:
@@ -1377,11 +1395,16 @@ def _recorded(key: dict, name: str) -> dict:
 
 
 def _cmd_mr_body(args, services: Services) -> int:
-    """Write mr-title.txt and mr.md, or mr-addition.md when the key already has an MR."""
+    """Write mr-title.txt and mr.md, or mr-addition.md when the key already has an MR.
+
+    One MR per pass and per repo: every section of the key must be settled or failed. The
+    description groups its rows by section, in the order of the commits (fix_mr.material).
+    """
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
     _need_reviewed(key, args.key, "mr-body")
+    _need_settled(key, args.key, "mr-body")
     context = _load_context(run_dir)
     run_id = _run_id(run_dir, context)
     worktree = _key_worktree(run_dir, key, services.run)
@@ -1394,26 +1417,23 @@ def _cmd_mr_body(args, services: Services) -> int:
         worktree, services.run, f"refs/remotes/origin/{key['base']}", "HEAD"
     )
     since = (key.get("published_pass") or 0) if key.get("mr") else 0
+    order = [item["sha"] for item in fix_git.commits_in_range(worktree, services.run,
+                                                              key["start_sha"])]
     found = fix_mr.material(
         key, candidates, _notion_rows(run_dir), _numbered(run_dir, key, "report"),
         _numbered(run_dir, key, "review"), _optional_key_json(run_dir, key, "checks.json"),
-        changed, set(branch_refs), since=since,
+        changed, set(branch_refs), since=since, order=order,
     )
-    category = ", ".join(section.get("category") or section["alias"]
-                         for section in key["sections"])
-    count = len(found["fixed"]) + len(found["covered"])
     if key.get("mr"):
         text = fix_mr.addition(**found)
         name, stale, kind = "mr-addition.md", "mr.md", "update"
     else:
         notion = context.get("notion") if isinstance(context.get("notion"), dict) else {}
         text = fix_mr.body(
-            run_id=run_id, category=category, copy_url=fix_mr.notion_url(notion.get("copy_page_id")),
-            **found,
+            run_id=run_id, copy_url=fix_mr.notion_url(notion.get("copy_page_id")), **found,
         )
         name, stale, kind = "mr.md", "mr-addition.md", "create"
-        count += len(found["earlier"])
-    title = fix_mr.title(category, count)
+    title = fix_mr.title(*fix_mr.title_counts(found, earlier=kind == "create"))
     _refuse_secrets(f"{title}\n{text}", "rien n'a été écrit")
     folder = _key_folder(run_dir, key)
     write_text(folder / "mr-title.txt", title + "\n")
@@ -1424,7 +1444,9 @@ def _cmd_mr_body(args, services: Services) -> int:
     fix_state.save(run_dir, state)
     _emit({
         "title": title, "file": (folder / name).relative_to(run_dir).as_posix(), "kind": kind,
+        "sections": [section["alias"] for section in found["sections"]],
         "fixed": [row["ref"] for row in found["fixed"]],
+        "partial": [row["ref"] for row in found["fixed"] if row["remaining"]],
         "covered": [row["ref"] for row in found["covered"]],
         "waiting": [row["ref"] for row in found["waiting"]],
         "out_of_scope": [row["ref"] for row in found["left"]],
@@ -1439,7 +1461,9 @@ def _cmd_publish(args, services: Services) -> int:
     in its key loop, step, branch name, state of the MR on GitLab, fresh description files,
     secrets, guard, every new commit reported by the fixer, and a remote branch that HEAD
     contains. The push is a fast-forward of that one branch, never forced. Rows covered by
-    the fix of another row ship in the MR, so they get its link too.
+    the fix of another row ship in the MR, so they get its link too. Every section of the key
+    must be settled or failed (one MR per pass and per repo). Each link of fix/mr-links.json
+    says whether its row is partial, and its status at launch (fix_mr.link_details).
     """
     run = services.run
     run_dir = args.run_dir.resolve()
@@ -1450,6 +1474,7 @@ def _cmd_publish(args, services: Services) -> int:
     if state.get("mode") == "autonomous" and state["stage"] == "keys":
         raise fix_git.Refused(AUTONOMOUS_KEYS)
     _need_reviewed(key, args.key, "publish")
+    _need_settled(key, args.key, "publish")
     if not fix_names.is_pass_branch(branch, fix_names.BRANCH_BASE):
         raise fix_git.Refused(
             f"La branche {branch} n'est pas une branche de correctif "
@@ -1457,6 +1482,7 @@ def _cmd_publish(args, services: Services) -> int:
         )
     worktree = _key_worktree(run_dir, key, run)
     links = _read_links(run_dir)
+    candidates = _read_run_json(run_dir, "fix/candidates.json", "cqa_fix.py candidates")
     if key.get("mr") is None and _ahead_of_base(worktree, run, key["base"]) == 0:
         _published(run_dir, state, key, empty=True)
         _emit({"branch": branch, "head": fix_git.rev(worktree, run, "HEAD"), "pushed": False,
@@ -1530,7 +1556,9 @@ def _cmd_publish(args, services: Services) -> int:
     refs = sorted({int(ref) for ref, row in key["rows"].items()
                    if row.get("outcome") in ("fixed", "done_before")}
                   | set(fix_mr.covered_refs(key["rows"])))
-    write_json(run_dir / LINKS_FILE, fix_mr.merge_links(links, key["repo"], key["mr"], refs))
+    details = fix_mr.link_details(key, candidates, _notion_rows(run_dir), refs)
+    write_json(run_dir / LINKS_FILE,
+               fix_mr.merge_links(links, key["repo"], key["mr"], refs, details))
     _published(run_dir, state, key)
     _emit({"branch": branch, "head": head, "pushed": pushed, "mr": key["mr"], "created": created,
            "updated": updated, "links": refs, "assignee": user if created else None})
@@ -1542,6 +1570,8 @@ def _cmd_finish(args, services: Services) -> int:
 
     --keep-local lets a reviewed key of a pushing pass end without publication (push refused,
     glab failure, lead's choice): its branch stays in the dev's repo, kept_local in the state.
+    A branch the pass left without any commit is then deleted (_delete_empty_branch):
+    branch_deleted in the output and in the state.
     """
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
@@ -1571,12 +1601,41 @@ def _cmd_finish(args, services: Services) -> int:
             )
         fix_git.remove_worktree(path, services.run, worktree)
         removed = str(worktree)
+    deleted = _delete_empty_branch(path, services.run, key)
     key["step"] = "done"
     key["kept_local"] = kept_local
+    if deleted:
+        key["branch_deleted"] = True
     fix_state.save(run_dir, state)
     _emit({"removed": removed, "branch": key["branch"], "kept_local": kept_local,
+           "branch_deleted": deleted,
            "unpushed": fix_git.unpushed(path, services.run, key["branch"])})
     return EXIT_OK
+
+
+def _delete_empty_branch(path, run, key: dict) -> bool:
+    """Delete the key's local branch when the pass left it without any commit; True once done.
+
+    Only a pass branch whose head is still start_sha, checked out in no worktree (the dev's
+    own checkout included) and absent from origin goes; git update-ref deletes it only while
+    it points at start_sha, so a branch with a commit is never deleted. When origin cannot be
+    asked, the branch stays.
+    """
+    branch, start = key["branch"], key["start_sha"]
+    if not any(fix_names.is_pass_branch(branch, base)
+               for base in (fix_names.BRANCH_BASE, fix_names.DRY_RUN_BASE)):
+        return False
+    try:
+        if fix_git.rev(path, run, f"refs/heads/{branch}") != start:
+            return False
+        if any(entry["branch"] == branch for entry in fix_git.worktrees(path, run)):
+            return False
+        if fix_git.remote_has(path, run, branch):
+            return False
+    except fix_git.GitRefused:
+        return False
+    deleted = fix_names.git(path, run, "update-ref", "-d", f"refs/heads/{branch}", start)
+    return deleted.returncode == 0
 
 
 def _need_reviewed(key: dict, name: str, command: str) -> None:
@@ -1585,6 +1644,18 @@ def _need_reviewed(key: dict, name: str, command: str) -> None:
             f"La clé {name} est à l'étape « {key.get('step')} » : {command} attend « reviewed » "
             "(revue sans ligne bloquante)."
         )
+
+
+def _need_settled(key: dict, name: str, command: str) -> None:
+    """Exit 2 while a section of the key is pending or in progress: one MR per pass and per
+    repo carries every section, each settled or failed (section-end)."""
+    for section in key["sections"]:
+        if section["state"] not in ("settled", "failed"):
+            raise UsageError(
+                f"La section {section['alias']} est à l'état « {section['state']} » : {command} "
+                f"attend chaque section de la clé {name} réglée ou en échec (cqa_fix.py "
+                "section-end)."
+            )
 
 
 def _refuse_local(state: dict, key: dict) -> None:
@@ -1910,18 +1981,22 @@ def _close_fix_questions(run_dir: Path) -> None:
 
 
 def _cmd_summary(args, services: Services) -> int:
-    """Write fix/synthese.md, close the pass and its fix questions; exit 7 on a secret."""
+    """Write fix/synthese.md, close the pass and its fix questions; exit 7 on a secret.
+
+    The project name recorded by open heads the synthesis and the team message (see
+    _summary_project). --in-review gives the rows the Notion stage moved to « En review ».
+    """
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     failed = parse_refs(args.replace_failed)
+    in_review = parse_refs(args.in_review)
     context = _load_context(run_dir)
     candidates = _read_run_json(run_dir, "fix/candidates.json", "cqa_fix.py candidates")
     checks = {name: _optional_key_json(run_dir, key, "checks.json")
               for name, key in state["keys"].items() if key.get("mr")}
-    name = context.get("name")
     found = fix_summary.summary(
-        project=name if isinstance(name, str) and name.strip() else run_dir.name,
-        state=state, candidates=candidates, checks=checks, replace_failed=failed,
+        project=_summary_project(state, context), state=state, candidates=candidates,
+        checks=checks, replace_failed=failed, in_review=in_review,
     )
     labels = scan_text(f"{found['text']}\n{found['team_message']}", known_values_from_env())
     if labels:
@@ -1935,6 +2010,18 @@ def _cmd_summary(args, services: Services) -> int:
     fix_state.save(run_dir, state)
     _emit(found)
     return EXIT_OK
+
+
+def _summary_project(state: dict, context: dict) -> str:
+    """Return the project name of the pass: the one open recorded, else the one of
+    cqa_plan.py project (_project_name), else the first repo; never the run id."""
+    name = state.get("project_name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    found = _project_name(context)
+    if found:
+        return found
+    return next((key["repo"] for key in state["keys"].values()), "Projet")
 
 
 def _read_state(run_dir: Path, *, required: bool):

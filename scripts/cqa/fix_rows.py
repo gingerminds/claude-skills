@@ -42,7 +42,9 @@ def select(
     context.json; access the entries of doctor.json; flights {repo: in_flight}. refs are rows
     the lead adds (they skip the automation, outside-the-repo and closed MR checks), without
     rows the lead removes. A finding with in_repo false leaves its row to the devs. run_dir,
-    when given, tells whether fiches/CQ-xxx.md exists.
+    when given, tells whether fiches/CQ-xxx.md exists. A row left carries "repos", the repos its
+    evidence names ([] when none or without a finding), so that the MR of another repo leaves
+    it out; a candidate row keeps the status of the copy (status_before of fix/mr-links.json).
     """
     repo_names = [repo["name"] for repo in repos]
     status_of = {entry["repo"]: entry["status"] for entry in access}
@@ -70,13 +72,14 @@ def select(
         if reasons.get(ref) in SILENT_EXCLUSIONS or ref in without:
             continue
         lead = ref in forced
+        cited = _cited(findings.get(ref), repo_names)
         verdict = _verdict(row, findings.get(ref), reasons.get(ref), lead)
         if verdict is not None:
-            left.append(_left(row, verdict, None))
+            left.append(_left(row, verdict, None, cited))
             continue
         finding = findings[ref]
         if not lead and finding.get("in_repo") is False:
-            left.append(_left(row, _outside(finding), None))
+            left.append(_left(row, _outside(finding), None, cited))
             continue
         targets, every_repo = _targets(finding, repo_names)
         category = row.get("category") or _NO_CATEGORY
@@ -98,7 +101,7 @@ def select(
             section["rows"].append(_row(row, finding, lead, every_repo, run_dir))
             placed = True
         if first_cause and not placed:
-            left.append(_left(row, first_cause[0], first_cause[1]))
+            left.append(_left(row, first_cause[0], first_cause[1], cited))
     ordered = [keys[name] for name in repo_names if name in keys]
     for key in ordered:
         key["sections"].sort(key=lambda section: section["alias"] != FIRST_SECTION)
@@ -155,17 +158,24 @@ def _outside(finding: dict) -> str:
     return f"{OUTSIDE_REPO} : {todo.strip()}" if isinstance(todo, str) and todo.strip() else OUTSIDE_REPO
 
 
-def _left(row: dict, reason: str, url) -> dict:
+def _left(row: dict, reason: str, url, repos: list) -> dict:
     return {"ref": row["ref"], "title": row.get("title"), "category": row.get("category"),
-            "reason": reason, "url": url}
+            "reason": reason, "url": url, "repos": repos}
 
 
-def _targets(finding: dict, repo_names: list) -> tuple:
+def _cited(finding, repo_names: list) -> list:
+    """Return the repos, in their order, that the file evidence of a finding names."""
+    if not isinstance(finding, dict):
+        return []
     cited = {
         item.get("repo") for item in finding.get("evidence") or []
         if isinstance(item, dict) and item.get("type") == "file"
     }
-    named = [name for name in repo_names if name in cited]
+    return [name for name in repo_names if name in cited]
+
+
+def _targets(finding: dict, repo_names: list) -> tuple:
+    named = _cited(finding, repo_names)
     if named:
         return named, False
     return list(repo_names), len(repo_names) > 1
@@ -207,6 +217,7 @@ def _row(row: dict, finding: dict, lead: bool, every_repo: bool, run_dir) -> dic
         "ref": ref,
         "page_id": row.get("page_id"),
         "title": row.get("title"),
+        "status": row.get("status"),
         "category": row.get("category"),
         "automation": row.get("automation"),
         "semi_auto": FIXABLE.get(row.get("automation"), False),

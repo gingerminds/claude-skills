@@ -12,6 +12,7 @@ NO_MR = "Aucune MR créée."
 NO_CHECK = "Aucune vérification en attente."
 NOTHING_PREPARED = "Aucun correctif préparé."
 EMPTY_BRANCH = " (aucun commit)"
+PARTIAL = "partielle, reste à faire : {remaining}"
 SUITE = ("Relire et ajuster les MR, les fusionner, déployer en préprod, passer les lignes en "
          "« Mis en place » dans Notion, puis lancer `/gm:checklist-quality-audit recette`.")
 _LEFT_OUTCOMES = ("skipped", "dropped", "question")
@@ -19,15 +20,21 @@ _RAN = ("passed", "failed")
 
 
 def summary(*, project: str, state: dict, candidates: dict, checks: dict,
-            replace_failed: list = ()) -> dict:
-    """Return {"text", "team_message"}.
+            replace_failed: list = (), in_review: list = ()) -> dict:
+    """Return {"text", "team_message"}, both headed by the project name.
 
     state: fix/state.json; candidates: fix/candidates.json; checks: {key name: checks.json
-    document or None}; replace_failed: refs whose skill comment could not be replaced.
+    document or None}; replace_failed: refs whose skill comment could not be replaced;
+    in_review: refs the Notion stage moved to « En review » (counted when the lead agreed to
+    the Notion writing and an MR exists). Partial rows are marked with what is left to do; a
+    failed section (with its reason and its leftover patch) and a reorder conflict are named.
     """
     info = _titles(candidates)
     keys = state["keys"]
     parts = [("MR", _mr_section(keys, info))]
+    notes = _attention_lines(keys)
+    if notes:
+        parts.append(("Points d'attention", "\n".join(notes)))
     left = _left(keys, candidates, info)
     if left:
         parts.append(("Laissées aux devs", left))
@@ -35,11 +42,11 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
     local = _local_lines(state)
     if local:
         parts.append(("Branches restées en local", "\n".join(local)))
-    if replace_failed:
-        names = ", ".join(ref_label(ref) for ref in replace_failed)
-        parts.append(("Notion", f"Commentaire du skill non remplacé, un second a été créé : {names}"))
+    notion = _notion_lines(state, replace_failed, in_review)
+    if notion:
+        parts.append(("Notion", "\n".join(notion)))
     parts.append(("Suite", SUITE))
-    text = "# Synthèse de la passe de correction\n\n" + "\n\n".join(
+    text = f"# {project} : synthèse de la passe de correction\n\n" + "\n\n".join(
         f"## {name}\n\n{body}" for name, body in parts) + "\n"
     return {"text": _clean(text), "team_message": _clean(_team_message(project, state))}
 
@@ -80,20 +87,68 @@ def _mr_section(keys: dict, info: dict) -> str:
         fixed = _refs(key, "fixed", "done_before")
         covered = fix_mr.covered_refs(key["rows"])
         waiting = _refs(key, "pending", "question")
-        lines.append("Lignes corrigées :")
-        lines.extend(
-            _line(ref, info, " (Semi-auto)" if (info.get(ref) or {}).get("semi_auto") else "")
-            for ref in fixed
-        ) if fixed or covered else lines.append("- aucune")
+        remaining = {ref: fix_mr.remaining_of(key["rows"][str(ref)]) for ref in fixed}
+        partial = sum(1 for text in remaining.values() if text)
+        count = f"Lignes mises en MR : {len(fixed) + len(covered)}"
+        if partial:
+            count += f", dont {partial} {'partielle' if partial == 1 else 'partielles'}"
+        lines += [f"{count}.", "", "Lignes corrigées :"]
+        for ref in fixed:
+            suffix = " (Semi-auto)" if (info.get(ref) or {}).get("semi_auto") else ""
+            if remaining[ref]:
+                suffix += f" ({PARTIAL.format(remaining=remaining[ref])})"
+            lines.append(_line(ref, info, suffix))
         lines.extend(
             _line(ref, info, f" ({fix_mr.COVERED.format(ref=ref_label(by))})")
             for ref, by in sorted(covered.items())
         )
+        if not fixed and not covered:
+            lines.append("- aucune")
         if waiting:
             lines += ["", "Lignes en attente :"]
             lines.extend(_line(ref, info) for ref in waiting)
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) if blocks else NO_MR
+
+
+def _attention_lines(keys: dict) -> list:
+    """Return the failed sections of every key, with their reason and the patch of the
+    changes their fixer left uncommitted, then the commits a reorder left in place."""
+    lines = []
+    for key in keys.values():
+        for section in key.get("sections") or []:
+            if section.get("state") != "failed":
+                continue
+            name = section.get("category") or section.get("alias")
+            line = f"- {key['repo']} : section {name} non aboutie : {_sentence(section.get('reason'))}"
+            leftover = section.get("leftover")
+            patch = leftover.get("patch") if isinstance(leftover, dict) else None
+            if patch:
+                line += f" Modifications non commitées sauvées dans {patch}."
+            lines.append(line)
+        conflicts = [subject for subject in key.get("reorder_conflicts") or []
+                     if isinstance(subject, str) and subject.strip()]
+        if conflicts:
+            names = ", ".join(f"`{subject}`" for subject in conflicts)
+            lines.append(f"- {key['repo']} : {fix_mr.REORDER_CONFLICT} ({names}).")
+    return lines
+
+
+def _sentence(text) -> str:
+    text = text.strip() if isinstance(text, str) and text.strip() else NO_REASON
+    return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _notion_lines(state: dict, replace_failed, in_review) -> list:
+    lines = []
+    if state.get("notion") and any(key.get("mr") for key in state["keys"].values()):
+        refs = sorted(set(in_review))
+        listed = f" ({', '.join(ref_label(ref) for ref in refs)})" if refs else ""
+        lines.append(f"Lignes passées « En review » : {len(refs)}{listed}.")
+    if replace_failed:
+        names = ", ".join(ref_label(ref) for ref in replace_failed)
+        lines.append(f"Commentaire du skill non remplacé, un second a été créé : {names}")
+    return lines
 
 
 def _left(keys: dict, candidates: dict, info: dict) -> str:
@@ -135,7 +190,7 @@ def _local_keys(state: dict) -> list:
     everything = state.get("push") in ("local", "dry_run")
     found = []
     for key in state["keys"].values():
-        if not key.get("branch"):
+        if not key.get("branch") or key.get("branch_deleted"):
             continue
         empty = bool(key.get("empty_branch")) and not key.get("mr")
         if everything or key.get("kept_local") or not key.get("push_ready") or empty:

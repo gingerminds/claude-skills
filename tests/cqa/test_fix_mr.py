@@ -34,6 +34,13 @@ DIVERGED = "La branche distante a divergé : intégrez ses commits à la main, r
 PHP = "Syntaxe PHP (php -l)"
 STYLE = "stylelint (configuration du projet)"
 AWS = "AKIA" + "IOSFODNN7EXAMPLE"
+TITLE_ONE = "Checklist PRE-MEL : correctifs (1 ligne, 1 section)"
+
+
+def link(partial=False, status=None, iid=12):
+    """An entry of fix/mr-links.json for the MR of the front repo."""
+    return {"repo": "front", "url": f"https://{HOST}/acme/shop/-/merge_requests/{iid}",
+            "iid": iid, "partial": partial, "status_before": status}
 
 
 def section(text, heading, level="##"):
@@ -74,9 +81,9 @@ def full_body(**change):
 
 
 class TitleAndBodyTest(unittest.TestCase):
-    def test_title_counts_the_rows(self):
-        self.assertEqual(fix_mr.title("SÉCURITÉ", 5), "Checklist PRE-MEL : correctifs SÉCURITÉ (5 lignes)")
-        self.assertEqual(fix_mr.title("SÉCURITÉ", 1), "Checklist PRE-MEL : correctifs SÉCURITÉ (1 ligne)")
+    def test_title_counts_the_rows_and_the_sections(self):
+        self.assertEqual(fix_mr.title(5, 2), "Checklist PRE-MEL : correctifs (5 lignes, 2 sections)")
+        self.assertEqual(fix_mr.title(1, 1), "Checklist PRE-MEL : correctifs (1 ligne, 1 section)")
 
     def test_body_has_every_section_and_no_attribution(self):
         text = full_body()
@@ -138,6 +145,14 @@ class TitleAndBodyTest(unittest.TestCase):
         self.assertTrue(fix_mr.same_description("## A\r\n\r\nTexte.  \r\n", "## A\n\nTexte.\n"))
         self.assertFalse(fix_mr.same_description("## A\n\nTexte.\n", "## A\n\nAutre.\n"))
 
+    def test_partial_rows_are_marked(self):
+        text = full_body(fixed=[fixed_row(remaining="Traduire la page anglaise."),
+                                fixed_row(ref=108, title="Autre ligne")])
+        fixes = section(text, "Correctifs")
+        first = fixes[:fixes.index("### CQ-108 : Autre ligne")]
+        self.assertIn("**Partiel.** Reste à faire : Traduire la page anglaise.", first)
+        self.assertEqual(text.count("**Partiel.**"), 1)
+
     def test_semi_auto_rows_are_flagged(self):
         text = full_body(fixed=[
             fixed_row(semi_auto=True, human_check="Vérifier le rendu des iframes."),
@@ -191,12 +206,13 @@ class MaterialTest(unittest.TestCase):
     def setUp(self):
         def row(outcome, reason=None, commits=(), attention=None, number=1):
             return {"outcome": outcome, "reason": reason, "commits": list(commits),
-                    "pass": number, "attention": attention}
+                    "pass": number, "attention": attention, "section": "securite"}
 
         self.sha = "0123456789abcdef0123456789abcdef01234567"
         self.key = {"repo": "front", "mr": None,
                     "sections": [{"category": "SÉCURITÉ", "alias": "securite",
-                                  "refs": [3, 5, 6, 12], "state": "active", "reason": None}],
+                                  "refs": [3, 5, 6, 12], "state": "settled", "reason": None}],
+                    "pass_sections": {"1": "securite", "2": "securite"},
                     "rows": {
                         "3": row("fixed", commits=[self.sha], attention="Vérifier le cache du CDN."),
                         "5": row("skipped", "Demande une décision du client."),
@@ -250,10 +266,10 @@ class MaterialTest(unittest.TestCase):
         found = self.material()
         text = fix_mr.body(run_id=RUN_ID, category="SÉCURITÉ", copy_url=None, **found)
         self.assertEqual(section(text, "Hors-scope"), [
+            "### SÉCURITÉ",
             "- CQ-5 : Cinq : Demande une décision du client. ([Notion](https://www.notion.so/p5))",
             "- CQ-6 : Six : Revue bloquante : échappement manquant. ([Notion](https://www.notion.so/p6))",
             "- CQ-40 : Quarante : Manuel ([Notion](https://www.notion.so/p40))",
-            "- CQ-41 : Quarante et un : repo hors GitLab ([Notion](https://www.notion.so/p41))",
             "- CQ-42 : Quarante-deux : Détection seule ([Notion](https://www.notion.so/p42))",
             "- CQ-43 : Quarante-trois : non évaluée par l'audit : lancer d'abord une relance",
             "- CQ-53 : Cinquante-trois : déjà dans la MR !9",
@@ -261,7 +277,7 @@ class MaterialTest(unittest.TestCase):
         self.assertEqual(section(text, "En attente d'une décision"), [
             "- CQ-12 : Douze : Quel contact pour security.txt ? ([Notion](https://www.notion.so/p12))",
         ])
-        self.assertEqual(section(text, "Correctifs")[0], "### CQ-3 : Trois")
+        self.assertEqual(section(text, "Correctifs")[:2], ["### SÉCURITÉ", "#### CQ-3 : Trois"])
         self.assertIn(ROW_URL, "\n".join(section(text, "Correctifs")))
 
     def test_a_row_covered_by_the_fix_of_another_row_is_a_correctif_not_hors_scope(self):
@@ -269,19 +285,20 @@ class MaterialTest(unittest.TestCase):
         « Correctifs » as covered, unless CQ-x left the branch."""
         reason = "corrigé par le commit de CQ-{} d'une passe précédente"
         self.key["rows"]["7"] = {"outcome": "skipped", "reason": reason.format(3), "commits": [],
-                                 "pass": 2, "attention": None}
+                                 "pass": 2, "attention": None, "section": "securite"}
         self.key["rows"]["8"] = {"outcome": "skipped", "reason": reason.format(6), "commits": [],
-                                 "pass": 2, "attention": None}
+                                 "pass": 2, "attention": None, "section": "securite"}
         self.candidates["keys"][0]["sections"][0]["rows"] += [
             {"ref": 7, "title": "Sept", "page_id": "p7"}, {"ref": 8, "title": "Huit", "page_id": "p8"},
         ]
         found = self.material()
         self.assertEqual(found["covered"],
-                         [{"ref": 7, "title": "Sept", "by": 3, "url": "https://www.notion.so/p7"}])
-        self.assertEqual([item["ref"] for item in found["left"]], [5, 6, 8, 40, 41, 42, 43, 52, 53])
+                         [{"ref": 7, "title": "Sept", "by": 3, "url": "https://www.notion.so/p7",
+                           "section": "securite"}])
+        self.assertEqual([item["ref"] for item in found["left"]], [5, 6, 8, 40, 42, 43, 52, 53])
         text = fix_mr.body(run_id=RUN_ID, category="SÉCURITÉ", copy_url=None, **found)
         fixes = section(text, "Correctifs")
-        self.assertEqual(fixes[0], "### CQ-3 : Trois")
+        self.assertEqual(fixes[:2], ["### SÉCURITÉ", "#### CQ-3 : Trois"])
         self.assertEqual(fixes[-1], "- CQ-7 : Sept : couverte par le correctif de CQ-3 "
                                     "([Notion](https://www.notion.so/p7))")
         out = "\n".join(section(text, "Hors-scope"))
@@ -299,15 +316,18 @@ class MaterialTest(unittest.TestCase):
         reviews = [(1, {"attention": ["Nommer la constante."]}),
                    (2, {"attention": ["Ajouter un test.", "Nommer la constante."]})]
         found = self.material(reports=reports, reviews=reviews)
-        self.assertEqual(found["attention"], [
+        self.assertEqual([note["text"] for note in found["attention"]], [
             "Nommer la constante.", "Ajouter un test.", "CQ-3 : Vérifier le cache du CDN.",
         ])
+        self.assertEqual({note["section"] for note in found["attention"]}, {"securite"})
         text = fix_mr.body(run_id=RUN_ID, category="SÉCURITÉ", copy_url=None, **found)
         self.assertEqual(section(text, "Points d'attention"), [
-            "- Nommer la constante.", "- Ajouter un test.", "- CQ-3 : Vérifier le cache du CDN.",
+            "### SÉCURITÉ", "- Nommer la constante.", "- Ajouter un test.",
+            "- CQ-3 : Vérifier le cache du CDN.",
         ])
         later = self.material(reports=reports, reviews=reviews, since=1)
-        self.assertEqual(later["attention"], ["Ajouter un test.", "Nommer la constante."])
+        self.assertEqual([note["text"] for note in later["attention"]],
+                         ["Ajouter un test.", "Nommer la constante."])
 
     def test_material_takes_the_latest_report_and_the_current_files(self):
         reports = [
@@ -325,6 +345,7 @@ class MaterialTest(unittest.TestCase):
         self.assertEqual(found["fixed"], [{
             "ref": 3, "title": "Trois", "url": ROW_URL, "semi_auto": False, "human_check": None,
             "summary": "Constat 3.", "change": "c2", "uat": "u2", "commits": [self.sha[:8]],
+            "remaining": None, "section": "securite",
         }])
         self.assertEqual(found["checks"], [
             {"name": PHP, "status": "passed", "files": ["a.php"], "detail": ""},
@@ -332,9 +353,226 @@ class MaterialTest(unittest.TestCase):
         ])
         self.assertEqual(found["not_run"], [{"name": "Makefile (lint)", "command": "make lint"}])
         self.assertEqual(found["earlier"],
-                         [{"ref": 2, "title": None}, {"ref": 51, "title": "Cinquante et un"}])
+                         [{"ref": 2, "title": None, "section": None},
+                          {"ref": 51, "title": "Cinquante et un", "section": None}])
         self.assertIsNone(self.material()["checks"])
         self.assertEqual(self.material(since=1)["fixed"], [])
+
+
+class SectionLayoutTest(unittest.TestCase):
+    """0.15: one MR per pass and per repo carries every section, in the order of the commits."""
+
+    def setUp(self):
+        self.q20, self.s4, self.s3 = "a" * 40, "b" * 40, "c" * 40
+        failure = "Revue illisible après une nouvelle tentative."
+
+        def row(section, outcome, number, commits=(), reason=None, attention=None, **more):
+            return {"outcome": outcome, "reason": reason, "commits": list(commits),
+                    "pass": number, "attention": attention, "section": section, **more}
+
+        self.key = {
+            "repo": "front", "mr": None,
+            "sections": [
+                {"category": "SÉCURITÉ", "alias": "securite", "refs": [3, 4, 5],
+                 "state": "settled", "reason": None},
+                {"category": "QUALITÉ", "alias": "qualite", "refs": [20, 21],
+                 "state": "settled", "reason": None},
+                {"category": "SEO / GEO", "alias": "seo", "refs": [30], "state": "failed",
+                 "reason": failure,
+                 "leftover": {"patch": "fix/front/leftover-1.patch", "base": "d" * 40,
+                              "untracked": []}},
+            ],
+            "pass_sections": {"1": "securite", "2": "qualite", "3": "seo"},
+            "reorder_conflicts": ["fix(qualite CQ-20): name the constant"],
+            "rows": {
+                "3": row("securite", "fixed", 1, [self.s3], attention="Vérifier le cache du CDN."),
+                "4": row("securite", "fixed", 1, [self.s4], remaining="Traduire la page anglaise."),
+                "5": row("securite", "skipped", 1,
+                         reason="corrigé par le commit de CQ-3 d'une passe précédente"),
+                "20": row("qualite", "fixed", 2, [self.q20], attention="Relire le nom."),
+                "21": row("qualite", "skipped", 2, reason="Demande une décision du client."),
+                "30": row("seo", "dropped", 3, reason=failure),
+            },
+        }
+        titles = {3: "Trois", 4: "Quatre", 5: "Cinq", 20: "Vingt", 21: "Vingt et un",
+                  30: "Trente"}
+        sections = [("SÉCURITÉ", "securite", [3, 4, 5]), ("QUALITÉ", "qualite", [20, 21]),
+                    ("SEO / GEO", "seo", [30])]
+        self.candidates = {
+            "keys": [
+                {"key": "front", "repo": "front", "sections": [
+                    {"category": category, "alias": alias,
+                     "rows": [{"ref": ref, "title": titles[ref], "page_id": None} for ref in refs]}
+                    for category, alias, refs in sections]},
+                {"key": "back", "repo": "back", "sections": [
+                    {"category": "SÉCURITÉ", "alias": "securite",
+                     "rows": [{"ref": 41, "title": "Quarante et un", "page_id": None}]}]},
+            ],
+            "left": [
+                {"ref": 40, "title": "Quarante", "category": "SÉCURITÉ", "reason": "Manuel",
+                 "url": None, "repos": []},
+                {"ref": 41, "title": "Quarante et un", "category": "SÉCURITÉ",
+                 "reason": "repo hors GitLab", "url": None},
+                {"ref": 42, "title": "Quarante-deux", "category": "SÉCURITÉ",
+                 "reason": "Détection seule", "url": None, "repos": ["back"]},
+                {"ref": 43, "title": "Quarante-trois", "category": "SÉCURITÉ",
+                 "reason": "Manuel", "url": None, "repos": ["front", "back"]},
+                {"ref": 50, "title": "Cinquante", "category": "RGPD & LÉGAL", "reason": "Manuel",
+                 "url": None},
+            ],
+        }
+        self.reports = [
+            (1, {"rows": [
+                {"ref": 3, "outcome": "fixed", "change": "Changement du rapport 3.",
+                 "uat": "UAT du rapport 3.", "attention": "Vérifier le cache du CDN."},
+                {"ref": 4, "outcome": "fixed", "change": "Changement 4.", "uat": "UAT 4.",
+                 "remaining": "Traduire la page anglaise."},
+                {"ref": 5, "outcome": "skipped", "reason": "x"},
+            ]}),
+            (2, {"rows": [{"ref": 20, "outcome": "fixed", "change": "Changement 20.",
+                           "uat": "UAT 20.", "attention": "Relire le nom."}]}),
+            (3, {"rows": [{"ref": 30, "outcome": "fixed", "change": "Changement 30.",
+                           "uat": "UAT 30.", "attention": "Remarque de la section en échec."}]}),
+        ]
+        self.reviews = [(1, {"attention": ["Note de la revue 1."]}),
+                        (2, {"attention": ["Note de la revue 2."]}),
+                        (3, {"attention": ["Note de la revue de la section en échec."]})]
+
+    def material(self, since=0):
+        return fix_mr.material(
+            self.key, self.candidates, [], self.reports, self.reviews, None, [], set(),
+            since=since, order=[self.q20, self.s4, self.s3],
+        )
+
+    def test_body_groups_by_section_in_commit_order(self):
+        found = self.material()
+        self.assertEqual([item["alias"] for item in found["sections"]],
+                         ["qualite", "securite", "seo"])
+        self.assertEqual([row["ref"] for row in found["fixed"]], [20, 4, 3])
+        self.assertEqual([row["section"] for row in found["fixed"]],
+                         ["qualite", "securite", "securite"])
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
+        self.assertEqual(section(text, "Contexte")[0],
+                         "Audit PRE-MEL du 29/10/2026 (run 2026-10-29-0930), catégories QUALITÉ, "
+                         "SÉCURITÉ, SEO / GEO.")
+        fixes = section(text, "Correctifs")
+        self.assertEqual([line for line in fixes if line.startswith("#")], [
+            "### QUALITÉ", "#### CQ-20 : Vingt", "### SÉCURITÉ", "#### CQ-4 : Quatre",
+            "#### CQ-3 : Trois",
+        ])
+        self.assertEqual(fixes[-1], "- CQ-5 : Cinq : couverte par le correctif de CQ-3")
+        self.assertEqual(section(text, "Hors-scope"), [
+            "### QUALITÉ",
+            "- CQ-21 : Vingt et un : Demande une décision du client.",
+            "### SÉCURITÉ",
+            "- CQ-40 : Quarante : Manuel",
+            "- CQ-43 : Quarante-trois : Manuel",
+            "### SEO / GEO",
+            "Section non aboutie : Revue illisible après une nouvelle tentative.",
+            "- CQ-30 : Trente : Revue illisible après une nouvelle tentative.",
+        ])
+        self.assertEqual(section(text, "Points d'attention"), [
+            "- Commits non rangés par section : conflit de rejeu "
+            "(`fix(qualite CQ-20): name the constant`).",
+            "### QUALITÉ",
+            "- Note de la revue 2.",
+            "- CQ-20 : Relire le nom.",
+            "### SÉCURITÉ",
+            "- Note de la revue 1.",
+            "- CQ-3 : Vérifier le cache du CDN.",
+        ])
+        for absent in ("leftover", "section en échec", "Changement 30."):
+            self.assertNotIn(absent, text)
+        self.assertEqual(fix_mr.title(4, 2), "Checklist PRE-MEL : correctifs (4 lignes, 2 sections)")
+        self.assertEqual(fix_mr.title(1, 1), "Checklist PRE-MEL : correctifs (1 ligne, 1 section)")
+        self.assertEqual(fix_mr.title_counts(found), (4, 2))
+        added = fix_mr.addition(**{name: value for name, value in found.items()
+                                   if name != "earlier"})
+        self.assertTrue(added.startswith(
+            "### Correctifs\n\n#### QUALITÉ\n\n##### CQ-20 : Vingt\n"), added)
+        addition, hors = fix_mr.split_addition(added)
+        self.assertIn("### Points d'attention\n\n- Commits non rangés par section", addition)
+        self.assertIn("#### SÉCURITÉ\n\n- Note de la revue 1.", addition)
+        self.assertTrue(hors.startswith("### QUALITÉ\n\n- CQ-21 : Vingt et un"), hors)
+        self.assertIn("### SEO / GEO\n\nSection non aboutie : ", hors)
+        later = self.material(since=1)
+        self.assertEqual([row["ref"] for row in later["fixed"]], [20])
+        self.assertEqual(fix_mr.title_counts(later), (1, 1))
+
+    def test_partial_rows_are_marked(self):
+        found = self.material()
+        self.assertEqual({row["ref"]: row["remaining"] for row in found["fixed"]},
+                         {20: None, 4: "Traduire la page anglaise.", 3: None})
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
+        fixes = section(text, "Correctifs")
+        four = fixes[fixes.index("#### CQ-4 : Quatre"):fixes.index("#### CQ-3 : Trois")]
+        self.assertIn("**Partiel.** Reste à faire : Traduire la page anglaise.", four)
+        self.assertEqual(text.count("**Partiel.**"), 1)
+        alone = full_body(fixed=[fixed_row(remaining="Ajouter la page en anglais.")])
+        self.assertIn("**Partiel.** Reste à faire : Ajouter la page en anglais.",
+                      section(alone, "Correctifs"))
+
+    def test_review_corrections_replace_report_texts(self):
+        self.key["rows"]["3"]["corrections"] = {
+            "change": "Changement relu.", "attention": "Remarque relue.",
+            "remaining": "Reste relu."}
+        self.key["rows"]["20"]["corrections"] = {"uat": "UAT relue."}
+        found = self.material()
+        rows = {row["ref"]: row for row in found["fixed"]}
+        self.assertEqual((rows[3]["change"], rows[3]["uat"], rows[3]["remaining"]),
+                         ("Changement relu.", "UAT du rapport 3.", "Reste relu."))
+        self.assertEqual((rows[20]["change"], rows[20]["uat"]), ("Changement 20.", "UAT relue."))
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
+        notes = section(text, "Points d'attention")
+        self.assertIn("- CQ-3 : Remarque relue.", notes)
+        self.assertIn("- CQ-20 : Relire le nom.", notes)
+        for replaced in ("Changement du rapport 3.", "Vérifier le cache du CDN.", "UAT 20."):
+            self.assertNotIn(replaced, text)
+        self.assertIn("**Partiel.** Reste à faire : Reste relu.", section(text, "Correctifs"))
+
+    def test_hors_scope_lists_only_the_rows_of_the_repo(self):
+        refs = [item["ref"] for item in self.material()["left"]]
+        self.assertEqual(refs, [21, 30, 40, 43])
+        old = dict(self.candidates["left"][0])
+        old.pop("repos")
+        self.candidates["left"][0] = old
+        self.assertIn(40, [item["ref"] for item in self.material()["left"]])
+
+    def test_links_record_partial_and_status_before(self):
+        earlier = {"links": {
+            "3": [{"repo": "back", "url": "u7", "iid": 7, "partial": False,
+                   "status_before": "À traiter"},
+                  {"repo": "front", "url": MR_URL, "iid": 12, "partial": False,
+                   "status_before": "À traiter"}],
+            "9": [{"repo": "front", "url": MR_URL, "iid": 12}]}}
+        before = json.dumps(earlier)
+        details = {3: {"partial": True, "status_before": "En review"},
+                   4: {"partial": False, "status_before": "Mise en place partielle"},
+                   9: {"partial": False, "status_before": "À traiter"}}
+        merged = fix_mr.merge_links(earlier, "front", {"iid": 12, "url": MR_URL}, [3, 4, 9],
+                                    details)
+        self.assertEqual(json.dumps(earlier), before)
+        self.assertEqual(merged["links"], {
+            "3": [{"repo": "back", "url": "u7", "iid": 7, "partial": False,
+                   "status_before": "À traiter"},
+                  {"repo": "front", "url": MR_URL, "iid": 12, "partial": True,
+                   "status_before": "À traiter"}],
+            "4": [{"repo": "front", "url": MR_URL, "iid": 12, "partial": False,
+                   "status_before": "Mise en place partielle"}],
+            "9": [{"repo": "front", "url": MR_URL, "iid": 12, "partial": False,
+                   "status_before": "À traiter"}],
+        })
+        self.assertEqual(
+            fix_mr.link_details(self.key, self.candidates, [{"ref": 3, "status": "À traiter"}],
+                                [3, 4, 5]),
+            {3: {"partial": False, "status_before": "À traiter"},
+             4: {"partial": True, "status_before": None},
+             5: {"partial": False, "status_before": None}})
+        self.candidates["keys"][0]["sections"][0]["rows"][1]["status"] = "Mise en place partielle"
+        self.assertEqual(
+            fix_mr.link_details(self.key, self.candidates,
+                                [{"ref": 4, "status": "Mis en place"}], [4])[4]["status_before"],
+            "Mise en place partielle")
 
 
 class MergeDescriptionTest(unittest.TestCase):
@@ -484,8 +722,9 @@ class MrCase(GitCase):
     def write_doc(self, name, document):
         (self.folder / name).write_text(json.dumps(document), encoding="utf-8")
 
-    def reviewed(self, push="mr", fix=True, mode="present"):
-        """Open a pass, fix CQ-3 and skip CQ-5 in pass 1, then review: the key is reviewed."""
+    def reviewed(self, push="mr", fix=True, mode="present", settle=True, **fixed):
+        """Open a pass, fix CQ-3 and skip CQ-5 in pass 1, then review: the key is reviewed and,
+        with settle, its section settled. fixed adds fields to the report row of CQ-3."""
         self.open_pass(push=push, mode=mode)
         started = self.start_ok()
         self.worktree = Path(started["worktree"])
@@ -496,7 +735,8 @@ class MrCase(GitCase):
         if fix:
             self.fixed = self.fixer_commit(self.worktree, "a3.txt", "fix(securite CQ-3): add a")
             rows.insert(0, {"ref": 3, "outcome": "fixed", "change": "Ajoute a.", "uat": "Lire a.",
-                            "commits": [self.fixed], "attention": "Vérifier le cache du CDN."})
+                            "commits": [self.fixed], "attention": "Vérifier le cache du CDN.",
+                            **fixed})
         else:
             rows.insert(0, {"ref": 3, "outcome": "skipped", "reason": "Déjà corrigé sur develop."})
         self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": rows})
@@ -508,7 +748,19 @@ class MrCase(GitCase):
         code, out, err = self.cli("validate", KEY, "review", "--pass", "1")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.key()["step"], "reviewed")
+        if settle:
+            self.settle()
         return started
+
+    def settle(self):
+        code, out, err = self.cli("section-end", KEY, *SECTION)
+        self.assertEqual(code, 0, err)
+
+    def reopen_section(self):
+        """Put the settled section back in progress, for one more pass of the same key."""
+        state = self.state()
+        state["keys"][KEY]["sections"][0]["state"] = "active"
+        fix_state.save(self.run_dir, state)
 
     def remote(self, branch):
         found = subprocess.run(
@@ -550,26 +802,27 @@ class MrBodyTest(MrCase):
         code, out, err = self.cli("mr-body", KEY)
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out), {
-            "title": "Checklist PRE-MEL : correctifs SECURITE (1 ligne)",
-            "file": "fix/front/mr.md", "kind": "create", "fixed": [3], "covered": [],
-            "waiting": [], "out_of_scope": [5],
+            "title": TITLE_ONE, "file": "fix/front/mr.md", "kind": "create",
+            "sections": ["securite"], "fixed": [3], "partial": [], "covered": [], "waiting": [],
+            "out_of_scope": [5],
         })
         self.assertEqual((self.folder / "mr-title.txt").read_text(encoding="utf-8"),
-                         "Checklist PRE-MEL : correctifs SECURITE (1 ligne)\n")
+                         TITLE_ONE + "\n")
         text = (self.folder / "mr.md").read_text(encoding="utf-8")
         self.assertEqual(section(text, "Contexte")[0],
                          f"Audit PRE-MEL du 29/10/2026 (run {RUN_ID}), catégorie SECURITE.")
         self.assertIn(COPY_URL, text)
         fixes = section(text, "Correctifs")
-        self.assertEqual(fixes[0], "### CQ-3 : Ligne 3")
+        self.assertEqual(fixes[:2], ["### SECURITE", "#### CQ-3 : Ligne 3"])
         for expected in ("Ajoute a.", "Lire a.", self.fixed[:8]):
             self.assertIn(expected, "\n".join(fixes))
         self.assertEqual(section(text, "Vérification"),
                          [f"- ✅ {PHP} (a3.txt)", "- Non lancé : Makefile (lint) : `make lint`", CI])
         self.assertEqual(section(text, "Points d'attention"),
-                         ["- Nommer la constante.", "- CQ-3 : Vérifier le cache du CDN."])
+                         ["### SECURITE", "- Nommer la constante.",
+                          "- CQ-3 : Vérifier le cache du CDN."])
         self.assertEqual(section(text, "Hors-scope"),
-                         ["- CQ-5 : Ligne 5 : Demande une décision de l'équipe UI/UX."])
+                         ["### SECURITE", "- CQ-5 : Ligne 5 : Demande une décision de l'équipe UI/UX."])
         self.assertFalse((self.folder / "mr-addition.md").exists())
 
     def test_mr_body_counts_and_lists_a_row_covered_by_another_fix(self):
@@ -582,7 +835,7 @@ class MrBodyTest(MrCase):
         self.assertEqual(code, 0, err)
         result = json.loads(out)
         self.assertEqual((result["title"], result["fixed"], result["covered"], result["out_of_scope"]),
-                         ("Checklist PRE-MEL : correctifs SECURITE (2 lignes)", [3], [5], []))
+                         ("Checklist PRE-MEL : correctifs (2 lignes, 1 section)", [3], [5], []))
         text = (self.folder / "mr.md").read_text(encoding="utf-8")
         self.assertEqual(section(text, "Correctifs")[-1],
                          "- CQ-5 : Ligne 5 : couverte par le correctif de CQ-3")
@@ -599,9 +852,9 @@ class MrBodyTest(MrCase):
         self.assertFalse((self.folder / "mr.md").exists())
         addition, hors = fix_mr.split_addition(
             (self.folder / "mr-addition.md").read_text(encoding="utf-8"))
-        self.assertTrue(addition.startswith("### Correctifs\n\n#### CQ-3 : Ligne 3"))
+        self.assertTrue(addition.startswith("### Correctifs\n\n#### SECURITE\n\n##### CQ-3 : Ligne 3"))
         self.assertNotIn("CQ-107", addition)
-        self.assertEqual(hors, "- CQ-5 : Ligne 5 : Demande une décision de l'équipe UI/UX.")
+        self.assertEqual(hors, "### SECURITE\n\n- CQ-5 : Ligne 5 : Demande une décision de l'équipe UI/UX.")
 
     def test_mr_body_needs_a_reviewed_key_and_a_run_id(self):
         self.open_pass()
@@ -611,6 +864,7 @@ class MrBodyTest(MrCase):
         self.assertIn("reviewed", err)
         state = self.state()
         state["keys"][KEY]["step"] = "reviewed"
+        state["keys"][KEY]["sections"][0]["state"] = "settled"
         fix_state.save(self.run_dir, state)
         renamed = self.root / "run"
         self.run_dir.rename(renamed)
@@ -668,8 +922,7 @@ class PublishTest(MrCase):
         self.assertEqual(args[args.index("--source-branch") + 1], self.branch)
         self.assertEqual(args[args.index("--target-branch") + 1], "develop")
         self.assertEqual(args[args.index("--assignee") + 1], "camille")
-        self.assertEqual(args[args.index("--title") + 1],
-                         "Checklist PRE-MEL : correctifs SECURITE (1 ligne)")
+        self.assertEqual(args[args.index("--title") + 1], TITLE_ONE)
         description = (self.folder / "mr.md").read_text(encoding="utf-8")
         self.assertIn(f"--description={description}", args)
         self.assertEqual(kwargs["env"]["GITLAB_HOST"], HOST)
@@ -679,7 +932,7 @@ class PublishTest(MrCase):
                          ({"iid": 12, "url": MR_URL}, True, True))
         key = self.key()
         self.assertEqual((key["mr"], key["step"]), ({"iid": 12, "url": MR_URL}, "published"))
-        self.assertEqual(self.links(), {"links": {"3": [{"repo": "front", "url": MR_URL, "iid": 12}]}})
+        self.assertEqual(self.links(), {"links": {"3": [link()]}})
         self.assertEqual(self.tracking_config(), "")
         self.assert_allowed()
 
@@ -707,7 +960,7 @@ class PublishTest(MrCase):
         self.reviewed()
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         self.assertEqual(self.cli("publish", KEY)[0], 0)
-        front = {"repo": "front", "url": MR_URL, "iid": 12}
+        front = link()
         self.assertEqual(self.links(), {"links": {"3": [back, front], "40": [back]}})
         state = self.state()
         state["keys"][KEY].update(step="reviewed")
@@ -738,15 +991,16 @@ class PublishTest(MrCase):
         today = date.today().strftime("%d/%m/%Y")
         self.assertTrue(new.startswith(
             f"## Contexte\n\nTexte retouché par le relecteur.\n\n## Ajouts du {today}\n\n"
-            "### Correctifs\n\n#### CQ-3 : Ligne 3\n"))
+            "### Correctifs\n\n#### SECURITE\n\n##### CQ-3 : Ligne 3\n"))
         self.assertTrue(new.endswith(
-            "## Hors-scope\n\n- CQ-5 : Ligne 5 : Demande une décision de l'équipe UI/UX.\n\n"
+            "## Hors-scope\n\n### SECURITE\n\n"
+            "- CQ-5 : Ligne 5 : Demande une décision de l'équipe UI/UX.\n\n"
             "## Suite\n\nNote du relecteur.\n"))
         self.assertNotIn("CQ-40", new)
         self.assertEqual(self.remote(branch), self.head(self.worktree))
         result = json.loads(out)
         self.assertEqual((result["created"], result["updated"]), (False, True))
-        self.assertEqual(self.links(), {"links": {"3": [{"repo": "front", "url": MR_URL, "iid": 12}]}})
+        self.assertEqual(self.links(), {"links": {"3": [link()]}})
         self.assertEqual((self.key()["mr"]["iid"], self.key()["step"]), (12, "published"))
         self.assert_allowed()
 
@@ -758,6 +1012,7 @@ class PublishTest(MrCase):
         self.assertEqual(self.key()["mr"], {"iid": 12, "url": MR_URL})
         self.assertEqual(self.cli("finish", KEY)[0], 0)
         self.assertEqual(self.start_ok()["branch"], self.branch)
+        self.reopen_section()
         self.assertEqual(self.cli("pass-start", KEY, "--pass", "2", *SECTION)[0], 0)
         self.fixer_commit(self.worktree, "b5.txt", "fix(securite CQ-5): add b")
         self.write_doc("report-2.json", {"key": KEY, "pass": 2, "rows": [
@@ -767,9 +1022,10 @@ class PublishTest(MrCase):
         self.write_doc("review-2.json", {"key": KEY, "pass": 2, "attention": ["Remarque 2."],
                                          "rows": [{"ref": 5, "verdict": "ok", "notes": None}]})
         self.assertEqual(self.cli("validate", KEY, "review", "--pass", "2")[0], 0)
+        self.settle()
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         addition = (self.folder / "mr-addition.md").read_text(encoding="utf-8")
-        self.assertIn("#### CQ-5 : Ligne 5", addition)
+        self.assertIn("##### CQ-5 : Ligne 5", addition)
         self.assertNotIn("CQ-3", addition)
         self.assertIn("- Remarque 2.", addition)
         self.assertNotIn("Nommer la constante.", addition)
@@ -781,7 +1037,7 @@ class PublishTest(MrCase):
         self.assertEqual(self.cli("publish", KEY)[0], 5)
         self.assertEqual(len(self.glab_args("mr", "create")), 1)
         self.assertEqual(len(self.glab_args("mr", "update")), 1)
-        self.assertEqual(self.links()["links"]["5"], [{"repo": "front", "url": MR_URL, "iid": 12}])
+        self.assertEqual(self.links()["links"]["5"], [link()])
         self.assert_allowed()
 
     def test_publish_refuses_a_diverged_branch(self):
@@ -858,6 +1114,7 @@ class PublishTest(MrCase):
     def test_publish_refuses_a_stale_description(self):
         self.reviewed()
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.reopen_section()
         self.assertEqual(self.cli("pass-start", KEY, "--pass", "2", *SECTION)[0], 0)
         self.fixer_commit(self.worktree, "b5.txt", "fix(securite CQ-5): add b")
         self.write_doc("report-2.json", {"key": KEY, "pass": 2, "rows": [
@@ -867,6 +1124,7 @@ class PublishTest(MrCase):
         self.write_doc("review-2.json", {"key": KEY, "pass": 2, "attention": [],
                                          "rows": [{"ref": 5, "verdict": "ok", "notes": None}]})
         self.assertEqual(self.cli("validate", KEY, "review", "--pass", "2")[0], 0)
+        self.settle()
         code, out, err = self.cli("publish", KEY)
         self.assertEqual(code, 2)
         self.assertIn(STALE, err)
@@ -922,15 +1180,14 @@ class PublishTest(MrCase):
         self.fix_row_5()
         code, out, err = self.cli("mr-body", KEY)
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out)["title"], "Checklist PRE-MEL : correctifs SECURITE (2 lignes)")
+        self.assertEqual(json.loads(out)["title"], "Checklist PRE-MEL : correctifs (2 lignes, 1 section)")
         text = (self.folder / "mr.md").read_text(encoding="utf-8")
         self.assertIn("La branche porte aussi des correctifs d'une passe précédente : CQ-3 (Ligne 3).",
                       text)
         code, out, err = self.cli("publish", KEY)
         self.assertEqual(code, 0, err)
         self.assertEqual(self.remote(branch), self.head(self.worktree))
-        link = [{"repo": "front", "url": MR_URL, "iid": 12}]
-        self.assertEqual(self.links(), {"links": {"3": link, "5": link}})
+        self.assertEqual(self.links(), {"links": {"3": [link()], "5": [link()]}})
         self.assertEqual(json.loads(out)["links"], [3, 5])
 
     def take_over_local_branch(self, *subjects):
@@ -1056,6 +1313,7 @@ class PublishTest(MrCase):
                                          "rows": [{"ref": 5, "verdict": "ok", "notes": None}]})
         self.assertEqual(self.cli("validate", KEY, "review", "--pass", "1")[0], 0)
         self.assertEqual(self.key()["step"], "reviewed")
+        self.settle()
 
     def test_publish_and_finish_follow_the_steps(self):
         self.open_pass()
@@ -1125,7 +1383,7 @@ class PublishTest(MrCase):
         self.assertEqual(len(self.glab_args("mr", "create")), 1)
         self.assertEqual(self.glab_args("mr", "update"), [])
         self.assertEqual(self.key()["mr"], {"iid": 12, "url": MR_URL})
-        self.assertEqual(self.links(), {"links": {"3": [{"repo": "front", "url": MR_URL, "iid": 12}]}})
+        self.assertEqual(self.links(), {"links": {"3": [link()]}})
         self.assertEqual(self.gitlab.mrs[12]["description"], stored)
 
     def test_publish_resumes_after_a_failure_once_the_mr_exists(self):
@@ -1150,7 +1408,7 @@ class PublishTest(MrCase):
         self.assertEqual(self.glab_args("mr", "update"), [])
         self.assertEqual(self.gitlab.mrs[12]["description"].count("### CQ-3 : Ligne 3"), 1)
         self.assertEqual((self.key()["mr"], self.key()["step"]), ({"iid": 12, "url": MR_URL}, "published"))
-        self.assertEqual(self.links(), {"links": {"3": [{"repo": "front", "url": MR_URL, "iid": 12}]}})
+        self.assertEqual(self.links(), {"links": {"3": [link()]}})
 
     def test_publish_without_any_commit_publishes_nothing(self):
         self.reviewed(fix=False)
@@ -1165,11 +1423,15 @@ class PublishTest(MrCase):
         self.assertFalse((self.run_dir / "fix" / "mr-links.json").exists())
 
     def test_summary_names_the_empty_branch_left_by_a_publication_without_commit(self):
-        """M4: « Aucun commit sur la branche » leaves the branch, empty, in the dev's repo."""
+        """M4: « Aucun commit sur la branche » leaves the branch, empty, in the dev's repo when
+        finish may not delete it (here the dev has it checked out)."""
         self.reviewed(fix=False)
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         self.assertEqual(self.cli("publish", KEY)[0], 0)
-        self.assertEqual(self.cli("finish", KEY)[0], 0)
+        real_git(self.repo, "checkout", "-q", "--ignore-other-worktrees", self.branch)
+        code, out, err = self.cli("finish", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertFalse(json.loads(out)["branch_deleted"])
         self.assertEqual(self.head(self.repo, f"refs/heads/{self.branch}"),
                          self.head(self.repo, "refs/remotes/origin/develop"))
         code, out, err = self.cli("summary")
@@ -1177,7 +1439,7 @@ class PublishTest(MrCase):
         result = json.loads(out)
         local = result["text"].split("## Branches restées en local\n\n", 1)[1].split("\n\n")[0]
         self.assertEqual(local, f"- front : {self.branch} (aucun commit)")
-        self.assertEqual(result["team_message"], f"{RUN_ID}\nAucun correctif préparé.")
+        self.assertEqual(result["team_message"], "front\nAucun correctif préparé.")
 
     def test_publish_refuses_during_an_autonomous_pass(self):
         """I1: an autonomous pass pushes nothing during its key loop (stage keys)."""
@@ -1214,12 +1476,128 @@ class PublishTest(MrCase):
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
         code, out, err = self.cli("publish", KEY)
         self.assertEqual(code, 0, err)
-        link = [{"repo": "front", "url": MR_URL, "iid": 12}]
-        self.assertEqual(self.links(), {"links": {"3": link, "5": link}})
+        self.assertEqual(self.links(), {"links": {"3": [link()], "5": [link()]}})
         self.assertEqual(json.loads(out)["links"], [3, 5])
 
 
+class SettledSectionsTest(MrCase):
+    def test_mr_body_and_publish_need_every_section_settled(self):
+        """P6: one MR per pass and per repo, once each of its sections is settled or failed."""
+        self.reviewed(settle=False)
+        for command in ("mr-body", "publish"):
+            with self.subTest(command=command):
+                code, out, err = self.cli(command, KEY)
+                self.assertEqual(code, 2, err)
+                self.assertIn("La section securite est à l'état « active »", err)
+                self.assertIn("section-end", err)
+        self.assertFalse((self.folder / "mr.md").exists())
+        self.assertEqual(self.remote(self.branch), "")
+        self.assertEqual(self.gitlab.calls, [])
+        reason = "Revue illisible après une nouvelle tentative."
+        code, out, err = self.cli("section-end", KEY, *SECTION, "--failed", "--reason", reason)
+        self.assertEqual(code, 0, err)
+        code, out, err = self.cli("mr-body", KEY)
+        self.assertEqual(code, 0, err)
+        text = (self.folder / "mr.md").read_text(encoding="utf-8")
+        self.assertEqual(section(text, "Hors-scope"), [
+            "### SECURITE", f"Section non aboutie : {reason}", f"- CQ-3 : Ligne 3 : {reason}",
+            "- CQ-5 : Ligne 5 : Demande une décision de l'équipe UI/UX.",
+        ])
+        self.assertNotIn("## Points d'attention", text)
+        self.assertEqual(self.cli("publish", KEY)[0], 0)
+        self.assertEqual(self.remote(self.branch), "")
+
+
+class LinksTest(MrCase):
+    def test_links_record_partial_and_status_before(self):
+        """Each link of fix/mr-links.json says whether the row is partial, and its status at
+        launch: fix/candidates.json first, else rows.json."""
+        path = self.run_dir / "fix" / "candidates.json"
+        candidates = json.loads(path.read_text(encoding="utf-8"))
+        candidates["keys"][0]["sections"][0]["rows"][0]["status"] = "À traiter"
+        path.write_text(json.dumps(candidates), encoding="utf-8")
+        self.write_json("rows.json", {"rows": [
+            {"ref": 3, "status": "Mis en place"}, {"ref": 5, "status": "Mise en place partielle"}]})
+        self.reviewed(remaining="Traduire la page anglaise.")
+        state = self.state()
+        state["keys"][KEY]["rows"]["5"].update(
+            reason="corrigé par le commit de CQ-3 d'une passe précédente")
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.cli("mr-body", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["partial"], [3])
+        text = (self.folder / "mr.md").read_text(encoding="utf-8")
+        self.assertIn("**Partiel.** Reste à faire : Traduire la page anglaise.",
+                      section(text, "Correctifs"))
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.links(), {"links": {
+            "3": [link(partial=True, status="À traiter")],
+            "5": [link(status="Mise en place partielle")],
+        }})
+
+
 class FinishTest(MrCase):
+    def head_of(self, branch):
+        found = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "--verify", "--quiet",
+                                f"refs/heads/{branch}"], capture_output=True, text=True)
+        return found.stdout.strip() or None
+
+    def test_finish_deletes_only_an_empty_local_branch(self):
+        """A key left without any commit loses its local branch at finish; a branch with
+        commits, checked out elsewhere or on origin stays, and nothing is ever forced."""
+        for case in ("local", "dry_run", "published", "commits", "checked_out", "on_origin"):
+            with self.subTest(case=case):
+                push = case if case in ("local", "dry_run") else (
+                    "mr" if case == "published" else "local")
+                self.reviewed(push=push, fix=case == "commits")
+                start = self.key()["start_sha"]
+                if case == "published":
+                    self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+                    self.assertEqual(self.cli("publish", KEY)[0], 0)
+                if case == "checked_out":
+                    real_git(self.repo, "checkout", "-q", "--ignore-other-worktrees", self.branch)
+                if case == "on_origin":
+                    real_git(self.repo, "push", "-q", "origin", f"{start}:refs/heads/{self.branch}")
+                code, out, err = self.cli("finish", KEY)
+                self.assertEqual(code, 0, err)
+                result = json.loads(out)
+                deleted = case in ("local", "dry_run", "published")
+                self.assertEqual(result["branch_deleted"], deleted)
+                self.assertFalse(self.worktree.exists())
+                self.assertEqual(self.key().get("branch_deleted", False), deleted)
+                self.assertEqual(self.head_of(self.branch),
+                                 None if deleted else (self.fixed if case == "commits" else start))
+                for command in self.gitlab.git:
+                    self.assertNotIn("-D", command)
+                    self.assertNotIn("--force", command[command.index("branch"):]
+                                     if "branch" in command else [])
+                if deleted:
+                    code, out, err = self.cli("summary")
+                    self.assertEqual(code, 0, err)
+                    self.assertNotIn("## Branches restées en local", json.loads(out)["text"])
+                else:
+                    self.assertEqual(self.run_main(["abandon", self.run_dir])[0], 0)
+                if case == "checked_out":
+                    real_git(self.repo, "checkout", "-q", "develop")
+                    real_git(self.repo, "branch", "-q", "-D", self.branch)
+                if case == "on_origin":
+                    real_git(self.repo, "push", "-q", "origin", f":refs/heads/{self.branch}")
+                    real_git(self.repo, "branch", "-q", "-D", self.branch)
+                if case == "commits":
+                    real_git(self.repo, "branch", "-q", "-D", self.branch)
+                self.gitlab.git.clear()
+
+    def test_start_after_finish_restores_a_deleted_empty_branch(self):
+        self.reviewed(push="local", fix=False)
+        start = self.key()["start_sha"]
+        self.assertTrue(json.loads(self.cli("finish", KEY)[1])["branch_deleted"])
+        started = self.start_ok()
+        self.assertEqual((started["branch"], started["start_sha"]), (self.branch, start))
+        self.assertEqual(self.head(self.worktree), start)
+        self.assertEqual(self.head_of(self.branch), start)
+        self.assertNotIn("branch_deleted", self.key())
+
     def test_finish_refuses_a_dirty_worktree(self):
         self.reviewed(push="local")
         (self.worktree / "draft.txt").write_text("uncommitted", encoding="utf-8")

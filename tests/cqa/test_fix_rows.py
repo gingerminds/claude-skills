@@ -225,6 +225,23 @@ class SelectTest(unittest.TestCase):
         result = select(rows, findings, refs=(1,))
         self.assertEqual(kept_refs(result), [1, 2, 3])
 
+    def test_left_rows_name_the_repos_of_their_evidence_and_rows_keep_their_status(self):
+        """The MR of a repo lists in « Hors-scope » only the left rows that may concern it;
+        each candidate row keeps the status of the copy, read at launch (status_before)."""
+        repos = [{"name": "front"}, {"name": "back"}]
+        access = [{"repo": "front", "status": "ok"}, {"repo": "back", "status": "not_gitlab"}]
+        rows = [row(1, automation="Manuel"), row(2, automation="Manuel"), row(3), row(4),
+                row(5, status=PARTIAL)]
+        findings = {1: finding(1, repo="back"), 3: finding(3, repo="back"),
+                    4: finding(4, repo="front"), 5: finding(5, repo="front")}
+        result = select(rows, findings, repos=repos, access=access,
+                        flights={"front": flight(), "back": flight()})
+        self.assertEqual({entry["ref"]: (entry["reason"], entry["repos"]) for entry in result["left"]}, {
+            1: ("Manuel", ["back"]), 2: ("Manuel", []), 3: ("repo hors GitLab", ["back"]),
+        })
+        self.assertEqual({item["ref"]: item["status"] for item in fix_rows.key_rows(result["keys"][0])},
+                         {4: TODO, 5: PARTIAL})
+
     def test_candidates_skip_rows_of_a_v2_mr(self):
         url = "https://gitlab.example.org/acme/shop/-/merge_requests/318"
         flights = {"front": flight(
