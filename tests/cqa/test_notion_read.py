@@ -836,7 +836,7 @@ class RecetteCommandTest(CliTestCase):
                     "MR : https://gitlab.example.org/acme/back/-/merge_requests/7",
                     "Premier avis",
                 ],
-                "mr_links": [],
+                "fix": {"mrs": [], "remaining": None},
             },
         )
         self.assertEqual(json.loads(out)["recette"], [79])
@@ -846,23 +846,55 @@ class RecetteCommandTest(CliTestCase):
         self.assertTrue(all(call.url.split("?")[0].endswith("/query") for call in posts))
         self.assertEqual({call.method for call in transport.calls}, {"GET", "POST"})
 
-    def test_recette_gives_the_mr_links(self):
+    def test_recette_gives_the_fix_info(self):
         self.write_audit()
         url = "https://gitlab.example.org/acme/back/-/merge_requests/7"
+        old_url = "https://gitlab.example.org/acme/back/-/merge_requests/2"
         (self.run_dir / "fix").mkdir()
-        self.write_json("fix/mr-links.json", {"links": {"79": [{"repo": "back", "url": url, "iid": 7}]}})
+        self.write_json("fix/mr-links.json", {"links": {
+            "79": [{"repo": "back", "url": old_url, "iid": 2}],
+            "81": [{"repo": "back", "url": old_url, "iid": 2}],
+        }})
         reduced = (
-            "Audit PRE-MEL · 29/10/2026 · lancé par Camille D\n\nMR :\n" + url + "\n"
+            "Audit PRE-MEL · 29/10/2026 · lancé par Camille D\n\nMR :\n" + old_url + "\n"
             "Réf CQ-79 · develop@abc1234 · gm:checklist-quality-audit 0.14.0"
         )
-        comments = {"c1": [dated_comment(reduced, "2026-10-03T10:00:00.000Z", BOT),
-                           dated_comment("Avis", "2026-10-02T10:00:00.000Z")]}
-        code, out, err, _ = self.run_recette(comments, options=["--refs", "CQ-81"])
+        fixed = (
+            "Correctif automatique · 29/10/2026 · lancé par Camille D\n\nMR :\n" + url + "\n\n"
+            "Fait :\nActive la compression.\n\nReste à faire :\nCompresser aussi le JSON.\n\n"
+            "Commits :\nabc12345\nRéf CQ-79 · develop@abc1234 · gm:checklist-quality-audit 0.15.0"
+        )
+        older = fixed.replace(url, old_url).replace("29/10", "20/10")
+        comments = {
+            "c1": [dated_comment(reduced, "2026-10-03T10:00:00.000Z", BOT),
+                   dated_comment(older, "2026-10-01T10:00:00.000Z", BOT),
+                   dated_comment(fixed, "2026-10-04T10:00:00.000Z", BOT),
+                   dated_comment("Avis", "2026-10-02T10:00:00.000Z")],
+            "c2": [dated_comment(fixed, "2026-10-04T10:00:00.000Z", "user-1")],
+        }
+        code, out, err, _ = self.run_recette(comments, options=["--refs", "CQ-80,CQ-81"])
         self.assertEqual(code, 0, err)
         found = {item["ref"]: item for item in self.read_json("notion/recette.json")["rows"]}
-        self.assertEqual(found[79]["mr_links"], [url])
-        self.assertEqual(found[81]["mr_links"], [])
+        self.assertEqual(found[79]["fix"], {"mrs": [url], "remaining": "Compresser aussi le JSON."})
         self.assertEqual(found[79]["comments"], ["Avis"])
+        self.assertEqual(found[81]["fix"], {"mrs": [old_url], "remaining": None})
+        self.assertEqual(found[80]["fix"], {"mrs": [], "remaining": None})
+        self.assertEqual(len(found[80]["comments"]), 1)
+        self.assertTrue(all("mr_links" not in item for item in found.values()))
+
+    def test_recette_masks_secrets_in_the_remaining_text(self):
+        self.write_audit()
+        fixed = (
+            "Correctif automatique · 29/10/2026 · lancé par Camille D\n\nReste à faire :\n"
+            "Retirer DB_PASSWORD=Adm1nP4ss2024 du dépôt.\n"
+            "Réf CQ-79 · develop@abc1234 · gm:checklist-quality-audit 0.15.0"
+        )
+        comments = {"c1": [dated_comment(fixed, "2026-10-04T10:00:00.000Z", BOT)]}
+        code, out, err, _ = self.run_recette(comments)
+        self.assertEqual(code, 0, err)
+        [item] = self.read_json("notion/recette.json")["rows"]
+        self.assertNotIn("Adm1nP4ss2024", item["fix"]["remaining"])
+        self.assertIn("Retirer", item["fix"]["remaining"])
 
     def test_recette_refuses_an_unreadable_links_file(self):
         self.write_audit()
@@ -872,9 +904,11 @@ class RecetteCommandTest(CliTestCase):
         self.assertEqual(code, 2)
         self.assertIn("mr-links.json", err)
 
-    def test_mr_links_command_is_registered(self):
-        code, _, _ = self.run_main(["mr-links", "--help"], None, {})
+    def test_fix_plan_replaces_the_mr_links_command(self):
+        code, _, _ = self.run_main(["fix-plan", "--help"], None, {})
         self.assertEqual(code, 0)
+        code, _, _ = self.run_main(["mr-links", "--help"], None, {})
+        self.assertEqual(code, 2)
 
     def test_recette_command_is_registered(self):
         code, _, _ = self.run_main(["recette", "--help"], None, {})

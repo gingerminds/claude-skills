@@ -1210,7 +1210,6 @@ def _cmd_plan(args, services) -> int:
         missing_in_copy=missing,
         recette_refs=recette["refs"],
         comment_dates=_comment_dates(run_dir, sources),
-        mr_links=_mr_links(run_dir),
     )
     if args.recette is not None:
         plan["recette"] = {**recette, "rerun": f"{args.recette:02d}"}
@@ -1224,14 +1223,6 @@ def _cmd_plan(args, services) -> int:
     write_json(run_dir / "notion" / "plan.json", plan)
     _emit(plan["summary"])
     return EXIT_OK
-
-
-def _mr_links(run_dir: Path) -> dict:
-    """Return {ref: [url]} of the merge requests of a fix pass, {} without one."""
-    try:
-        return fix_state.read_mr_links(run_dir)
-    except ValueError as error:
-        raise UsageError(str(error))
 
 
 def _comment_dates(run_dir: Path, sources: dict) -> dict:

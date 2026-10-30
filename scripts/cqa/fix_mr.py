@@ -242,6 +242,13 @@ def link_details(key: dict, candidates: dict, notion_rows: list, refs) -> dict:
     return details
 
 
+def fixed_texts(ref: int, row: dict, reports: list) -> dict:
+    """Return {"change", "uat"} of a fixed state row: the review's corrections, else the texts
+    of its latest report ([(N, document)]) where it is fixed; None for a missing one."""
+    corrected, report = _corrections(row), _latest_fixed(reports).get(ref, {})
+    return {name: corrected.get(name) or report.get(name) for name in ("change", "uat")}
+
+
 def remaining_of(row: dict) -> Optional[str]:
     """Return what is left to do after the partial fix of a fixed state row: the review's
     correction, else the report's remaining; None for a full fix or a row not fixed."""

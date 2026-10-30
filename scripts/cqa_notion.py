@@ -13,23 +13,28 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from cqa.checklist import parse_refs, validate_schema
-from cqa import fix_state
+from cqa.checklist import STATUS_REVIEW, parse_refs, ref_label, validate_schema
+from cqa import fix_notion, fix_state, report
 from cqa.comments import (
     MAX_COMMENT_LENGTH,
     format_comment,
-    format_mr_comment,
-    with_mr_block,
+    format_fix_comment,
+    format_fix_page_comment,
+    has_mr_block,
+    parse_verdict,
+    without_mr_block,
 )
 from cqa.findings import apply_guardrails
 from cqa.notion_api import NotionClient, NotionError, extract_id
 from cqa.notion_read import (
     assemble_rows,
     assignee_options,
+    fix_comment_info,
     human_comments,
     load_rows,
     load_skill_comments,
     resolve,
+    status_options,
     write_fiches,
     write_json,
 )
@@ -113,11 +118,24 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--refs", default="", help="Réf à ajouter, même non candidates (CQ-40)")
     sub.set_defaults(handler=_cmd_recette)
     sub = commands.add_parser(
-        "mr-links",
-        help="prépare le bloc « MR : » des commentaires du skill (fix/notion-plan.json)",
+        "fix-plan",
+        help="prépare l'écriture d'une passe fix : commentaires de correctif, statut « En "
+        "review », commentaire de page (fix/notion-plan.json)",
     )
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.set_defaults(handler=_cmd_mr_links)
+    sub.add_argument(
+        "--closed",
+        nargs="+",
+        default=[],
+        metavar="CQ-n",
+        help="Réf dont la MR est fermée sans fusion : statut d'avant la passe remis",
+    )
+    sub.add_argument(
+        "--closed-only",
+        action="store_true",
+        help="seulement les retours des MR fermées (--closed), sans passe ni commentaire de page",
+    )
+    sub.set_defaults(handler=_cmd_fix_plan)
     sub = commands.add_parser("apply", help="écrit un plan dans la copie (reprise possible)")
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument(
@@ -272,9 +290,10 @@ def _cmd_recette(args, client) -> int:
     result = []
     for ref in sorted(chosen):
         item = chosen[ref]
-        texts = human_comments(client.comments(item["page_id"]), notion["bot_id"])
+        thread = client.comments(item["page_id"])
+        texts = human_comments(thread, notion["bot_id"])
         item["comments"] = [redact(text, known) for text in texts]
-        item["mr_links"] = list(links.get(ref, []))
+        item["fix"] = _fix_info(thread, notion["bot_id"], links.get(ref), known)
         result.append(item)
     (run_dir / "notion").mkdir(parents=True, exist_ok=True)
     write_json(run_dir / "notion" / "recette.json", {"rows": result})
@@ -287,43 +306,114 @@ def _mr_links(run_dir: Path) -> dict:
     return fix_state.read_mr_links(run_dir)
 
 
-def _cmd_mr_links(args, client) -> int:
-    """Write fix/notion-plan.json: one comment per row put in merge requests (never a status)."""
+def _fix_info(thread: list, bot_id: str, urls, known: list) -> dict:
+    """Return the « fix » of a recette row: {"mrs", "remaining"} read in its latest fix comment;
+    without one, the merge requests that fix/mr-links.json of the run links and no remaining."""
+    found = fix_comment_info(thread, bot_id)
+    if found is None:
+        return {"mrs": list(urls or []), "remaining": None}
+    if found["remaining"]:
+        found["remaining"] = redact(found["remaining"], known)
+    return found
+
+
+def _cmd_fix_plan(args, client) -> int:
+    """Write fix/notion-plan.json, what a fix pass writes to Notion, and print what it holds.
+
+    For each row of the pass (fix_notion.pass_rows): its fix comment; the « En review » status
+    of a row put in a published merge request, with its status before the pass as expected
+    (fix/mr-links.json), when the copy has the option; its audit comment without the « MR : »
+    block of the v2 fix mode, when it still has one. Then the page comment of the pass.
+    --closed names rows whose merge request was closed unmerged: their status goes back to the
+    one before the pass (expected « En review »), read in the newest fix/mr-links.json of the
+    project's runs that links them, and their fix comment says so. --closed-only plans those
+    alone, without a pass. Prints {"ops", "in_review", "reverted", "notes"}: the count of each
+    kind of operation, the refs set to « En review », the refs whose status goes back, and what
+    the plan leaves out.
+    """
     run_dir = args.run_dir
     notion = _notion_context(run_dir, "copy_data_source_id", "bot_id")
     context = _read_json(run_dir / "context.json")
-    option = (context.get("lead") or {}).get("option")
-    if not isinstance(option, str) or not option.strip():
-        raise UsageError("context.json : « lead.option » est vide : le commentaire cite le lead.")
+    closed = sorted({ref for text in args.closed for ref in _parse_refs(text)})
+    if args.closed_only and not closed:
+        raise UsageError("--closed-only attend les Réf des MR fermées sans fusion (--closed CQ-12).")
     common = {
-        "run_date": _fix_date(run_dir),
-        "lead_option": option,
+        "lead_option": _lead_option(context),
         "repos": context.get("repos") or [],
         "plugin_version": context.get("plugin_version") or "",
     }
-    links = _mr_links(run_dir)
-    by_ref = {item["ref"]: item for item in _read_rows(run_dir) if isinstance(item, dict)}
-    findings = _latest_findings(run_dir, context) if links else {}
-    ops = []
-    for ref in sorted(links):
-        row = by_ref.get(ref)
-        if row is None:
-            _log(f"CQ-{ref} ne figure pas dans la copie : aucun commentaire pour cette ligne.")
-            continue
-        text = _mr_comment(client, row, links[ref], findings.get(ref), notion["bot_id"], common)
-        ops.append(
-            {
-                "key": operation_key("comment", row["page_id"], None, text),
-                "kind": "comment",
-                "page_id": row["page_id"],
-                "ref": ref,
-                "verdict": None,
-                "before": None,
-                "after": None,
-                "text": text,
-                "human_override": False,
-            }
+    rows = {item["ref"]: item for item in _read_rows(run_dir)
+            if isinstance(item, dict) and isinstance(item.get("ref"), int)}
+    notes = []
+    state, concerned, links = None, {}, {}
+    if args.closed_only:
+        common["run_date"] = date.today()
+    else:
+        state = _notion_pass(run_dir)
+        common["run_date"] = _fix_date(run_dir)
+        candidates = _read_json(run_dir / "fix" / "candidates.json",
+                                "lancer d'abord cqa_fix.py candidates")
+        reports = {name: _key_reports(run_dir, key) for name, key in state["keys"].items()}
+        concerned = fix_notion.pass_rows(
+            state, candidates if isinstance(candidates, dict) else {}, reports
         )
+        links = fix_state.read_mr_link_entries(run_dir)
+    reverts = _closed_targets(run_dir, closed, concerned, notes)
+    review = _review_option(client, notion, concerned, notes)
+    latest = []
+
+    def findings() -> dict:
+        if not latest:
+            latest.append(_latest_findings(run_dir, context))
+        return latest[0]
+
+    ops, in_review, reverted = [], [], []
+    for ref in sorted(set(concerned) | set(reverts)):
+        row = rows.get(ref)
+        if row is None:
+            notes.append(f"{ref_label(ref)} ne figure pas dans la copie : rien n'est écrit pour "
+                         "cette ligne.")
+            continue
+        if ref in reverts:
+            url, before = reverts[ref]
+            text = format_fix_comment(row=row, **common, mrs=[], done=None, remaining=None,
+                                      uat=None, commits=[],
+                                      not_done=fix_notion.closed_reason(url, before))
+            if before:
+                ops.append(_fix_op("status", row, before=STATUS_REVIEW, after=before,
+                                   expected=STATUS_REVIEW))
+                reverted.append(ref)
+            else:
+                notes.append(f"{ref_label(ref)} : statut d'avant la passe inconnu : statut "
+                             "laissé tel quel.")
+        else:
+            item = concerned[ref]
+            text = format_fix_comment(
+                row=row, **common, mrs=item["mrs"], branches=item["branches"],
+                done=item["done"], remaining=item["remaining"], uat=item["uat"],
+                commits=item["commits"], not_done=item["not_done"],
+            )
+            if item["in_mr"] and review:
+                before = fix_notion.status_before(item, links.get(ref))
+                if before is None:
+                    notes.append(f"{ref_label(ref)} : statut d'avant la passe inconnu : statut "
+                                 f"« {STATUS_REVIEW} » non posé.")
+                elif before != STATUS_REVIEW:
+                    ops.append(_fix_op("status", row, before=before, after=STATUS_REVIEW,
+                                       expected=before))
+                    in_review.append(ref)
+        audit = _audit_without_mr_block(client, row, notion["bot_id"], findings, context, common)
+        if audit is not None:
+            ops.append(_fix_op("comment", row, text=audit[0], verdict=audit[1]))
+        ops.append(_fix_op("fix_comment", row, text=text))
+    if state is not None:
+        page_id = notion.get("copy_page_id")
+        if isinstance(page_id, str) and page_id.strip():
+            text = _fix_page_comment(state, concerned, common, not review, in_review, reverted)
+            ops.append(_fix_op("page_comment", {"page_id": page_id, "ref": None}, text=text))
+        else:
+            notes.append("copy_page_id absent de context.json (copie donnée par l'URL de la "
+                         "base) : pas de commentaire de page.")
     plan = {
         "run_id": context.get("run_id"),
         "copy_data_source_id": notion["copy_data_source_id"],
@@ -333,29 +423,163 @@ def _cmd_mr_links(args, client) -> int:
     }
     plan["plan_id"] = plan_digest(plan)
     write_json(run_dir / "fix" / "notion-plan.json", plan)
-    _emit({"comments": len(ops), "refs": [op["ref"] for op in ops]})
+    counts = {}
+    for kind in ("status", "comment", "fix_comment", "page_comment"):
+        count = sum(1 for item in ops if item["kind"] == kind)
+        if count:
+            counts[kind] = count
+    _emit({"ops": counts, "in_review": in_review, "reverted": reverted, "notes": notes})
     return EXIT_OK
 
 
-def _mr_comment(client, row: dict, urls: list, finding, bot_id: str, common: dict) -> str:
-    """Return the comment of a row with its merge requests: the skill's text plus the block.
+def _lead_option(context) -> str:
+    option = ((context.get("lead") or {}) if isinstance(context, dict) else {}).get("option")
+    if not isinstance(option, str) or not option.strip():
+        raise UsageError("context.json : « lead.option » est vide : le commentaire cite le lead.")
+    return option
 
-    The existing skill comment keeps its text. Without one the comment is reduced to the header,
-    the block and the footer. When the block does not fit, the comment is written again from the
-    latest finding of the row (reduced when there is none).
-    """
-    own = skill_comments(client.comments(row["page_id"]), bot_id)
-    if not own:
-        return format_mr_comment(row=row, urls=urls, **common)
-    existing = "".join(part.get("plain_text", "") for part in own[-1].get("rich_text") or [])
+
+def _notion_pass(run_dir: Path) -> dict:
+    """Return fix/state.json of a pass whose result may go to Notion; exit 2 otherwise."""
     try:
-        return with_mr_block(existing, urls)
-    except ValueError:
-        pass
+        state = fix_state.load(run_dir)
+    except FileNotFoundError:
+        raise UsageError("fix/state.json est introuvable : aucune passe de correctifs dans ce run.")
+    except fix_state.StateError as error:
+        raise UsageError(str(error))
+    if state.get("push") == "dry_run":
+        raise UsageError("Passe --dry-run : rien n'est écrit dans Notion.")
+    if not state.get("notion"):
+        raise UsageError(
+            "fix/state.json : le lead n'a pas donné son accord pour écrire dans Notion "
+            "(« notion » vaut false) : rien n'est préparé."
+        )
+    return state
+
+
+def _key_reports(run_dir: Path, key: dict) -> list:
+    """Return [(N, report)] of a key: fix/<repo>/report-<N>.json (fix/<repo>/<slug> for v2)."""
+    folder = Path(run_dir) / "fix" / key["repo"]
+    if "slug" in key:
+        folder = folder / key["slug"]
+    found = []
+    for path in folder.glob("report-*.json"):
+        match = re.fullmatch(r"report-([0-9]+)\.json", path.name)
+        if match is None:
+            continue
+        document = _optional_json(path, "les textes de ses lignes manquent aux commentaires")
+        if isinstance(document, dict):
+            found.append((int(match.group(1)), document))
+    return sorted(found, key=lambda item: item[0])
+
+
+def _closed_targets(run_dir: Path, closed: list, concerned: dict, notes: list) -> dict:
+    """Return {ref: (url, status_before)} for the refs of closed merge requests, read in the
+    newest fix/mr-links.json of the project's runs (run_dir and its siblings) that links each."""
+    targets = {}
+    if not closed:
+        return targets
+    project = Path(run_dir).resolve().parent
+    folders = sorted((path for path in project.iterdir() if path.is_dir()),
+                     key=lambda path: path.name, reverse=True)
+    read = {}
+    for ref in closed:
+        if ref in concerned:
+            notes.append(f"{ref_label(ref)} est une ligne de cette passe : le retour de sa MR "
+                         "fermée est ignoré.")
+            continue
+        for folder in folders:
+            if folder.name not in read:
+                try:
+                    read[folder.name] = fix_state.read_mr_link_entries(folder)
+                except ValueError as error:
+                    read[folder.name] = {}
+                    notes.append(f"Run {folder.name} : {error} Fichier ignoré.")
+            entries = read[folder.name].get(ref)
+            if entries:
+                targets[ref] = fix_notion.closed_target(entries)
+                break
+        else:
+            notes.append(f"{ref_label(ref)} : aucune MR connue dans les runs du projet : statut "
+                         "laissé tel quel.")
+    return targets
+
+
+def _review_option(client, notion: dict, concerned: dict, notes: list) -> bool:
+    """Return whether the copy has the « En review » status option; read only when a row of
+    the pass went into a published merge request."""
+    if not any(item["in_mr"] for item in concerned.values()):
+        return True
+    data_source = client.data_source(notion["copy_data_source_id"])
+    if STATUS_REVIEW in status_options(data_source):
+        return True
+    notes.append(fix_notion.NO_REVIEW_OPTION)
+    return False
+
+
+def _audit_without_mr_block(client, row: dict, bot_id: str, findings, context: dict,
+                            common: dict):
+    """Return (text, verdict) of the audit comment of a row rewritten without the « MR : »
+    block of the v2 fix mode, None when it has no such block (or no audit comment).
+
+    A comment with a verdict keeps its text; a reduced v2 comment (no verdict) is written again
+    from the latest finding of the row, dated by the audit, and only loses its block without one.
+    """
+    own = skill_comments(client.comments(row["page_id"]), bot_id, "comment")
+    if not own:
+        return None
+    text = "".join(part.get("plain_text", "") for part in own[-1].get("rich_text") or [])
+    if not has_mr_block(text):
+        return None
+    verdict = parse_verdict(text)
+    finding = findings().get(row["ref"]) if verdict is None else None
     if finding is None:
-        return format_mr_comment(row=row, urls=urls, **common)
+        return without_mr_block(text), verdict
+    try:
+        day = report.run_start(context.get("run_id")).date()
+    except ValueError:
+        day = common["run_date"]
     judged = apply_guardrails(finding, row, followup_done=True)
-    return format_comment(finding=judged, row=row, mr_links=urls, **common)
+    rebuilt = format_comment(finding=judged, row=row, **{**common, "run_date": day})
+    return rebuilt, judged["verdict"]
+
+
+def _fix_page_comment(state: dict, concerned: dict, common: dict, review_missing: bool,
+                      in_review: list, reverted: list) -> str:
+    mrs = []
+    for key in state["keys"].values():
+        if fix_notion.published(key) and key["mr"]["url"] not in mrs:
+            mrs.append(key["mr"]["url"])
+    local = [ref for ref, item in concerned.items() if item["fixed"] and not item["in_mr"]]
+    branches = []
+    for ref in local:
+        branches.extend(name for name in concerned[ref]["branches"] if name not in branches)
+    return format_fix_page_comment(
+        run_date=common["run_date"], lead_option=common["lead_option"], mrs=mrs,
+        branches=branches, in_mr=[ref for ref, item in concerned.items() if item["in_mr"]],
+        local=local, partial=[ref for ref, item in concerned.items() if item["partial"]],
+        in_review=in_review, review_missing=review_missing,
+        not_done=fix_notion.not_done_groups(concerned), reverted=reverted,
+    )
+
+
+def _fix_op(kind: str, row: dict, *, text: str = "", verdict=None, before=None, after=None,
+            expected=None) -> dict:
+    """Return an operation of fix/notion-plan.json; expected makes a status conditional."""
+    operation = {
+        "key": operation_key(kind, row["page_id"], after, text),
+        "kind": kind,
+        "page_id": row["page_id"],
+        "ref": row["ref"],
+        "verdict": verdict,
+        "before": before,
+        "after": after,
+        "text": text,
+        "human_override": False,
+    }
+    if expected is not None:
+        operation["expected"] = expected
+    return operation
 
 
 def _latest_findings(run_dir: Path, context: dict) -> dict:

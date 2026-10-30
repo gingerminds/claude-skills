@@ -46,6 +46,17 @@ def read_mr_links(run_dir: Path) -> dict:
 
     Raises ValueError when the file cannot be read as {"links": {"<ref>": [{"url": ...}]}}.
     """
+    return {ref: [entry["url"] for entry in entries]
+            for ref, entries in read_mr_link_entries(run_dir).items()}
+
+
+def read_mr_link_entries(run_dir: Path) -> dict:
+    """Return {ref: [entry, ...]} from fix/mr-links.json, in the order of the file (the newest
+    link last); {} when the file is absent. An entry is {"repo", "url", "iid", "partial",
+    "status_before"} (older files lack the last two).
+
+    Raises ValueError when the file cannot be read as {"links": {"<ref>": [{"url": ...}]}}.
+    """
     try:
         document = json.loads((Path(run_dir) / LINKS_FILE).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -57,14 +68,12 @@ def read_mr_links(run_dir: Path) -> dict:
         raise ValueError(f"{LINKS_FILE} est illisible : « links » doit être un objet.")
     found = {}
     for key, entries in links.items():
-        urls = [
-            entry.get("url") if isinstance(entry, dict) else None
-            for entry in (entries if isinstance(entries, list) else [None])
-        ]
+        listed = entries if isinstance(entries, list) else [None]
+        urls = [entry.get("url") if isinstance(entry, dict) else None for entry in listed]
         if not str(key).isdigit() or not all(isinstance(url, str) and url.strip() for url in urls):
             raise ValueError(f"{LINKS_FILE} est illisible : « {key} » doit lister des entrées avec une « url ».")
-        if urls:
-            found[int(key)] = urls
+        if listed:
+            found[int(key)] = [dict(entry) for entry in listed]
     return found
 
 

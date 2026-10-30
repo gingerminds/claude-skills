@@ -581,7 +581,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_notion.py" recette "$RUN"
 ```
 
-It writes `notion/recette.json`, `{"rows": [{"ref", "page_id", "status", "skill_last", "comments", "mr_links"}]}` (`mr_links` lists the merge request URLs of the fix pass for the row, empty without any, and the agents read them as the devs' notes), and prints the refs (`recette`) and those added for a code change (`code_modifie`). Exit codes as in section 8, step 1. A row without a known status of the skill is a candidate: the lead may drop it. The last status the skill wrote comes from the `value` of the status entries of `notion/applied.json`.
+It writes `notion/recette.json`, `{"rows": [{"ref", "page_id", "status", "skill_last", "comments", "fix"}]}` (`fix` is `{"mrs", "remaining"}`, read in the skill's fix comment of the row: `mrs` the merge request URLs of the fix pass, from `fix/mr-links.json` of the run when the row has no fix comment, empty without any; `remaining` what a partial fix left to do, null otherwise; the agents read it with the devs' notes), and prints the refs (`recette`) and those added for a code change (`code_modifie`). Exit codes as in section 8, step 1. A row without a known status of the skill is a candidate: the lead may drop it. The last status the skill wrote comes from the `value` of the status entries of `notion/applied.json`.
 
 3. Run the diagnostic of section 5 for the tools, and also its launch condition « commit deployed in preprod » (`references/diagnostic.md`: the guard commands, then `cqa_plan.py deployed`, then `cqa_plan.py align`): the devs' fixes must be deployed before they are checked, so ask the same « Déployer puis relancer (recommandé) » or « Lancer quand même » when the preprod is behind, and never deploy. Update `available_tools` in `context.json`. Run `cqa_plan.py repo-state` on each repo as in section 10, step 3 (« C'est corrigé, revérifier » or « Continuer avec l'état actuel »; the comments of the rows judged again carry the date of the rerun). Then open the rerun and list the lots of the candidate rows, as in section 10, steps 4 and 5, with the refs of `notion/recette.json`, and keep only the candidates whose reasons include `lead` (those refs; the rows whose code changed are already in `notion/recette.json`): `rerun-candidates` also lists every row of the run still unknown, which the recette does not check. A row without a lot is dropped, say so:
 
@@ -1045,15 +1045,15 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" stage "$RUN" notion
 ```
 
-Then, only when the pass has `notion` true (the consent of step 3), build the comments: one per row put in a merge request, the skill's comment with its « MR : » block (or a comment reduced to the block when the row has none), never a status:
+Then, only when the pass has `notion` true (the consent of step 3), build the writes of the pass: a « Correctif automatique » comment for each row of the pass and each row left out as outside the repo, the status « En review » for the rows of a published merge request (only when the copy has the option, and written only if the status has not changed since launch), the audit comment without its v2 « MR : » block, and a comment on the copy page:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-python3 "$S/cqa_notion.py" mr-links "$RUN"
+python3 "$S/cqa_notion.py" fix-plan "$RUN"
 ```
 
-It writes `fix/notion-plan.json` and prints `{"comments", "refs"}`. With `comments` 0, skip the write. Otherwise:
+It writes `fix/notion-plan.json` and prints `{"ops", "in_review", "reverted", "notes"}`: `ops` counts the operations by kind, `in_review` the refs planned « En review », `notes` what the plan leaves out (say each one, such as « option En review absente de la copie »). With `ops` empty, skip the write. Otherwise:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -1061,7 +1061,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_notion.py" apply "$RUN" --plan fix/notion-plan.json
 ```
 
-Exit codes as in section 8, step 1: 0, go on; 7, show each blocked operation (ref, kind, reason, never its text) and go on; 3, once the cause is fixed run it once more (it resumes where it stopped), still 3: say « Écriture Notion interrompue : la passe reste reprenable, relancez /gm:checklist-quality-audit fix plus tard. », release the workstation (step 8) and stop; 8 or 2: show the message and go on, nothing was written. Keep the refs of `replace_failed` (a skill comment that could not be replaced, so a second one was created).
+Exit codes as in section 8, step 1: 0, go on; 7, show each blocked operation (ref, kind, reason, never its text) and go on; 3, once the cause is fixed run it once more (it resumes where it stopped), still 3: say « Écriture Notion interrompue : la passe reste reprenable, relancez /gm:checklist-quality-audit fix plus tard. », release the workstation (step 8) and stop; 8 or 2: show the message and go on, nothing was written. Keep the refs of `replace_failed` (a skill comment that could not be replaced, so a second one was created), and say the refs of `status_changed` (their status changed since launch: left as is).
 
 **8. Summary.**
 

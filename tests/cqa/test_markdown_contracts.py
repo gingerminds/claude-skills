@@ -445,15 +445,18 @@ class SkillTest(unittest.TestCase):
             _text(SKILL),
         )
 
-    def test_recette_gives_the_mr_links_to_the_agents(self):
-        for path in (
-            SKILL.parent.parent.parent / "agents" / "cqa-auditor.md",
-            SKILL.parent.parent.parent / "agents" / "cqa-browser.md",
-            REFERENCES / "lots.md",
+    def test_recette_gives_the_fix_info_to_the_agents(self):
+        recette = _section(_text(SKILL), "11. Recette")
+        for path, text in (
+            ("cqa-auditor.md", _text(SKILL.parent.parent.parent / "agents" / "cqa-auditor.md")),
+            ("cqa-browser.md", _text(SKILL.parent.parent.parent / "agents" / "cqa-browser.md")),
+            ("lots.md", _text(REFERENCES / "lots.md")),
+            ("SKILL.md", recette),
         ):
-            with self.subTest(path=path.name):
-                self.assertIn("mr_links", _text(path))
-        self.assertIn("mr_links", _section(_text(SKILL), "11. Recette"))
+            with self.subTest(path=path):
+                for needle in ("`fix`", "`mrs`", "`remaining`"):
+                    self.assertIn(needle, text)
+                self.assertNotIn("mr_links", text)
 
     def test_deferred_step_ignores_the_fix_kinds(self):
         step = _section(_text(SKILL), "8. Writing and synthesis")
@@ -1664,7 +1667,7 @@ class FixSectionTest(unittest.TestCase):
         for call in (
             ("cqa_plan.py", "project"), ("cqa_plan.py", "runs"), ("cqa_plan.py", "context"),
             ("cqa_plan.py", "defer"), ("cqa_plan.py", "deferred"), ("cqa_notion.py", "rows"),
-            ("cqa_notion.py", "mr-links"), ("cqa_notion.py", "apply"),
+            ("cqa_notion.py", "fix-plan"), ("cqa_notion.py", "apply"),
             ("cqa-toolbox.sh", "doctor"), ("cqa-toolbox.sh", "pull"), ("cqa_plan.py", "wp-plugins"),
         ):
             with self.subTest(call=call):
@@ -1752,7 +1755,7 @@ class FixSectionTest(unittest.TestCase):
             'deferred "$RUN" --fix',
             "« Publier les branches maintenant ? »",
             'stage "$RUN" notion',
-            'cqa_notion.py" mr-links',
+            'cqa_notion.py" fix-plan',
             'cqa_notion.py" apply',
             'stage "$RUN" summary',
             'cqa_fix.py" summary',
