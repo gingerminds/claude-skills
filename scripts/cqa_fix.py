@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import quote
 
-from cqa import deferred, git_tools, fix_checks, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_state, fix_summary
+from cqa import deferred, git_tools, fix_checks, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_stack, fix_state, fix_summary
 from cqa.checklist import STATUS_REVIEW, parse_refs, ref_label
 from cqa.notion_read import write_json, write_text
 from cqa.project import project_name
@@ -93,6 +93,9 @@ def main(argv, *, run=subprocess.run) -> int:
     except SecretFound as error:
         print(error, file=sys.stderr)
         return EXIT_SECRET
+    except fix_stack.StackRefused as error:
+        print(error, file=sys.stderr)
+        return EXIT_REFUSED
     except (UsageError, fix_git.GitRefused, ValueError, OSError) as error:
         print(error, file=sys.stderr)
         return EXIT_USAGE
@@ -214,6 +217,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = _command(commands, "merged", "lignes « En review » dont la MR est fusionnée et déployée",
                    _cmd_merged)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub = _command(commands, "stack-core",
+                   "cœur WordPress ou Drupal en lecture seule pour les sous-agents", _cmd_stack_core)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("--repo", help="repo à traiter (par défaut : le premier WordPress ou Drupal)")
+    choice = sub.add_mutually_exclusive_group()
+    choice.add_argument("--download", action="store_true",
+                        help="télécharge la version officielle dans le cache partagé (WordPress)")
+    choice.add_argument("--path", type=Path, help="dossier du cœur indiqué par le lead")
     return parser
 
 
@@ -283,6 +294,61 @@ def _cmd_merged(args, services: Services) -> int:
         else:
             result["merged_deployed"].append(ref)
     result["notes"] = notes
+    _emit(result)
+    return EXIT_OK
+
+
+def _cmd_stack_core(args, services: Services) -> int:
+    run_dir = Path(args.run_dir)
+    repos = [repo for repo in _load_context(run_dir).get("repos") or []
+             if isinstance(repo, dict) and repo.get("stack") in fix_stack.MARKERS
+             and isinstance(repo.get("path"), str) and repo["path"]
+             and (args.repo is None or repo.get("name") == args.repo)]
+    if not repos:
+        raise UsageError("Aucun repo WordPress ou Drupal dans context.json"
+                         + (f" pour « {args.repo} »." if args.repo else "."))
+    stack, repo_path = repos[0]["stack"], Path(repos[0]["path"])
+    core, source, note = None, None, None
+    if args.path:
+        core, source = fix_stack.check_path(stack, args.path), "path"
+    else:
+        core = fix_stack.find_core(stack, repo_path)
+        source = "repo" if core else None
+        if core is None:
+            core = fix_stack.find_beside(stack, repo_path)
+            source = "dev" if core else None
+    version = fix_stack.read_version(stack, repo_path, core)
+    cache = None
+    if args.download:
+        if stack != "wordpress":
+            raise UsageError("Le téléchargement n'existe que pour WordPress.")
+        if not fix_stack.valid_version(version):
+            raise UsageError(
+                "Version WordPress inconnue ou invalide : indiquez un dossier avec --path.")
+        cache = fix_stack.download(version, fix_stack.cache_root())
+        core, source = cache, "cache"
+    elif core is None and version:
+        cache = fix_stack.cached(stack, version)
+        if cache:
+            core, source = cache, "cache"
+    if core is None:
+        note = ("Cœur introuvable dans le repo ni dans le dossier du dev."
+                + (" Pas de téléchargement pour Drupal : indiquez un dossier (--path)."
+                   if stack != "wordpress" else ""))
+    result = {"stack": stack, "version": version, "found": core is not None,
+              "path": str(core) if core else None, "source": source,
+              "cache": str(cache) if cache else None, "note": note}
+    record = ({"stack": stack, "version": version, "path": result["path"], "source": source}
+              if core else None)
+    (run_dir / "fix").mkdir(exist_ok=True)
+    write_json(run_dir / "fix" / "stack-core.json", record or {})
+    state = _read_state(run_dir, required=False)
+    if state is not None and not state.get("finished_at") and not fix_state.is_v2(state):
+        if record:
+            state["stack_core"] = record
+        else:
+            state.pop("stack_core", None)
+        fix_state.save(run_dir, state)
     _emit(result)
     return EXIT_OK
 

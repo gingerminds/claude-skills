@@ -710,6 +710,8 @@ It writes `fix/doctor.json` and prints `{"repos": [{"repo", "host", "project", "
 - `fetched` false: `git fetch origin` failed, the branches would start from a stale `origin/<base>`.
 - `ahead`: the commits of `origin/<base>` since the audited commit; every row is checked again on the current code before it is fixed.
 
+WordPress or Drupal core for the sub-agents: `python3 "$S/cqa_fix.py" stack-core "$RUN"` looks for it in the repo, then prints `{"stack", "version", "found", "path", "source", "cache", "note"}`. `found` false: ask « Cœur WordPress pour les sous-agents ? » with « Télécharger la version <x> » (`stack-core "$RUN" --download`, WordPress only), « Indiquer un dossier » (`stack-core "$RUN" --path <dossier>`) and « Continuer sans ». The chosen path is recorded as `stack_core` and read-only for the sub-agents.
+
 Commit signing, one call per repo (`path` of `context.json`):
 
 ```bash

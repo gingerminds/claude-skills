@@ -687,7 +687,7 @@ class RegistrationTest(FixCase):
         for name in ("doctor", "candidates", "open", "stage", "start", "section-start",
                      "section-end", "pass-start", "validate", "guard", "review-scope", "waive-secret", "drop",
                      "reorder", "reword",
-                     "check", "mr-body", "publish", "finish", "summary", "abandon", "merged"):
+                     "check", "mr-body", "publish", "finish", "summary", "abandon", "merged", "stack-core"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)
 
