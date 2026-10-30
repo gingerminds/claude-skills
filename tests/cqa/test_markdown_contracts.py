@@ -2563,6 +2563,36 @@ class FixPassOrchestrationTest(unittest.TestCase):
         self.assertIn("with its rows", closing)
         self.assertIn("counts the keys left", closing)
 
+    def test_residual_final_wave_wordings(self):
+        """Residual items 1, 3, 4, 5 and 7: the v2 status rule as the code checks it, the
+        fixed Notion reason of a failed start, the entry of 5.a per mode, the v2 MRs not
+        checked, drop and start among the commands a left key refuses."""
+        start = _between(self.keys, "a. Branch and worktree", "Sections: the `sections`")
+        for needle in ("the entry stays open for step 6", "not asked again",
+                       "closes it at once with that answer", "the raw message",
+                       "« clé laissée au lead : la passe n'a pas pu démarrer »"):
+            with self.subTest(part="5.a", needle=needle):
+                self.assertIn(needle, start)
+        self.assertNotIn("set it aside and close its entry as at the end of 5.f", start)
+        end = _between(self.section, "**6. ", "**7. ")
+        questions = _between(end, "A row question:", "A secret alert (")
+        self.assertIn("a row of a key left", questions)
+        self.assertIn("`drop`", _between(self.keys, "A key is left when", "g. Publication"))
+        keys = _section(_text(FIX_MD), "1. Keys, sections, passes and files")
+        line = next(item for item in keys.splitlines() if "`keys[<key>].left`" in item)
+        for needle in ("a start that failed", "`start`", "`drop`"):
+            with self.subTest(part="fix.md", needle=needle):
+                self.assertIn(needle, line)
+        readme = _text(ROOT / "README.md")
+        fix = readme[readme.index("### Corriger : `fix`"):readme.index("## Structure")]
+        line = next(item for item in fix.splitlines() if "**Passe v2 terminée**" in item)
+        for needle in ("plus ancien que le lancement", "aucun statut n'est posé",
+                       "ne vérifie pas que ses MR sont encore ouvertes", "`fix-plan --closed-only`",
+                       "recette"):
+            with self.subTest(part="README", needle=needle):
+                self.assertIn(needle, line)
+        self.assertNotIn("statut lu dans le `rows.json` du run)", line)
+
     def test_a_left_key_runs_nothing_of_step_5(self):
         """Final wave L1: the resume rule and the answer passes of step 6 skip a left key;
         the « clé laissée » entry is set aside in both modes so that present mode asks again
