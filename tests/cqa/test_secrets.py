@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cqa.secrets import known_values_from_env, redact, scan_text, scan_tree
+from cqa.secrets import (known_values_from_env, redact, scan_lines, scan_spans, scan_text,
+                         scan_tree)
 
 JWT = ".".join(["eyJhbGciOiJub25lIn0", "eyJzdWIiOiJ0ZXN0In0", "c2lnbmF0dXJlLXZhbHVl"])
 
@@ -33,6 +34,7 @@ PATTERN_CASES = [
     ("credential_assignment", "https://example.org/?api-key=abcd1234&page=2"),
     ("credential_assignment", '{"password": "hunter22"}'),
     ("credential_assignment", '{\\"password\\": \\"hunter22\\"}'),
+    ("credential_define", "define( 'DB_PASSWORD', 'Adm1nP@ss2024' );"),
     ("authorization_header", "Authorization: Basic dXNlcjpwYXNz"),
     ("authorization_header", "Authorization: Bearer abcd1234"),
     ("authorization_header", '"Authorization": "Bearer abcd1234"'),
@@ -297,6 +299,154 @@ class NonSecretTest(unittest.TestCase):
         text = "password : type=password\nDB_PASSWORD=Pa55word2024"
         self.assertEqual(scan_text(text, []), ["credential_assignment"])
         self.assertEqual(redact(text, []), "password : type=password\nDB_PASSWORD=[secret masqué]")
+
+
+class CodeCredentialsTest(unittest.TestCase):
+    """Credentials in code, as the audit and the guard of the fix mode both scan them: the same
+    strict rule; the guard lets the lead waive a heuristic alert instead (fix_guard)."""
+
+    WORDPRESS = ("$password = isset( $_POST['pass1'] ) ? (string) wp_unslash( $_POST['pass1'] ) "
+                 ": '';")
+    STILL_SECRETS = [
+        "$password = 'hunter2hunter2';",
+        "DB_PASSWORD=hunter22 # prod",
+        "$password = isset( $x ) ? 'Adm1nP@ss2024' : '';",
+        "$password = wp_hash( 'Adm1nP@ss2024' );",
+        "password=isset(x)&token=abcd1234efgh5678",
+        "PASSWORD=(hunter22)",
+        "password: hunter22 (prod)",
+        # A bare token that only looks like a call, a negation or a cast.
+        "DB_PASSWORD=Adm1n(2024)!",
+        "DB_PASSWORD=Adm1n(2024",
+        "API_KEY=sk(4f9a8b7c6d5e4f3a2b1c)z",
+        "password: Hunter2(prod)x",
+        "PASSWORD=!$uperS3cret",
+        "password=!Secret(x)y",
+        "PASSWORD=(string)hunter22",
+        "token: Abc(def ghi jkl",
+        "$password = foo(1) . Adm1nP4ss;",
+        "$password = foo( 1 ) . Adm1nP4ss;",
+        "$password = isset( $_POST['p'] ) ? Adm1nP4ss : '';",
+        "$password = isset( $x&token=abcd1234efgh5678 );",
+        "$password = (string) Adm1nP4ss;",
+        "$password = isset( $x ) ? $y : 2024;",
+        "password = isset(",
+        # A quoted fallback or concatenated part of the value.
+        "$password = getenv( 'DB_PASSWORD' ) ?: 'AZERTY2024';",
+        WORDPRESS[:-3] + "'AZERTY2024';",
+        "'password' => getenv( 'DB_PASSWORD' ) ?: 'PROD_DB_2024',",
+        "$password = getenv( 'DB_PASSWORD' ) ?: 's3cr3t.pass';",
+        "$password = getenv( 'DB_PASSWORD' ) ?: 'gingerminds.2024';",
+        "$token = env( 'API_TOKEN' ) ?? 'sk.live.4f9a8b7c6d5e4f3a';",
+        "$password = isset( $x ) ? $x : 'AZERTY2024' . $suffix;",
+    ]
+
+    def test_strict_rule_flags_every_known_credential_form(self):
+        self.assertEqual(scan_text(self.WORDPRESS, []), ["credential_assignment"])
+        for text in self.STILL_SECRETS:
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, []), ["credential_assignment"])
+
+    DEFINED = [
+        "define( 'DB_PASSWORD', 'Adm1nP@ss2024' );",
+        "define('DB_PASSWORD','Adm1nP@ss2024');",
+        'define( "SMTP_PASSWD", "Adm1nP@ss2024" );',
+        "define( 'DB_PWD', 'x' );",
+        "define( 'MY_APP_SECRET', 'Adm1nP@ss2024' );",
+        "define( 'API_TOKEN', 'abcd1234efgh5678' );",
+        "DEFINE( 'db_password', 'Adm1nP@ss2024' );",
+        "define(\n    'DB_PASSWORD',\n    'Adm1nP@ss2024'\n);",
+        *[f"define( '{name}', 'k;X}}9+mJ|<w@F' );" for name in (
+            "AUTH_KEY", "SECURE_AUTH_KEY", "LOGGED_IN_KEY", "NONCE_KEY",
+            "AUTH_SALT", "SECURE_AUTH_SALT", "LOGGED_IN_SALT", "NONCE_SALT")],
+    ]
+    NOT_DEFINED = [
+        "define( 'DB_PASSWORD', getenv( 'DB_PASSWORD' ) );",
+        "define( 'DB_PASSWORD', $password );",
+        "define( 'DB_PASSWORD', DB_PASSWORD_FROM_ENV );",
+        "define( 'DB_PASSWORD', '' );",
+        "define( 'WP_DEBUG', false );",
+        "define( 'WP_ENVIRONMENT_TYPE', 'staging' );",
+        "define( 'DB_NAME', 'wordpress' );",
+        "define( 'OAUTH_KEY_URL', 'https://example.test/oauth' );",
+        "undefine( 'DB_PASSWORD', 'Adm1nP@ss2024' );",
+    ]
+
+    def test_defined_credentials(self):
+        for text in self.DEFINED:
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, []), ["credential_define"])
+            with self.subTest(redact=text):
+                masked = redact(text, [])
+                self.assertIn("[secret masqué]", masked)
+                self.assertEqual(scan_text(masked, []), [])
+                self.assertEqual(redact(masked, []), masked)
+        for text in self.NOT_DEFINED:
+            with self.subTest(text=text):
+                self.assertEqual(scan_text(text, []), [])
+        self.assertEqual(redact("define( 'DB_PASSWORD', 'Adm1nP@ss2024' );", []),
+                         "define( 'DB_PASSWORD', '[secret masqué]' );")
+
+    def test_redact_masks_the_whole_expression(self):
+        self.assertEqual(redact(self.WORDPRESS, []), "$password = [secret masqué]")
+
+    def test_scan_lines_names_the_line_of_each_label(self):
+        aws = "AKIA" + "IOSFODNN7EXAMPLE"
+        text = "\n".join([
+            "<?php",
+            self.WORDPRESS,
+            "$name = 'x';",
+            f"$key = '{aws}'; // s3cr3t-value",
+            "define(",
+            "    'DB_PASSWORD',",
+            "    'Adm1nP@ss2024'",
+            ");",
+            "s3cr3t-value",
+        ])
+        self.assertEqual(scan_lines(text, ["s3cr3t-value", ""]), [
+            ("credential_assignment", 2),
+            ("known_value", 4), ("aws_key", 4),
+            ("credential_define", 5),
+            ("known_value", 9),
+        ])
+        self.assertEqual(sorted({label for label, _ in scan_lines(text, ["s3cr3t-value"])}),
+                         sorted(scan_text(text, ["s3cr3t-value"])))
+        self.assertEqual(scan_lines("rien à signaler", ["s3cr3t-value"]), [])
+
+    def test_scan_spans_names_the_first_and_last_line_of_each_match(self):
+        """A define( or a private key over several lines spans them: the guard reports it when
+        one of its lines is added, at the line where it starts."""
+        text = "\n".join([
+            "<?php",
+            "define(",
+            "    'DB_PASSWORD',",
+            "    'Adm1nP@ss2024'",
+            ");",
+            self.WORDPRESS,
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "MIIEowIBAAKCAQEA",
+            "-----END RSA PRIVATE KEY-----",
+            "s3cr3t-value",
+        ])
+        self.assertEqual(scan_spans(text, ["s3cr3t-value"]), [
+            ("credential_define", 2, 4),
+            ("credential_assignment", 6, 6),
+            ("private_key", 7, 9),
+            ("known_value", 10, 10),
+        ])
+        self.assertEqual(scan_lines(text, ["s3cr3t-value"]),
+                         [(label, first) for label, first, _ in scan_spans(text, ["s3cr3t-value"])])
+        self.assertEqual(scan_spans("rien à signaler", ["s3cr3t-value"]), [])
+
+    def test_an_unclosed_private_key_spans_its_first_line_only(self):
+        """Without an END line the audit still flags the key, but the guard must not take every
+        later line of the file for part of it."""
+        text = "\n".join(["<?php", "-----BEGIN RSA PRIVATE KEY-----", "MIIEowIBAAKCAQEA",
+                          "// a", "// b"])
+        self.assertEqual(scan_text(text, []), ["private_key"])
+        self.assertEqual(scan_spans(text, []), [("private_key", 2, 2)])
+        closed = text + "\n-----END RSA PRIVATE KEY-----\n// c"
+        self.assertEqual(scan_spans(closed, []), [("private_key", 2, 6)])
 
 
 class ProcessAndKubeSecretsTest(unittest.TestCase):

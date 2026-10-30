@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from cqa.checklist import STATUS_STANDBY, fiche_filename, match_reference, normalize_row
-from cqa.comments import is_skill_comment, parse_verdict
+from cqa.comments import is_fix_comment, is_skill_comment, parse_fix_comment, parse_verdict
 from cqa.notion_api import NotionClient, NotionError, extract_id
 
 FICHES_DIR = "fiches"
@@ -78,6 +78,13 @@ def assignee_options(data_source: dict) -> list[str]:
     return [option["name"] for option in options]
 
 
+def status_options(data_source: dict) -> list[str]:
+    """Return the option names of "Statut", in schema order (empty when it is absent)."""
+    prop = (data_source.get("properties") or {}).get("Statut") or {}
+    options = (prop.get("status") or {}).get("options") or []
+    return [option["name"] for option in options if isinstance(option, dict)]
+
+
 def write_fiches(client: NotionClient, run_dir: Path, pairs: list[tuple[dict, dict]]) -> dict:
     """Cache the reference fiche of each pair as fiches/CQ-xxx.md and return fiches/index.json.
 
@@ -112,8 +119,8 @@ def load_skill_comments(client: NotionClient, rows: list[dict], bot_id: str) -> 
     """Return {ref: [verdict, ...]} read in the comments the integration left on the rows.
 
     Rows "En standby" and rows without ref are not read. A comment counts only when the
-    integration wrote it and it carries a known "Verdict : ..." line. Refs without verdict
-    are left out, and verdicts keep the order of the comments.
+    integration wrote it and it carries a known "Verdict : ..." line; a fix comment never counts.
+    Refs without verdict are left out, and verdicts keep the order of the comments.
     """
     verdicts = {}
     for item in rows:
@@ -124,7 +131,7 @@ def load_skill_comments(client: NotionClient, rows: list[dict], bot_id: str) -> 
             if (entry.get("created_by") or {}).get("id") != bot_id:
                 continue
             text = "".join(part.get("plain_text", "") for part in entry.get("rich_text") or [])
-            verdict = parse_verdict(text)
+            verdict = None if is_fix_comment(text) else parse_verdict(text)
             if verdict:
                 found.append(verdict)
         if found:
@@ -135,8 +142,8 @@ def load_skill_comments(client: NotionClient, rows: list[dict], bot_id: str) -> 
 def human_comments(comments: list, bot_id: str, limit: int = 5) -> list:
     """Return the texts of the comments the skill did not write, the most recent first.
 
-    A comment is the skill's own when the integration wrote it and it carries a known
-    "Verdict : ..." line or an "MR :" block (the rule of the comment replacement). Empty texts are left out.
+    A comment is the skill's own when the integration wrote it and it is its audit comment or
+    its fix comment (comments.is_skill_comment). Empty texts are left out.
     """
     others = []
     for entry in comments:
@@ -146,6 +153,19 @@ def human_comments(comments: list, bot_id: str, limit: int = 5) -> list:
             others.append((entry.get("created_time") or "", text.strip()))
     others.sort(key=lambda item: item[0], reverse=True)
     return [text for _, text in others[:limit]]
+
+
+def fix_comment_info(comments: list, bot_id: str):
+    """Return {"mrs", "remaining"} of the latest fix comment the integration left on a row
+    (comments.parse_fix_comment), None when the row has none."""
+    own = []
+    for entry in comments:
+        text = "".join(part.get("plain_text", "") for part in entry.get("rich_text") or [])
+        if (entry.get("created_by") or {}).get("id") == bot_id and is_fix_comment(text):
+            own.append((entry.get("created_time") or "", text))
+    if not own:
+        return None
+    return parse_fix_comment(max(own, key=lambda item: item[0])[1])
 
 
 def write_text(path: Path, text: str) -> None:

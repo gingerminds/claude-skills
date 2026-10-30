@@ -39,6 +39,17 @@ class DeferredModuleTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             deferred.resolve(self.run_dir, 3)
 
+    def test_resolving_keeps_the_entry_and_the_answer(self):
+        """A key left for the lead stays known after the pass resumes: the entry is resolved
+        with the lead's answer, never deleted."""
+        entry = deferred.add(self.run_dir, "fix_question", "front : clé laissée : commit de fusion")
+        deferred.resolve(self.run_dir, entry["id"], answer="  Laisser cette clé ")
+        [item] = deferred.all_items(self.run_dir)
+        self.assertEqual((item["resolved"], item["answer"]), (True, "Laisser cette clé"))
+        other = deferred.add(self.run_dir, "gap", "écart")
+        deferred.resolve(self.run_dir, other["id"])
+        self.assertNotIn("answer", deferred.all_items(self.run_dir)[1])
+
     def test_a_damaged_file_is_an_error(self):
         (self.run_dir / "deferred.json").write_text("{", encoding="utf-8")
         with self.assertRaises(ValueError):
@@ -100,6 +111,20 @@ class DeferredCommandTest(AuditCase):
         self.assertEqual([item["id"] for item in after["items"]], [1, 3])
         self.run_json(["deferred", run_dir, "--resolve", "1"])
         self.assertEqual([i["id"] for i in self.run_json(["deferred", run_dir])["items"]], [3])
+
+    def test_deferred_resolves_with_the_lead_answer(self):
+        run_dir = self.make_run()
+        self.run_json(["defer", run_dir, "--kind", "fix_question", "--detail",
+                       "front : clé laissée : commit de fusion"])
+        closed = self.run_json(["deferred", run_dir, "--fix", "--resolve", "1", "--answer",
+                                "C'est réglé, reprendre"])
+        self.assertEqual(closed["items"], [])
+        [item] = self.read(run_dir, "deferred.json")["items"]
+        self.assertEqual((item["resolved"], item["answer"]), (True, "C'est réglé, reprendre"))
+        code, out, err = self.run_main(["deferred", run_dir, "--fix", "--answer", "Laisser"])
+        self.assertEqual(code, 2)
+        self.assertIn("--resolve", err)
+        self.assertNotIn("Traceback", err)
 
     def test_report_labels_fix_kinds(self):
         from cqa import report

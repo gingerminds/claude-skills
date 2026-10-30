@@ -1,11 +1,13 @@
 """Writing a plan to Notion: the only code that changes the copy, behind its safety gates."""
+import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 from cqa.checklist import ref_label
-from cqa.comments import is_skill_comment, to_rich_text
+from cqa.comments import is_audit_comment, is_fix_comment, to_rich_text
 from cqa.notion_api import NotionError
 from cqa.notion_read import assignee_options, write_json
 from cqa.secrets import scan_text
@@ -14,9 +16,20 @@ STATUS_PROPERTY = "Statut"
 ASSIGNEE_PROPERTY = "Assignée à"
 REFUSED_MESSAGE = "écriture refusée : data source du modèle"
 REFUSED_PAGE_MESSAGE = "écriture refusée : page du modèle"
+STATUS_CHANGED = "statut changé depuis le lancement"
+AUDIT_CHANGED = "commentaire d'audit changé depuis le plan"
 
-_KIND_ORDER = {"status": 0, "assign": 1, "comment": 2, "page_comment": 3}
+_KIND_ORDER = {"status": 0, "assign": 1, "comment": 2, "fix_comment": 3, "page_comment": 4}
+_COMMENT_KINDS = ("comment", "fix_comment", "page_comment")
+# The skill comment each kind replaces: the audit comment, or the fix comment.
+_OWN = {"comment": is_audit_comment, "fix_comment": is_fix_comment}
 _STOPPING_STATUSES = (0, 401, 429)
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def text_digest(text: str) -> str:
+    """Return the sha256 of a comment text, edge spaces aside: the « replaces » of an operation."""
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
 class ReferenceWriteRefused(ValueError):
@@ -38,14 +51,25 @@ def apply_plan(
 ) -> dict:
     """Write the operations of a plan to Notion and return its report.
 
-    The report is {"done", "skipped", "blocked", "errors", "replace_failed"}: done and skipped
-    are counts, blocked lists {"key", "labels"}, errors {"key", "message"} and replace_failed
-    {"key", "ref", "reason"}, the skill comments that Notion refused to edit or delete.
+    The report is {"done", "skipped", "blocked", "errors", "replace_failed", "status_changed"}:
+    done and skipped are counts, blocked lists {"key", "labels"}, errors {"key", "message"},
+    replace_failed {"key", "ref", "reason"}, the skill comments that Notion refused to edit or
+    delete, and status_changed {"key", "ref", "current", "reason"}, the status operations left
+    out because the row no longer had their expected status.
 
-    A row comment replaces the skill's own comment of the row (written by bot_id, with a
-    "Verdict : ..." line): the latest is edited in place, the others are deleted, human comments
-    are never touched. When Notion refuses (403) the edit, all skill comments are deleted and a
-    new one is created; when it refuses the deletion too, the comment is created anyway.
+    A row comment replaces the skill's own comment of its kind (written by bot_id): a
+    "comment" the audit comment (comments.is_audit_comment), a "fix_comment" the fix comment
+    (comments.is_fix_comment), never the other one. The latest is edited in place, the others
+    of the kind are deleted, human comments are never touched. When Notion refuses (403) the
+    edit, all skill comments of the kind are deleted and a new one is created; when it refuses
+    the deletion too, the comment is created anyway.
+
+    A status operation with "expected" reads the status of the page first and writes only
+    when it is still expected: otherwise it is skipped (status_changed, not journaled, so a
+    rerun reads it again); a page that already has the target status is skipped and journaled.
+    A comment with "replaces" (text_digest of the audit comment its plan read) rewrites the
+    audit comment only while it is still that text: otherwise, or when it is gone, it is
+    skipped without being journaled, and nothing is created.
 
     A plan whose copy is the reference data source, or with an operation on reference_page_id
     (the page of the template), is refused with ReferenceWriteRefused, and a malformed plan or
@@ -54,8 +78,8 @@ def apply_plan(
     written. An operation is blocked, without any request, when its page is not a row of the
     copy (a page_comment may also target copy_page_id), when its text or target value holds a
     secret, or when an assignment names an option that the plan does not list or that the copy
-    no longer has (Notion would create it). Operations go by ref, then status, assign and
-    comment, the page_comment ones last.
+    no longer has (Notion would create it). Operations go by ref, then status, assign, comment
+    and fix_comment, the page_comment ones last.
 
     notion/applied.json in run_dir lists what was written and is rewritten after each success
     (entries accumulate across applies; a "status" entry carries "value", the status written,
@@ -82,7 +106,8 @@ def apply_plan(
     journal.parent.mkdir(parents=True, exist_ok=True)
     plan_id = plan.get("plan_id")
     recorded = {entry["key"] for entry in entries if entry.get("plan_id") == plan_id}
-    result = {"done": 0, "skipped": 0, "blocked": [], "errors": [], "replace_failed": []}
+    result = {"done": 0, "skipped": 0, "blocked": [], "errors": [], "replace_failed": [],
+              "status_changed": []}
     failed_pages = set()
     for item in sorted(ops, key=_order):
         key, label = item["key"], _describe(item)
@@ -111,6 +136,18 @@ def apply_plan(
             if stop:
                 break
             failed_pages.add(item["page_id"])
+            continue
+        if "status_changed" in sent:
+            current = sent["status_changed"]
+            result["skipped"] += 1
+            result["status_changed"].append(
+                {"key": key, "ref": item.get("ref"), "current": current, "reason": STATUS_CHANGED}
+            )
+            log(f"{label} : non écrit, {STATUS_CHANGED} (« {current or 'aucun'} »)")
+            continue
+        if sent.get("audit_changed"):
+            result["skipped"] += 1
+            log(f"{label} : non écrit, {AUDIT_CHANGED}")
             continue
         recorded.add(key)
         entries.append(_entry(item, sent, plan_id))
@@ -175,9 +212,19 @@ def _problem(item) -> Optional[str]:
         return "« text » n'est pas un texte"
     if kind == "status" and (not isinstance(after, str) or not after.strip()):
         return "« after » doit être le nom d'un statut"
+    expected = item.get("expected")
+    if kind == "status" and expected is not None and (
+        not isinstance(expected, str) or not expected.strip()
+    ):
+        return "« expected » doit être le nom d'un statut"
+    replaces = item.get("replaces")
+    if replaces is not None and (
+        kind != "comment" or not isinstance(replaces, str) or not _DIGEST.fullmatch(replaces)
+    ):
+        return "« replaces » doit être l'empreinte sha256 d'un commentaire d'audit"
     if kind == "assign" and not _is_names(after):
         return "« after » doit être la liste des noms assignés"
-    if kind in ("comment", "page_comment") and not (text and text.strip()):
+    if kind in _COMMENT_KINDS and not (text and text.strip()):
         return "« text » est vide"
     return None
 
@@ -217,23 +264,42 @@ def _send(client, item: dict, bot_id: Optional[str]) -> dict:
     """Send one operation and return what it did.
 
     A comment gives {"comment_id", "mode", "failed"}, or {"skipped": True, "failed"} when the
-    text was already on the page; the other operations give {}.
+    text was already on the page. A status with "expected" gives {"skipped": True} when the
+    page already has the target status, {"skipped": True, "status_changed": <status>} when it
+    has neither; the other operations give {}.
     """
     kind, page_id = item["kind"], item["page_id"]
     if kind == "status":
+        expected = item.get("expected")
+        if expected is not None:
+            current = _current_status(client, page_id)
+            if current == item["after"]:
+                return {"skipped": True}
+            if current != expected:
+                return {"skipped": True, "status_changed": current}
         client.update_page(page_id, {STATUS_PROPERTY: {"status": {"name": item["after"]}}})
     elif kind == "assign":
         names = [{"name": name} for name in item["after"]]
         client.update_page(page_id, {ASSIGNEE_PROPERTY: {"multi_select": names}})
     else:
         existing = client.comments(page_id)
-        own = _skill_comments(existing, bot_id) if kind == "comment" else []
+        own = _skill_comments(existing, bot_id, kind) if kind in _OWN else []
         if own and _plain_text(own[-1]).strip() == item["text"].strip():
             return {"skipped": True, "failed": _delete_all(client, own[:-1])}
+        replaces = item.get("replaces")
+        if replaces is not None and (not own or text_digest(_plain_text(own[-1])) != replaces):
+            return {"skipped": True, "audit_changed": True, "failed": []}
         if not own and _shown_in(existing, item["text"], bot_id):
             return {"skipped": True, "failed": []}
         return _write_comment(client, page_id, item["text"], own)
     return {}
+
+
+def _current_status(client, page_id: str):
+    """Return the « Statut » of a page as Notion has it now (None when it has none)."""
+    prop = (client.page(page_id).get("properties") or {}).get(STATUS_PROPERTY) or {}
+    value = prop.get(prop.get("type") or "status")
+    return value.get("name") if isinstance(value, dict) else None
 
 
 def _write_comment(client, page_id: str, text: str, own: list) -> dict:
@@ -276,20 +342,21 @@ def _delete_all(client, comments: list) -> list:
     return failed
 
 
-def skill_comments(comments: list, bot_id: Optional[str]) -> list:
-    """Return the skill's comments among comments, the oldest first."""
-    return _skill_comments(comments, bot_id)
+def skill_comments(comments: list, bot_id: Optional[str], kind: str = "comment") -> list:
+    """Return the skill's comments of a kind among comments, the oldest first: "comment" for
+    the audit comments, "fix_comment" for the fix comments."""
+    return _skill_comments(comments, bot_id, kind)
 
 
-def _skill_comments(comments: list, bot_id: Optional[str]) -> list:
-    """Return the skill's comments (the integration's, with a verdict or an "MR :" block), oldest first."""
+def _skill_comments(comments: list, bot_id: Optional[str], kind: str = "comment") -> list:
+    """Return the skill's comments of a kind (written by bot_id, see _OWN), oldest first."""
     if bot_id is None:
         return []
     own = [
         comment
         for comment in comments
         if (comment.get("created_by") or {}).get("id") == bot_id
-        and is_skill_comment(_plain_text(comment))
+        and _OWN[kind](_plain_text(comment))
     ]
     return sorted(own, key=lambda comment: comment.get("created_time") or "")
 

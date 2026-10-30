@@ -18,7 +18,7 @@ SECRETS = {
     "GM_AUDIT_AUTH_PASS": "pass-xyz-123",
 }
 UNSAFE_METHODS = "^(?!(GET|HEAD|OPTIONS)$)"
-IMAGES = ["agence", "nu", "testssl", "gitleaks", "redocly", "schemathesis"]
+IMAGES = ["agence", "nu", "testssl", "gitleaks", "redocly", "schemathesis", "nginx", "varnish"]
 ALL_ORDER = [
     ("agence", "http --probes"),
     ("gitleaks", "git /repos/laravel"),
@@ -706,6 +706,97 @@ class AllTest(LauncherCase):
         self.assertEqual("skipped", self.read_json("tools/schemathesis/result.json")["status"])
 
 
+class SecretsTest(LauncherCase):
+    """secrets <in_file> <out_dir>: gitleaks on the content of a file, offline and read-only,
+    for the guard of the fix mode."""
+
+    def setUp(self):
+        super().setUp()
+        self.in_dir = self.tmp / "guard in"
+        self.in_dir.mkdir()
+        self.in_file = self.in_dir / "input.txt"
+        self.in_file.write_text("<?php\n$x = 1;\n", encoding="utf-8")
+        self.out_dir = self.tmp / "guard out"
+        self.out_dir.mkdir()
+
+    def secrets(self, *args, **extra):
+        return self.launch("secrets", *(args or (str(self.in_file), str(self.out_dir))), **extra)
+
+    def docker_runs(self):
+        return [call for call in self.calls() if call[:1] == ["run"]]
+
+    def test_secrets_command_runs_offline(self):
+        result = self.secrets(**SECRETS)
+        self.assertEqual(0, result.returncode, result.stderr)
+        runs = self.docker_runs()
+        self.assertEqual(1, len(runs))
+        call = runs[0]
+        self.assertTrue(has_pair(call, "--network", "none"))
+        self.assertTrue(has_pair(call, "--pull", "never"))
+        self.assertIn("--rm", call)
+        self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
+        self.assertTrue(has_pair(call, "--env", "HOME=/tmp"))
+        self.assertTrue(has_pair(call, "--tmpfs", "/tmp"))
+        self.assertTrue(has_pair(call, "-v", f"{self.in_file}:/in/input:ro"))
+        self.assertTrue(has_pair(call, "-v", f"{self.out_dir}:/out"))
+        mounts = [call[i + 1] for i in range(len(call) - 1) if call[i] == "-v"]
+        self.assertEqual(2, len(mounts))
+        self.assertEqual(["HOME=/tmp"], env_args(call))
+        for secret in ("GM_AUDIT_AUTH_USER", "GM_AUDIT_AUTH_PASS", "cqa-user", "pass-xyz-123"):
+            self.assertNotIn(secret, " ".join(call))
+        options, image, arguments = split_run(call)
+        self.assertEqual("gitleaks", image)
+        self.assertTrue(has_pair(options, "--entrypoint", "sh"))
+        self.assertEqual("-c", arguments[0])
+        script = arguments[1]
+        for needle in ("gitleaks stdin", "--report-format json", "--report-path /out/gitleaks.json",
+                       "--exit-code 0", "--no-banner", "-l error", "--ignore-gitleaks-allow",
+                       "--redact=100", "</in/input"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, script)
+        self.assertEqual("[]", (self.out_dir / "gitleaks.json").read_text(encoding="utf-8"))
+        self.assertEqual("<?php\n$x = 1;\n", self.in_file.read_text(encoding="utf-8"))
+        self.assertEqual(["input.txt"], [path.name for path in self.in_dir.iterdir()])
+        self.assertEqual(["gitleaks.json"], [path.name for path in self.out_dir.iterdir()])
+
+    def test_secrets_replaces_a_stale_report(self):
+        (self.out_dir / "gitleaks.json").write_text("stale", encoding="utf-8")
+        self.assertEqual(0, self.secrets().returncode)
+        self.assertEqual("[]", (self.out_dir / "gitleaks.json").read_text(encoding="utf-8"))
+
+    def test_secrets_without_docker_or_image_exits_2_before_any_run(self):
+        result = self.secrets(CQA_STUB_MISSING="gitleaks")
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("gitleaks", result.stderr)
+        self.assertIn("cqa-toolbox.sh pull", result.stderr)
+        self.assertEqual([], self.docker_runs())
+        self.assertFalse((self.out_dir / "gitleaks.json").exists())
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name in ("python3", "uname", "dirname", "basename", "id"):
+            (bin_dir / name).symlink_to(shutil.which(name))
+        result = self.secrets(path=str(bin_dir))
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Docker", result.stderr)
+
+    def test_secrets_usage_and_failures(self):
+        for args in (
+            [],
+            [str(self.in_file)],
+            [str(self.in_file), str(self.out_dir), "extra"],
+            [str(self.tmp / "absent.txt"), str(self.out_dir)],
+            [str(self.in_file), str(self.tmp / "absent")],
+        ):
+            with self.subTest(args=args):
+                result = self.launch("secrets", *args)
+                self.assertEqual(2, result.returncode, (args, result.stderr))
+        self.assertEqual([], self.docker_runs())
+        result = self.secrets(CQA_STUB_FAIL="gitleaks stdin")
+        self.assertEqual(1, result.returncode)
+        self.assertIn("gitleaks", result.stderr)
+        self.assertFalse((self.out_dir / "gitleaks.json").exists())
+
+
 class RefusalsTest(LauncherCase):
     def test_usage_errors(self):
         for args in (
@@ -899,6 +990,8 @@ class CheckTest(LauncherCase):
             self.assertTrue(has_pair(call, "--network", "none"))
             # R19: a missing image is never downloaded in the middle of a fix pass.
             self.assertTrue(has_pair(call, "--pull", "never"))
+            self.assertTrue(has_pair(call, "--cap-drop", "ALL"))
+            self.assertTrue(has_pair(call, "--security-opt", "no-new-privileges"))
             self.assertIn("--rm", call)
             self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
             self.assertTrue(has_pair(call, "--env", "HOME=/tmp"))
@@ -985,6 +1078,319 @@ class CheckTest(LauncherCase):
         self.assertEqual(("skip", "json"), status["tsconfig.json"])
         self.assertEqual(("ko", "json"), status["mytsconfig.json"])
         self.assertTrue(all(len(row) == 4 for row in rows))
+
+    def test_syntax_script_parses_scss_with_postcss_scss(self):
+        if shutil.which("node") is None:
+            self.skipTest("node absent")
+        module = self.tmp / "gm-audit" / "node_modules" / "postcss-scss"
+        module.mkdir(parents=True)
+        (module / "package.json").write_text('{"name": "postcss-scss", "main": "index.js"}',
+                                             encoding="utf-8")
+        (module / "index.js").write_text(
+            "exports.parse = (text) => { if (text.includes('{{')) { const e = new Error('x');"
+            " e.reason = 'Unclosed block'; e.line = 2; e.column = 3; throw e; } };\n",
+            encoding="utf-8")
+        (self.tmp / "gm-audit" / "package.json").write_text("{}", encoding="utf-8")
+        root = self.tmp / "fake-root"
+        repo = root / "repos" / "front"
+        repo.mkdir(parents=True)
+        (repo / "good.scss").write_text(".a { .b { color: red; } }\n", encoding="utf-8")
+        (repo / "bad.scss").write_text(".a {\n  .b {{\n", encoding="utf-8")
+        (repo / "c.css").write_text(".a {{\n", encoding="utf-8")
+        listing = self.tmp / "in.txt"
+        listing.write_text("good.scss\nbad.scss\nc.css\n", encoding="utf-8")
+        script = (embedded_script("SYNTAX_SCRIPT")
+                  .replace("/opt/gm-audit/package.json", str(self.tmp / "gm-audit" / "package.json"))
+                  .replace("/repos/", f"{root}/repos/").replace("</in/files.txt", f"<{listing}"))
+        result = subprocess.run(["sh", "-c", script, "sh", "front"], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        self.assertEqual([["ok", "scss", "good.scss", ""], ["ko", "scss", "bad.scss", "2:3 Unclosed block"]],
+                         rows)
+        (module / "index.js").unlink()
+        (module / "package.json").unlink()
+        result = subprocess.run(["sh", "-c", script, "sh", "front"], capture_output=True, text=True)
+        self.assertEqual("skip\tscss\tgood.scss\tmodule postcss-scss absent de l'image",
+                         result.stdout.splitlines()[0])
+
+    def put(self, root, path, text):
+        target = Path(root) / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def config_runs(self):
+        found = {}
+        for call in self.docker_runs():
+            parts = split_run(call)
+            if parts and parts[1] in ("nginx", "varnish"):
+                found.setdefault(parts[1], []).append(call)
+        return found
+
+    def test_check_runs_nginx_and_varnish_offline(self):
+        self.put(self.worktree, "docker/nginx/conf.d/default.conf",
+                 "upstream backend {\n    server app-1:8080 weight=2;\n    server unix:/run/a.sock;\n}\n"
+                 "upstream one { server one-line:80; server two-line:80 backup; }\n"
+                 "server {\n    resolver dns.example.test valid=30s ipv6=off;\n"
+                 "    location / { proxy_pass http://api.example.test:8080/x; }\n"
+                 "    location ~ \\.php$ { fastcgi_pass php:9000; }\n"
+                 "    location /v { proxy_pass http://$backend; }\n"
+                 "    location /l { proxy_pass http://127.0.0.1:81; }\n"
+                 "    # proxy_pass http://commented.example.test;\n}\n")
+        self.put(self.worktree, "docker/nginx/templates/site.conf.template",
+                 "server { listen ${APP_PORT}; location / { fastcgi_pass ${PHP_HOST}:9000; } }\n")
+        self.put(self.worktree, "docker/varnish/default.vcl", 'vcl 4.1;\ninclude "backends.vcl";\n')
+        self.put(self.worktree, "docker/varnish/backends.vcl",
+                 'backend default { .host = "cms.example.test"; .port = "80"; }\n')
+        self.put(self.check_dir, "base/docker/nginx/conf.d/default.conf",
+                 "server { location / { proxy_pass http://old.example.test; } }\n")
+        self.put(self.check_dir, "base/docker/varnish/default.vcl", 'backend b { .host = "app"; }\n')
+        self.put(self.worktree, "conf/nginx.conf",
+                 "events {}\nhttp { server { location / { proxy_pass http://main.example.test; } } }\n")
+        self.put(self.worktree, "conf/other.conf", "server { location / { proxy_pass http://sibling.example.test; } }\n")
+        (self.check_dir / "files.txt").write_text(
+            "a.php\ndocker/nginx/conf.d/default.conf\ndocker/nginx/templates/site.conf.template\n"
+            "docker/varnish/default.vcl\nother/site.conf\nconf/nginx.conf\nREADME.md\n", encoding="utf-8")
+        result = self.check(**SECRETS)
+        self.assertEqual(0, result.returncode, result.stderr)
+        runs = self.config_runs()
+        self.assertEqual({"nginx": 1, "varnish": 1}, {name: len(calls) for name, calls in runs.items()})
+        for name, (call,) in runs.items():
+            with self.subTest(image=name):
+                self.assertIn(["image", "inspect", f"{REGISTRY}/{name}:1"],
+                              [c[:2] + c[-1:] for c in self.calls() if c[:2] == ["image", "inspect"]])
+                self.assertTrue(has_pair(call, "--network", "none"))
+                self.assertTrue(has_pair(call, "--pull", "never"))
+                self.assertTrue(has_pair(call, "--cap-drop", "ALL"))
+                self.assertTrue(has_pair(call, "--security-opt", "no-new-privileges"))
+                self.assertIn("--rm", call)
+                self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
+                self.assertEqual(["HOME=/tmp"], env_args(call))
+                self.assertTrue(has_pair(call, "--tmpfs", "/tmp"))
+                self.assertTrue(has_pair(call, "--entrypoint", "sh"))
+                mounts = [call[i + 1] for i in range(len(call) - 1) if call[i] == "-v"]
+                self.assertEqual(sorted([f"{self.check_dir}:/in:ro", f"{self.worktree}:/repos/front:ro"]),
+                                 sorted(mounts))
+                for secret in ("GM_AUDIT_AUTH_USER", "GM_AUDIT_AUTH_PASS", "cqa-user", "pass-xyz-123"):
+                    self.assertNotIn(secret, " ".join(call))
+
+        def hosts(call):
+            return sorted(call[i + 1] for i in range(len(call) - 1) if call[i] == "--add-host")
+
+        self.assertEqual(
+            [f"{host}:127.0.0.1" for host in
+             ("api.example.test", "app-1", "dns.example.test", "example.test", "main.example.test",
+              "old.example.test", "one-line", "php", "two-line")],
+            hosts(runs["nginx"][0]))
+        self.assertEqual(["app:127.0.0.1", "cms.example.test:127.0.0.1"], hosts(runs["varnish"][0]))
+        self.assertEqual(
+            "nginx\tdocker/nginx\tdocker/nginx/conf.d/default.conf\n"
+            "nginx\tdocker/nginx\tdocker/nginx/templates/site.conf.template\n"
+            "varnish\tdocker/varnish\tdocker/varnish/default.vcl\n"
+            "nginx\tconf\tconf/nginx.conf\n",
+            (self.check_dir / "config-plan.tsv").read_text(encoding="utf-8"))
+        self.assertTrue((self.check_dir / "config.tsv").is_file())
+        self.assertTrue((self.check_dir / "syntax.tsv").is_file())
+        self.assertEqual(["conf", "docker"], sorted(p.name for p in self.worktree.iterdir()))
+
+    def test_check_without_a_server_file_starts_no_config_container(self):
+        self.assertEqual(0, self.check().returncode)
+        self.assertEqual({}, self.config_runs())
+        self.assertFalse(any(call[:2] == ["image", "inspect"] for call in self.calls()))
+        self.assertFalse((self.check_dir / "config.tsv").exists())
+
+    def test_missing_image_is_not_run(self):
+        self.put(self.worktree, "nginx/site.conf", "server {}\n")
+        self.put(self.worktree, "default.vcl", "vcl 4.1;\n")
+        (self.check_dir / "files.txt").write_text("nginx/site.conf\ndefault.vcl\n", encoding="utf-8")
+        result = self.check(CQA_STUB_MISSING="nginx,varnish")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual({}, self.config_runs())
+        self.assertEqual(
+            ["head\tskip\tnginx -t\tnginx/site.conf\timage nginx absente de la boîte à outils : "
+             "lancez cqa-toolbox.sh pull",
+             "head\tskip\tvarnishd -C\tdefault.vcl\timage varnish absente de la boîte à outils : "
+             "lancez cqa-toolbox.sh pull"],
+            (self.check_dir / "config.tsv").read_text(encoding="utf-8").splitlines())
+        result = self.check(CQA_STUB_FAIL="--tmpfs /var/cache/nginx")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("head\tskip\tnginx -t\tnginx/site.conf\tcontrôle nginx impossible dans la boîte à "
+                      "outils (code 1)",
+                      (self.check_dir / "config.tsv").read_text(encoding="utf-8").splitlines())
+
+    def fake_bin(self, name, code):
+        folder = self.tmp / "fake-bin"
+        folder.mkdir(exist_ok=True)
+        path = folder / name
+        path.write_text("#!/usr/bin/env python3\n" + code, encoding="utf-8")
+        path.chmod(0o755)
+        return folder
+
+    def test_nginx_script_renders_templates_and_wraps_partial_files(self):
+        etc = self.tmp / "etc-nginx"
+        self.put(etc, "nginx.conf", "events {}\nhttp { include /etc/nginx/conf.d/*.conf; }\n")
+        self.put(etc, "fastcgi_params", "fastcgi_param A b;\n")
+        root = self.tmp / "fake-root"
+        repo = root / "repos" / "front"
+        self.put(repo, "docker/nginx/nginx.conf", "events {}\nhttp {\n include /etc/nginx/conf.d/*.conf;\n}\n")
+        self.put(repo, "docker/nginx/conf.d/default.conf", "server {\n BROKEN\n}\n")
+        self.put(repo, "docker/nginx/snippets/deny.conf", "location ~ /\\. { deny all; }\n")
+        self.put(repo, "docker/nginx/templates/site.conf.template",
+                 "server { listen ${APP_PORT}; server_name ${SERVER_NAME}; set $x ${host}; }\n")
+        self.put(repo, "nginx.conf", "events {}\nhttp {\n BROKEN\n}\n")
+        self.put(repo, "README.md", "x\n")
+        inbox = self.tmp / "in"
+        self.put(inbox, "base/docker/nginx/conf.d/default.conf", "server {\n BROKEN\n}\n")
+        self.put(inbox, "config-plan.tsv", "".join(
+            f"nginx\tdocker/nginx\tdocker/nginx/{name}\n"
+            for name in ("nginx.conf", "conf.d/default.conf", "snippets/deny.conf", "templates/site.conf.template"))
+            + "nginx\t.\tnginx.conf\n")
+        work = self.tmp / "work"
+        log = self.tmp / "nginx.log"
+        fake = self.fake_bin("nginx", f"""import json, re, sys
+args = sys.argv[1:]
+conf = args[args.index("-c") + 1]
+text = open(conf).read()
+found = re.search(r'include "([^"]+)";', text)
+target = found.group(1) if found else conf
+body = open(target).read()
+with open({str(log)!r}, "a") as handle:
+    handle.write(json.dumps({{"args": args, "conf": text, "target": target}}) + "\\n")
+level = "location" if "location / {{" in text else "server" if "server {{" in text else "http"
+if "BROKEN" in body:
+    sys.stderr.write('2026/10/30 10:00:00 [emerg] 7#7: unexpected "}}" in ' + target + ':2\\n')
+    sys.stderr.write("nginx: configuration file " + conf + " test failed\\n")
+    sys.exit(1)
+if body.lstrip().startswith("location") and level == "http":
+    sys.stderr.write('2026/10/30 10:00:00 [emerg] 7#7: "location" directive is not allowed here in ' + target + ':1\\n')
+    sys.exit(1)
+""")
+        script = (embedded_script("NGINX_SCRIPT")
+                  .replace("plan=/in/config-plan.tsv", f"plan={inbox}/config-plan.tsv")
+                  .replace("base_root=/in/base", f"base_root={inbox}/base")
+                  .replace('head_root="/repos/$repo"', f'head_root="{root}/repos/$repo"')
+                  .replace("etc=/etc/nginx", f"etc={etc}")
+                  .replace("work=/tmp/cqa", f"work={work}"))
+        env = dict(os.environ, PATH=f"{fake}{os.pathsep}{os.environ['PATH']}")
+        result = subprocess.run(["sh", "-c", script, "sh", "front"], capture_output=True, text=True, env=env)
+        self.assertEqual(0, result.returncode, result.stderr)
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        self.assertTrue(all(len(row) == 5 and row[2] == "nginx -t" for row in rows), rows)
+        status = {(row[0], row[3]): (row[1], row[4]) for row in rows}
+        self.assertEqual({
+            ("head", "docker/nginx/nginx.conf"): ("ok", ""),
+            ("head", "docker/nginx/conf.d/default.conf"):
+                ("ko", 'unexpected "}" in docker/nginx/conf.d/default.conf:2'),
+            ("head", "docker/nginx/snippets/deny.conf"): ("ok", ""),
+            ("head", "docker/nginx/templates/site.conf.template"): ("ok", ""),
+            ("base", "docker/nginx/conf.d/default.conf"):
+                ("ko", 'unexpected "}" in docker/nginx/conf.d/default.conf:2'),
+            ("head", "nginx.conf"): ("ko", 'unexpected "}" in nginx.conf:2'),
+        }, status)
+        self.assertEqual(sorted(p.name for p in (work / "head" / ".cqa-root").iterdir()),
+                         ["fastcgi_params", "nginx.conf"])
+        self.assertEqual([], [p for p in work.rglob("*.cqa-part")])
+        copy = work / "head" / "docker" / "nginx"
+        self.assertEqual("server { listen 1; server_name example.test; set $x ${host}; }\n",
+                         (copy / "templates" / "site.conf").read_text(encoding="utf-8"))
+        self.assertEqual(f"events {{}}\nhttp {{\n include {copy}/conf.d/*.conf;\n}}\n",
+                         (copy / "nginx.conf").read_text(encoding="utf-8"))
+        self.assertTrue((copy / "fastcgi_params").is_file())
+        calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertTrue(all(call["args"][:3] == ["-t", "-q", "-e"] and call["args"][3] == "stderr"
+                            for call in calls))
+        self.assertIn(str(copy / "nginx.conf"), [call["args"][-1] for call in calls])
+        deny = [call for call in calls if call["target"].endswith("snippets/deny.conf")]
+        self.assertEqual(2, len(deny))
+        self.assertNotIn("server {", deny[0]["conf"])
+        self.assertIn("server {", deny[1]["conf"])
+        self.assertFalse((repo / "docker" / "nginx" / "templates" / "site.conf").exists())
+
+    def test_nginx_script_never_reuses_a_half_built_copy(self):
+        if os.getuid() == 0:
+            self.skipTest("root reads every file")
+        etc = self.tmp / "etc-nginx"
+        self.put(etc, "nginx.conf", "events {}\n")
+        root = self.tmp / "fake-root"
+        repo = root / "repos" / "front"
+        self.put(repo, "nginx/a.conf", "server {}\n")
+        self.put(repo, "nginx/b.conf", "server {}\n")
+        self.put(repo, "nginx/secret.conf", "x\n")
+        (repo / "nginx" / "secret.conf").chmod(0)
+        self.addCleanup((repo / "nginx" / "secret.conf").chmod, 0o644)
+        inbox = self.tmp / "in"
+        self.put(inbox, "config-plan.tsv", "nginx\tnginx\tnginx/a.conf\nnginx\tnginx\tnginx/b.conf\n")
+        work = self.tmp / "work"
+        fake = self.fake_bin("nginx", "import sys\n")
+        script = (embedded_script("NGINX_SCRIPT")
+                  .replace("plan=/in/config-plan.tsv", f"plan={inbox}/config-plan.tsv")
+                  .replace("base_root=/in/base", f"base_root={inbox}/base")
+                  .replace('head_root="/repos/$repo"', f'head_root="{root}/repos/$repo"')
+                  .replace("etc=/etc/nginx", f"etc={etc}")
+                  .replace("work=/tmp/cqa", f"work={work}"))
+        env = dict(os.environ, PATH=f"{fake}{os.pathsep}{os.environ['PATH']}")
+        result = subprocess.run(["sh", "-c", script, "sh", "front"], capture_output=True, text=True, env=env)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([["head", "skip", "nginx -t", "nginx/a.conf", "copie du dossier nginx impossible"],
+                          ["head", "skip", "nginx -t", "nginx/b.conf", "copie du dossier nginx impossible"]],
+                         [line.split("\t") for line in result.stdout.splitlines()])
+        self.assertEqual([], list((work / "head").iterdir()))
+
+    def test_varnish_script_compiles_each_side_and_keeps_the_compiler_message(self):
+        root = self.tmp / "fake-root"
+        repo = root / "repos" / "front"
+        self.put(repo, "docker/varnish/default.vcl", "vcl 4.1;\nBROKEN\n")
+        self.put(repo, "docker/varnish/new.vcl", "vcl 4.1;\n")
+        inbox = self.tmp / "in"
+        self.put(inbox, "base/docker/varnish/default.vcl", "vcl 4.1;\n")
+        self.put(inbox, "config-plan.tsv", "varnish\tdocker/varnish\tdocker/varnish/default.vcl\n"
+                                           "varnish\tdocker/varnish\tdocker/varnish/new.vcl\n")
+        state = self.tmp / "varnish-state"
+        log = self.tmp / "varnishd.log"
+        fake = self.fake_bin("varnishd", f"""import json, sys
+args = sys.argv[1:]
+with open({str(log)!r}, "a") as handle:
+    handle.write(json.dumps(args) + "\\n")
+path = args[args.index("-f") + 1]
+if "BROKEN" in open(path).read():
+    sys.stderr.write("Message from VCC-compiler:\\nExpected ';' got '}}'\\n(program line 410), at\\n"
+                     "('" + path + "' Line 2 Pos 1)\\nBROKEN\\n#\\n\\nRunning VCC-compiler failed, exited with 2\\n"
+                     "VCL compilation failed\\n")
+    sys.exit(2)
+sys.stderr.write("/* C code */\\n")
+""")
+        script = (embedded_script("VARNISH_SCRIPT")
+                  .replace("plan=/in/config-plan.tsv", f"plan={inbox}/config-plan.tsv")
+                  .replace("base_root=/in/base", f"base_root={inbox}/base")
+                  .replace('head_root="/repos/$repo"', f'head_root="{root}/repos/$repo"')
+                  .replace("state=/var/lib/varnish", f"state={state}")
+                  .replace("err=/tmp/cqa-vcc.err", f"err={self.tmp}/vcc.err"))
+        env = dict(os.environ, PATH=f"{fake}{os.pathsep}{os.environ['PATH']}")
+        result = subprocess.run(["sh", "-c", script, "sh", "front"], capture_output=True, text=True, env=env)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([
+            ["head", "ko", "varnishd -C", "docker/varnish/default.vcl",
+             "Expected ';' got '}' ('docker/varnish/default.vcl' Line 2 Pos 1)"],
+            ["base", "ok", "varnishd -C", "docker/varnish/default.vcl", ""],
+            ["head", "ok", "varnishd -C", "docker/varnish/new.vcl", ""],
+        ], [line.split("\t") for line in result.stdout.splitlines()])
+        calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(3, len(calls))
+        for call in calls:
+            self.assertEqual("-C", call[0])
+            folder = os.path.dirname(call[call.index("-f") + 1])
+            self.assertEqual(f"vcl_path={folder}:/etc/varnish:/usr/share/varnish/vcl",
+                             call[call.index("-p") + 1])
+            self.assertTrue(call[call.index("-n") + 1].startswith(f"{state}/"))
+        self.assertEqual(3, len({call[call.index("-n") + 1] for call in calls}))
+
+
+def embedded_script(name):
+    """Return the text of a sh script embedded in the launcher by read -r -d '' <name>."""
+    match = re.search(rf"read -r -d '' {name} <<'SCRIPT' \|\| true\n(.*?)\nSCRIPT\n",
+                      SCRIPT.read_text(encoding="utf-8"), re.DOTALL)
+    if match is None:
+        raise AssertionError(f"{name} absent du lanceur")
+    return match.group(1)
 
 
 class SourceTest(unittest.TestCase):

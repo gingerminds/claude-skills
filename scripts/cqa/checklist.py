@@ -8,6 +8,8 @@ STATUS_PARTIAL = "Mise en place partielle"
 STATUS_IMPLEMENTED = "Mis en place"
 STATUS_OK = "Ok / Recetté"
 STATUS_NA = "Non applicable"
+# Set by the fix mode on rows put in a merge request; only when the copy has the option.
+STATUS_REVIEW = "En review"
 
 REQUIRED_PROPERTIES = {
     "Tâche": "title",

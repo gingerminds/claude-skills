@@ -37,8 +37,14 @@ from cqa.lots import TOOLS, build_lots, coverage, select_rows
 from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
 from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_digest
-from cqa.rerun import latest_findings, read_grounded_findings, rerun_candidates
-from cqa.project import parse_project_md, project_slug, sibling_repos
+from cqa.rerun import (
+    comment_dates,
+    latest_findings,
+    read_grounded_findings,
+    rerun_candidates,
+    rerun_dates,
+)
+from cqa.project import parse_project_md, project_name, project_slug, sibling_repos
 from cqa.secrets import known_values_from_env, scan_tree
 from cqa import crawl_budget
 from cqa.target import build_opener, fetch_page, fetch_timed, probe_target, validate_url
@@ -288,6 +294,7 @@ def _register_audit(commands) -> None:
         commands, "deferred", "décisions mises de côté encore ouvertes", _cmd_deferred
     )
     sub.add_argument("--resolve", type=int, metavar="ID", help="ferme la décision ID")
+    sub.add_argument("--answer", help="avec --resolve : réponse du lead, gardée dans l'entrée")
     sub.add_argument(
         "--fix", action="store_true", help="liste les décisions du mode fix (fix_*) au lieu de celles de l'audit"
     )
@@ -310,7 +317,7 @@ def _cmd_project(args, services) -> int:
             f"Le nom du dossier « {root.name} » ne permet pas de déduire le projet "
             "(forme attendue : « Client - Projet - Techno »)."
         )
-    name = _project_name(root.name)
+    name = project_name(root.name)
     _emit({"slug": slug, "name": name, "repos": [repo], "candidates": candidates})
     return EXIT_OK
 
@@ -1037,15 +1044,7 @@ def _closed_reruns(run_dir: Path) -> set:
 
 def _rerun_dates(run_dir: Path) -> dict:
     """Return {NN: date} of the closed reruns that recorded their date (rerun-close)."""
-    dates = _read_json_object(run_dir / "reruns.json").get("dates")
-    found = {}
-    for key, value in (dates.items() if isinstance(dates, dict) else []):
-        if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
-            try:
-                found[key] = datetime.strptime(value, "%Y-%m-%d").date()
-            except ValueError:
-                continue
-    return found
+    return rerun_dates(run_dir)
 
 
 def _read_json_object(path: Path) -> dict:
@@ -1075,8 +1074,10 @@ def _cmd_defer(args, services) -> int:
 
 def _cmd_deferred(args, services) -> int:
     run_dir = args.run_dir.resolve()
+    if args.answer is not None and args.resolve is None:
+        raise UsageError("--answer va avec --resolve : la réponse du lead à la décision qu'il ferme.")
     if args.resolve is not None:
-        deferred.resolve(run_dir, args.resolve)
+        deferred.resolve(run_dir, args.resolve, answer=args.answer)
     _emit({"items": deferred.open_items(run_dir, fix=args.fix)})
     return EXIT_OK
 
@@ -1210,7 +1211,6 @@ def _cmd_plan(args, services) -> int:
         missing_in_copy=missing,
         recette_refs=recette["refs"],
         comment_dates=_comment_dates(run_dir, sources),
-        mr_links=_mr_links(run_dir),
     )
     if args.recette is not None:
         plan["recette"] = {**recette, "rerun": f"{args.recette:02d}"}
@@ -1226,27 +1226,13 @@ def _cmd_plan(args, services) -> int:
     return EXIT_OK
 
 
-def _mr_links(run_dir: Path) -> dict:
-    """Return {ref: [url]} of the merge requests of a fix pass, {} without one."""
-    try:
-        return fix_state.read_mr_links(run_dir)
-    except ValueError as error:
-        raise UsageError(str(error))
-
-
 def _comment_dates(run_dir: Path, sources: dict) -> dict:
     """Return {ref: date of its rerun} for the rows whose latest finding comes from a rerun.
 
     Their comment then says when they were judged again; a rerun closed before its date was
     recorded keeps the date of the run.
     """
-    dates = _rerun_dates(run_dir)
-    found = {}
-    for ref, name in sources.items():
-        match = _RERUN_FILE.fullmatch(name)
-        if match and match.group(2) in dates:
-            found[ref] = dates[match.group(2)]
-    return found
+    return comment_dates(run_dir, sources)
 
 
 def _check_closed(run_dir: Path, number: int) -> None:
@@ -1353,7 +1339,7 @@ def _cmd_scan(args, services) -> int:
         {"path": path, "label": label}
         for path, label in scan_tree(
             args.run_dir, known_values_from_env(), exclude=("fiches",),
-            skip_dirs=(fix_state.WORKTREE_DIRS,),
+            skip_dirs=fix_state.WORKTREE_DIRS,
         )
     ]
     _emit({"ok": not found, "found": found})
@@ -1569,11 +1555,6 @@ def _public_remote(remote: str) -> str:
         user = "" if scheme.lower() in ("http", "https") else userinfo.partition(":")[0]
         netloc = f"{user}@{host}" if user else host
     return f"{scheme}://{netloc}{slash}{tail}"
-
-
-def _project_name(dir_name: str) -> str:
-    parts = [part.strip() for part in dir_name.split(_SEPARATOR)]
-    return _SEPARATOR.join(parts[:-1]) if len(parts) >= 2 else dir_name
 
 
 def _repo_label(dir_name: str) -> str:

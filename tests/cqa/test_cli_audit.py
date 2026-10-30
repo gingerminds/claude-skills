@@ -1,5 +1,6 @@
 import contextlib
 import io
+import itertools
 import json
 import os
 import re
@@ -7,14 +8,14 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 from urllib.parse import urljoin, urlsplit
 
 import cqa_plan as cqa_plan_module
-from cqa import probes, report
-from cqa.notion_write import apply_plan, validate_plan
+from cqa import fix_state, probes, report
+from cqa.notion_write import apply_plan, text_digest, validate_plan
 from cqa.plan import operation_key
 from tests.cqa.fakes import apply_report
 from tests.cqa import test_cli_prepare as prepare
@@ -1924,9 +1925,10 @@ class ScanTest(AuditCase):
     def test_scan_skips_fix_worktrees(self):
         run_dir = self.make_run()
         config = "<?php\n$password = 'hunter22';\n"
-        worktree = run_dir / "fix" / "front" / "securite" / "wt"
-        worktree.mkdir(parents=True)
-        (worktree / "wp-config.php").write_text(config, encoding="utf-8")
+        repo_folder = run_dir / "fix" / "front"
+        for worktree in (repo_folder / "wt", repo_folder / "securite" / "wt"):
+            worktree.mkdir(parents=True)
+            (worktree / "wp-config.php").write_text(config, encoding="utf-8")
         self.assertEqual(self.run_json(["scan", run_dir]), {"ok": True, "found": []})
         (worktree.parent / "wp-config.php").write_text(config, encoding="utf-8")
         code, out, err = self.run_main(["scan", run_dir])
@@ -1936,6 +1938,14 @@ class ScanTest(AuditCase):
             [{"path": "fix/front/securite/wp-config.php", "label": "credential_assignment"}],
         )
         (worktree.parent / "wp-config.php").unlink()
+        (repo_folder / "wp-config.php").write_text(config, encoding="utf-8")
+        code, out, err = self.run_main(["scan", run_dir])
+        self.assertEqual(code, 7)
+        self.assertEqual(
+            json.loads(out)["found"],
+            [{"path": "fix/front/wp-config.php", "label": "credential_assignment"}],
+        )
+        (repo_folder / "wp-config.php").unlink()
         archived = run_dir / "fix" / "_history" / "2026-10-29-100000" / "wt" / "securite"
         archived.mkdir(parents=True)
         (archived / "wp-config.php").write_text(config, encoding="utf-8")
@@ -2741,169 +2751,774 @@ class RerunValidateAndSnapshotTest(AuditCase):
         )
 
 
-class MrPlanTest(AuditCase):
+class AuditPlanWithoutMrBlockTest(AuditCase):
     URL = "https://gitlab.example.org/acme/shop/-/merge_requests/12"
 
     def comments(self, run_dir):
         plan = self.read(run_dir, "notion/plan.json")
         return {op["ref"]: op["text"] for op in plan["ops"] if op["kind"] == "comment"}
 
-    def test_rerun_plan_keeps_the_mr_block(self):
+    def test_rerun_plan_has_no_mr_block(self):
         run_dir = self.make_run()
         self.run_json(["plan", run_dir])
         plain = self.comments(run_dir)
         self.write(run_dir, "fix/mr-links.json",
                    {"links": {"103": [{"repo": "laravel", "url": self.URL, "iid": 12}]}})
         self.run_json(["plan", run_dir])
-        linked = self.comments(run_dir)
-        self.assertIn(f"\n\nMR :\n{self.URL}\nRéf CQ-103", linked[103])
-        self.assertEqual({r: t for r, t in linked.items() if r != 103},
-                         {r: t for r, t in plain.items() if r != 103})
-        self.assertNotIn("MR :", plain[103])
-
-    def test_plan_without_the_file_is_unchanged(self):
-        run_dir = self.make_run()
-        self.run_json(["plan", run_dir])
-        first = self.read(run_dir, "notion/plan.json")
-        self.run_json(["plan", run_dir])
-        self.assertEqual(first, self.read(run_dir, "notion/plan.json"))
-        self.assertFalse(any("MR :" in op["text"] for op in first["ops"]))
-
-    def test_unreadable_links_file_is_a_usage_error(self):
-        run_dir = self.make_run()
-        (run_dir / "fix").mkdir()
+        self.assertEqual(self.comments(run_dir), plain)
+        self.assertFalse(any("MR :" in text for text in plain.values()))
         (run_dir / "fix" / "mr-links.json").write_text("{", encoding="utf-8")
         code, out, err = self.run_main(["plan", run_dir])
-        self.assertIn(code, (2, 6))
-        self.assertIn("mr-links.json", err)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.comments(run_dir), plain)
 
 
-class MrClient:
-    """The part of the Notion client that cqa_notion.py mr-links reads."""
+BOT = "bot-1"
+MR_URL = "https://gitlab.example.org/acme/back/-/merge_requests/12"
+CLOSED_URL = "https://gitlab.example.org/acme/back/-/merge_requests/9"
+FRONT_URL = "https://gitlab.example.org/acme/front/-/merge_requests/5"
+OLDER_URL = "https://gitlab.example.org/acme/back/-/merge_requests/4"
+SHA_A, SHA_B, SHA_C, SHA_D = "1" * 40, "2" * 40, "3" * 40, "4" * 40
+FIX_FOOT = "Réf CQ-{ref} · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0"
+FIX_HEAD = "Correctif automatique · {day} · lancé par Côme D"
+STATUSES = ("À traiter", "En standby", "Mise en place partielle", "Mis en place", "En review",
+            "Ok / Recetté", "Non applicable")
 
-    def __init__(self, threads):
-        self.threads = threads
-        self.calls = []
 
-    def comments(self, page_id):
-        self.calls.append(page_id)
-        return self.threads.get(page_id, [])
+COMMENT_IDS = itertools.count(1)
 
 
-def bot_comment(text, when="2026-10-20T10:00:00.000Z"):
+def thread_comment(text, author=BOT, when="2026-10-21T10:00:00.000Z", comment_id=None):
     return {
-        "id": "c-" + when,
-        "created_by": {"id": "bot-1"},
+        "id": comment_id or f"c-{next(COMMENT_IDS)}",
+        "created_by": {"id": author},
         "created_time": when,
         "rich_text": [{"plain_text": text}],
     }
 
 
-class MrLinksCommandTest(AuditCase):
-    URL = "https://gitlab.example.org/acme/back/-/merge_requests/12"
-    URL_2 = "https://gitlab.example.org/acme/back/-/merge_requests/13"
-    FOOT = "Réf CQ-101 · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0"
+class FixNotion:
+    """The Notion client of fix-plan and apply_plan: threads, statuses and the copy schema."""
 
+    def __init__(self, threads=None, options=STATUSES, statuses=None):
+        self.threads = {page: list(items) for page, items in (threads or {}).items()}
+        self.options = list(options)
+        self.statuses = dict(statuses or {})
+        self.schema_reads = 0
+        self.writes = []
+
+    def data_source(self, data_source_id):
+        self.schema_reads += 1
+        listed = [{"name": name} for name in self.options]
+        return {"properties": {"Statut": {"type": "status", "status": {"options": listed}}}}
+
+    def comments(self, page_id):
+        return list(self.threads.get(page_id, []))
+
+    def page(self, page_id):
+        status = {"type": "status", "status": {"name": self.statuses[page_id]}}
+        return {"object": "page", "id": page_id, "properties": {"Statut": status}}
+
+    def update_page(self, page_id, properties):
+        name = properties["Statut"]["status"]["name"]
+        self.statuses[page_id] = name
+        self.writes.append(("status", page_id, name))
+        return {}
+
+    def create_comment(self, page_id, rich_text):
+        text = "".join(part["text"]["content"] for part in rich_text)
+        comment_id = f"new-{len(self.writes)}"
+        self.threads.setdefault(page_id, []).append(
+            thread_comment(text, when="2026-10-30T10:00:00.000Z", comment_id=comment_id))
+        self.writes.append(("comment", page_id, text))
+        return {"id": comment_id}
+
+    def update_comment(self, comment_id, rich_text):
+        text = "".join(part["text"]["content"] for part in rich_text)
+        for page_id, items in self.threads.items():
+            for item in items:
+                if item["id"] == comment_id:
+                    item["rich_text"] = [{"plain_text": text}]
+                    self.writes.append(("update", page_id, text))
+                    return {}
+        raise AssertionError(comment_id)
+
+    def delete_comment(self, comment_id):
+        for items in self.threads.values():
+            items[:] = [item for item in items if item["id"] != comment_id]
+        self.writes.append(("delete", comment_id, None))
+        return {}
+
+    def texts(self, page_id):
+        return ["".join(part["plain_text"] for part in item["rich_text"])
+                for item in self.threads.get(page_id, [])]
+
+
+class FixPlanCase(AuditCase):
     def setUp(self):
         self.run_dir = self.make_run()
-        self.write(self.run_dir, "fix/state.json", {"started_at": "2026-10-29T12:00:00Z", "stage": "notion", "push": "mr", "keys": {}})
+        self.edit(self.run_dir, "rows.json", self._add_row_107)
+        self.write(self.run_dir, "fix/state.json", self.state())
+        self.write(self.run_dir, "fix/candidates.json", self.candidates())
+        self.write(self.run_dir, "fix/mr-links.json", self.links())
+        self.write(self.run_dir, "fix/laravel/report-1.json", self.report())
 
-    def links(self, **by_ref):
-        self.write(
-            self.run_dir,
-            "fix/mr-links.json",
-            {"links": {ref: [{"repo": "laravel", "url": url, "iid": 1} for url in urls]
-                       for ref, urls in by_ref.items()}},
-        )
+    @staticmethod
+    def _add_row_107(document):
+        row = dict(document["rows"][-1])
+        row.update(page_id="page-107", ref=107, title="Filtrer les requêtes au pare-feu",
+                   category="SÉCURITÉ", automation="Détection seule",
+                   reference_page_id="reference-107", fiche_path=None)
+        document["rows"].append(row)
+        row = dict(row)
+        row.update(page_id="page-108", ref=108, title="Minifier les feuilles de style",
+                   category="PERFORMANCE", automation="Auto", reference_page_id="reference-108")
+        document["rows"].append(row)
 
-    def run_links(self, threads):
+    def add_front_key(self, state, *, published=False, fixed=True, branch_deleted=False,
+                      pushed=False):
+        """Add a second key, front, whose row CQ-108 is fixed (or skipped)."""
+        key = json.loads(json.dumps(state["keys"]["laravel"]))
+        key.update(repo="front", mr={"iid": 5, "url": FRONT_URL} if published else None,
+                   kept_local=not published, sections=[
+                       {"category": "PERFORMANCE", "alias": "performance", "refs": [108],
+                        "state": "settled", "reason": None}])
+        if branch_deleted:
+            key["branch_deleted"] = True
+        if pushed:
+            key["pushed"] = True
+        row = {"outcome": "fixed" if fixed else "skipped", "reason": None if fixed else "déjà fait",
+               "commits": [SHA_D] if fixed else [], "pass": 1, "attention": None,
+               "section": "performance", "remaining": None}
+        key["rows"] = {"108": row}
+        state["keys"]["front"] = key
+        self.write(self.run_dir, "fix/front/report-1.json", {"key": "front", "pass": 1, "rows": [
+            {"ref": 108, "outcome": "fixed", "change": "Minifie les feuilles de style.",
+             "uat": "Comparer le poids du CSS.", "commits": [SHA_D]}]})
+        return state
+
+    def state(self, *, push="mr", notion=True, published=True):
+        def row(outcome, section, reason=None, commits=(), **extra):
+            return {"outcome": outcome, "reason": reason, "commits": list(commits), "pass": 1,
+                    "attention": None, "section": section, **extra}
+
+        key = {
+            "repo": "laravel", "push_ready": True, "branch": "feature/checklist-qa-fix",
+            "base": "develop", "start_sha": "a" * 40, "worktree": None, "reused": None,
+            "mr": {"iid": 12, "url": MR_URL} if published else None,
+            "step": "done", "kept_local": not published, "pass": 1, "dev_fingerprint": None,
+            "bases": {}, "reviews": {"1": {"blocking": []}}, "reports": [1],
+            "sections": [
+                {"category": "SÉCURITÉ", "alias": "securite", "refs": [103, 104],
+                 "state": "settled", "reason": None},
+                {"category": "PERFORMANCE", "alias": "performance", "refs": [101, 105, 106],
+                 "state": "settled", "reason": None},
+            ],
+            "pass_sections": {"1": "securite"},
+            "rows": {
+                "101": row("fixed", "performance", commits=[SHA_A],
+                           remaining="Compresser aussi les réponses JSON."),
+                "103": row("fixed", "securite", commits=[SHA_B, SHA_C], remaining=None,
+                           corrections={"change": "Coupe la page d'erreur détaillée en production."}),
+                "104": row("dropped", "securite", "laissée aux devs par le lead"),
+                "105": row("skipped", "performance", "le fichier est généré au déploiement"),
+                "106": row("done_before", "performance"),
+            },
+        }
+        return {"started_at": "2026-10-29T12:00:00Z", "finished_at": None, "stage": "notion",
+                "mode": "present", "push": push, "notion": notion, "project_name": "Shop",
+                "keys": {"laravel": key}}
+
+    @staticmethod
+    def candidates():
+        def row(ref, status="À traiter"):
+            return {"ref": ref, "page_id": f"page-{ref}", "status": status}
+
+        return {
+            "keys": [{"key": "laravel", "repo": "laravel", "push_ready": True, "sections": [
+                {"category": "SÉCURITÉ", "alias": "securite",
+                 "rows": [row(103, "Mise en place partielle"), row(104)]},
+                {"category": "PERFORMANCE", "alias": "performance",
+                 "rows": [row(101), row(105), row(106)]},
+            ]}],
+            "left": [
+                {"ref": 102, "title": "Servir les images en formats modernes",
+                 "category": "PERFORMANCE", "url": None, "repos": [],
+                 "reason": "hors du dépôt : convertir les images dans la médiathèque"},
+                {"ref": 107, "title": "Filtrer les requêtes au pare-feu", "category": "SÉCURITÉ",
+                 "reason": "Détection seule", "url": None, "repos": []},
+            ],
+            "flights": {}, "notes": [], "estimate_min": 30,
+        }
+
+    @staticmethod
+    def links():
+        def entry(partial, status):
+            return [{"repo": "laravel", "url": MR_URL, "iid": 12, "partial": partial,
+                     "status_before": status}]
+
+        return {"links": {"101": entry(True, "À traiter"),
+                          "103": entry(False, "Mise en place partielle"),
+                          "106": entry(None, "À traiter")}}
+
+    @staticmethod
+    def report():
+        return {"key": "laravel", "pass": 1, "rows": [
+            {"ref": 101, "outcome": "fixed", "change": "Active la compression gzip dans nginx.",
+             "uat": "Vérifier l'en-tête Content-Encoding de la page d'accueil.",
+             "commits": [SHA_A], "remaining": "Compresser aussi les réponses JSON."},
+            {"ref": 103, "outcome": "fixed", "change": "Coupe le mode debug.",
+             "uat": "Provoquer une erreur 500 : aucune trace affichée.", "commits": [SHA_B, SHA_C]},
+            {"ref": 105, "outcome": "skipped", "reason": "le fichier est généré au déploiement"},
+        ]}
+
+    def run_fix_plan(self, client, *options):
         import cqa_notion
 
-        client = MrClient(threads)
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, NO_SECRETS, clear=True):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = cqa_notion.main(["mr-links", str(self.run_dir)], client=client)
+                code = cqa_notion.main(["fix-plan", str(self.run_dir), *options], client=client)
         return code, out.getvalue(), err.getvalue()
 
     def plan(self):
         return self.read(self.run_dir, "fix/notion-plan.json")
 
-    def test_mr_links_builds_a_comment_only_plan(self):
-        existing = (
-            "Audit PRE-MEL · 20/10/2026 · lancé par Côme D\n\nVerdict :\nÀ traiter (confiance haute)\n\n"
-            f"Constat :\nx\n\nMR :\nhttps://gitlab.example.org/old\n{self.FOOT}"
+    def ops(self, kind):
+        return {op["ref"]: op for op in self.plan()["ops"] if op["kind"] == kind}
+
+    def apply(self, client):
+        context = self.read(self.run_dir, "context.json")
+        rows = self.read(self.run_dir, "rows.json")["rows"]
+        return apply_plan(
+            client, self.plan(), run_dir=self.run_dir,
+            reference_ds_id=context["notion"]["reference_data_source_id"],
+            row_page_ids={row["page_id"] for row in rows},
+            copy_page_id=context["notion"]["copy_page_id"], known_secrets=[], bot_id=BOT,
+            log=lambda message: None,
         )
-        self.links(**{"101": [self.URL, self.URL_2], "103": [self.URL]})
-        code, out, err = self.run_links({"page-101": [bot_comment(existing)]})
+
+    @staticmethod
+    def fix_text(ref, *lines, day="29/10/2026"):
+        return "\n".join([FIX_HEAD.format(day=day), "", *lines, FIX_FOOT.format(ref=ref)])
+
+
+class FixPlanCommandTest(FixPlanCase):
+    PAGE_TEXT = "\n".join([
+        "Correctifs automatiques · 29/10/2026 · lancé par Côme D",
+        f"MR : {MR_URL}",
+        "Lignes mises en MR : 3, dont 1 partielle.",
+        "Statut « En review » : 3 lignes, sauf statut changé depuis le lancement.",
+        "Non traitées :",
+        "- hors du dépôt : CQ-102",
+        "- écartées : CQ-105",
+        "- laissées aux devs : CQ-104",
+        "Suite : relire et tester la MR, la fusionner, déployer en préprod, puis lancer "
+        "/gm:checklist-quality-audit recette.",
+    ])
+
+    def test_fix_plan_writes_the_fix_comments_the_statuses_and_the_page_comment(self):
+        """The key created its MR (reused null): CQ-106, already on the branch before the
+        pass (done_before), ships in that MR and gets its comment and status too (ruling P21)."""
+        client = FixNotion()
+        code, out, err = self.run_fix_plan(client)
         self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {
+            "ops": {"status": 3, "fix_comment": 6, "page_comment": 1},
+            "in_review": [101, 103, 106], "reverted": [], "notes": [],
+        })
         plan = self.plan()
         validate_plan(plan)
-        self.assertEqual({op["kind"] for op in plan["ops"]}, {"comment"})
-        by_ref = {op["ref"]: op for op in plan["ops"]}
-        self.assertEqual(sorted(by_ref), [101, 103])
-        self.assertEqual(
-            by_ref[101]["text"],
-            "Audit PRE-MEL · 20/10/2026 · lancé par Côme D\n\nVerdict :\nÀ traiter (confiance haute)\n\n"
-            f"Constat :\nx\n\nMR :\n{self.URL}\n{self.URL_2}\n{self.FOOT}",
-        )
-        self.assertEqual(by_ref[101]["page_id"], "page-101")
-        self.assertEqual(
-            by_ref[103]["text"],
-            "Audit PRE-MEL · 29/10/2026 · lancé par Côme D\n\nMR :\n"
-            f"{self.URL}\nRéf CQ-103 · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0",
-        )
         self.assertEqual(plan["copy_data_source_id"], "ds-copy")
         self.assertTrue(plan["plan_id"])
+        fixes = self.ops("fix_comment")
+        self.assertEqual(sorted(fixes), [101, 102, 103, 104, 105, 106])
+        self.assertEqual(fixes[106]["text"], self.fix_text(
+            106, "MR :", MR_URL, "", "Fait :", "Correctif d'une passe précédente (voir la MR)."))
+        self.assertEqual(fixes[101]["page_id"], "page-101")
+        self.assertEqual(fixes[101]["text"], self.fix_text(
+            101, "MR :", MR_URL, "", "Fait :", "Active la compression gzip dans nginx.", "",
+            "Reste à faire :", "Compresser aussi les réponses JSON.", "", "À tester :",
+            "Vérifier l'en-tête Content-Encoding de la page d'accueil.", "", "Commits :",
+            "11111111"))
+        self.assertEqual(fixes[103]["text"], self.fix_text(
+            103, "MR :", MR_URL, "", "Fait :", "Coupe la page d'erreur détaillée en production.",
+            "", "À tester :", "Provoquer une erreur 500 : aucune trace affichée.", "",
+            "Commits :", "22222222, 33333333"))
+        self.assertEqual(fixes[104]["text"], self.fix_text(
+            104, "Non traité :", "laissée aux devs par le lead"))
+        self.assertEqual(fixes[105]["text"], self.fix_text(
+            105, "Non traité :", "le fichier est généré au déploiement"))
+        self.assertEqual(fixes[102]["text"], self.fix_text(
+            102, "Non traité :", "hors du dépôt : convertir les images dans la médiathèque"))
+        statuses = self.ops("status")
+        self.assertEqual(
+            {ref: (item["after"], item["expected"], item["before"]) for ref, item in statuses.items()},
+            {101: ("En review", "À traiter", "À traiter"),
+             103: ("En review", "Mise en place partielle", "Mise en place partielle"),
+             106: ("En review", "À traiter", "À traiter")},
+        )
+        [page] = self.ops("page_comment").values()
+        self.assertEqual((page["page_id"], page["text"]), ("page-copy", self.PAGE_TEXT))
+        self.assertEqual(self.ops("comment"), {})
+        self.assertEqual(client.schema_reads, 1)
 
-    def test_human_comments_are_not_taken_for_the_skill_comment(self):
-        human = {"id": "h", "created_by": {"id": "user-1"}, "created_time": "2026-10-21T10:00:00Z",
-                 "rich_text": [{"plain_text": f"Verdict :\nÀ traiter\n{self.FOOT}"}]}
-        self.links(**{"101": [self.URL]})
-        self.run_links({"page-101": [human]})
-        [op] = self.plan()["ops"]
-        self.assertTrue(op["text"].startswith("Audit PRE-MEL · 29/10/2026"))
-        self.assertNotIn("Verdict", op["text"])
+    def test_rows_done_before_follow_the_origin_of_the_mr(self):
+        """Ruling P21 (final wave F2): the done_before rows of a key get the fix comment and
+        « En review » only when this pass created the MR (a local branch taken over, reused
+        « branch »); the rows of an MR of an earlier pass (reused « mr ») stay untouched."""
+        state = self.state()
+        state["keys"]["laravel"]["reused"] = "branch"
+        self.write(self.run_dir, "fix/state.json", state)
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["in_review"], [101, 103, 106])
+        self.assertEqual(self.ops("fix_comment")[106]["text"], self.fix_text(
+            106, "MR :", MR_URL, "", "Fait :", "Correctif d'une passe précédente (voir la MR)."))
+        self.assertEqual(self.ops("status")[106]["expected"], "À traiter")
+        state["keys"]["laravel"]["reused"] = "mr"
+        self.write(self.run_dir, "fix/state.json", state)
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["in_review"], [101, 103])
+        self.assertNotIn(106, self.ops("fix_comment"))
+        self.assertNotIn(106, self.ops("status"))
+        [page] = self.ops("page_comment").values()
+        self.assertIn("Lignes mises en MR : 2, dont 1 partielle.", page["text"])
 
-    def test_too_long_comment_falls_back_to_the_latest_finding(self):
-        existing = "Verdict :\nÀ traiter\n\nConstat :\n" + "y" * 1480 + "\n" + self.FOOT
-        self.links(**{"101": [self.URL]})
-        self.run_links({"page-101": [bot_comment(existing)]})
-        [op] = self.plan()["ops"]
-        self.assertLessEqual(len(op["text"]), 1500)
-        self.assertIn("La compression gzip est absente", op["text"])
-        self.assertIn(f"\n\nMR :\n{self.URL}\nRéf CQ-101", op["text"])
-        self.assertIn("29/10/2026", op["text"])
+    def test_fix_plan_names_the_open_mr_of_a_branch_kept_local(self):
+        """Final wave F4: a key that took over an open MR and ended kept local says so, with
+        the MR, instead of « Branche locale : ... (non poussée) »; no status."""
+        state = self.state(published=False)
+        state["keys"]["laravel"].update(reused="mr", mr={"iid": 12, "url": MR_URL})
+        self.write(self.run_dir, "fix/state.json", state)
+        client = FixNotion()
+        code, out, err = self.run_fix_plan(client)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.ops("status"), {})
+        self.assertEqual(client.schema_reads, 0)
+        line = "Branche feature/checklist-qa-fix poussée, MR !12 ouverte : nouveaux commits non poussés"
+        text = self.ops("fix_comment")[101]["text"]
+        self.assertIn(f"\n\n{line}\n\nFait :\n", text)
+        self.assertNotIn("non poussée)", text)
+        self.assertNotIn("MR :", text)
+        self.assertNotIn(106, self.ops("fix_comment"))
+        [page] = self.ops("page_comment").values()
+        self.assertEqual(page["text"].split("\n")[1:3], [
+            line, "Lignes corrigées sur la branche locale : 2, dont 1 partielle ; statuts inchangés."])
+        self.assertIn("Suite : pousser la branche (sa MR est déjà ouverte)", page["text"])
 
-    def test_too_long_comment_without_finding_gets_the_reduced_comment(self):
-        existing = "Verdict :\nÀ traiter\n\nConstat :\n" + "y" * 1480 + "\n" + self.FOOT.replace("101", "103")
+    def test_the_rows_of_a_left_key_are_not_handled(self):
+        """Final wave F4: a key left to the lead (cqa_fix.py leave) fixed nothing for Notion:
+        its rows of the pass get « Non traité : clé laissée au lead (<raison>) », no status."""
+        state = self.state()
+        state["keys"]["laravel"].update(
+            step="reviewed", left={"reason": "commit de fusion dans la branche",
+                                   "at": "2026-10-29T13:00:00Z"})
+        self.write(self.run_dir, "fix/state.json", state)
+        client = FixNotion()
+        code, out, err = self.run_fix_plan(client)
+        self.assertEqual(code, 0, err)
+        printed = json.loads(out)
+        self.assertEqual((printed["ops"], printed["in_review"]),
+                         ({"fix_comment": 5, "page_comment": 1}, []))
+        fixes = self.ops("fix_comment")
+        self.assertEqual(sorted(fixes), [101, 102, 103, 104, 105])
+        for ref in (101, 103, 104, 105):
+            self.assertEqual(fixes[ref]["text"], self.fix_text(
+                ref, "Non traité :", "clé laissée au lead (commit de fusion dans la branche)"))
+        self.assertEqual(client.schema_reads, 0)
+        [page] = self.ops("page_comment").values()
+        self.assertNotIn("MR :", page["text"])
+        self.assertIn("- clé laissée au lead : CQ-101, CQ-103, CQ-104, CQ-105", page["text"])
+
+    def test_the_rows_of_a_key_left_before_its_start_get_a_fixed_reason(self):
+        """Residual item 3: the raw start error (paths of the workstation) never reaches
+        Notion: a key left at « selected » gives a fixed short reason."""
+        state = self.state()
+        state["keys"]["laravel"].update(
+            step="selected", branch=None, worktree=None, start_sha=None, mr=None,
+            left={"reason": "La branche feature/checklist-qa-fix est extraite dans votre dossier "
+                            "/home/camille/projets/shop : changez de branche, puis relancez.",
+                  "at": "2026-10-29T13:00:00Z"})
+        for row in state["keys"]["laravel"]["rows"].values():
+            row.update(outcome="pending", reason=None, commits=[])
+        self.write(self.run_dir, "fix/state.json", state)
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 0, err)
+        fixes = self.ops("fix_comment")
+        self.assertEqual(sorted(fixes), [101, 102, 103, 104, 105, 106])
+        for ref in (101, 103, 104, 105, 106):
+            self.assertEqual(fixes[ref]["text"], self.fix_text(
+                ref, "Non traité :", "clé laissée au lead : la passe n'a pas pu démarrer"))
+        self.assertNotIn("/home/camille", json.dumps(self.plan(), ensure_ascii=False))
+        self.assertEqual(self.ops("status"), {})
+        [page] = self.ops("page_comment").values()
+        self.assertIn("- clé laissée au lead : CQ-101, CQ-103, CQ-104, CQ-105, CQ-106", page["text"])
+
+    def test_fix_plan_skips_a_status_changed_since_launch(self):
+        self.assertEqual(self.run_fix_plan(FixNotion())[0], 0)
+        client = FixNotion(statuses={"page-101": "Mis en place",
+                                     "page-103": "Mise en place partielle",
+                                     "page-106": "À traiter"})
+        result = self.apply(client)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([item["ref"] for item in result["status_changed"]], [101])
+        self.assertEqual(result["status_changed"][0]["reason"], "statut changé depuis le lancement")
+        self.assertEqual(client.statuses, {"page-101": "Mis en place", "page-103": "En review",
+                                           "page-106": "En review"})
+        written = [write[1] for write in client.writes if write[0] == "comment"]
+        self.assertEqual(written, ["page-101", "page-102", "page-103", "page-104", "page-105",
+                                  "page-106", "page-copy"])
+        self.assertEqual(result["done"], 9)
+
+    def test_fix_plan_without_the_review_option_writes_comments_only(self):
+        client = FixNotion(options=[name for name in STATUSES if name != "En review"])
+        code, out, err = self.run_fix_plan(client)
+        self.assertEqual(code, 0, err)
+        printed = json.loads(out)
+        self.assertEqual(printed["notes"], ["option En review absente de la copie"])
+        self.assertEqual(printed["in_review"], [])
+        self.assertEqual(self.ops("status"), {})
+        self.assertEqual(sorted(self.ops("fix_comment")), [101, 102, 103, 104, 105, 106])
+        [page] = self.ops("page_comment").values()
+        self.assertIn("Statut « En review » non posé : option absente de la copie.", page["text"])
+        self.assertNotIn("sauf statut changé", page["text"])
+
+    def test_fix_plan_reverts_rows_of_a_closed_mr(self):
+        project = self.run_dir.parent
+        self.write(project / "2026-10-10-0900", "fix/mr-links.json", {"links": {
+            "105": [{"repo": "laravel", "url": OLDER_URL, "iid": 4, "status_before": "À traiter"}],
+            "107": [{"repo": "laravel", "url": OLDER_URL, "iid": 4, "status_before": "À traiter"}],
+        }})
+        self.write(project / "2026-10-25-0900", "fix/mr-links.json", {"links": {
+            "107": [{"repo": "laravel", "url": OLDER_URL, "iid": 4, "status_before": None},
+                    {"repo": "laravel", "url": CLOSED_URL, "iid": 9,
+                     "status_before": "Mise en place partielle"},
+                    {"repo": "front", "url": FRONT_URL, "iid": 5,
+                     "status_before": "Mise en place partielle"}],
+        }})
+        (self.run_dir / "fix" / "state.json").unlink()
+        client = FixNotion()
+        code, out, err = self.run_fix_plan(client, "--closed-only", "--closed", "CQ-107", "CQ-104",
+                                           "CQ-999")
+        self.assertEqual(code, 0, err)
+        printed = json.loads(out)
+        self.assertEqual(printed["ops"], {"status": 1, "fix_comment": 1})
+        self.assertEqual(printed["reverted"], [107])
+        self.assertEqual(len(printed["notes"]), 2)
+        self.assertIn("CQ-104", printed["notes"][0])
+        self.assertIn("CQ-999", printed["notes"][1])
+        [status] = self.ops("status").values()
+        self.assertEqual((status["ref"], status["after"], status["expected"], status["before"]),
+                         (107, "Mise en place partielle", "En review", "En review"))
+        [fix] = self.ops("fix_comment").values()
+        today = datetime.now().strftime("%d/%m/%Y")
+        self.assertEqual(fix["text"], self.fix_text(
+            107, "Non traité :",
+            "MR fermée sans fusion, statut remis à « Mise en place partielle » s'il était encore "
+            "« En review » :", CLOSED_URL, FRONT_URL, day=today))
+        self.assertEqual(self.ops("page_comment"), {})
+        self.assertEqual(client.schema_reads, 0)
+
+        moved = FixNotion(statuses={"page-107": "Mis en place"})
+        result = self.apply(moved)
+        self.assertEqual([item["ref"] for item in result["status_changed"]], [107])
+        self.assertEqual(moved.statuses, {"page-107": "Mis en place"})
+        self.assertEqual(moved.texts("page-107"), [fix["text"]])
+
+    def test_closed_only_plan_in_a_run_without_a_fix_pass(self):
+        """A recette on a run where no fix pass ran: the plan creates fix/ itself."""
+        self.write(self.run_dir.parent / "2026-10-10-0900", "fix/mr-links.json", {"links": {
+            "107": [{"repo": "laravel", "url": CLOSED_URL, "iid": 9, "status_before": "À traiter"}],
+        }})
+        shutil.rmtree(self.run_dir / "fix")
+        code, out, err = self.run_fix_plan(FixNotion(), "--closed-only", "--closed", "CQ-107")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["reverted"], [107])
+        self.assertEqual(set(self.ops("status")), {107})
+
+    def test_closed_only_plan_refuses_a_run_without_notion_writes(self):
+        """The recette path honours the launch consent too: notion_write « none » or a dry
+        run prepares nothing (README: « none » n'écrit rien, garanti par le code)."""
+        self.write(self.run_dir.parent / "2026-10-10-0900", "fix/mr-links.json", {"links": {
+            "107": [{"repo": "laravel", "url": CLOSED_URL, "iid": 9, "status_before": "À traiter"}],
+        }})
+        original = self.read(self.run_dir, "context.json")
+        plan = self.run_dir / "fix" / "notion-plan.json"
+        for name, value, needle in (("notion_write", "none", "« none »"),
+                                    ("dry_run", True, "--dry-run")):
+            with self.subTest(**{name: value}):
+                self.write(self.run_dir, "context.json", {**original, name: value})
+                if plan.exists():
+                    plan.unlink()
+                code, out, err = self.run_fix_plan(FixNotion(), "--closed-only", "--closed",
+                                                   "CQ-107")
+                self.assertEqual(code, 2, err)
+                self.assertIn(needle, err)
+                self.assertIn("rien n'est", err)
+                self.assertFalse(plan.exists())
+        self.write(self.run_dir, "context.json", {**original, "notion_write": "keep_human",
+                                                  "dry_run": False})
+        code, out, err = self.run_fix_plan(FixNotion(), "--closed-only", "--closed", "CQ-107")
+        self.assertEqual(code, 0, err)
+
+    def test_closed_mrs_during_a_pass_and_the_option_checks(self):
+        self.write(self.run_dir.parent / "2026-10-10-0900", "fix/mr-links.json", {"links": {
+            "107": [{"repo": "laravel", "url": CLOSED_URL, "iid": 9, "status_before": "À traiter"}],
+            "105": [{"repo": "laravel", "url": CLOSED_URL, "iid": 9, "status_before": "À traiter"}],
+        }})
+        code, out, err = self.run_fix_plan(FixNotion(), "--closed", "CQ-107,CQ-105")
+        self.assertEqual(code, 0, err)
+        printed = json.loads(out)
+        self.assertEqual(printed["reverted"], [107])
+        self.assertTrue(any("CQ-105" in note for note in printed["notes"]))
+        self.assertEqual(self.ops("status")[107]["after"], "À traiter")
+        self.assertIn("Non traité :\nle fichier est généré", self.ops("fix_comment")[105]["text"])
+        [page] = self.ops("page_comment").values()
+        self.assertIn("MR fermées sans fusion : CQ-107 remise à son statut d'avant la passe si "
+                      "elle était encore « En review ».", page["text"])
+        code, out, err = self.run_fix_plan(FixNotion(), "--closed-only")
+        self.assertEqual(code, 2)
+        self.assertIn("--closed", err)
+
+    def test_fix_plan_removes_the_v2_mr_block_from_the_audit_comment(self):
+        foot = "Réf CQ-101 · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0"
+        audit = ("Audit PRE-MEL · 20/10/2026 · lancé par Côme D\n\nVerdict :\n"
+                 "À traiter (confiance haute)\n\nConstat :\nx")
+        reduced = (f"Audit PRE-MEL · 29/10/2026 · lancé par Côme D\n\nMR :\n{MR_URL}\n"
+                   + foot.replace("101", "103"))
+        human = f"MR :\n{CLOSED_URL}\n{foot.replace('101', '105')}"
+        threads = {
+            "page-101": [thread_comment(f"{audit}\n\nMR :\n{MR_URL}\n{foot}")],
+            "page-103": [thread_comment(reduced)],
+            "page-104": [thread_comment(audit.replace("Constat :\nx", f"Constat :\nx\nMR :\n{MR_URL}")
+                                        + "\n" + foot.replace("101", "104"))],
+            "page-105": [thread_comment(human, author="user-1"),
+                         thread_comment(self.fix_text(105, "Non traité :", "ancienne raison"))],
+        }
+        code, out, err = self.run_fix_plan(FixNotion(threads))
+        self.assertEqual(code, 0, err)
+        comments = self.ops("comment")
+        self.assertEqual(sorted(comments), [101, 103])
+        self.assertEqual(comments[101]["text"], f"{audit}\n{foot}")
+        self.assertEqual(comments[101]["verdict"], "ko")
+        self.assertEqual(comments[101]["replaces"],
+                         text_digest(f"{audit}\n\nMR :\n{MR_URL}\n{foot}"))
+        rebuilt = comments[103]["text"]
+        self.assertTrue(rebuilt.startswith("Audit PRE-MEL · 20/10/2026 · lancé par Côme D\n\n"))
+        self.assertIn("Constat :\nLe mode debug est coupé", rebuilt)
+        self.assertNotIn("MR :", rebuilt)
+        self.assertEqual(comments[103]["verdict"], "partial")
+        self.assertEqual(json.loads(out)["ops"]["comment"], 2)
+
         (self.run_dir / "findings" / "code-securite.json").unlink()
-        self.links(**{"103": [self.URL]})
-        self.run_links({"page-103": [bot_comment(existing)]})
-        [op] = self.plan()["ops"]
-        self.assertTrue(op["text"].startswith("Audit PRE-MEL · 29/10/2026"))
-        self.assertNotIn("Verdict", op["text"])
+        self.run_fix_plan(FixNotion(threads))
+        self.assertEqual(self.ops("comment")[103]["text"],
+                         "Audit PRE-MEL · 29/10/2026 · lancé par Côme D\n"
+                         + foot.replace("101", "103"))
 
-    def test_no_links_writes_an_empty_plan(self):
-        code, out, err = self.run_links({})
+        client = FixNotion(threads, statuses={"page-101": "À traiter",
+                                              "page-103": "Mise en place partielle",
+                                              "page-106": "À traiter"})
+        self.assertEqual(self.apply(client)["errors"], [])
+        self.assertEqual(client.texts("page-105")[0], human)
+        self.assertEqual(client.texts("page-105")[1],
+                         self.fix_text(105, "Non traité :", "le fichier est généré au déploiement"))
+        self.assertEqual(client.texts("page-101")[0], f"{audit}\n{foot}")
+        self.assertEqual(client.texts("page-101")[1], self.ops("fix_comment")[101]["text"])
+
+    def test_a_resumed_apply_leaves_an_audit_comment_rewritten_since_the_plan(self):
+        foot = "Réf CQ-101 · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0"
+        audit = ("Audit PRE-MEL · 20/10/2026 · lancé par Côme D\n\nVerdict :\n"
+                 "À traiter (confiance haute)\n\nConstat :\nx")
+        threads = {"page-101": [thread_comment(f"{audit}\n\nMR :\n{MR_URL}\n{foot}")]}
+        self.assertEqual(self.run_fix_plan(FixNotion(threads))[0], 0)
+        rerun = audit.replace("Constat :\nx", "Constat :\nrevu par la relance") + "\n" + foot
+        threads["page-101"][0]["rich_text"] = [{"plain_text": rerun}]
+        client = FixNotion(threads, statuses={"page-101": "À traiter",
+                                              "page-103": "Mise en place partielle",
+                                              "page-106": "À traiter"})
+        result = self.apply(client)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(client.texts("page-101"), [rerun, self.ops("fix_comment")[101]["text"]])
+
+    def test_a_reduced_v2_comment_is_rebuilt_with_the_date_of_its_rerun(self):
+        foot = "Réf CQ-103 · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0"
+        reduced = f"Audit PRE-MEL · 29/10/2026 · lancé par Côme D\n\nMR :\n{MR_URL}\n{foot}"
+        source = self.read(self.run_dir, "findings/code-securite.json")
+        items = [item for item in source["findings"] if item["ref"] == 103]
+        self.write(self.run_dir, "findings/code-securite-rerun-01.json",
+                   {"lot": "code-securite", "findings": items})
+        self.write(self.run_dir, "reruns.json", {"closed": ["01"], "dates": {"01": "2026-10-25"}})
+        code, out, err = self.run_fix_plan(FixNotion({"page-103": [thread_comment(reduced)]}))
         self.assertEqual(code, 0, err)
+        self.assertTrue(self.ops("comment")[103]["text"].startswith(
+            "Audit PRE-MEL · 25/10/2026 · lancé par Côme D\n\n"))
+
+    def test_fix_plan_in_local_mode(self):
+        self.write(self.run_dir, "fix/state.json", self.state(push="local", published=False))
+        (self.run_dir / "fix" / "mr-links.json").unlink()
+        client = FixNotion()
+        code, out, err = self.run_fix_plan(client)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.ops("status"), {})
+        self.assertEqual(client.schema_reads, 0)
+        text = self.ops("fix_comment")[101]["text"]
+        self.assertIn("\n\nBranche locale : feature/checklist-qa-fix (non poussée)\n\nFait :\n", text)
+        self.assertNotIn("MR :", text)
+        [page] = self.ops("page_comment").values()
+        self.assertEqual(page["text"].split("\n")[1:3], [
+            "Branche locale : feature/checklist-qa-fix (non poussée)",
+            "Lignes corrigées sur la branche locale : 2, dont 1 partielle ; statuts inchangés.",
+        ])
+        self.assertIn("Suite : pousser la branche et ouvrir la MR", page["text"])
+
+    def test_fix_plan_refuses_a_dry_run_or_a_pass_without_the_notion_consent(self):
+        for push, notion in (("dry_run", False), ("mr", False)):
+            with self.subTest(push=push):
+                self.write(self.run_dir, "fix/state.json", self.state(push=push, notion=notion))
+                code, out, err = self.run_fix_plan(FixNotion())
+                self.assertEqual(code, 2)
+                self.assertIn("Notion", err)
+                self.assertFalse((self.run_dir / "fix" / "notion-plan.json").exists())
+
+    def test_fix_plan_without_the_copy_page_has_no_page_comment(self):
+        self.edit(self.run_dir, "context.json",
+                  lambda context: context["notion"].update(copy_page_id=None))
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.ops("page_comment"), {})
+        self.assertTrue(any("copy_page_id" in note for note in json.loads(out)["notes"]))
+
+    def test_fix_plan_names_a_branch_pushed_without_mr(self):
+        state = self.state(published=False)
+        state["keys"]["laravel"]["pushed"] = True
+        self.write(self.run_dir, "fix/state.json", state)
+        client = FixNotion()
+        code, out, err = self.run_fix_plan(client)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.ops("status"), {})
+        text = self.ops("fix_comment")[101]["text"]
+        self.assertIn("\n\nBranche poussée sans MR : feature/checklist-qa-fix\n\nFait :\n", text)
+        self.assertNotIn("non poussée", text)
+        [page] = self.ops("page_comment").values()
+        self.assertIn("Suite : ouvrir la MR, la relire et la tester", page["text"])
+        self.assertNotIn("pousser la branche", page["text"])
+
+    def test_local_branches_are_named_by_repo_only_when_several_carry_fixes(self):
+        cases = (
+            ({}, " du repo laravel (non poussée)"),
+            ({"branch_deleted": True}, " (non poussée)"),
+            ({"fixed": False}, " (non poussée)"),
+        )
+        for options, suffix in cases:
+            with self.subTest(options=options):
+                state = self.add_front_key(self.state(push="local", published=False), **options)
+                self.write(self.run_dir, "fix/state.json", state)
+                code, out, err = self.run_fix_plan(FixNotion())
+                self.assertEqual(code, 0, err)
+                self.assertIn(f"Branche locale : feature/checklist-qa-fix{suffix}",
+                              self.ops("fix_comment")[101]["text"])
+                [page] = self.ops("page_comment").values()
+                self.assertIn(f"Branche locale : feature/checklist-qa-fix{suffix}", page["text"])
+        state = self.add_front_key(self.state(push="local", published=False))
+        self.write(self.run_dir, "fix/state.json", state)
+        self.run_fix_plan(FixNotion())
+        self.assertIn("Branche locale : feature/checklist-qa-fix du repo front (non poussée)",
+                      self.ops("fix_comment")[108]["text"])
+        [page] = self.ops("page_comment").values()
+        self.assertIn("Lignes corrigées sur les branches locales : 3, dont 1 partielle",
+                      page["text"])
+
+    def test_a_mixed_pass_gets_both_suites(self):
+        self.write(self.run_dir, "fix/state.json", self.add_front_key(self.state()))
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(self.ops("status")), [101, 103, 106])
+        self.assertIn("Branche locale : feature/checklist-qa-fix (non poussée)\n\nFait :\n"
+                      "Minifie les feuilles de style.", self.ops("fix_comment")[108]["text"])
+        [page] = self.ops("page_comment").values()
+        lines = page["text"].split("\n")
+        self.assertEqual(lines[1:4], [
+            f"MR : {MR_URL}", "Branche locale : feature/checklist-qa-fix (non poussée)",
+            "Lignes mises en MR : 3, dont 1 partielle."])
+        self.assertIn("Lignes corrigées sur la branche locale : 1 ; statuts inchangés.", lines)
+        self.assertTrue(lines[-2].startswith("Suite (MR) : relire et tester la MR"))
+        self.assertTrue(lines[-1].startswith("Suite (branche locale) : pousser la branche"))
+
+    def test_fix_plan_without_any_row_has_no_page_comment(self):
+        state = self.state()
+        state["keys"]["laravel"]["reused"] = "mr"
+        for row in state["keys"]["laravel"]["rows"].values():
+            row["outcome"] = "done_before"
+        self.write(self.run_dir, "fix/state.json", state)
+        candidates = self.candidates()
+        candidates["left"] = candidates["left"][1:]
+        self.write(self.run_dir, "fix/candidates.json", candidates)
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 0, err)
+        printed = json.loads(out)
+        self.assertEqual(printed["ops"], {})
+        self.assertTrue(printed["notes"])
         self.assertEqual(self.plan()["ops"], [])
 
-    def test_unknown_ref_is_skipped_with_a_note(self):
-        self.links(**{"999": [self.URL]})
-        code, out, err = self.run_links({})
-        self.assertEqual(code, 0, err)
-        self.assertEqual(self.plan()["ops"], [])
-        self.assertIn("CQ-999", err)
+    def test_the_apply_command_writes_a_fix_plan(self):
+        import cqa_notion
 
-    def test_plan_is_stable_and_applicable(self):
-        self.links(**{"103": [self.URL]})
-        self.run_links({})
+        self.assertEqual(self.run_fix_plan(FixNotion())[0], 0)
+        client = FixNotion(statuses={"page-101": "Mis en place",
+                                     "page-103": "Mise en place partielle",
+                                     "page-106": "À traiter"})
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, NO_SECRETS, clear=True):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cqa_notion.main(["apply", str(self.run_dir), "--plan",
+                                        "fix/notion-plan.json"], client=client)
+        self.assertEqual(code, 0, err.getvalue())
+        result = json.loads(out.getvalue())
+        self.assertEqual((result["done"], result["skipped"], result["errors"]), (9, 1, []))
+        self.assertEqual([item["ref"] for item in result["status_changed"]], [101])
+        self.assertIn("statut changé depuis le lancement", err.getvalue())
+        self.assertEqual(client.statuses["page-103"], "En review")
+        self.assertEqual(len(client.texts("page-copy")), 1)
+
+    def test_a_v2_links_file_is_read_without_error(self):
+        v2 = {"links": {"104": [{"repo": "laravel", "url": CLOSED_URL, "iid": 9}]}}
+        self.write(self.run_dir.parent / "2026-10-25-0900", "fix/mr-links.json", v2)
+        self.write(self.run_dir.parent / "2026-10-10-0900", "fix/mr-links.json", {"links": {
+            "104": [{"repo": "laravel", "url": OLDER_URL, "iid": 4, "partial": False,
+                     "status_before": "À traiter"}]}})
+        self.assertEqual(
+            fix_state.read_mr_link_entries(self.run_dir.parent / "2026-10-25-0900"),
+            {104: [{"repo": "laravel", "url": CLOSED_URL, "iid": 9, "partial": False,
+                    "status_before": None}]},
+        )
+        self.assertEqual(fix_state.read_mr_links(self.run_dir.parent / "2026-10-25-0900"),
+                         {104: [CLOSED_URL]})
+        (self.run_dir / "fix" / "state.json").unlink()
+        code, out, err = self.run_fix_plan(FixNotion(), "--closed-only", "--closed", "CQ-104")
+        self.assertEqual(code, 0, err)
+        printed = json.loads(out)
+        self.assertEqual((printed["ops"], printed["reverted"]), ({"fix_comment": 1}, []))
+        self.assertEqual(len(printed["notes"]), 1)
+        self.assertIn("CQ-104", printed["notes"][0])
+        today = datetime.now().strftime("%d/%m/%Y")
+        self.assertEqual(self.ops("fix_comment")[104]["text"], self.fix_text(
+            104, "Non traité :",
+            "MR fermée sans fusion, statut laissé tel quel (statut d'avant la passe inconnu) :",
+            CLOSED_URL, day=today))
+
+    def test_fix_plan_is_stable_and_applicable(self):
+        self.run_fix_plan(FixNotion())
         first = self.plan()
-        self.run_links({})
+        self.run_fix_plan(FixNotion())
         self.assertEqual(first, self.plan())
-        plan, result, client = ApplyContractTest.apply(self, self.run_dir, "fix/notion-plan.json")
-        self.assertEqual(result["done"], 1)
+        client = FixNotion(statuses={"page-101": "À traiter", "page-103": "Mise en place partielle",
+                                     "page-106": "À traiter"})
+        result = self.apply(client)
+        self.assertEqual(result["done"], 10)
+        self.assertEqual(self.apply(client)["skipped"], 10)
 
 
 class RegistrationTest(AuditCase):
@@ -2968,6 +3583,243 @@ class RegistrationTest(AuditCase):
         self.assertNotRegex(text, r"\b[0-9a-f]{32}\b")
         for host in re.findall(r"https?://([^/\"\s`]+)", text):
             self.assertTrue(host.endswith("example.org") or host.endswith("example.net"), host)
+
+
+V2_URL_31 = "https://gitlab.example.org/acme/back/-/merge_requests/31"
+V2_URL_32 = "https://gitlab.example.org/acme/back/-/merge_requests/32"
+
+
+class V2FixPlanTest(FixPlanCase):
+    """Ruling P20 (final wave F5): fix-plan on a FINISHED state of the v2 fix mode (plugin
+    0.14.0 and before, one key per repo and category) is the retroactive Notion write of
+    that pass; an unfinished v2 state is refused."""
+
+    def setUp(self):
+        super().setUp()
+        (self.run_dir / "fix" / "laravel" / "report-1.json").unlink()
+        (self.run_dir / "fix" / "mr-links.json").unlink()
+        self.write(self.run_dir, "fix/state.json", self.v2_state())
+        self.write(self.run_dir, "fix/candidates.json", self.v2_candidates())
+        self.write(self.run_dir, "fix/mr-links.json", {"links": {
+            "103": [{"repo": "laravel", "url": V2_URL_31, "iid": 31}],
+            "101": [{"repo": "laravel", "url": V2_URL_32, "iid": 32}],
+        }})
+        self.write(self.run_dir, "fix/laravel/securite/report-1.json", self.v2_report(
+            "laravel/securite",
+            [self.v2_report_row(103, "fixed", change="Coupe le mode debug.",
+                                uat="Provoquer une erreur 500 : aucune trace affichée.",
+                                commits=[SHA_B]),
+             self.v2_report_row(104, "question", question={
+                 "text": "Quel contact ?", "options": ["A", "B"], "default": "A"})]))
+        self.write(self.run_dir, "fix/laravel/performance/report-1.json", self.v2_report(
+            "laravel/performance",
+            [self.v2_report_row(101, "fixed", change="Active la compression gzip dans nginx.",
+                                uat="Vérifier l'en-tête Content-Encoding.", commits=[SHA_A]),
+             self.v2_report_row(105, "skipped", reason="le fichier est généré au déploiement")]))
+        self.write(self.run_dir, "fix/laravel/seo/report-1.json", self.v2_report(
+            "laravel/seo", [self.v2_report_row(106, "skipped", reason="contenu en base")]))
+        self.edit_row(self.run_dir, 103, status="Mise en place partielle")
+        self.age_rows()
+
+    def age_rows(self, older=True):
+        """Date rows.json before (or after) the v2 started_at: only a snapshot older than the
+        v2 launch is the copy as it was read then (ruling P22)."""
+        started = datetime(2026, 10, 27, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+        stamp = started - 600 if older else started + 600
+        os.utime(self.run_dir / "rows.json", (stamp, stamp))
+
+    @staticmethod
+    def v2_report(key, rows):
+        return {"key": key, "pass": 1, "rows": rows}
+
+    @staticmethod
+    def v2_report_row(ref, outcome, **fields):
+        row = {"ref": ref, "outcome": outcome, "change": None, "uat": None, "commits": [],
+               "reason": None, "question": None, "covered_by": None, "attention": None}
+        row.update(fields)
+        return row
+
+    @staticmethod
+    def v2_state(finished=True):
+        """A state as plugin 0.14.0 left it: keys « <repo>/<slug> » with a slug and a category,
+        rows {attention, commits, outcome, pass, reason}, mr {iid, url} or null, reports and
+        published_pass; no section, no remaining, no left, no project_name."""
+        def row(outcome, reason=None, commits=()):
+            return {"attention": None, "commits": list(commits), "outcome": outcome, "pass": 1,
+                    "reason": reason}
+
+        def key(slug, category, rows, mr):
+            return {
+                "repo": "laravel", "slug": slug, "category": category, "push_ready": True,
+                "branch": f"feature/checklist-qa-fix-{slug}", "base": "develop",
+                "start_sha": "a" * 40, "worktree": None, "reused": None, "mr": mr, "step": "done",
+                "pass": 1, "dev_fingerprint": None, "bases": {"1": "a" * 40},
+                "reviews": {"1": {"blocking": []}} if mr else {}, "reports": [1],
+                "published_pass": 1, "kept_local": False, "empty_branch": mr is None,
+                "taken_head": None, "mr_body": None, "rows": rows,
+            }
+
+        return {
+            "started_at": "2026-10-27T12:00:00Z",
+            "finished_at": "2026-10-27T15:10:00Z" if finished else None,
+            "stage": "summary", "mode": "autonomous", "push": "mr", "notion": True,
+            "keys": {
+                "laravel/securite": key("securite", "SÉCURITÉ", {
+                    "103": row("fixed", commits=[SHA_B]),
+                    "104": row("dropped", "laissée aux devs par le lead"),
+                }, {"iid": 31, "url": V2_URL_31}),
+                "laravel/performance": key("performance", "PERFORMANCE", {
+                    "101": row("fixed", commits=[SHA_A]),
+                    "105": row("skipped", "le fichier est généré au déploiement"),
+                }, {"iid": 32, "url": V2_URL_32}),
+                "laravel/seo": key("seo", "SEO / GEO", {"106": row("skipped", "contenu en base")},
+                                   None),
+            },
+        }
+
+    @staticmethod
+    def v2_candidates():
+        """Candidates as plugin 0.14.0 wrote them: rows under the key, without any status."""
+        def row(ref, title):
+            return {"ref": ref, "page_id": f"page-{ref}", "title": title, "semi_auto": False,
+                    "lead": False, "every_repo": False, "assignees": []}
+
+        def key(slug, category, rows):
+            return {"key": f"laravel/{slug}", "repo": "laravel", "category": category,
+                    "slug": slug, "push_ready": True, "rows": rows}
+
+        return {
+            "keys": [key("securite", "SÉCURITÉ", [row(103, "Debug"), row(104, "Contact")]),
+                     key("performance", "PERFORMANCE", [row(101, "Gzip"), row(105, "Minifier")]),
+                     key("seo", "SEO / GEO", [row(106, "Titres")])],
+            "left": [{"ref": 102, "title": "Images", "category": "PERFORMANCE",
+                      "reason": "Manuel", "url": None, "repos": []}],
+            "flights": {}, "notes": [], "estimate_min": 30,
+        }
+
+    def test_fix_plan_writes_the_result_of_a_finished_v2_pass(self):
+        client = FixNotion()
+        code, out, err = self.run_fix_plan(client)
+        self.assertEqual(code, 0, err)
+        printed = json.loads(out)
+        self.assertEqual(printed, {
+            "ops": {"status": 2, "fix_comment": 5, "page_comment": 1},
+            "in_review": [101, 103], "reverted": [], "notes": [],
+        })
+        validate_plan(self.plan())
+        today = datetime.now().strftime("%d/%m/%Y")
+        fixes = self.ops("fix_comment")
+        self.assertEqual(sorted(fixes), [101, 103, 104, 105, 106])
+        self.assertEqual(fixes[103]["text"], self.fix_text(
+            103, "MR :", V2_URL_31, "", "Fait :", "Coupe le mode debug.", "", "À tester :",
+            "Provoquer une erreur 500 : aucune trace affichée.", "", "Commits :", "22222222",
+            day=today))
+        self.assertEqual(fixes[101]["text"], self.fix_text(
+            101, "MR :", V2_URL_32, "", "Fait :", "Active la compression gzip dans nginx.", "",
+            "À tester :", "Vérifier l'en-tête Content-Encoding.", "", "Commits :", "11111111",
+            day=today))
+        self.assertEqual(fixes[104]["text"], self.fix_text(
+            104, "Non traité :", "laissée aux devs par le lead", day=today))
+        self.assertEqual(fixes[106]["text"], self.fix_text(
+            106, "Non traité :", "contenu en base", day=today))
+        statuses = self.ops("status")
+        self.assertEqual(
+            {ref: (item["after"], item["expected"], item["before"]) for ref, item in statuses.items()},
+            {101: ("En review", "À traiter", "À traiter"),
+             103: ("En review", "Mise en place partielle", "Mise en place partielle")},
+        )
+        [page] = self.ops("page_comment").values()
+        self.assertEqual(page["text"].split("\n"), [
+            f"Correctifs automatiques (reprise de la passe du 27/10/2026) · {today} · lancé par "
+            "Côme D",
+            f"MR : {V2_URL_31}",
+            f"MR : {V2_URL_32}",
+            "Lignes mises en MR : 2.",
+            "Statut « En review » : 2 lignes, sauf statut changé depuis le lancement.",
+            "Non traitées :",
+            "- écartées : CQ-105, CQ-106",
+            "- laissées aux devs : CQ-104",
+            "Suite : relire et tester les MR, les fusionner, déployer en préprod, puis lancer "
+            "/gm:checklist-quality-audit recette.",
+        ])
+        self.assertEqual(client.schema_reads, 1)
+        moved = FixNotion(statuses={"page-101": "Mis en place",
+                                    "page-103": "Mise en place partielle"})
+        result = self.apply(moved)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([item["ref"] for item in result["status_changed"]], [101])
+        self.assertEqual(moved.statuses, {"page-101": "Mis en place", "page-103": "En review"})
+
+    def test_an_unfinished_v2_pass_is_refused(self):
+        self.write(self.run_dir, "fix/state.json", self.v2_state(finished=False))
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 2)
+        self.assertIn("Passe v2 inachevée : abandonnez-la (cqa_fix.py abandon), puis relancez fix.",
+                      err)
+        self.assertFalse((self.run_dir / "fix" / "notion-plan.json").exists())
+
+    def test_a_v2_row_without_any_status_at_launch_gets_no_status(self):
+        self.edit(self.run_dir, "rows.json",
+                  lambda document: [row.update(status=None) for row in document["rows"]
+                                    if row["ref"] == 101])
+        self.age_rows()
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 0, err)
+        printed = json.loads(out)
+        self.assertEqual(printed["in_review"], [103])
+        self.assertTrue(any("CQ-101" in note and "inconnu" in note for note in printed["notes"]))
+
+    def test_a_rows_json_rewritten_since_the_v2_launch_gives_no_status(self):
+        """Ruling P22: rows.json is rewritten by assign, rerun, recette and the fix step 2;
+        a copy newer than the v2 started_at may carry a status a dev set since, which must
+        never become the expected status of « En review »: no status op, one note."""
+        self.edit_row(self.run_dir, 101, status="Mis en place")
+        self.age_rows(older=False)
+        client = FixNotion()
+        code, out, err = self.run_fix_plan(client)
+        self.assertEqual(code, 0, err)
+        printed = json.loads(out)
+        self.assertEqual((printed["ops"], printed["in_review"]),
+                         ({"fix_comment": 5, "page_comment": 1}, []))
+        self.assertEqual(self.ops("status"), {})
+        self.assertEqual(len(printed["notes"]), 1)
+        note = printed["notes"][0]
+        for needle in ("rows.json", "statut au lancement de la passe v2 inconnu",
+                       "« En review » à poser à la main si la ligne n'a pas bougé", "2 lignes",
+                       "CQ-101", "CQ-103"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, note)
+        self.assertFalse(any("statut d'avant la passe inconnu" in item for item in printed["notes"]))
+        [page] = self.ops("page_comment").values()
+        self.assertNotIn("En review", page["text"])
+        self.assertIn(f"MR : {V2_URL_31}", page["text"])
+        self.assertEqual(client.schema_reads, 1)
+
+    def test_a_candidates_json_rewritten_since_the_v2_launch_is_not_trusted(self):
+        """Ruling P22: cqa_fix.py candidates rewrites fix/candidates.json from the current
+        rows.json; a copy newer than the v2 started_at never gives the expected status."""
+        candidates = self.v2_candidates()
+        for entry in candidates["keys"]:
+            for row in entry["rows"]:
+                row["status"] = "Mis en place"
+        self.write(self.run_dir, "fix/candidates.json", candidates)
+        stamp = datetime(2026, 10, 27, 12, 0, 0, tzinfo=timezone.utc).timestamp() + 600
+        os.utime(self.run_dir / "fix" / "candidates.json", (stamp, stamp))
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            {ref: item["expected"] for ref, item in self.ops("status").items()},
+            {101: "À traiter", 103: "Mise en place partielle"},
+        )
+
+    def test_a_v2_state_without_a_readable_start_gives_no_status(self):
+        state = self.v2_state()
+        state["started_at"] = "29/10/2026"
+        self.write(self.run_dir, "fix/state.json", state)
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 2)
+        self.assertIn("started_at", err)
+        self.assertFalse((self.run_dir / "fix" / "notion-plan.json").exists())
 
 
 if __name__ == "__main__":

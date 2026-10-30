@@ -21,9 +21,11 @@ if log:
 
 for index, arg in enumerate(args[:-1]):
     if arg == "-v" and args[index + 1].startswith("/"):
-        host = args[index + 1].split(":")[0]
-        if not os.path.isdir(host):
-            sys.stderr.write("stub: bind mount source is not a directory: " + host + "\n")
+        host, _, target = args[index + 1].partition(":")
+        # Only the read-only input of "secrets" is a file; every other bind source is a folder.
+        expected = os.path.isfile if target == "/in/input:ro" else os.path.isdir
+        if not expected(host):
+            sys.stderr.write("stub: bind mount source is not a " + ("file" if target == "/in/input:ro" else "directory") + ": " + host + "\n")
             sys.exit(99)
 
 needle = os.environ.get("CQA_STUB_FAIL")
@@ -53,3 +55,10 @@ elif args[:1] == ["ps"]:
     print("CONTAINER ID   NAMES")
 elif args[:1] == ["run"] and "lint" in args:
     print('{"problems": []}')
+elif args[:1] == ["run"] and any("gitleaks stdin" in arg for arg in args):
+    # The secrets command: the report goes to the /out mount, as gitleaks would write it.
+    for index, arg in enumerate(args[:-1]):
+        if arg == "-v" and args[index + 1].endswith(":/out"):
+            report = os.path.join(args[index + 1].split(":")[0], "gitleaks.json")
+            with open(report, "w", encoding="utf-8") as handle:
+                handle.write(os.environ.get("CQA_STUB_GITLEAKS", "[]"))

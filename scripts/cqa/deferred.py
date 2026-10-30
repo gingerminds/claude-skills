@@ -2,6 +2,7 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from cqa.checklist import parse_refs
 from cqa.notion_read import write_json
@@ -66,12 +67,15 @@ def open_items(run_dir: Path, *, fix: bool = False) -> list:
     ]
 
 
-def resolve(run_dir: Path, item_id: int) -> None:
-    """Close an entry; raise ValueError when no entry has that id."""
+def resolve(run_dir: Path, item_id: int, answer: Optional[str] = None) -> None:
+    """Close an entry, keeping the lead's answer when given (a closed entry is never deleted:
+    the fix mode reads it again on a resume); raise ValueError when no entry has that id."""
     items = _read(run_dir)
     for item in items:
         if item.get("id") == item_id:
             item["resolved"] = True
+            if isinstance(answer, str) and answer.strip():
+                item["answer"] = answer.strip()
             write_json(run_dir / FILE, {"items": items})
             return
     raise ValueError(f"Aucune décision mise de côté n'a le numéro {item_id}.")

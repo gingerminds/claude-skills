@@ -6,6 +6,7 @@
 #   cqa-toolbox.sh run <run_dir> <tool> [--followup]
 #   cqa-toolbox.sh all <run_dir>
 #   cqa-toolbox.sh check <check_dir> <worktree> <repo_name>
+#   cqa-toolbox.sh secrets <in_file> <out_dir>
 #
 # Exit codes: 0 success, 1 tool failure, 2 usage or environment; "run" passes through the
 # exit code of the tool container. Secret values never appear on a command line: they are
@@ -17,7 +18,7 @@ unset CDPATH
 S="$(cd "$(dirname "$0")" && pwd)"
 
 DEFAULT_REGISTRY="registry.gitlab.gingerminds.fr/gm/tools/checklist-qualite-outillage-audit"
-IMAGES=(agence nu testssl gitleaks redocly schemathesis)
+IMAGES=(agence nu testssl gitleaks redocly schemathesis nginx varnish)
 ALL_TOOLS=(http gitleaks assets stylelint deps lighthouse lighthouse-desktop a11y viewport nu yellowlab yellowlab-desktop testssl redocly schemathesis crawl)
 NEEDS_1_2_REASON="boîte à outils 1.2 requise : lancez cqa-toolbox.sh pull"
 # Version gate: "unset" until read, then 0 or 1 (once per launcher call).
@@ -53,6 +54,7 @@ usage() {
   say "  cqa-toolbox.sh run <dossier_du_run> <outil> [--followup]"
   say "  cqa-toolbox.sh all <dossier_du_run>"
   say "  cqa-toolbox.sh check <dossier_de_controle> <worktree> <nom_du_repo>"
+  say "  cqa-toolbox.sh secrets <fichier_d_entree> <dossier_de_sortie>"
   say "Outils : ${ALL_TOOLS[*]}"
   exit 2
 }
@@ -549,6 +551,7 @@ first_error() {
 }
 JSON_JS='try{JSON.parse(require("fs").readFileSync(process.argv[1],"utf8").replace(/^﻿/,""))}catch(e){console.error(e.message);process.exit(1)}'
 YAML_JS='const {createRequire}=require("module");const r=createRequire("/opt/gm-audit/package.json");let y;try{y=r("yaml")}catch(e){try{y=r("js-yaml")}catch(f){process.exit(3)}}try{const t=require("fs").readFileSync(process.argv[1],"utf8");if(y.parseAllDocuments){for(const d of y.parseAllDocuments(t)){if(d.errors.length){throw d.errors[0]}}}else{y.loadAll(t)}}catch(e){console.error(e.message);process.exit(1)}'
+SCSS_JS='const {createRequire}=require("module");const r=createRequire("/opt/gm-audit/package.json");let s;try{s=r("postcss-scss")}catch(e){process.exit(3)}try{s.parse(require("fs").readFileSync(process.argv[1],"utf8"))}catch(e){console.error(e.line?e.line+":"+e.column+" "+(e.reason||e.message):e.message);process.exit(1)}'
 while IFS= read -r f || [ -n "$f" ]; do
   [ -n "$f" ] || continue
   p="/repos/$repo/$f"
@@ -590,13 +593,249 @@ while IFS= read -r f || [ -n "$f" ]; do
         *) emit ko yaml "$f" "$(first_error "$out")" ;;
       esac
       ;;
+    *.scss)
+      rc=0
+      if have node; then
+        out="$(node -e "$SCSS_JS" "$p" 2>&1)" || rc=$?
+      else
+        rc=3
+      fi
+      case "$rc" in
+        0) emit ok scss "$f" "" ;;
+        3) emit skip scss "$f" "module postcss-scss absent de l'image" ;;
+        *) emit ko scss "$f" "$(first_error "$out")" ;;
+      esac
+      ;;
   esac
 done </in/files.txt
 SCRIPT
 
-# check <check_dir> <worktree> <repo_name>: syntax and stylelint checks of the files listed in
-# <check_dir>/files.txt, on a read-only copy of the worktree, without network and without credentials.
-# Writes only under <check_dir> (syntax.tsv and tools/stylelint/).
+# nginx -t of the nginx files of /in/config-plan.tsv (kind, folder, path), run by sh in the
+# official nginx image, on the worktree (head) and on /in/base (the folders at the start of the
+# pass). Each nginx folder (a lone nginx.conf: that file only) is copied over a copy of
+# /etc/nginx, built aside and renamed when complete, its /etc/nginx/ paths pointed at the copy
+# and its *.template rendered with dummy values; a file without events or http block is included
+# by a minimal main file, in a server then a location block when its directives need them.
+# Prints one line per file and side: side, ok|ko|skip, check, path, message.
+IFS= read -r -d '' NGINX_SCRIPT <<'SCRIPT' || true
+repo="$1"
+plan=/in/config-plan.tsv
+head_root="/repos/$repo"
+base_root=/in/base
+etc=/etc/nginx
+work=/tmp/cqa
+tab="$(printf '\t')"
+swap() {
+  awk -v a="$1" -v b="$2" 'BEGIN { n = length(a) } { o = ""; s = $0; while (n > 0 && (i = index(s, a)) > 0) { o = o substr(s, 1, i - 1) b; s = substr(s, i + n) } print o s }'
+}
+emit() {
+  msg="$(printf '%s' "$4" | tr '\t\r\n' '   ' | cut -c1-300)"
+  printf '%s\t%s\tnginx -t\t%s\t%s\n' "$1" "$2" "$3" "$msg"
+}
+first_emerg() {
+  line="$(printf '%s\n' "$1" | grep -m1 -E '\[(emerg|alert|crit)\]')" || line="$(printf '%s\n' "$1" | grep -m1 .)"
+  printf '%s\n' "$line" | sed -E 's/^.*\[(emerg|alert|crit)\] ([0-9]+#[0-9]+: )?//'
+}
+# prepare <work dir> <root> <folder> <file>: the copy is built in <work dir>.cqa-part and renamed
+# only when complete, so that a copy that failed half-way is never used.
+prepare() {
+  [ -d "$1" ] && return 0
+  part="$1.cqa-part"
+  rm -rf "$part"
+  if ! build "$part" "$1" "$2" "$3" "$4" || ! mv "$part" "$1"; then
+    rm -rf "$part"
+    return 1
+  fi
+}
+build() {
+  mkdir -p "$1" && cp -R "$etc/." "$1/" || return 1
+  case "/$4" in
+    */nginx) cp -R "$3/$4/." "$1/" || return 1 ;;
+    *) cp "$3/$5" "$1/" || return 1 ;;
+  esac
+  chmod -R u+w "$1" || return 1
+  grep -rlI -F /etc/nginx/ "$1" 2>/dev/null | while IFS= read -r f; do
+    swap /etc/nginx/ "$2/" <"$f" >"$f.cqa-tmp" && mv "$f.cqa-tmp" "$f"
+  done
+  find "$1" -type f -name '*.template' | while IFS= read -r t; do
+    sed -e 's/\${[A-Z_][A-Z0-9_]*_PORT}/1/g' -e 's/\${[A-Z_][A-Z0-9_]*}/example.test/g' "$t" >"${t%.template}"
+  done
+}
+wrap() {
+  case "$1" in
+    1) printf 'events {}\nhttp {\ninclude "%s";\n}\n' "$2" ;;
+    2) printf 'events {}\nhttp {\nserver {\ninclude "%s";\n}\n}\n' "$2" ;;
+    *) printf 'events {}\nhttp {\nserver {\nlocation / {\ninclude "%s";\n}\n}\n}\n' "$2" ;;
+  esac
+}
+# check_one <side> <work dir> <path in the work dir> <path in the repo>
+check_one() {
+  w="$2"
+  target="$w/${3%.template}"
+  levels="1 2 3"
+  if grep -Eq '^[[:space:]]*(events|http)[[:space:]]*([{]|$)' "$target" 2>/dev/null; then
+    levels=0
+  elif grep -Eq '^[[:space:]]*server[[:space:]]*([{]|$)' "$target" 2>/dev/null; then
+    levels=1
+  fi
+  for level in $levels; do
+    conf="$target"
+    if [ "$level" != 0 ]; then
+      conf="$w/cqa-wrapper.conf"
+      wrap "$level" "$target" >"$conf"
+    fi
+    if out="$(nginx -t -q -e stderr -c "$conf" 2>&1)"; then
+      emit "$1" ok "$4" ""
+      return 0
+    fi
+    case "$out" in
+      *"is not allowed here"*) continue ;;
+    esac
+    break
+  done
+  emit "$1" ko "$4" "$(first_emerg "$out" | swap "$w/cqa-wrapper.conf" "(fichier englobant du contrôle)" \
+    | swap "$work/$1/.cqa-root/" "" | swap "$work/$1/" "")"
+}
+while IFS="$tab" read -r kind folder file || [ -n "$kind" ]; do
+  [ "$kind" = nginx ] || continue
+  if [ "$folder" = . ]; then
+    sub=.cqa-root
+    rel="$file"
+  else
+    sub="$folder"
+    rel="${file#"$folder"/}"
+  fi
+  for side in head base; do
+    if [ "$side" = head ]; then root="$head_root"; else root="$base_root"; fi
+    [ -f "$root/$file" ] || continue
+    if prepare "$work/$side/$sub" "$root" "$folder" "$file"; then
+      check_one "$side" "$work/$side/$sub" "$rel" "$file"
+    else
+      emit "$side" skip "$file" "copie du dossier nginx impossible"
+    fi
+  done
+done <"$plan"
+SCRIPT
+
+# varnishd -C of the VCL files of /in/config-plan.tsv, run by sh in the official varnish image,
+# on the worktree (head) and on /in/base, includes searched in the file's folder first. Prints
+# one line per file and side, as NGINX_SCRIPT does.
+IFS= read -r -d '' VARNISH_SCRIPT <<'SCRIPT' || true
+repo="$1"
+plan=/in/config-plan.tsv
+head_root="/repos/$repo"
+base_root=/in/base
+state=/var/lib/varnish
+err=/tmp/cqa-vcc.err
+tab="$(printf '\t')"
+n=0
+swap() {
+  awk -v a="$1" -v b="$2" 'BEGIN { n = length(a) } { o = ""; s = $0; while (n > 0 && (i = index(s, a)) > 0) { o = o substr(s, 1, i - 1) b; s = substr(s, i + n) } print o s }'
+}
+emit() {
+  msg="$(printf '%s' "$4" | tr '\t\r\n' '   ' | cut -c1-300)"
+  printf '%s\t%s\tvarnishd -C\t%s\t%s\n' "$1" "$2" "$3" "$msg"
+}
+while IFS="$tab" read -r kind folder file || [ -n "$kind" ]; do
+  [ "$kind" = varnish ] || continue
+  for side in head base; do
+    if [ "$side" = head ]; then root="$head_root"; else root="$base_root"; fi
+    [ -f "$root/$file" ] || continue
+    n=$((n + 1))
+    dir="$(dirname "$root/$file")"
+    if varnishd -C -n "$state/cqa-$n" -p "vcl_path=$dir:/etc/varnish:/usr/share/varnish/vcl" -f "$root/$file" >/dev/null 2>"$err"; then
+      emit "$side" ok "$file" ""
+    else
+      msg="$(sed -n '/^Message from VCC-compiler:/{n;p;q;}' "$err")"
+      [ -n "$msg" ] || msg="$(grep -v -x 'Error:' "$err" | grep -m1 .)"
+      at="$(grep -m1 -E "^\('.*' Line [0-9]+ Pos [0-9]+\)" "$err")"
+      [ -z "$at" ] || msg="$msg $at"
+      emit "$side" ko "$file" "$(printf '%s\n' "$msg" | swap "$root/" "")"
+    fi
+  done
+done <"$plan"
+SCRIPT
+
+# Run by python3 -I -c: writes <check_dir>/config-plan.tsv, prints the host names to map.
+IFS= read -r -d '' CONFIG_PLAN_PY <<'PY' || true
+import sys
+sys.path.insert(0, sys.argv[1])
+from cqa import fix_checks
+for kind, host in fix_checks.write_config_plan(sys.argv[2], sys.argv[3]):
+    print(kind + "\t" + host)
+PY
+
+# config_skip <check_dir> <kind> <check> <reason>: a "skip" line for each file of the kind.
+config_skip() {
+  local kind folder file
+  while IFS=$'\t' read -r kind folder file; do
+    if [ "$kind" = "$2" ]; then
+      printf 'head\tskip\t%s\t%s\t%s\n' "$3" "$file" "$4" >>"$1/config.tsv"
+    fi
+  done <"$1/config-plan.tsv"
+}
+
+# config_run <image> <check> <script> <check_dir> <worktree> <repo> <uid:gid> [docker options ...]
+config_run() {
+  local image="$1" check="$2" script="$3" check_dir="$4" worktree="$5" repo="$6" uid_gid="$7"
+  local ref part rc=0
+  shift 7
+  ref="$(image_ref "$image")"
+  if ! docker image inspect "$ref" >/dev/null 2>&1 </dev/null; then
+    config_skip "$check_dir" "$image" "$check" "image $image absente de la boîte à outils : lancez cqa-toolbox.sh pull"
+    return 0
+  fi
+  part="$check_dir/config-$image.part"
+  docker run --rm --pull never --network none --cap-drop ALL --security-opt no-new-privileges \
+    --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+    -v "$check_dir:/in:ro" -v "$worktree:/repos/$repo:ro" "$@" \
+    --entrypoint sh "$ref" -c "$script" sh "$repo" >"$part" </dev/null || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    cat -- "$part" >>"$check_dir/config.tsv"
+  else
+    say "check : le contrôle $image a échoué (code $rc)."
+    config_skip "$check_dir" "$image" "$check" "contrôle $image impossible dans la boîte à outils (code $rc)"
+  fi
+  rm -f -- "$part"
+}
+
+# nginx and Varnish checks of the files of <check_dir>/files.txt, on the worktree and on
+# <check_dir>/base (their folders at the start of the pass, written by the caller): official
+# images, offline, sources read-only, the host names the files resolve mapped to the loopback.
+# Writes <check_dir>/config-plan.tsv and config.tsv (side, status, check, path, message); never
+# fails: a missing image or a failed run gives "skip" lines.
+config_checks() {
+  local check_dir="$1" worktree="$2" repo="$3" uid_gid="$4" lines kind name
+  local -a nginx_hosts varnish_hosts
+  nginx_hosts=()
+  varnish_hosts=()
+  grep -Eq '(^|/)nginx/.*\.conf(\.template)?$|(^|/)nginx\.conf$|\.vcl$' "$check_dir/files.txt" || return 0
+  : >"$check_dir/config.tsv"
+  if ! lines="$(python3 -I -c "$CONFIG_PLAN_PY" "$S" "$check_dir" "$worktree" </dev/null)"; then
+    say "check : la liste des fichiers nginx et Varnish n'a pas pu être établie."
+    return 0
+  fi
+  while IFS=$'\t' read -r kind name; do
+    case "$kind" in
+      nginx) nginx_hosts+=(--add-host "$name:127.0.0.1") ;;
+      varnish) varnish_hosts+=(--add-host "$name:127.0.0.1") ;;
+    esac
+  done <<<"$lines"
+  if grep -q $'^nginx\t' "$check_dir/config-plan.tsv"; then
+    config_run nginx "nginx -t" "$NGINX_SCRIPT" "$check_dir" "$worktree" "$repo" "$uid_gid" \
+      --tmpfs /var/cache/nginx:mode=1777 --tmpfs /var/log/nginx:mode=1777 --tmpfs /run:mode=1777 \
+      ${nginx_hosts[@]+"${nginx_hosts[@]}"}
+  fi
+  if grep -q $'^varnish\t' "$check_dir/config-plan.tsv"; then
+    config_run varnish "varnishd -C" "$VARNISH_SCRIPT" "$check_dir" "$worktree" "$repo" "$uid_gid" \
+      --tmpfs /var/lib/varnish:exec,mode=1777 \
+      ${varnish_hosts[@]+"${varnish_hosts[@]}"}
+  fi
+}
+
+# check <check_dir> <worktree> <repo_name>: syntax, stylelint, nginx and Varnish checks of the files
+# listed in <check_dir>/files.txt, on a read-only copy of the worktree, without network and without
+# credentials. Writes only under <check_dir> (syntax.tsv, config-plan.tsv, config.tsv, tools/stylelint/).
 cmd_check() {
   local check_dir worktree repo rc=0 uid_gid
   [ "$#" -eq 3 ] || usage
@@ -615,10 +854,13 @@ cmd_check() {
   [ -f "$check_dir/files.txt" ] || die "files.txt est introuvable dans $check_dir."
   [ -f "$check_dir/context.json" ] || die "context.json est introuvable dans $check_dir."
   uid_gid="$(id -u):$(id -g)"
-  rm -rf -- "$check_dir/tools" "$check_dir/syntax.tsv" || return 1
+  rm -rf -- "$check_dir/tools" "$check_dir/syntax.tsv" "$check_dir/config.tsv" \
+    "$check_dir/config-plan.tsv" || return 1
   mkdir -p -- "$check_dir/tools/stylelint/raw" || return 1
+  config_checks "$check_dir" "$worktree" "$repo" "$uid_gid"
 
-  docker run --rm --pull never --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+  docker run --rm --pull never --network none --cap-drop ALL --security-opt no-new-privileges \
+    --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
     -v "$check_dir:/in:ro" -v "$worktree:/repos/$repo:ro" \
     --entrypoint sh "$(image_ref agence)" -c "$SYNTAX_SCRIPT" sh "$repo" \
     >"$check_dir/syntax.tsv" </dev/null || rc=$?
@@ -628,12 +870,48 @@ cmd_check() {
     return 1
   fi
   if grep -Eq '\.(css|scss|sass|less|vue)$' "$check_dir/files.txt"; then
-    docker run --rm --pull never --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+    docker run --rm --pull never --network none --cap-drop ALL --security-opt no-new-privileges \
+      --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
       -v "$check_dir:/in:ro" -v "$check_dir/tools:/out" -v "$worktree:/repos/$repo:ro" \
       "$(image_ref agence)" stylelint --repos /repos --context /in/context.json </dev/null || {
       say "check : stylelint a échoué."
       return 1
     }
+  fi
+}
+
+# secrets <in_file> <out_dir>: gitleaks (default rules) on the content of <in_file>, for the
+# guard of the fix mode: the input mounted read-only, no network, no credentials, no download.
+# Inline "gitleaks:allow" comments are ignored (a fixer never waives a finding) and the values
+# are redacted from the report (RuleID, StartLine and EndLine stay). Writes
+# <out_dir>/gitleaks.json (a JSON array of findings) and nothing else; exit 2 without Docker
+# or the gitleaks image, 1 when gitleaks fails.
+cmd_secrets() {
+  local in_file out_dir uid_gid ref
+  [ "$#" -eq 2 ] || usage
+  require_docker
+  [ -f "$1" ] || die "Le fichier d'entrée est introuvable : $1"
+  [ -d "$2" ] || die "Le dossier de sortie est introuvable : $2"
+  in_file="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+  out_dir="$(cd "$2" && pwd)"
+  case "$in_file$out_dir" in
+    *:*) die "Les chemins du contrôle ne doivent pas contenir « : » (montage Docker)." ;;
+  esac
+  ref="$(image_ref gitleaks)"
+  docker image inspect "$ref" >/dev/null 2>&1 </dev/null \
+    || die "L'image gitleaks de la boîte à outils est absente ($ref) : lancez cqa-toolbox.sh pull."
+  uid_gid="$(id -u):$(id -g)"
+  rm -f -- "$out_dir/gitleaks.json" || return 1
+  docker run --rm --pull never --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+    -v "$in_file:/in/input:ro" -v "$out_dir:/out" \
+    --entrypoint sh "$ref" -c 'exec gitleaks stdin --report-format json --report-path /out/gitleaks.json --exit-code 0 --no-banner -l error --ignore-gitleaks-allow --redact=100 </in/input' \
+    </dev/null || {
+    say "secrets : gitleaks a échoué."
+    return 1
+  }
+  if [ ! -f "$out_dir/gitleaks.json" ]; then
+    say "secrets : gitleaks n'a pas écrit de rapport."
+    return 1
   fi
 }
 
@@ -653,6 +931,7 @@ main() {
     run) cmd_run "$@" ;;
     all) cmd_all "$@" ;;
     check) cmd_check "$@" ;;
+    secrets) cmd_secrets "$@" ;;
     *) usage ;;
   esac
 }

@@ -7,11 +7,16 @@ from pathlib import Path
 from unittest import mock
 
 from cqa import fix_guard, fix_names, fix_state
-from tests.cqa.test_fix_git import GitCase, IDENTITY, PREFIX, flight, mr
+from tests.cqa.test_cli_fix import GITLEAKS_DOWN
+from tests.cqa.test_fix_git import BASE, GitCase, IDENTITY, KEY, flight, mr
 from tests.cqa.test_git_tools import commit, git as real_git
 
 SCHEMAS = Path(__file__).resolve().parents[2] / "skills" / "checklist-quality-audit" / "schemas"
-KEY = "front/securite"
+SECTION = ["--section", "securite"]
+# A made-up Stripe-shaped key: gitleaks flags it (stripe-access-token), the home rule does not
+# unless a credential keyword precedes it.
+STRIPE = "sk_live_" + "51Hx9k2LmN8pQ7rS3tU6vW0xY4zA1bC5dE2fG8hJ3kL6mN9pQ"
+GITLEAKS = "gitleaks:stripe-access-token"
 
 THIRD_PARTY = "code tiers (third_party_paths)"
 DEPENDENCY_DIR = "dossier de dépendances"
@@ -24,6 +29,23 @@ BAD_MESSAGE = "message de commit hors convention"
 OUT_OF_MR = "Réf hors de cette MR"
 MERGE = "commit de fusion"
 ATTRIBUTION = "ligne d'attribution dans le message"
+SECTION_MISMATCH = "section du commit différente de celle de la ligne"
+SUBJECT_TOO_LONG = "sujet de plus de 72 caractères"
+REWRITTEN = "historique réécrit : le départ de la passe n'est plus dans la branche"
+
+
+def problem(sha, ref, path, reason, kind, line=None, label=None, waivable=False):
+    """A problem as the guard prints it."""
+    return {"sha": sha, "ref": ref, "path": path, "line": line, "label": label,
+            "reason": reason, "kind": kind, "waivable": waivable}
+
+
+def secret(sha, ref, path, label, line):
+    """A secret problem: a heuristic label is a suspect, waivable on a line of a file."""
+    heuristic = label in ("credential_assignment", "credential_define")
+    return problem(sha, ref, path, f"secret détecté ({label})",
+                   "suspect" if heuristic else "content", line, label,
+                   heuristic and path is not None)
 
 
 def write(root, path, content):
@@ -57,9 +79,11 @@ class RepoCase(unittest.TestCase):
         real_git(self.repo, "commit", "-q", "-m", message, *paragraphs)
         return real_git(self.repo, "rev-parse", "HEAD")
 
-    def check(self, repo=None, rows=(3, 12, 107), known=()):
+    def check(self, repo=None, rows=(3, 12, 107), known=(), gitleaks=None):
+        sections = rows if isinstance(rows, dict) else {ref: "securite" for ref in rows}
         return fix_guard.check_commits(
-            self.repo, self.start, set(rows), repo or {"name": "front"}, list(known), subprocess.run
+            self.repo, self.start, sections, repo or {"name": "front"}, list(known), subprocess.run,
+            gitleaks=gitleaks,
         )
 
     @staticmethod
@@ -71,11 +95,11 @@ class GuardPathTest(RepoCase):
     def test_guard_refuses_third_party_and_lockfiles(self):
         repo = {"name": "front", "stack": "wordpress",
                 "third_party_paths": ["web/app/plugins/acme-forms"]}
-        first = self.add("fix(CQ-3): touch a plugin",
+        first = self.add("fix(securite CQ-3): touch a plugin",
                          {"web/app/plugins/acme-forms/x.php": "<?php", "composer.lock": "{}"})
         self.assertEqual(self.check(repo), [
-            {"sha": first, "ref": 3, "path": "composer.lock", "reason": DEPENDENCIES},
-            {"sha": first, "ref": 3, "path": "web/app/plugins/acme-forms/x.php", "reason": THIRD_PARTY},
+            problem(first, 3, "composer.lock", DEPENDENCIES, "content"),
+            problem(first, 3, "web/app/plugins/acme-forms/x.php", THIRD_PARTY, "content"),
         ])
         refused = {
             "package.json": DEPENDENCIES,
@@ -92,13 +116,14 @@ class GuardPathTest(RepoCase):
         }
         accepted = ("web/app/plugins/acme-forms-pro/x.php", "web/app/themes/t/functions.php",
                     "web/app/themes/t/vendors.php", "docs/composer.json.md")
-        self.add("fix(CQ-12): touch many files",
+        self.add("fix(securite CQ-12): touch many files",
                  {**{path: "x" for path in refused}, **{path: "y" for path in accepted}})
         real_git(self.repo, "update-index", "--add", "--cacheinfo", f"160000,{self.start},libs/sub")
-        real_git(self.repo, "commit", "-q", "-m", "fix(CQ-12): add a submodule")
+        real_git(self.repo, "commit", "-q", "-m", "fix(securite CQ-12): add a submodule")
         later = [problem for problem in self.check(repo) if problem["sha"] != first]
         self.assertEqual(self.reasons(later), {**refused, "libs/sub": SUBMODULE})
         self.assertEqual({problem["ref"] for problem in later}, {12})
+        self.assertEqual({problem["kind"] for problem in later}, {"content"})
 
     def test_guard_refuses_core_paths_per_stack(self):
         wordpress = ["wp-includes/x.php", "wp-admin/y.php", "wp-login.php", "web/wp/wp-settings.php"]
@@ -106,7 +131,8 @@ class GuardPathTest(RepoCase):
                   "web/libraries/z.js"]
         accepted = ["wp-config.php", "wp-content/themes/t/functions.php",
                     "web/modules/custom/z/z.module"]
-        self.add("fix(CQ-3): touch the core", {path: "x" for path in wordpress + drupal + accepted})
+        self.add("fix(securite CQ-3): touch the core",
+                 {path: "x" for path in wordpress + drupal + accepted})
         for stack, refused in (("wordpress", wordpress), ("drupal", drupal)):
             with self.subTest(stack=stack):
                 found = self.reasons(self.check({"name": "front", "stack": stack}))
@@ -119,30 +145,104 @@ class GuardPathTest(RepoCase):
 
 class GuardMessageTest(RepoCase):
     def test_guard_checks_commit_messages(self):
-        self.add("fix(CQ-107): add headers", {"a.php": "1"}, "The audit found no header.")
+        self.add("fix(securite CQ-107): add headers", {"a.php": "1"}, "The audit found no header.")
         bare = self.add("fix: add headers", {"b.php": "1"})
-        glued = self.add("fix(CQ-107):add headers", {"b2.php": "1"})
-        stray = self.add("fix(CQ-999): x", {"c.php": "1"})
-        coauthor = self.add("fix(CQ-107): add d", {"d.php": "1"}, "Adds d.",
+        glued = self.add("fix(securite CQ-107):add headers", {"b2.php": "1"})
+        legacy = self.add("fix(CQ-107): add headers", {"b3.php": "1"})
+        stray = self.add("fix(securite CQ-999): x", {"c.php": "1"})
+        coauthor = self.add("fix(securite CQ-107): add d", {"d.php": "1"}, "Adds d.",
                             "Co-Authored-By: Claude <noreply@example.test>")
-        generated = self.add("fix(CQ-107): add e", {"e.php": "1"},
+        generated = self.add("fix(securite CQ-107): add e", {"e.php": "1"},
                              "\U0001F916 Generated with [Claude Code](https://claude.example.test)")
-        session = self.add("fix(CQ-107): add f", {"f.php": "1"},
+        session = self.add("fix(securite CQ-107): add f", {"f.php": "1"},
                            "Claude-Session: https://claude.example.test/session")
         real_git(self.repo, "checkout", "-q", "-b", "side")
-        self.add("fix(CQ-3): side work", {"g.php": "1"})
+        self.add("fix(securite CQ-3): side work", {"g.php": "1"})
         real_git(self.repo, "checkout", "-q", "-")
         real_git(self.repo, "merge", "-q", "--no-ff", "-m", "Merge branch 'side'", "side")
         merge = real_git(self.repo, "rev-parse", "HEAD")
         self.assertCountEqual(self.check(), [
-            {"sha": bare, "ref": None, "path": None, "reason": BAD_MESSAGE},
-            {"sha": glued, "ref": None, "path": None, "reason": BAD_MESSAGE},
-            {"sha": stray, "ref": 999, "path": None, "reason": OUT_OF_MR},
-            {"sha": coauthor, "ref": 107, "path": None, "reason": ATTRIBUTION},
-            {"sha": generated, "ref": 107, "path": None, "reason": ATTRIBUTION},
-            {"sha": session, "ref": 107, "path": None, "reason": ATTRIBUTION},
-            {"sha": merge, "ref": None, "path": None, "reason": MERGE},
+            problem(bare, None, None, BAD_MESSAGE, "form"),
+            problem(glued, None, None, BAD_MESSAGE, "form"),
+            problem(legacy, 107, None, BAD_MESSAGE, "form"),
+            problem(stray, 999, None, OUT_OF_MR, "form"),
+            problem(coauthor, 107, None, ATTRIBUTION, "form"),
+            problem(generated, 107, None, ATTRIBUTION, "form"),
+            problem(session, 107, None, ATTRIBUTION, "form"),
+            problem(merge, None, None, MERGE, "content"),
         ])
+
+    def test_guard_checks_section_and_subject_length(self):
+        rows = {3: "securite", 12: "qualite"}
+        self.add("fix(qualite CQ-12): add the alt text", {"a.php": "1"})
+        crossed = self.add("fix(qualite CQ-3): escape the search field", {"b.php": "1"})
+        exact = "fix(securite CQ-3): " + "x" * (fix_names.SUBJECT_MAX - 20)
+        self.assertEqual(len(exact), fix_names.SUBJECT_MAX)
+        self.add(exact, {"c.php": "1"})
+        long = self.add(exact + "y", {"d.php": "1"})
+        both = self.add("fix(qualite CQ-3): " + "z" * fix_names.SUBJECT_MAX, {"e.php": "1"})
+        self.assertEqual(self.check(rows=rows), [
+            problem(crossed, 3, None, SECTION_MISMATCH, "form"),
+            problem(long, 3, None, SUBJECT_TOO_LONG, "form"),
+            problem(both, 3, None, SECTION_MISMATCH, "form"),
+            problem(both, 3, None, SUBJECT_TOO_LONG, "form"),
+        ])
+        self.assertEqual(fix_guard.SECTION_MISMATCH, SECTION_MISMATCH)
+        self.assertEqual(fix_guard.SUBJECT_TOO_LONG, SUBJECT_TOO_LONG)
+
+    def test_guard_classes_form_and_content(self):
+        known = ["s3cr3t-value"]
+        aws = "AKIA" + "IOSFODNN7EXAMPLE"
+        message = self.add("fix(securite CQ-3): rotate s3cr3t-value", {"a.txt": "a"},
+                           "DB_PASSWORD=hunter22",
+                           "Co-Authored-By: Claude <noreply@example.test>")
+        content = self.add("fix(seo CQ-3): add a key",
+                           {"web/key.php": f"<?php\n$key = '{aws}';\n$password = 'hunter2hunter2';\n",
+                            "x.min.js": "x"})
+        found = {(item["sha"], item["reason"]): (item["kind"], item["waivable"])
+                 for item in self.check(known=known)}
+        self.assertEqual(found, {
+            (message, ATTRIBUTION): ("form", False),
+            (message, KNOWN_SECRET): ("content", False),
+            (message, "secret détecté (credential_assignment)"): ("suspect", False),
+            (content, SECTION_MISMATCH): ("form", False),
+            (content, "secret détecté (aws_key)"): ("content", False),
+            (content, "secret détecté (credential_assignment)"): ("suspect", True),
+            (content, MINIFIED): ("content", False),
+        })
+        self.assertEqual((fix_guard.FORM, fix_guard.CONTENT, fix_guard.SUSPECT),
+                         ("form", "content", "suspect"))
+        self.assertEqual(fix_guard.HEURISTIC_SECRET_LABELS,
+                         {"credential_assignment", "credential_define"})
+        real_git(self.repo, "reset", "-q", "--hard", self.start)
+        self.add("fix(securite CQ-3): start again", {"b.txt": "b"})
+        self.start = message
+        self.assertEqual(self.check(), [problem(message, None, None, REWRITTEN, "content")])
+
+    def test_guard_reports_heuristic_alerts_as_waivable_suspects(self):
+        expression = ("<?php\n$password = isset( $_POST['pass1'] ) ? (string) "
+                      "wp_unslash( $_POST['pass1'] ) : '';\n")
+        read = self.add("fix(securite CQ-3): read the password field", {"login.php": expression})
+        literal = self.add("fix(securite CQ-3): set a password",
+                           {"seed.php": "<?php\n// Seed.\n$password = 'hunter2hunter2';\n"})
+        defined = self.add("fix(securite CQ-3): define the password",
+                           {"conf.php": "<?php\ndefine( 'DB_PASSWORD', 'Adm1nP@ss2024' );\n"})
+        self.assertEqual(self.check(), [
+            secret(read, 3, "login.php", "credential_assignment", 2),
+            secret(literal, 3, "seed.php", "credential_assignment", 3),
+            secret(defined, 3, "conf.php", "credential_define", 2),
+        ])
+
+    def test_guard_names_the_line_of_a_secret_in_a_later_hunk(self):
+        write(self.repo, "big.php", "".join(f"<?php // {index}\n" for index in range(20)))
+        real_git(self.repo, "add", "big.php")
+        real_git(self.repo, "commit", "-q", "-m", "chore: before the pass")
+        self.start = real_git(self.repo, "rev-parse", "HEAD")
+        lines = [f"<?php // {index}\n" for index in range(20)]
+        lines[2] = "$a = 1;\n"
+        lines[14] = "$password = 'hunter2hunter2';\n"
+        sha = self.add("fix(securite CQ-3): edit big", {"big.php": "".join(lines)})
+        self.assertEqual(self.check(), [secret(sha, 3, "big.php", "credential_assignment", 15)])
 
     def test_guard_scans_only_added_lines(self):
         known = ["s3cr3t-value"]
@@ -150,23 +250,200 @@ class GuardMessageTest(RepoCase):
         real_git(self.repo, "add", "old.php")
         real_git(self.repo, "commit", "-q", "-m", "chore: before the pass")
         self.start = real_git(self.repo, "rev-parse", "HEAD")
-        self.add("fix(CQ-3): edit old", {"old.php": "<?php\n$auth = getenv('AUTH');\n"})
+        self.add("fix(securite CQ-3): edit old", {"old.php": "<?php\n$auth = getenv('AUTH');\n"})
         aws = "AKIA" + "IOSFODNN7EXAMPLE"
-        added = self.add("fix(CQ-3): add a key", {"new.php": f"<?php\n$key = '{aws}';\n"})
+        added = self.add("fix(securite CQ-3): add a key", {"new.php": f"<?php\n$key = '{aws}';\n"})
         self.assertEqual(self.check(known=known), [
-            {"sha": added, "ref": 3, "path": "new.php", "reason": "secret détecté (aws_key)"},
+            secret(added, 3, "new.php", "aws_key", 2),
         ])
 
     def test_guard_names_a_path_with_a_space_or_an_accent(self):
         aws = "AKIA" + "IOSFODNN7EXAMPLE"
         content = f"<?php\n'{aws}';\n"
-        spaced = self.add("fix(CQ-3): add a spaced file", {"web/my file.php": content})
-        accented = self.add("fix(CQ-3): add an accented file", {"web/clé.php": content})
+        spaced = self.add("fix(securite CQ-3): add a spaced file", {"web/my file.php": content})
+        accented = self.add("fix(securite CQ-3): add an accented file", {"web/clé.php": content})
         reason = "secret détecté (aws_key)"
         self.assertEqual(self.check(), [
-            {"sha": spaced, "ref": 3, "path": "web/my file.php", "reason": reason},
-            {"sha": accented, "ref": 3, "path": "web/clé.php", "reason": reason},
+            secret(spaced, 3, "web/my file.php", "aws_key", 2),
+            secret(accented, 3, "web/clé.php", "aws_key", 2),
         ])
+
+
+class GuardContentTest(RepoCase):
+    """The guard scans the whole new content of every changed file, as the audit reads it
+    (bytes, no newline translation), and keeps the secrets that an added line carries."""
+
+    PASSWORD = "$db_password = 'RealS3cretValue99';"
+    DEFINE = "<?php\ndefine(\n    'DB_PASSWORD',\n    {value}\n);\n"
+
+    def add_bytes(self, message, files):
+        for path, content in files.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            real_git(self.repo, "add", "--", path)
+        real_git(self.repo, "commit", "-q", "-m", message)
+        return real_git(self.repo, "rev-parse", "HEAD")
+
+    def test_a_carriage_return_hides_nothing(self):
+        """A lone \\r (not followed by \\n) keeps the line whole for git and for the scan; the
+        alert on such a line is a suspect the lead cannot waive, since an editor would show
+        the lead another line than the one judged."""
+        for case, content in (
+            ("lone CR", b"<?php // note\r" + self.PASSWORD.encode() + b"\n"),
+            ("CR line endings", b"<?php\r// a\r" + self.PASSWORD.encode() + b"\r"),
+        ):
+            with self.subTest(case=case):
+                sha = self.add_bytes("fix(securite CQ-3): x", {"web/cr.php": content})
+                expected = secret(sha, 3, "web/cr.php", "credential_assignment", 1)
+                self.assertEqual(self.check(), [{**expected, "waivable": False}])
+                self.start = sha
+        sha = self.add_bytes("fix(securite CQ-3): y",
+                             {"web/crlf.php": b"<?php\r\n" + self.PASSWORD.encode() + b"\r\n"})
+        self.assertEqual(self.check(), [secret(sha, 3, "web/crlf.php", "credential_assignment", 2)])
+
+    def test_unchanged_lines_between_two_hunks_are_never_added(self):
+        """diff.interHunkContext of the dev's config would merge two hunks and show the lines
+        between them as context: the guard asks for none."""
+        real_git(self.repo, "config", "diff.interHunkContext", "10")
+        lines = ["<?php", "// 2", "// 3", "// 4", self.PASSWORD, "// 6", "// 7", "// 8", "// 9"]
+        self.start = self.add("chore: before", {"web/m.php": "\n".join(lines) + "\n"})
+        lines[1], lines[7] = "// two", "// eight"
+        self.add("fix(securite CQ-3): x", {"web/m.php": "\n".join(lines) + "\n"})
+        self.assertEqual(self.check(), [])
+
+    def test_a_secret_over_several_lines_is_reported_when_one_of_its_lines_is_added(self):
+        self.start = self.add("chore: before",
+                              {"web/wp-config.php": self.DEFINE.format(value="getenv( 'DB_PASSWORD' )")})
+        sha = self.add("fix(securite CQ-3): x",
+                       {"web/wp-config.php": self.DEFINE.format(value="'Adm1nP@ss2024'")})
+        self.assertEqual(self.check(),
+                         [secret(sha, 3, "web/wp-config.php", "credential_define", 2)])
+        write(self.repo, "web/wp-config.php", self.DEFINE.format(value="'Adm1nP@ss2024!'"))
+        real_git(self.repo, "add", "--", "web/wp-config.php")
+        blob = real_git(self.repo, "rev-parse", ":web/wp-config.php")
+        staged = fix_guard.check_staged(self.repo, "fix(securite CQ-3): y", {3: "securite"},
+                                        {"name": "front"}, [], subprocess.run)
+        self.assertEqual(staged, [secret(blob, 3, "web/wp-config.php", "credential_define", 2)])
+
+    def test_a_secret_the_commit_did_not_add_is_not_reported(self):
+        self.start = self.add("chore: before", {"web/old.php": f"<?php\n{self.PASSWORD}\n"})
+        self.add("fix(securite CQ-3): x", {"web/old.php": f"<?php\n{self.PASSWORD}\n// note\n"})
+        self.assertEqual(self.check(), [])
+
+    def test_every_added_line_of_a_file_is_scanned(self):
+        lines = [f"// {index}" for index in range(30)]
+        self.start = self.add("chore: before", {"my dir/a b.php": "\n".join(lines) + "\n"})
+        lines[3] = lines[20] = self.PASSWORD
+        lines.insert(25, self.PASSWORD)
+        sha = self.add("fix(securite CQ-3): x", {"my dir/a b.php": "\n".join(lines) + "\n"})
+        self.assertEqual(self.check(), [
+            secret(sha, 3, "my dir/a b.php", "credential_assignment", line) for line in (4, 21, 26)
+        ])
+
+
+class GitleaksTest(RepoCase):
+    """gitleaks reads, once per guard call, the same content as the home rule (the changed
+    files whole and the messages); a finding becomes a content problem, never waivable, at
+    its commit, file and line, when one of its lines is added."""
+
+    LINE = f"$stripe = '{STRIPE}';"
+
+    def scanner(self, calls, finder=None):
+        def scan(text):
+            calls.append(text)
+            if finder is not None:
+                return finder(text)
+            return [("stripe-access-token", number, number)
+                    for number, line in enumerate(text.split("\n"), start=1) if STRIPE in line]
+        return scan
+
+    def test_findings_map_back_to_their_commit_file_and_line(self):
+        self.start = self.add("chore: before", {"web/old.php": f"<?php\n{self.LINE}\n"})
+        first = self.add("fix(securite CQ-3): pay", {
+            "web/pay.php": f"<?php\n$x = 1;\n{self.LINE}\n",
+            "web/old.php": f"<?php\n{self.LINE}\n// note\n",
+        })
+        second = self.add("fix(securite CQ-12): rotate", {"docs/a.md": f"{self.LINE}\n"},
+                          f"Old key: {STRIPE}")
+        calls = []
+        problems = self.check(gitleaks=self.scanner(calls))
+        self.assertEqual(problems, [
+            secret(first, 3, "web/pay.php", GITLEAKS, 3),
+            secret(second, 12, None, GITLEAKS, 3),
+            secret(second, 12, "docs/a.md", GITLEAKS, 1),
+        ])
+        self.assertEqual({(item["kind"], item["waivable"]) for item in problems}, {("content", False)})
+        self.assertEqual(len(calls), 1)
+        for part in ("fix(securite CQ-3): pay", "$x = 1;", "// note", "fix(securite CQ-12): rotate",
+                     f"Old key: {STRIPE}"):
+            with self.subTest(part=part):
+                self.assertIn(part, calls[0])
+        self.assertLess(calls[0].index("fix(securite CQ-3): pay"), calls[0].index("$x = 1;"))
+        self.assertLess(calls[0].index("// note"), calls[0].index("fix(securite CQ-12): rotate"))
+
+    def test_without_a_scanner_or_with_an_unavailable_one_the_home_rule_runs_alone(self):
+        sha = self.add("fix(securite CQ-3): pay",
+                       {"web/pay.php": f"<?php\n{self.LINE}\n$password = 'hunter2hunter2';\n"})
+        home = [secret(sha, 3, "web/pay.php", "credential_assignment", 3)]
+        self.assertEqual(self.check(), home)
+        calls = []
+        self.assertEqual(self.check(gitleaks=self.scanner(calls, lambda text: None)), home)
+        self.assertEqual(len(calls), 1)
+        calls = []
+        self.assertEqual(self.check(gitleaks=self.scanner(calls)),
+                         home + [secret(sha, 3, "web/pay.php", GITLEAKS, 2)])
+
+    def test_a_finding_over_several_lines_is_kept_when_one_of_them_is_added(self):
+        self.start = self.add("chore: before", {"web/k.php": "<?php\n// a\n// b\n// c\n"})
+        sha = self.add("fix(securite CQ-3): x", {"web/k.php": "<?php\n// a\n// b\n// changed\n"})
+
+        def finder(text):
+            at = text.split("\n").index("// a") + 1
+            return [("private-key", at, at + 2), ("other-rule", at, at + 1),
+                    ("tail-rule", at + 2, at + 50)]
+
+        self.assertEqual(self.check(gitleaks=self.scanner([], finder)), [
+            secret(sha, 3, "web/k.php", "gitleaks:private-key", 2),
+            secret(sha, 3, "web/k.php", "gitleaks:tail-rule", 4),
+        ])
+
+    def test_a_finding_outside_the_input_is_never_skipped_quietly(self):
+        """fix_gitleaks.Gitleaks refuses such a report (home rule alone, with the note); a
+        scanner that still hands one over is a programming error, not a silent skip."""
+        self.add("fix(securite CQ-3): x", {"web/k.php": "<?php\n"})
+        for first in (0, 10 ** 6):
+            with self.subTest(first=first):
+                with self.assertRaises(ValueError) as caught:
+                    self.check(gitleaks=self.scanner([], lambda text: [("rule", first, first)]))
+                self.assertIn("gitleaks", str(caught.exception))
+
+
+class UnwaivedTest(unittest.TestCase):
+    def test_a_waiver_covers_a_waivable_problem_of_the_same_blob_only(self):
+        blob = "b" * 40
+        suspect = secret("c" * 40, 3, "web/login.php", "credential_assignment", 2)
+        waivers = [{"blob": blob, "path": "web/login.php", "line": 2,
+                    "label": "credential_assignment"}]
+        self.assertEqual(fix_guard.unwaived([suspect], waivers, lambda sha, path: blob), [])
+        for case, blob_of in (("no blob", lambda sha, path: None),
+                              ("another blob", lambda sha, path: "d" * 40)):
+            with self.subTest(case=case):
+                self.assertEqual(fix_guard.unwaived([suspect], waivers, blob_of), [suspect])
+        for case, waiver in (("no blob", {k: v for k, v in waivers[0].items() if k != "blob"}),
+                             ("blob None", {**waivers[0], "blob": None}),
+                             ("other path", {**waivers[0], "path": "web/other.php"}),
+                             ("other line", {**waivers[0], "line": 3}),
+                             ("other label", {**waivers[0], "label": "credential_define"})):
+            with self.subTest(case=case):
+                self.assertEqual(fix_guard.unwaived([suspect], [waiver], lambda sha, path: blob),
+                                 [suspect])
+        for case, problem in (("known value", secret("c" * 40, 3, "web/login.php", "known_value", 2)),
+                              ("message", secret("c" * 40, 3, None, "credential_assignment", 2))):
+            with self.subTest(case=case):
+                covering = [{**waivers[0], "path": problem["path"]}]
+                self.assertEqual(fix_guard.unwaived([problem], covering, lambda sha, path: blob),
+                                 [problem])
 
 
 class GuardCommandTest(GitCase):
@@ -183,7 +460,7 @@ class GuardCommandTest(GitCase):
                 self.assertIn("third_party_paths", err)
 
     def test_guard_ignores_commits_before_start_sha(self):
-        branch = PREFIX + "securite"
+        branch = BASE
         before = self.head(self.repo, "refs/remotes/origin/develop")
         self.push_branch(branch, "fix(CQ-3): first", "Apply 1 suggestion(s) to 1 file(s)")
         self.advance_develop()
@@ -197,33 +474,199 @@ class GuardCommandTest(GitCase):
         started = self.start_ok()
         self.assertEqual(started["done_refs"], [3])
         self.assertEqual(self.key()["rows"]["3"]["outcome"], "done_before")
-        self.fixer_commit(started["worktree"], "follow.txt", "fix(CQ-3): follow up")
+        self.fixer_commit(started["worktree"], "follow.txt", "fix(securite CQ-3): follow up")
         code, out, err = self.run_main(["guard", self.run_dir, KEY])
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), {"ok": True, "problems": []})
+        self.assertEqual(json.loads(out), {"ok": True, "problems": [], "note": None})
         earlier = fix_guard.check_commits(
-            Path(started["worktree"]), before, {3, 5}, {"name": "front"}, [], subprocess.run
+            Path(started["worktree"]), before, {3: "securite", 5: "securite"}, {"name": "front"},
+            [], subprocess.run,
         )
         self.assertEqual({problem["reason"] for problem in earlier}, {BAD_MESSAGE, MERGE})
 
     def test_guard_finds_a_secret_without_printing_it(self):
         self.open_pass()
         worktree = Path(self.start_ok()["worktree"])
-        leaked = self.commit_files(worktree, "fix(CQ-3): read the value",
+        leaked = self.commit_files(worktree, "fix(securite CQ-3): read the value",
                                    {"web/config.php": "<?php\n$auth = 's3cr3t-value';\n"})
-        self.commit_files(worktree, "fix(CQ-3): drop the value", {"web/config.php": "<?php\n"})
-        message = self.commit_files(worktree, "fix(CQ-5): rotate s3cr3t-value", {"b.txt": "b"})
+        self.commit_files(worktree, "fix(securite CQ-3): drop the value",
+                          {"web/config.php": "<?php\n"})
+        message = self.commit_files(worktree, "fix(securite CQ-5): rotate s3cr3t-value",
+                                    {"b.txt": "b"})
         code, out, err = self.run_main(
             ["guard", self.run_dir, KEY], env={"GM_AUDIT_AUTH_PASS": "s3cr3t-value"}
         )
         self.assertEqual(code, 5, err)
         self.assertEqual(json.loads(out), {"ok": False, "problems": [
-            {"sha": leaked, "ref": 3, "path": "web/config.php", "reason": KNOWN_SECRET},
-            {"sha": message, "ref": 5, "path": None, "reason": KNOWN_SECRET},
-        ]})
+            secret(leaked, 3, "web/config.php", "known_value", 2),
+            secret(message, 5, None, "known_value", 1),
+        ], "note": None})
         self.assertNotIn("s3cr3t-value", out)
         self.assertNotIn("s3cr3t-value", err)
         self.assertEqual(self.run_main(["guard", self.run_dir, KEY])[0], 0)
+
+    def guard_staged(self, *options):
+        return self.run_main(["guard", self.run_dir, KEY, *options])
+
+    def test_guard_staged_checks_the_index_and_message(self):
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        head = self.head(worktree)
+        message = self.root / "message.txt"
+        aws = "AKIA" + "IOSFODNN7EXAMPLE"
+        write(worktree, "web/key.php", f"<?php\n$key = '{aws}';\n")
+        write(worktree, "vendor/acme/a.php", "<?php\n")
+        write(worktree, "notes.php", f"<?php\n$key = '{aws}';\n")
+        for path in ("web/key.php", "vendor/acme/a.php"):
+            self.assertEqual(fix_names.git(worktree, subprocess.run, "add", "--", path).returncode, 0)
+        message.write_text("fix(CQ-3): add the key\n\nCo-Authored-By: Claude <noreply@example.test>\n",
+                           encoding="utf-8")
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 5, err)
+        vendor = real_git(worktree, "rev-parse", ":vendor/acme/a.php")
+        key_blob = real_git(worktree, "rev-parse", ":web/key.php")
+        content = [
+            problem(vendor, 3, "vendor/acme/a.php", DEPENDENCY_DIR, "content"),
+            secret(key_blob, 3, "web/key.php", "aws_key", 2),
+        ]
+        self.assertEqual(json.loads(out), {"ok": False, "problems": [
+            problem(None, 3, None, BAD_MESSAGE, "form"),
+            problem(None, 3, None, ATTRIBUTION, "form"),
+            *content,
+        ], "note": None})
+        self.assertEqual(self.head(worktree), head)
+        self.assertEqual(real_git(worktree, "diff", "--cached", "--name-only").splitlines(),
+                         ["vendor/acme/a.php", "web/key.php"])
+        message.write_text("fix(seo CQ-5): " + "x" * fix_names.SUBJECT_MAX + "\n", encoding="utf-8")
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out)["problems"], [
+            problem(None, 5, None, SECTION_MISMATCH, "form"),
+            problem(None, 5, None, SUBJECT_TOO_LONG, "form"),
+            *[{**problem, "ref": 5} for problem in content],
+        ])
+        real_git(worktree, "reset", "-q")
+        write(worktree, "web/login.php", "<?php\n$password = isset( $_POST['p'] ) ? (string) "
+                                         "wp_unslash( $_POST['p'] ) : '';\n")
+        self.assertEqual(
+            fix_names.git(worktree, subprocess.run, "add", "--", "web/login.php").returncode, 0)
+        message.write_text("fix(securite CQ-3): read the password field\n\nThe audit found it.\n",
+                           encoding="utf-8")
+        blob = real_git(worktree, "rev-parse", ":web/login.php")
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out)["problems"],
+                         [secret(blob, 3, "web/login.php", "credential_assignment", 2)])
+        code, out, err = self.run_main(["waive-secret", self.run_dir, KEY, "--sha", blob, "--path",
+                                        "web/login.php", "--line", "2", "--label",
+                                        "credential_assignment"])
+        self.assertEqual(code, 0, err)
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {"ok": True, "problems": [], "note": None})
+        self.assertEqual(self.head(worktree), head)
+        committed = self.commit_files(worktree, "fix(securite CQ-3): read the password field", {})
+        self.assertNotEqual(committed, head)
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual((code, json.loads(out)), (0, {"ok": True, "problems": [], "note": None}), err)
+        for options in (["--staged"], ["--message-file", str(message)],
+                        ["--staged", "--message-file", str(self.root / "absent.txt")]):
+            with self.subTest(options=options):
+                code, out, err = self.guard_staged(*options)
+                self.assertEqual(code, 2, err)
+                self.assertEqual(out, "")
+
+    def test_guard_reports_gitleaks_findings_without_the_value(self):
+        self.gitleaks = {STRIPE: "stripe-access-token"}
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        sha = self.commit_files(worktree, "fix(securite CQ-3): pay",
+                                {"web/pay.php": f'<?php\napi_key = "{STRIPE}"\n'})
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual(code, 5, err)
+        found = secret(sha, 3, "web/pay.php", GITLEAKS, 2)
+        self.assertEqual(json.loads(out), {"ok": False, "problems": [
+            secret(sha, 3, "web/pay.php", "credential_assignment", 2), found,
+        ], "note": None})
+        self.assertEqual((found["kind"], found["waivable"]), ("content", False))
+        for text in (out, err):
+            self.assertNotIn(STRIPE, text)
+            self.assertNotIn("CANARY", text)
+        self.assertEqual(len(self.toolbox_inputs), 1)
+        self.assertIn(f'api_key = "{STRIPE}"', self.toolbox_inputs[0])
+        self.assertIn("fix(securite CQ-3): pay", self.toolbox_inputs[0])
+        for path in self.toolbox_paths[0]:
+            self.assertFalse(path.exists(), path)
+        self.assertEqual(list(self.run_dir.rglob("gitleaks.json")), [])
+        waive = ["waive-secret", self.run_dir, KEY, "--sha", sha, "--path", "web/pay.php",
+                 "--line", "2", "--label"]
+        code, out, err = self.run_main(waive + [GITLEAKS])
+        self.assertEqual((code, out), (2, ""))
+        self.assertNotIn(STRIPE, err)
+        code, out, err = self.run_main(waive + ["credential_assignment"])
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out)["problems"], [found])
+        self.assertNotIn(STRIPE, (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8"))
+
+    def test_guard_keeps_the_home_rule_next_to_gitleaks(self):
+        self.gitleaks = {}
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        sha = self.commit_files(worktree, "fix(securite CQ-3): env", {
+            "web/.env.dist": "DB_PASSWORD=Adm1n(2024)!\n",
+            "web/login.php": f"<?php\n{SecretWaiverTest.WORDPRESS}\n",
+        })
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual(code, 5, err)
+        problems = [secret(sha, 3, "web/.env.dist", "credential_assignment", 1),
+                    secret(sha, 3, "web/login.php", "credential_assignment", 2)]
+        self.assertEqual(json.loads(out), {"ok": False, "problems": problems, "note": None})
+        self.assertTrue(all(item["kind"] == "suspect" and item["waivable"] for item in problems))
+        self.assertEqual(len(self.toolbox_inputs), 1)
+        self.assertIn("DB_PASSWORD=Adm1n(2024)!", self.toolbox_inputs[0])
+
+    def test_guard_without_gitleaks_notes_the_fallback(self):
+        self.gitleaks = None
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        self.commit_files(worktree, "fix(securite CQ-3): clean", {"web/a.php": "<?php\n"})
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {"ok": True, "problems": [], "note": GITLEAKS_DOWN})
+        self.assertIn("Docker", err)
+        sha = self.commit_files(worktree, "fix(securite CQ-3): read the password field",
+                                {"web/login.php": f"<?php\n{SecretWaiverTest.WORDPRESS}\n"})
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out), {"ok": False, "problems": [
+            secret(sha, 3, "web/login.php", "credential_assignment", 2)], "note": GITLEAKS_DOWN})
+        self.assertEqual(len(self.toolbox_inputs), 2)
+
+    def test_staged_guard_uses_gitleaks(self):
+        self.gitleaks = {STRIPE: "stripe-access-token"}
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        head = self.head(worktree)
+        write(worktree, "web/pay.php", f"<?php\n$stripe = '{STRIPE}';\n")
+        self.assertEqual(fix_names.git(worktree, subprocess.run, "add", "--", "web/pay.php").returncode, 0)
+        message = self.root / "message.txt"
+        message.write_text(f"fix(securite CQ-3): pay\n\nOld key {STRIPE}\n", encoding="utf-8")
+        blob = real_git(worktree, "rev-parse", ":web/pay.php")
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out), {"ok": False, "problems": [
+            secret(None, 3, None, GITLEAKS, 3),
+            secret(blob, 3, "web/pay.php", GITLEAKS, 2),
+        ], "note": None})
+        self.assertEqual(self.head(worktree), head)
+        self.assertEqual(len(self.toolbox_inputs), 1)
+        self.assertNotIn(STRIPE, out + err)
+        self.gitleaks = None
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {"ok": True, "problems": [], "note": GITLEAKS_DOWN})
 
     def commit_files(self, worktree, message, files):
         for path, content in files.items():
@@ -234,21 +677,238 @@ class GuardCommandTest(GitCase):
         return self.head(worktree)
 
 
+class SecretWaiverTest(GitCase):
+    """The lead waives a heuristic secret alert (credential_assignment, credential_define) for
+    one line of one commit; no other secret is ever waivable, and the value is never stored."""
+
+    WORDPRESS = ("$password = isset( $_POST['pass1'] ) ? (string) wp_unslash( $_POST['pass1'] ) "
+                 ": '';")
+
+    def setUp(self):
+        super().setUp()
+        self.open_pass()
+        started = self.start_ok()
+        self.worktree, self.start_sha = Path(started["worktree"]), started["start_sha"]
+
+    def commit(self, message, files):
+        for path, content in files.items():
+            write(self.worktree, path, content)
+            self.assertEqual(
+                fix_names.git(self.worktree, subprocess.run, "add", "--", path).returncode, 0)
+        done = fix_names.git(self.worktree, subprocess.run, "commit", "-q", "-m", message)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return self.head(self.worktree)
+
+    def guard(self, env=None):
+        code, out, err = self.run_main(["guard", self.run_dir, KEY], env=env)
+        return code, json.loads(out)["problems"]
+
+    def waive(self, sha, path, line, label, env=None):
+        return self.run_main(["waive-secret", self.run_dir, KEY, "--sha", sha, "--path", path,
+                              "--line", str(line), "--label", label], env=env)
+
+    def test_the_cq107_false_positive_is_waived_by_the_lead(self):
+        sha = self.commit("fix(securite CQ-3): read the password field",
+                          {"web/login.php": f"<?php\n{self.WORDPRESS}\n"})
+        expected = secret(sha, 3, "web/login.php", "credential_assignment", 2)
+        self.assertEqual(self.guard(), (5, [expected]))
+        self.assertEqual((expected["kind"], expected["waivable"]), ("suspect", True))
+        code, out, err = self.waive(sha, "web/login.php", 2, "credential_assignment")
+        self.assertEqual(code, 0, err)
+        waiver = json.loads(out)["waiver"]
+        blob = real_git(self.worktree, "rev-parse", f"{sha}:web/login.php")
+        self.assertEqual(set(waiver), {"blob", "path", "line", "label", "at"})
+        self.assertEqual((waiver["blob"], waiver["path"], waiver["line"], waiver["label"]),
+                         (blob, "web/login.php", 2, "credential_assignment"))
+        self.assertNotEqual(blob, sha)
+        self.assertEqual(self.key()["secret_waivers"], [waiver])
+        self.assertEqual(self.guard(), (0, []))
+        self.assertEqual(self.waive(sha, "web/login.php", 2, "credential_assignment")[0], 0)
+        self.assertEqual(len(self.key()["secret_waivers"]), 1)
+        state = (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8")
+        for text in ("$_POST", "wp_unslash", "pass1", "isset", sha):
+            self.assertNotIn(text, state)
+        again = self.commit("fix(securite CQ-3): read it on the profile page",
+                            {"web/profile.php": f"<?php\n// Profile.\n{self.WORDPRESS}\n",
+                             "web/copy.php": f"<?php\n{self.WORDPRESS}\n"})
+        self.assertEqual(real_git(self.worktree, "rev-parse", f"{again}:web/copy.php"), blob)
+        self.assertEqual(self.guard(), (5, [
+            secret(again, 3, "web/copy.php", "credential_assignment", 2),
+            secret(again, 3, "web/profile.php", "credential_assignment", 3),
+        ]))
+
+    def test_a_malformed_waiver_in_the_state_is_refused(self):
+        sha = self.commit("fix(securite CQ-3): read the password field",
+                          {"web/login.php": f"<?php\n{self.WORDPRESS}\n"})
+        self.assertEqual(self.waive(sha, "web/login.php", 2, "credential_assignment")[0], 0)
+        good = self.key()["secret_waivers"][0]
+        for case, waivers in (
+            ("not a list", {}),
+            ("not an object", ["x"]),
+            ("no blob", [{name: value for name, value in good.items() if name != "blob"}]),
+            ("blob not a sha", [{**good, "blob": "abc"}]),
+            ("old sha key", [{**{name: value for name, value in good.items() if name != "blob"},
+                              "sha": sha}]),
+            ("empty path", [{**good, "path": ""}]),
+            ("line 0", [{**good, "line": 0}]),
+            ("line as text", [{**good, "line": "2"}]),
+            ("line as bool", [{**good, "line": True}]),
+            ("unknown label", [{**good, "label": "aws_key"}]),
+            ("empty label", [{**good, "label": ""}]),
+            ("label as list", [{**good, "label": ["credential_assignment"]}]),
+            ("label as object", [{**good, "label": {"credential_assignment": 1}}]),
+            ("line as object", [{**good, "line": {}}]),
+        ):
+            with self.subTest(case=case):
+                state = self.state_text()
+                state["keys"][KEY]["secret_waivers"] = waivers
+                fix_state.save(self.run_dir, state)
+                with self.assertRaises(fix_state.StateError) as caught:
+                    fix_state.load(self.run_dir)
+                self.assertIn("secret_waivers", str(caught.exception))
+                code, out, err = self.run_main(["guard", self.run_dir, KEY])
+                self.assertEqual(code, 6, err)
+                self.assertEqual(out, "")
+                self.assertIn("secret_waivers", err)
+        state = self.state_text()
+        state["keys"][KEY]["secret_waivers"] = [good]
+        fix_state.save(self.run_dir, state)
+        self.assertEqual(self.guard(), (0, []))
+        state["keys"][KEY].pop("secret_waivers")
+        fix_state.save(self.run_dir, state)
+        self.assertEqual(self.guard()[0], 5)
+
+    def state_text(self):
+        """The state as written, without the check of load (a malformed one is being fixed)."""
+        return json.loads((self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8"))
+
+    def test_a_line_with_a_lone_carriage_return_is_never_waived(self):
+        path = self.worktree / "web" / "cr.php"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"<?php // note\r" + self.WORDPRESS.encode() + b"\n")
+        self.assertEqual(fix_names.git(self.worktree, subprocess.run, "add", "--", "web/cr.php").returncode, 0)
+        done = fix_names.git(self.worktree, subprocess.run, "commit", "-q", "-m", "fix(securite CQ-3): cr")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        sha = self.head(self.worktree)
+        expected = {**secret(sha, 3, "web/cr.php", "credential_assignment", 1), "waivable": False}
+        self.assertEqual(self.guard(), (5, [expected]))
+        code, out, err = self.waive(sha, "web/cr.php", 1, "credential_assignment")
+        self.assertEqual((code, out), (2, ""))
+        self.assertNotIn("secret_waivers", self.key())
+        self.assertEqual(self.guard(), (5, [expected]))
+
+    def test_only_a_heuristic_alert_the_guard_reports_may_be_waived(self):
+        env = {"GM_AUDIT_AUTH_PASS": "s3cr3t-value"}
+        aws = "AKIA" + "IOSFODNN7EXAMPLE"
+        known = self.commit("fix(securite CQ-3): read the value",
+                            {"web/config.php": "<?php\n$auth = 's3cr3t-value';\n",
+                             "web/key.php": f"<?php\n$key = '{aws}';\n"})
+        literal = self.commit("fix(securite CQ-3): seed a password",
+                              {"web/seed.php": "<?php\n$password = 'hunter2hunter2';\n"})
+        code, problems = self.guard(env)
+        self.assertEqual(problems, [
+            secret(known, 3, "web/config.php", "known_value", 2),
+            secret(known, 3, "web/key.php", "aws_key", 2),
+            secret(literal, 3, "web/seed.php", "credential_assignment", 2),
+        ])
+        refused = {
+            "known_value": (known, "web/config.php", 2, "known_value"),
+            "aws_key": (known, "web/key.php", 2, "aws_key"),
+            "hors de la passe": (self.start_sha, "web/seed.php", 2, "credential_assignment"),
+            "inconnu": ("f" * 40, "web/seed.php", 2, "credential_assignment"),
+            "autre ligne": (literal, "web/seed.php", 3, "credential_assignment"),
+            "autre chemin": (literal, "web/other.php", 2, "credential_assignment"),
+            "autre label": (literal, "web/seed.php", 2, "credential_define"),
+            "ligne 0": (literal, "web/seed.php", 0, "credential_assignment"),
+        }
+        for case, args in refused.items():
+            with self.subTest(case=case):
+                code, out, err = self.waive(*args, env=env)
+                self.assertEqual(code, 2, err)
+                self.assertEqual(out, "")
+                self.assertTrue(err.strip())
+                self.assertNotIn("s3cr3t-value", err)
+                self.assertNotIn("secret_waivers", self.key())
+        code, out, err = self.waive(literal, "web/seed.php", 2, "credential_assignment", env=env)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("hunter2", out)
+        self.assertNotIn("hunter2", (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(self.guard(env), (5, problems[:2]))
+
+    def drop(self, ref):
+        code, out, err = self.run_main(["drop", self.run_dir, KEY, "--refs", ref, "--reason",
+                                        "Revue bloquante : échappement manquant."])
+        self.assertEqual(code, 0, err)
+
+    def record(self, **commits):
+        """Record the commits of the rows ({"3": [sha]}) as fixed, as validate would."""
+        state = self.state()
+        for ref, shas in commits.items():
+            state["keys"][KEY]["rows"][ref].update(outcome="fixed", commits=shas)
+        fix_state.save(self.run_dir, state)
+
+    def test_a_drop_keeps_the_waiver_of_a_file_it_leaves_unchanged(self):
+        dropped = self.commit("fix(securite CQ-5): add b", {"b5.txt": "b"})
+        sha = self.commit("fix(securite CQ-3): read the password field",
+                          {"web/login.php": f"<?php\n{self.WORDPRESS}\n"})
+        self.record(**{"5": [dropped], "3": [sha]})
+        self.assertEqual(self.waive(sha, "web/login.php", 2, "credential_assignment")[0], 0)
+        waivers = self.key()["secret_waivers"]
+        self.drop("CQ-5")
+        rewritten = self.key()["rows"]["3"]["commits"][0]
+        self.assertNotEqual(rewritten, sha)
+        self.assertEqual(real_git(self.worktree, "rev-parse", f"{rewritten}:web/login.php"),
+                         waivers[0]["blob"])
+        self.assertEqual(self.key()["secret_waivers"], waivers)
+        self.assertEqual(self.guard(), (0, []))
+
+    def test_a_drop_that_shifts_the_file_voids_the_waiver(self):
+        """The re-reviewer's probe: D (CQ-5) adds a line at the top of login.php, A (CQ-3)
+        adds the CQ-107 false positive at line 5 and a real password at line 6; the lead
+        waives line 5; once D is dropped, both lines moved up and both are reported again."""
+        other = "$db_password = 'RealS3cretValue99';"
+        first = self.commit("fix(securite CQ-3): add the login page",
+                            {"web/login.php": "<?php\n// a\n// b\n// c\n"})
+        shift = self.commit("fix(securite CQ-5): note the page",
+                            {"web/login.php": "<?php\n// D\n// a\n// b\n// c\n"})
+        sha = self.commit("fix(securite CQ-3): read the password field",
+                          {"web/login.php": f"<?php\n// D\n// a\n// b\n{self.WORDPRESS}\n{other}\n// c\n"})
+        self.record(**{"3": [first, sha], "5": [shift]})
+        alerts = [secret(sha, 3, "web/login.php", "credential_assignment", line) for line in (5, 6)]
+        self.assertEqual(self.guard(), (5, alerts))
+        self.assertEqual(self.waive(sha, "web/login.php", 5, "credential_assignment")[0], 0)
+        self.assertEqual(self.guard(), (5, alerts[1:]))
+        waivers = self.key()["secret_waivers"]
+        self.drop("CQ-5")
+        rewritten = self.key()["rows"]["3"]["commits"]
+        self.assertEqual(rewritten[0], first)
+        self.assertNotEqual(rewritten[1], sha)
+        self.assertEqual(self.key()["secret_waivers"], waivers)
+        self.assertEqual(self.guard(), (5, [
+            secret(rewritten[1], 3, "web/login.php", "credential_assignment", line)
+            for line in (4, 5)
+        ]))
+        state = (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8")
+        self.assertNotIn("RealS3cret", state)
+
+
 class ValidateTest(GitCase):
     def setUp(self):
         super().setUp()
-        self.folder = self.run_dir / "fix" / "front" / "securite"
+        self.folder = self.run_dir / "fix" / "front"
 
     def started(self):
         self.open_pass()
         started = self.start_ok()
         self.worktree = Path(started["worktree"])
         self.start_sha = started["start_sha"]
+        self.section_start()
         self.pass_start(1)
         return started
 
     def pass_start(self, number):
-        code, out, err = self.run_main(["pass-start", self.run_dir, KEY, "--pass", str(number)])
+        code, out, err = self.run_main(
+            ["pass-start", self.run_dir, KEY, "--pass", str(number), *SECTION])
         self.assertEqual(code, 0, err)
         return json.loads(out)
 
@@ -304,11 +964,11 @@ class ValidateTest(GitCase):
         key = self.key()
         self.assertEqual(key["rows"]["3"], {
             "outcome": "fixed", "reason": None, "commits": [fixed], "pass": 1,
-            "attention": "Vérifier le cache du CDN.",
+            "attention": "Vérifier le cache du CDN.", "remaining": None, "section": "securite",
         })
         self.assertEqual(key["rows"]["5"], {
             "outcome": "skipped", "reason": "Demande une décision de l'équipe UI/UX.",
-            "commits": [], "pass": 1, "attention": None,
+            "commits": [], "pass": 1, "attention": None, "remaining": None, "section": "securite",
         })
         self.assertEqual((key["step"], key["pass"]), ("fixed", 1))
 
@@ -346,13 +1006,13 @@ class ValidateTest(GitCase):
         self.started()
         fixed = self.fixer_commit(self.worktree, "a.php", "fix(CQ-3): add the header")
         document = self.report(fixed)
-        document.update(key="front/qualite", rows=document["rows"][:1])
+        document.update(key="back", rows=document["rows"][:1])
         document["pass"] = 2
         self.write_doc("report-1.json", document)
         code, result, err = self.validate("report")
         self.assertEqual(code, 6)
         joined = " ".join(result["errors"])
-        for expected in ("front/qualite", "« pass »", "CQ-5"):
+        for expected in ('vaut "back"', "« pass »", "CQ-5"):
             self.assertIn(expected, joined)
         (self.folder / "report-1.json").write_text("{", encoding="utf-8")
         self.assertEqual(self.validate("report")[0], 6)
@@ -417,6 +1077,134 @@ class ValidateTest(GitCase):
         self.assertIn("ligne CQ-5 : verdict sur une ligne non corrigée (skipped)", result["errors"])
         self.assertEqual(self.key()["step"], "fixed")
 
+    def test_report_records_the_remaining_work(self):
+        self.started()
+        fixed = self.fixer_commit(self.worktree, "a.php", "fix(securite CQ-3): add the header")
+        document = self.report(fixed)
+        document["rows"][0]["remaining"] = "Reste l'en-tête des pages d'erreur."
+        self.write_doc("report-1.json", document)
+        code, result, err = self.validate("report")
+        self.assertEqual(code, 0, err)
+        rows = self.key()["rows"]
+        self.assertEqual(rows["3"]["remaining"], "Reste l'en-tête des pages d'erreur.")
+        self.assertIsNone(rows["5"]["remaining"])
+
+    def test_review_corrections_are_recorded(self):
+        self.started()
+        first = self.fixer_commit(self.worktree, "a.php", "fix(securite CQ-3): add the header")
+        self.write_doc("report-1.json", self.report(first))
+        self.assertEqual(self.validate("report")[0], 0)
+        corrections = {"change": "Ajoute l'en-tête X-Frame-Options au thème.", "uat": None,
+                       "remaining": "Reste l'en-tête des pages d'erreur."}
+        bad = {
+            "ligne CQ-3 : « corrections » ne sert qu'à un verdict ok":
+                {"verdict": "blocking", "notes": "À revoir.", "corrections": corrections},
+            "ligne CQ-3 : « corrections » : champ inconnu « title » (attendu : change, uat, "
+            "attention, remaining)": {"corrections": {"title": "Titre."}},
+            "ligne CQ-3 : « corrections.change » dépasse 600 caractères (601)":
+                {"corrections": {"change": "x" * 601}},
+            "ligne CQ-3 : « corrections.remaining » dépasse 300 caractères (301)":
+                {"corrections": {"remaining": "x" * 301}},
+            "ligne CQ-3 : « corrections.attention » : un abandon (« Abandon : ») fait 300 "
+            "caractères au plus (301)": {"corrections": {"attention": "Abandon : " + "x" * 291}},
+            'ligne CQ-3 : « corrections » doit être un objet {"change", "uat", "attention", '
+            '"remaining"}': {"corrections": "Ajoute l'en-tête."},
+        }
+        for expected, change in bad.items():
+            with self.subTest(error=expected):
+                row = {"ref": 3, "verdict": "ok", "notes": None, **change}
+                self.write_doc("review-1.json",
+                               {"key": KEY, "pass": 1, "attention": [], "rows": [row]})
+                code, result, err = self.validate("review")
+                self.assertEqual(code, 6, err)
+                self.assertEqual(result["errors"], [expected])
+                self.assertNotIn("corrections", self.key()["rows"]["3"])
+        review = {"key": KEY, "pass": 1, "attention": [], "rows": [
+            {"ref": 3, "verdict": "ok", "notes": None, "corrections": corrections}]}
+        self.write_doc("review-1.json", review)
+        code, result, err = self.validate("review")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.key()["rows"]["3"]["corrections"], {
+            "change": "Ajoute l'en-tête X-Frame-Options au thème.",
+            "remaining": "Reste l'en-tête des pages d'erreur.",
+        })
+        review["rows"][0]["corrections"] = None
+        self.write_doc("review-1.json", review)
+        self.assertEqual(self.validate("review")[0], 0)
+        self.assertNotIn("corrections", self.key()["rows"]["3"])
+        review["rows"][0]["corrections"] = corrections
+        self.write_doc("review-1.json", review)
+        self.assertEqual(self.validate("review")[0], 0)
+        self.assertIn("corrections", self.key()["rows"]["3"])
+        self.pass_start(2)
+        second = self.fixer_commit(self.worktree, "b.php", "fix(securite CQ-3): cover the 404 page")
+        again = self.report(second, number=2)
+        again["rows"] = again["rows"][:1]
+        again["rows"][0]["commits"] = [first, second]
+        self.write_doc("report-2.json", again)
+        self.assertEqual(self.validate("report", 2)[0], 0)
+        self.assertNotIn("corrections", self.key()["rows"]["3"])
+
+    def test_review_scope_light_only_for_small_doc_passes(self):
+        self.started()
+
+        def commit_lines(files, subject):
+            for path, lines in files.items():
+                write(self.worktree, path, "".join(f"{line}\n" for line in lines))
+                self.assertEqual(
+                    fix_names.git(self.worktree, subprocess.run, "add", "--", path).returncode, 0)
+            done = fix_names.git(self.worktree, subprocess.run, "commit", "-q", "-m", subject)
+            self.assertEqual(done.returncode, 0, done.stderr)
+
+        def scope(number):
+            code, out, err = self.run_main(
+                ["review-scope", self.run_dir, KEY, "--pass", str(number)])
+            self.assertEqual(code, 0, err)
+            return json.loads(out)
+
+        code, out, err = self.run_main(["review-scope", self.run_dir, KEY, "--pass", "2"])
+        self.assertEqual(code, 2, err)
+        self.assertIn("pass-start", err)
+        self.assertEqual(scope(1), {"light": False, "lines": 0, "files": []})
+        readme = [f"Ligne {index}" for index in range(30)]
+        commit_lines({"README.md": readme}, "docs(securite CQ-3): document the headers")
+        self.assertEqual(scope(1), {"light": True, "lines": 30, "files": ["README.md"]})
+        self.pass_start(2)
+        commit_lines({"robots.txt": ["Disallow: /wp-admin/"]}, "fix(securite CQ-3): hide the admin")
+        self.assertEqual(scope(2), {"light": False, "lines": 1, "files": ["robots.txt"]})
+        self.pass_start(3)
+        commit_lines({"docs/guide.rst": [f"Ligne {index}" for index in range(41)]},
+                     "docs(securite CQ-3): write the guide")
+        self.assertEqual(scope(3), {"light": False, "lines": 41, "files": ["docs/guide.rst"]})
+        self.pass_start(4)
+        commit_lines({"README.md": ["Titre"] * 5 + readme[5:], "docs/intro.adoc": ["= Intro", "x"]},
+                     "docs(securite CQ-3): reword the readme")
+        self.assertEqual(scope(4), {"light": True, "lines": 12,
+                                    "files": ["README.md", "docs/intro.adoc"]})
+        self.assertEqual(scope(1)["files"],
+                         ["README.md", "docs/guide.rst", "docs/intro.adoc", "robots.txt"])
+        self.assertFalse(scope(1)["light"])
+        self.assertEqual(fix_guard.LIGHT_REVIEW_LINES, 40)
+
+    def test_dev_checkout_alert_only_once_per_change(self):
+        self.started()
+        fixed = self.fixer_commit(self.worktree, "a.php", "fix(securite CQ-3): add the header")
+        self.write_doc("report-1.json", self.report(fixed))
+        self.assertIsNone(self.validate("report")[1]["dev_checkout_changed"])
+        (self.repo / "a.txt").write_text("changed during the pass", encoding="utf-8")
+        alert = {"paths": ["a.txt"], "head": False, "branch": False, "stash": False}
+        self.assertEqual(self.validate("report")[1]["dev_checkout_changed"], alert)
+        self.assertIsNone(self.validate("report")[1]["dev_checkout_changed"])
+        (self.repo / "b.txt").write_text("new", encoding="utf-8")
+        (self.folder / "report-1.json").write_text("{", encoding="utf-8")
+        code, result, err = self.validate("report")
+        self.assertEqual(code, 6, err)
+        self.assertEqual(result["dev_checkout_changed"], {**alert, "paths": ["b.txt"]})
+        self.write_doc("report-1.json", self.report(fixed))
+        self.assertIsNone(self.validate("report")[1]["dev_checkout_changed"])
+        (self.repo / "a.txt").write_text("changed again, longer", encoding="utf-8")
+        self.assertEqual(self.validate("report")[1]["dev_checkout_changed"], alert)
+
     def test_validate_reports_a_changed_dev_checkout(self):
         self.started()
         fixed = self.fixer_commit(self.worktree, "a.php", "fix(CQ-3): add the header")
@@ -436,7 +1224,7 @@ class ValidateTest(GitCase):
 class DropTest(GitCase):
     def setUp(self):
         super().setUp()
-        self.write_run(flight(), slugs=("securite", "qualite"), rows=(3, 5, 12))
+        self.write_run(flight(), rows=(3, 5, 12))
         self.open_pass()
 
     def drop(self, key, refs, reason="Revue bloquante : échappement manquant.", run=subprocess.run):
@@ -471,7 +1259,7 @@ class DropTest(GitCase):
         fix_state.save(self.run_dir, state)
         code, result, err = self.drop(KEY, "CQ-3,CQ-5")
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"dropped": [3, 5], "also_dropped": []})
+        self.assertEqual(result, {"dropped": [3, 5], "also_dropped": [], "retry": []})
         self.assertEqual(self.subjects(worktree, started["start_sha"]), ["fix(CQ-12): add b"])
         self.assertEqual(sorted(path.name for path in worktree.glob("*.txt")), ["a.txt", "b12.txt"])
         self.assert_clean_on(worktree, started["branch"])
@@ -485,17 +1273,18 @@ class DropTest(GitCase):
         self.assertEqual(rows["12"]["commits"], [self.head(worktree)])
         self.assertNotEqual(self.head(worktree), kept)
 
-        other = self.start_ok("front/qualite")
-        worktree = Path(other["worktree"])
+    def test_drop_also_drops_a_row_whose_commit_no_longer_replays(self):
+        started = self.start_ok()
+        worktree = Path(started["worktree"])
         self.fixer_commit(worktree, "shared.txt", "fix(CQ-3): add shared")
         self.fixer_commit(worktree, "shared.txt", "fix(CQ-12): change shared")
-        code, result, err = self.drop("front/qualite", "CQ-3")
+        code, result, err = self.drop(KEY, "CQ-3")
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"dropped": [3], "also_dropped": [12]})
-        self.assertEqual(self.head(worktree), other["start_sha"])
-        self.assert_clean_on(worktree, other["branch"])
-        rows = self.key("front/qualite")["rows"]
-        self.assertEqual((rows["3"]["outcome"], rows["12"]["outcome"]), ("dropped", "dropped"))
+        self.assertEqual(result, {"dropped": [3], "also_dropped": [12], "retry": [12]})
+        self.assertEqual(self.head(worktree), started["start_sha"])
+        self.assert_clean_on(worktree, started["branch"])
+        rows = self.key()["rows"]
+        self.assertEqual((rows["3"]["outcome"], rows["12"]["outcome"]), ("dropped", "pending"))
         self.assertIn("CQ-3", rows["12"]["reason"])
         self.assertEqual(rows["5"]["outcome"], "pending")
 
@@ -511,9 +1300,75 @@ class DropTest(GitCase):
         fix_state.save(self.run_dir, state)
         code, result, err = self.drop(KEY, "CQ-3")
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"dropped": [3], "also_dropped": [12]})
+        self.assertEqual(result, {"dropped": [3], "also_dropped": [12], "retry": [12]})
         self.assertEqual(self.head(worktree), started["start_sha"])
         self.assert_clean_on(worktree, started["branch"])
+
+    def test_also_dropped_rows_get_one_retry(self):
+        """A row dropped by ricochet goes back to the fixer once, in its section, with the
+        reason; dropped by ricochet again, it leaves for good."""
+        started = self.start_ok()
+        worktree = Path(started["worktree"])
+        self.section_start()
+        shared = self.fixer_commit(worktree, "shared.txt", "fix(securite CQ-3): add shared")
+        change = self.fixer_commit(worktree, "shared.txt", "fix(securite CQ-12): change shared")
+        self.record(r3=[shared], r12=[change])
+        state = self.state()
+        state["keys"][KEY]["rows"]["12"].update(attention="Abandon : ancien texte.",
+                                                remaining="Reste b.")
+        fix_state.save(self.run_dir, state)
+        code, result, err = self.drop(KEY, "CQ-3")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(result, {"dropped": [3], "also_dropped": [12], "retry": [12]})
+        self.assertEqual(self.head(worktree), started["start_sha"])
+        self.assert_clean_on(worktree, started["branch"])
+        row = self.key()["rows"]["12"]
+        self.assertEqual((row["outcome"], row["commits"], row["retry"], row["attention"]),
+                         ("pending", [], True, None))
+        self.assertNotIn("remaining", row)
+        self.assertIn("CQ-3", row["reason"])
+        code, result, err = self.section("end", "securite")
+        self.assertEqual(code, 2, err)
+        self.assertIn("CQ-12 en attente", err)
+        other = self.fixer_commit(worktree, "other.txt", "fix(securite CQ-5): add other")
+        again = self.fixer_commit(worktree, "other.txt", "fix(securite CQ-12): change other")
+        self.record(r5=[other], r12=[again])
+        code, result, err = self.drop(KEY, "CQ-5")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(result, {"dropped": [5], "also_dropped": [12], "retry": []})
+        rows = self.key()["rows"]
+        self.assertEqual((rows["12"]["outcome"], rows["12"]["commits"]), ("dropped", []))
+        self.assertIn("CQ-5", rows["12"]["reason"])
+        self.assertEqual(self.head(worktree), started["start_sha"])
+        self.assertEqual(self.section("end", "securite")[0], 0)
+
+    def test_a_ricochet_in_a_settled_section_is_final_until_the_questions(self):
+        """Keys stage: a settled section takes no more pass, so its row is dropped for good;
+        at the questions stage its section takes the retry, as for an answered question."""
+        self.assertEqual(self.run_main(["abandon", self.run_dir])[0], 0)
+        self.write_run(flight(), sections={"securite": (3,), "qualite": (5, 12)})
+        for stage, outcome in (("keys", "dropped"), ("questions", "pending")):
+            with self.subTest(stage=stage):
+                self.open_pass(mode="autonomous")
+                started = self.start_ok()
+                worktree = Path(started["worktree"])
+                shared = self.fixer_commit(worktree, f"{stage}.txt", "fix(qualite CQ-5): add")
+                change = self.fixer_commit(worktree, f"{stage}.txt", "fix(securite CQ-3): edit")
+                self.record(r5=[shared], r3=[change])
+                state = self.state()
+                state["stage"] = stage
+                state["keys"][KEY]["sections"][0]["state"] = "settled"
+                state["keys"][KEY]["sections"][1]["state"] = "active"
+                fix_state.save(self.run_dir, state)
+                code, result, err = self.drop(KEY, "CQ-5")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(result["also_dropped"], [3])
+                self.assertEqual(self.key()["rows"]["3"]["outcome"], outcome)
+                if stage == "questions":
+                    code, out, err = self.run_main(["pass-start", self.run_dir, KEY, "--pass",
+                                                    "1", *SECTION])
+                    self.assertEqual(code, 0, err)
+                self.assertEqual(self.run_main(["abandon", self.run_dir])[0], 0)
 
     def test_drop_refuses_pushed_commits(self):
         started = self.start_ok()
@@ -543,11 +1398,11 @@ class DropTest(GitCase):
         started = self.start_ok()
         worktree = Path(started["worktree"])
         real_git(worktree, "reset", "-q", "--hard", "HEAD~1")
-        head = self.fixer_commit(worktree, "a.txt", "fix(CQ-3): add a")
+        head = self.fixer_commit(worktree, "a.txt", "fix(securite CQ-3): add a")
         code, out, err = self.run_main(["guard", self.run_dir, KEY])
         self.assertEqual(code, 5)
-        self.assertIn({"sha": started["start_sha"], "ref": None, "path": None,
-                       "reason": fix_guard.REWRITTEN}, json.loads(out)["problems"])
+        self.assertEqual(json.loads(out)["problems"], [
+            problem(started["start_sha"], None, None, fix_guard.REWRITTEN, "content")])
         code, result, err = self.drop(KEY, "CQ-3")
         self.assertEqual(code, 5)
         self.assertIn("réécrit", err)
@@ -582,7 +1437,7 @@ class DropSafetyTest(DropTest):
         self.record(r3=[first])
         code, result, err = self.drop(KEY, "CQ-5", reason="Demande une décision du client.")
         self.assertEqual(code, 0, err)
-        self.assertEqual(result, {"dropped": [5], "also_dropped": []})
+        self.assertEqual(result, {"dropped": [5], "also_dropped": [], "retry": []})
         self.assertEqual(self.head(worktree), head)
         self.assertEqual(self.head(self.repo, f"refs/heads/{started['branch']}"), head)
         rows = self.key()["rows"]
@@ -674,10 +1529,12 @@ class DropSafetyTest(DropTest):
     def test_drop_moves_the_key_to_reviewed_once_every_blocking_row_is_dropped(self):
         started = self.start_ok()
         worktree = Path(started["worktree"])
-        self.assertEqual(self.run_main(["pass-start", self.run_dir, KEY, "--pass", "1"])[0], 0)
+        self.section_start()
+        self.assertEqual(
+            self.run_main(["pass-start", self.run_dir, KEY, "--pass", "1", *SECTION])[0], 0)
         first = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
         second = self.fixer_commit(worktree, "b12.txt", "fix(CQ-12): add b")
-        folder = self.run_dir / "fix" / "front" / "securite"
+        folder = self.run_dir / "fix" / "front"
         report = {"key": KEY, "pass": 1, "rows": [
             {"ref": 3, "outcome": "fixed", "change": "Ajoute a.", "uat": "Lire a.",
              "commits": [first]},
@@ -712,11 +1569,13 @@ class PassReviewTest(GitCase):
     def setUp(self):
         super().setUp()
         self.write_run(flight(), rows=(3, 5, 12))
-        self.folder = self.run_dir / "fix" / "front" / "securite"
+        self.folder = self.run_dir / "fix" / "front"
         self.open_pass()
 
     def pass_start(self, number):
-        code, out, err = self.run_main(["pass-start", self.run_dir, KEY, "--pass", str(number)])
+        self.section("start", "securite")
+        code, out, err = self.run_main(
+            ["pass-start", self.run_dir, KEY, "--pass", str(number), *SECTION])
         return code, json.loads(out) if out else None, err
 
     def write_doc(self, name, document):
@@ -1034,7 +1893,7 @@ class SettledRowsTest(GitCase):
 
     def setUp(self):
         super().setUp()
-        self.folder = self.run_dir / "fix" / "front" / "securite"
+        self.folder = self.run_dir / "fix" / "front"
 
     def main_ok(self, *args):
         code, out, err = self.run_main([args[0], self.run_dir, *args[1:]])
@@ -1046,15 +1905,16 @@ class SettledRowsTest(GitCase):
             json.dumps({"key": KEY, "pass": number, "rows": rows}), encoding="utf-8")
 
     def test_an_empty_report_brings_a_key_whose_rows_are_all_done_before_to_reviewed(self):
-        branch = PREFIX + "securite"
+        branch = BASE
         real_git(self.repo, "checkout", "-q", "-b", branch)
-        commit(self.repo, "s.txt", "fix(CQ-3): x")
+        commit(self.repo, "s.txt", "fix(securite CQ-3): x")
         real_git(self.repo, "checkout", "-q", "develop")
         self.write_run(flight(branches=[{"branch": branch, "where": "local", "refs": [3]}]),
                        rows=(3,))
         self.open_pass()
         self.assertEqual(self.start_ok()["done_refs"], [3])
-        self.main_ok("pass-start", KEY, "--pass", "1")
+        self.section_start()
+        self.main_ok("pass-start", KEY, "--pass", "1", *SECTION)
         self.write_report(1, [])
         result = self.main_ok("validate", KEY, "report", "--pass", "1")
         self.assertEqual((result["ok"], result["errors"]), (True, []))
@@ -1068,7 +1928,8 @@ class SettledRowsTest(GitCase):
         self.write_run(flight(), rows=(3, 5))
         self.open_pass()
         worktree = Path(self.start_ok()["worktree"])
-        self.main_ok("pass-start", KEY, "--pass", "1")
+        self.section_start()
+        self.main_ok("pass-start", KEY, "--pass", "1", *SECTION)
         fixed = self.fixer_commit(worktree, "a3.txt", "fix(CQ-3): add a")
         question = {"text": "Quel contact ?", "options": ["Équipe", "Client"], "default": "Client"}
         self.write_report(1, [
@@ -1079,7 +1940,7 @@ class SettledRowsTest(GitCase):
         self.main_ok("validate", KEY, "report", "--pass", "1")
         result = self.main_ok("drop", KEY, "--refs", "CQ-5", "--reason",
                               "laissée aux devs par le lead")
-        self.assertEqual(result, {"dropped": [5], "also_dropped": []})
+        self.assertEqual(result, {"dropped": [5], "also_dropped": [], "retry": []})
         self.assertEqual(self.head(worktree), fixed)
         rows = self.key()["rows"]
         self.assertEqual(rows["5"]["outcome"], "dropped")
@@ -1089,6 +1950,77 @@ class SettledRowsTest(GitCase):
 
 class ValidateReportTest(unittest.TestCase):
     """fix_guard.validate_report alone: every problem of a row comes out of one run."""
+
+    def test_report_remaining_options_and_abandon_limits(self):
+        sha = "a" * 40
+        rows = {"3": {"outcome": "pending"}, "5": {"outcome": "pending"},
+                "7": {"outcome": "pending"}}
+        fixed = {"ref": 3, "outcome": "fixed", "change": "Ajoute a.", "uat": "Lire a.",
+                 "commits": [sha[:12]]}
+        skipped = {"ref": 5, "outcome": "skipped", "reason": "Hors du repo."}
+        asked = {"text": "Quel contact ?", "options": ["Équipe", "Client"], "default": "Client"}
+        question = {"ref": 7, "outcome": "question", "question": asked}
+
+        def check(*items, sections=None):
+            return fix_guard.validate_report(
+                {"key": KEY, "pass": 1, "rows": list(items)}, key=KEY, number=1, rows=rows,
+                commits=[{"sha": sha, "ref": 3}], sections=sections,
+            )
+
+        self.assertEqual(fix_guard.MAX_REMAINING, 300)
+        entries, errors = check({**fixed, "remaining": "r" * 300}, skipped, question)
+        self.assertEqual(errors, [])
+        self.assertEqual([entry["remaining"] for entry in entries], ["r" * 300, None, None])
+        entries, errors = check({**fixed, "remaining": "r" * 301},
+                                {**skipped, "remaining": "Tout."}, question)
+        self.assertEqual(errors, [
+            "ligne CQ-3 : « remaining » dépasse 300 caractères (301)",
+            "ligne CQ-5 : « remaining » ne sert qu'à une ligne corrigée (fixed)",
+        ])
+        for option in ("Ne rien faire", "Laisser en l'état", "Laisser en l\u2019état",
+                       "Laisser tel quel", "Confier la ligne à un dev", "La laisser aux devs",
+                       "Laisser aux devs", "Laisser à un dev", "Pas de changement",
+                       "Ne pas corriger", "RIEN FAIRE pour l'instant", "Ne rien changer",
+                       "Laisser la ligne telle quelle", "Garder tel quel", "Garder en l'état",
+                       "Ne pas toucher", "Ne pas toucher au fichier"):
+            with self.subTest(option=option):
+                refused = {**question, "question": {**asked, "options": ["Équipe", option],
+                                                    "default": "Équipe"}}
+                self.assertEqual(check(fixed, skipped, refused)[1], [
+                    f"ligne CQ-7 : « question.options » : « {option} » laisse la ligne en "
+                    "l'état ; l'orchestrateur propose déjà de la laisser aux devs"
+                ])
+        for option in ("Laisser un alt vide (image décorative)",
+                       "Ne rien afficher si le champ est vide", "Laisser le lien ouvrir un onglet",
+                       "Ajouter le devis au devant de la page", "Changement de libellé",
+                       "Envoyer le formulaire au développeur", "Garder le lien et ajouter rel"):
+            with self.subTest(accepted=option):
+                kept = {**question, "question": {**asked, "options": ["Équipe", option],
+                                                 "default": option}}
+                self.assertEqual(check(fixed, skipped, kept)[1], [])
+        self.assertEqual(fix_guard.MAX_ABANDON, 300)
+        abandon = "Abandon : " + "a" * (fix_guard.MAX_ABANDON - len("Abandon : "))
+        self.assertEqual(check({**fixed, "attention": abandon}, skipped, question)[1], [])
+        self.assertEqual(check({**fixed, "attention": abandon + "a"}, skipped, question)[1], [
+            "ligne CQ-3 : « attention » : un abandon (« Abandon : ») fait 300 caractères au "
+            "plus (301)"
+        ])
+        self.assertEqual(
+            check({**fixed, "attention": "Abandon\u00a0: " + "a" * 300}, skipped, question)[1],
+            ["ligne CQ-3 : « attention » : un abandon (« Abandon : ») fait 300 caractères au "
+             "plus (310)"])
+        note = "n" * fix_guard.MAX_NOTE
+        self.assertEqual(check({**fixed, "attention": note}, skipped, question)[1], [])
+        sections = {"3": "securite", "5": "securite", "7": "securite", "9": "qualite"}
+        stray = [{"ref": ref, "outcome": "skipped", "reason": "Hors du repo."} for ref in (9, 11)]
+        self.assertEqual(check(fixed, skipped, question, *stray, sections=sections)[1], [
+            "ligne CQ-9 : Réf d'une autre section (qualite)",
+            "ligne CQ-11 : Réf hors de cette clé",
+        ])
+        self.assertEqual(check(fixed, skipped, question, *stray)[1], [
+            "ligne CQ-9 : Réf hors de cette clé",
+            "ligne CQ-11 : Réf hors de cette clé",
+        ])
 
     def test_every_problem_of_a_row_is_reported_in_one_run(self):
         first, second = "a" * 40, "b" * 40
@@ -1152,6 +2084,7 @@ class SchemaTest(unittest.TestCase):
         self.assertEqual(row["uat"]["maxLength"], fix_guard.MAX_TEXT)
         self.assertEqual(row["reason"]["maxLength"], fix_guard.MAX_REASON)
         self.assertEqual(row["attention"]["maxLength"], fix_guard.MAX_NOTE)
+        self.assertEqual(row["remaining"]["maxLength"], fix_guard.MAX_REMAINING)
         question = report["$defs"]["question"]["properties"]
         self.assertEqual(question["text"]["maxLength"], fix_guard.MAX_TEXT)
         options = question["options"]
@@ -1166,6 +2099,18 @@ class SchemaTest(unittest.TestCase):
         self.assertEqual(notes["maxLength"], fix_guard.MAX_TEXT)
         remarks = review["properties"]["attention"]["items"]
         self.assertEqual(remarks["maxLength"], fix_guard.MAX_NOTE)
+        corrections = review["$defs"]["corrections"]
+        self.assertEqual(corrections["additionalProperties"], False)
+        self.assertEqual(
+            {name: field["maxLength"] for name, field in corrections["properties"].items()},
+            fix_guard.CORRECTION_LIMITS)
+        self.assertEqual(fix_guard.CORRECTION_LIMITS, {
+            "change": fix_guard.MAX_TEXT, "uat": fix_guard.MAX_TEXT,
+            "attention": fix_guard.MAX_NOTE, "remaining": fix_guard.MAX_REMAINING})
+        self.assertEqual(review["$defs"]["row"]["properties"]["corrections"],
+                         {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/corrections"}],
+                          "description": review["$defs"]["row"]["properties"]["corrections"]
+                          ["description"]})
 
 
 if __name__ == "__main__":

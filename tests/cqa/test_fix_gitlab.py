@@ -263,6 +263,32 @@ class InFlightApiTest(unittest.TestCase):
             self.assertIn("--paginate", call)
         self.assertTrue(any("state=opened&per_page=100" in c[-1] for c in calls))
 
+    def test_legacy_subjects_and_branches_are_in_flight(self):
+        base = fix_names.BRANCH_BASE
+        listings = {
+            "opened": [self.mr(12, self.PREFIX + "securite"), self.mr(14, base),
+                       self.mr(15, "dry-run/checklist-qa-fix")],
+            "closed": [self.mr(16, base + "-2")],
+        }
+        commits = {
+            12: ["fix(CQ-107): add headers"],
+            14: ["fix(securite CQ-108): add more", "feat(seo CQ-9): y"],
+            16: ["fix(qualite CQ-5): z"],
+        }
+        found = self.flight(self.api(listings, commits))
+        self.assertEqual([(m["iid"], m["refs"]) for m in found["open"]],
+                         [(12, [107]), (14, [9, 108])])
+        self.assertEqual([(m["iid"], m["refs"]) for m in found["closed"]], [(16, [5])])
+
+    def test_new_pass_branch_without_mr_is_listed(self):
+        self.branch(fix_names.BRANCH_BASE, "fix(securite CQ-4): x")
+        self.branch(self.PREFIX + "qualite", "fix(CQ-3): x")
+        found = self.flight(self.api({"opened": [], "closed": []}, {}))
+        self.assertEqual(
+            sorted((b["branch"], b["refs"]) for b in found["branches"]),
+            [(fix_names.BRANCH_BASE, [4]), (self.PREFIX + "qualite", [3])],
+        )
+
     def test_opened_mr_beyond_the_first_page_is_found(self):
         def run(command, **kwargs):
             if command[0] == "git":

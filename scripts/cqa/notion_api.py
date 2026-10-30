@@ -173,6 +173,9 @@ class NotionClient:
         data = self.request("GET", f"/pages/{page_id}/markdown")
         return {"markdown": data["markdown"], "truncated": data["truncated"]}
 
+    def page(self, page_id: str) -> dict:
+        return self.request("GET", f"/pages/{page_id}")
+
     def comments(self, block_id: str) -> list[dict]:
         return self.paginate("GET", "/comments", query={"block_id": block_id})
 

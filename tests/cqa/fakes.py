@@ -88,4 +88,5 @@ def listing(results, next_cursor=None):
 
 def apply_report(done, skipped):
     """Return the report of an apply that blocked and failed nothing."""
-    return {"done": done, "skipped": skipped, "blocked": [], "errors": [], "replace_failed": []}
+    return {"done": done, "skipped": skipped, "blocked": [], "errors": [], "replace_failed": [],
+            "status_changed": []}

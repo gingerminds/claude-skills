@@ -16,12 +16,66 @@ from tests.cqa.test_cli_prepare import clean_environ
 REMOTE = "git@gitlab.example.org:acme/shop.git"
 
 
+GITLEAKS_DOWN = "gitleaks indisponible : contrôle maison seul"
+CANARY = "CANARY-VALUE-NEVER-COPIED"
+
+
+def is_secrets_call(command) -> bool:
+    """True for the launcher call of the guard: bash .../cqa-toolbox.sh secrets <in> <out_dir>."""
+    return (len(command) == 5 and command[0] == "bash" and command[2] == "secrets"
+            and Path(command[1]).name == "cqa-toolbox.sh")
+
+
+def fake_gitleaks(command, rules):
+    """Answer the launcher's secrets command as the toolbox would, without Docker.
+
+    rules maps the text of a line to the RuleID gitleaks gives it; the report lists one
+    finding per flagged line of <in>, Match and Secret being canaries. rules None stands for
+    a workstation without Docker (exit 2, nothing written).
+    """
+    if rules is None:
+        return subprocess.CompletedProcess(
+            command, 2, "", "Docker est introuvable : installez Docker Desktop (macOS) ou "
+                            "Docker Engine (Linux).\n")
+    text = Path(command[3]).read_bytes().decode("utf-8", "replace")
+    findings = []
+    for number, line in enumerate(text.split("\n"), start=1):
+        for needle, rule in rules.items():
+            if needle in line:
+                findings.append({
+                    "Description": rule, "StartLine": number, "EndLine": number,
+                    "StartColumn": 1, "EndColumn": 2, "Match": CANARY, "Secret": CANARY,
+                    "File": "", "SymlinkFile": "", "Commit": "", "Entropy": 4.2, "Author": "",
+                    "Email": "", "Date": "", "Message": "", "Tags": [], "RuleID": rule,
+                    "Fingerprint": f":{rule}:{number}",
+                })
+    (Path(command[4]) / "gitleaks.json").write_text(json.dumps(findings), encoding="utf-8")
+    return subprocess.CompletedProcess(command, 0, "", "")
+
+
 class FixCase(unittest.TestCase):
+    """The fix commands with the toolbox simulated: the guard's gitleaks call never starts a
+    container. gitleaks maps the text of a line to the RuleID the fake reports ({} finds
+    nothing); None stands for a workstation without Docker. toolbox_inputs keeps what each
+    call fed gitleaks."""
+
+    gitleaks = {}
+
     def run_main(self, argv, run=subprocess.run, env=None):
+        if not hasattr(self, "toolbox_inputs"):
+            self.toolbox_inputs, self.toolbox_paths = [], []
+
+        def runner(command, **kwargs):
+            if is_secrets_call(command):
+                self.toolbox_inputs.append(Path(command[3]).read_bytes().decode("utf-8", "replace"))
+                self.toolbox_paths.append((Path(command[3]), Path(command[4])))
+                return fake_gitleaks(command, self.gitleaks)
+            return run(command, **kwargs)
+
         out, err = io.StringIO(), io.StringIO()
         with clean_environ(env):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = cqa_fix.main([str(item) for item in argv], run=run)
+                code = cqa_fix.main([str(item) for item in argv], run=runner)
         return code, out.getvalue(), err.getvalue()
 
 
@@ -157,8 +211,10 @@ class CandidatesTest(FixCase):
             self.assertEqual(code, 0, err)
             written = json.loads((run_dir / "fix" / "candidates.json").read_text(encoding="utf-8"))
             self.assertEqual(written, json.loads(out))
-            self.assertEqual([k["key"] for k in written["keys"]], ["front/securite"])
-            self.assertEqual(written["keys"][0]["rows"][0]["fiche_path"], "fiches/CQ-001.md")
+            self.assertEqual([k["key"] for k in written["keys"]], ["front"])
+            self.assertEqual([s["alias"] for s in written["keys"][0]["sections"]], ["securite"])
+            self.assertEqual(written["keys"][0]["sections"][0]["rows"][0]["fiche_path"],
+                             "fiches/CQ-001.md")
             self.assertEqual([e["reason"] for e in written["left"]], ["Manuel"])
             self.assertEqual(self.calls, {"front": True, "back": False})
             self.assertEqual(written["notes"], ["n"])
@@ -178,9 +234,37 @@ class CandidatesTest(FixCase):
             self.assertEqual(code, 0, err)
             result = json.loads(out)
             self.assertEqual(self.calls, {"front": True, "back": False})
-            self.assertEqual([r["ref"] for k in result["keys"] for r in k["rows"]], [2])
+            self.assertEqual(
+                [r["ref"] for k in result["keys"] for s in k["sections"] for r in s["rows"]], [2])
             self.assertIn("CQ-999 ne figure pas dans la copie : ignorée.", result["notes"])
             self.assertFalse(result["keys"][0]["push_ready"])
+
+    def test_candidates_read_a_v2_mr_through_gitlab(self):
+        url = "https://gitlab.example.org/acme/shop/-/merge_requests/318"
+
+        def gitlab(command, **kwargs):
+            if command[0] == "git":
+                return subprocess.run(command, **kwargs)
+            path = command[-1]
+            if path.endswith("/merge_requests/318/commits?per_page=100"):
+                answer = [{"title": "fix(CQ-1): add headers"}]
+            elif "state=opened" in path:
+                answer = [{"iid": 318, "web_url": url,
+                           "source_branch": "feature/checklist-qa-fix-securite"}]
+            else:
+                answer = []
+            return subprocess.CompletedProcess(command, 0, json.dumps(answer), "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_run(Path(tmp))
+            code, out, err = self.run_main(["candidates", run_dir, "--refs", "CQ-2"], run=gitlab)
+            self.assertEqual(code, 0, err)
+            result = json.loads(out)
+            self.assertEqual([(s["alias"], [r["ref"] for r in s["rows"]])
+                              for k in result["keys"] for s in k["sections"]], [("seo", [2])])
+            self.assertEqual([(e["ref"], e["reason"], e["url"]) for e in result["left"]],
+                             [(1, "déjà dans la MR !318", url)])
+            self.assertEqual(result["flights"]["front"]["open"][0]["refs"], [1])
 
     def test_candidates_without_rows_json_exits_2(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -193,6 +277,7 @@ class CandidatesTest(FixCase):
 
 class PassTest(FixCase):
     UNFINISHED = "Une passe fix est inachevée : reprenez-la ou abandonnez-la (cqa_fix.py abandon)."
+    PROJECT = {"slug": "boutique", "name": "Boutique Exemple", "protection": None}
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -200,12 +285,17 @@ class PassTest(FixCase):
         self.run_dir = Path(tmp.name) / "run"
         (self.run_dir / "fix").mkdir(parents=True)
         rows = [{"ref": 3, "title": "Trois"}, {"ref": 12, "title": "Douze"}]
-        candidates = {
-            "keys": [{"key": "front/securite", "repo": "front", "category": "SÉCURITÉ",
-                      "slug": "securite", "push_ready": False, "rows": rows}],
-            "left": [], "flights": {}, "notes": [], "estimate_min": 18,
-        }
+        self.write_candidates([{"key": "front", "repo": "front", "push_ready": False, "sections": [
+            {"category": "SÉCURITÉ", "alias": "securite", "rows": rows}]}])
+        self.write_context({"project": self.PROJECT,
+                            "repos": [{"name": "front", "path": "/srv/front"}]})
+
+    def write_candidates(self, keys):
+        candidates = {"keys": keys, "left": [], "flights": {}, "notes": [], "estimate_min": 18}
         (self.run_dir / "fix" / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
+
+    def write_context(self, context):
+        (self.run_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
 
     def open(self, mode="present", push="mr", notion="yes"):
         return self.run_main(
@@ -228,16 +318,88 @@ class PassTest(FixCase):
             {k: state[k] for k in ("finished_at", "stage", "mode", "push", "notion")},
             {"finished_at": None, "stage": "keys", "mode": "present", "push": "mr", "notion": True},
         )
-        row = {"outcome": "pending", "reason": None, "commits": [], "pass": 0, "attention": None}
-        self.assertEqual(state["keys"], {"front/securite": {
-            "repo": "front", "category": "SÉCURITÉ", "slug": "securite", "push_ready": False,
+        self.assertEqual(state["project_name"], "Boutique Exemple")
+        row = {"outcome": "pending", "reason": None, "commits": [], "pass": 0, "attention": None,
+               "section": "securite"}
+        self.assertEqual(state["keys"], {"front": {
+            "repo": "front", "push_ready": False,
             "branch": None, "base": None, "start_sha": None, "worktree": None, "reused": None,
             "mr": None, "step": "selected", "pass": 0, "dev_fingerprint": None,
-            "bases": {}, "reviews": {}, "reports": [], "rows": {"3": row, "12": row},
+            "bases": {}, "reviews": {}, "reports": [],
+            "sections": [{"category": "SÉCURITÉ", "alias": "securite", "refs": [3, 12],
+                          "state": "pending", "reason": None}],
+            "pass_sections": {}, "rows": {"3": row, "12": row}, "left": None,
         }})
         result = json.loads(out)
-        self.assertEqual(result["keys"], ["front/securite"])
+        self.assertEqual(result["keys"], ["front"])
+        self.assertEqual(result["project_name"], "Boutique Exemple")
         self.assertIsNone(result["archived"])
+
+    def test_open_builds_one_key_per_repo_with_sections(self):
+        row = lambda ref: {"ref": ref, "title": f"Ligne {ref}"}
+        self.write_candidates([
+            {"key": "back", "repo": "back", "push_ready": True, "sections": [
+                {"category": "QUALITÉ", "alias": "qualite", "rows": [row(7)]}]},
+            {"key": "front", "repo": "front", "push_ready": False, "sections": [
+                {"category": "SÉCURITÉ", "alias": "securite", "rows": [row(3), row(12)]},
+                {"category": "SEO / GEO", "alias": "seo", "rows": [row(40)]}]},
+        ])
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["keys"], ["back", "front"])
+        state = self.state()
+        self.assertEqual(list(state["keys"]), ["back", "front"])
+        front = state["keys"]["front"]
+        self.assertEqual(front["sections"], [
+            {"category": "SÉCURITÉ", "alias": "securite", "refs": [3, 12], "state": "pending",
+             "reason": None},
+            {"category": "SEO / GEO", "alias": "seo", "refs": [40], "state": "pending",
+             "reason": None},
+        ])
+        self.assertEqual({ref: item["section"] for ref, item in front["rows"].items()},
+                         {"3": "securite", "12": "securite", "40": "seo"})
+        self.assertEqual((front["pass_sections"], front["push_ready"]), ({}, False))
+        self.assertNotIn("slug", front)
+        self.assertNotIn("category", front)
+        back = state["keys"]["back"]
+        self.assertEqual(([item["alias"] for item in back["sections"]], list(back["rows"]),
+                          back["push_ready"]), (["qualite"], ["7"], True))
+
+    def test_open_records_the_project_name(self):
+        self.assertEqual(self.open()[0], 0)
+        self.assertEqual(self.state()["project_name"], "Boutique Exemple")
+        self.finish()
+        self.write_context({"repos": [{"name": "front", "path": "/srv/Acme - Boutique - WordPress"}]})
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.state()["project_name"], "Acme - Boutique")
+        self.assertEqual(json.loads(out)["project_name"], "Acme - Boutique")
+
+    def test_open_carries_only_the_stack_cores_whose_folder_exists(self):
+        """Final wave S1: a core folder gone since stack-core ran (a cache cleaned, a folder
+        moved) is not given to the sub-agents; a note names it."""
+        present = self.run_dir / "core"
+        present.mkdir()
+        gone = self.run_dir / "gone"
+        (self.run_dir / "fix" / "stack-core.json").write_text(json.dumps({
+            "front": {"stack": "wordpress", "version": "6.5.2", "path": str(present),
+                      "source": "cache"},
+            "back": {"stack": "drupal", "version": "10.2", "path": str(gone), "source": "path"},
+        }), encoding="utf-8")
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(list(self.state()["stack_core"]), ["front"])
+        self.assertEqual(json.loads(out)["notes"], [
+            f"Cœur drupal du repo back introuvable ({gone}) : non repris, relancez cqa_fix.py "
+            "stack-core."])
+        self.finish()
+        (self.run_dir / "fix" / "stack-core.json").write_text(json.dumps({
+            "back": {"stack": "drupal", "version": "10.2", "path": str(gone), "source": "path"},
+        }), encoding="utf-8")
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("stack_core", self.state())
+        self.assertEqual(len(json.loads(out)["notes"]), 1)
 
     def test_dry_run_forces_notion_off(self):
         code, out, err = self.open(mode="autonomous", push="dry_run", notion="yes")
@@ -247,6 +409,16 @@ class PassTest(FixCase):
     def test_open_needs_candidates_and_valid_options(self):
         code, out, err = self.open(push="everywhere")
         self.assertEqual(code, 2)
+        v2 = {"key": "front/securite", "repo": "front", "category": "SÉCURITÉ",
+              "slug": "securite", "push_ready": False, "rows": [{"ref": 3, "title": "Trois"}]}
+        self.write_candidates([v2])
+        code, out, err = self.open()
+        self.assertEqual(code, 2)
+        self.assertIn("relancez cqa_fix.py candidates", err)
+        (self.run_dir / "context.json").unlink()
+        code, out, err = self.open()
+        self.assertEqual(code, 6)
+        self.assertIn("context.json", err)
         (self.run_dir / "fix" / "candidates.json").unlink()
         code, out, err = self.open()
         self.assertEqual(code, 2)
@@ -263,9 +435,9 @@ class PassTest(FixCase):
 
     def test_open_archives_a_finished_pass(self):
         self.assertEqual(self.open()[0], 0)
-        folder = self.run_dir / "fix" / "front" / "securite"
+        folder = self.run_dir / "fix" / "front"
         folder.mkdir(parents=True)
-        (folder / "report-1.json").write_text('{"key": "front/securite"}', encoding="utf-8")
+        (folder / "report-1.json").write_text('{"key": "front"}', encoding="utf-8")
         self.finish()
         old = self.state()
         code, out, err = self.open(push="local")
@@ -276,11 +448,11 @@ class PassTest(FixCase):
         self.assertEqual(
             json.loads((history / "state.json").read_text(encoding="utf-8")), old
         )
-        self.assertTrue((history / "front" / "securite" / "report-1.json").is_file())
+        self.assertTrue((history / "front" / "report-1.json").is_file())
         self.assertFalse((self.run_dir / "fix" / "front").exists())
         state = self.state()
         self.assertEqual((state["finished_at"], state["push"]), (None, "local"))
-        self.assertEqual(state["keys"]["front/securite"]["step"], "selected")
+        self.assertEqual(state["keys"]["front"]["step"], "selected")
 
     def test_pending_until_summary(self):
         self.assertFalse(fix_state.pending(self.run_dir))
@@ -315,14 +487,43 @@ class PassTest(FixCase):
         (self.run_dir / "fix" / "state.json").unlink()
         self.assertEqual(self.open()[0], 0)
         state = self.state()
-        state["keys"]["front/securite"]["branch"] = "--upload-pack=x"
+        state["keys"]["front"]["branch"] = "--upload-pack=x"
+        (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 6)
+        state["keys"]["front"]["branch"] = "feature/checklist-qa-fix-securite"
+        (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 6)
+        state["keys"]["front"]["branch"] = "feature/checklist-qa-fix-2"
+        state["keys"]["front"]["sections"][0]["state"] = "done"
         (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
         self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 6)
 
+    def test_an_invalid_left_record_exits_6(self):
+        """A key left to the lead is key["left"] = {"reason", "at"} (cqa_fix.py leave), or null."""
+        self.assertEqual(self.open()[0], 0)
+        state = self.state()
+        for left in ({"reason": ""}, {"reason": "x"}, {"at": "2026-10-30T10:00:00Z"}, "x", [],
+                     {"reason": "x", "at": 3}):
+            with self.subTest(left=left):
+                state["keys"]["front"]["left"] = left
+                (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+                code, out, err = self.run_main(["stage", self.run_dir, "notion"])
+                self.assertEqual(code, 6)
+                self.assertIn("« left »", err)
+        state["keys"]["front"]["left"] = {"reason": "commit de fusion", "at": "2026-10-30T10:00:00Z"}
+        (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 0)
+        del state["keys"]["front"]["left"]
+        (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 0)
+
     def test_key_commands_need_a_started_key(self):
         self.assertEqual(self.open()[0], 0)
-        key = "front/securite"
+        key = "front"
         for argv in (
+            ["section-start", self.run_dir, key, "--section", "securite"],
+            ["section-end", self.run_dir, key, "--section", "securite"],
+            ["pass-start", self.run_dir, key, "--pass", "1", "--section", "securite"],
             ["validate", self.run_dir, key, "report", "--pass", "1"],
             ["validate", self.run_dir, key, "review", "--pass", "1"],
             ["guard", self.run_dir, key],
@@ -337,9 +538,9 @@ class PassTest(FixCase):
                 self.assertEqual(code, 2, err)
                 self.assertIn("cqa_fix.py start", err)
         self.assertEqual(self.state()["keys"][key]["rows"]["3"]["outcome"], "pending")
-        code, out, err = self.run_main(["guard", self.run_dir, "front/nothing"])
+        code, out, err = self.run_main(["guard", self.run_dir, "back"])
         self.assertEqual(code, 2)
-        self.assertIn("front/nothing", err)
+        self.assertIn("Clé inconnue : back", err)
 
     def test_abandon_without_a_pass_exits_2(self):
         code, out, err = self.run_main(["abandon", self.run_dir])
@@ -360,11 +561,237 @@ class PassTest(FixCase):
         self.assertEqual(fix_state.load(self.run_dir)["stage"], "notion")
 
 
+class MergedTest(FixCase):
+    """merged: which rows « En review » have their MR merged and deployed in preprod."""
+
+    DEPLOYED = {}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        origin = self.root / "shop.git"
+        self.repo = self.root / "shop"
+        real_git(self.root, "init", "-q", "--bare", str(origin))
+        real_git(self.root, "clone", "-q", str(origin), str(self.repo))
+        real_git(self.repo, "symbolic-ref", "HEAD", "refs/heads/develop")
+        self.base = commit(self.repo, "a.txt", "base")
+        self.merge = commit(self.repo, "b.txt", "merged fix")
+        self.later = commit(self.repo, "c.txt", "later")
+        real_git(self.repo, "push", "-q", "origin", "develop")
+        project = self.root / "proj"
+        self.run_dir = project / "20261030-run"
+        (self.run_dir / "fix").mkdir(parents=True)
+        self.write_run(self.run_dir, [
+            {"ref": 7, "status": "En review"}, {"ref": 8, "status": "Fait"}], {})
+
+    def write_run(self, run_dir, rows, links):
+        (run_dir / "rows.json").write_text(json.dumps({"rows": rows}), encoding="utf-8")
+        (run_dir / "context.json").write_text(json.dumps({"repos": [
+            {"name": "shop", "path": str(self.repo), "remote": REMOTE,
+             "preprod_branch": "develop"}]}), encoding="utf-8")
+        (run_dir / "fix" / "mr-links.json").write_text(
+            json.dumps({"links": links}), encoding="utf-8")
+
+    def link(self, ref, iid, repo="shop"):
+        url = f"https://gitlab.example.org/acme/{repo}/-/merge_requests/{iid}"
+        return {str(ref): [{"repo": repo, "url": url, "iid": iid}]}
+
+    def glab(self, mrs, deployed):
+        def run(command, **kwargs):
+            if command[0] == "git":
+                return subprocess.run(command, **kwargs)
+            if command[0] != "glab":
+                raise AssertionError(command)
+            api = command[2]
+            if "merge_requests/" in api:
+                iid = int(api.rsplit("/", 1)[1])
+                if iid not in mrs:
+                    return subprocess.CompletedProcess(command, 1, "", "404")
+                return subprocess.CompletedProcess(command, 0, json.dumps(mrs[iid]), "")
+            if api.endswith("/environments"):
+                return subprocess.CompletedProcess(
+                    command, 0, json.dumps([{"name": "preprod"}]), "")
+            if "/deployments" in api and deployed:
+                return subprocess.CompletedProcess(
+                    command, 0, json.dumps([{"sha": deployed}]), "")
+            return subprocess.CompletedProcess(command, 1, "", "")
+        return run
+
+    def merged(self, run):
+        code, out, err = self.run_main(["merged", self.run_dir], run=run)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_merged_and_deployed_rows_are_candidates(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}}, self.later)
+        result = self.merged(run)
+        self.assertEqual(result["merged_deployed"], [7])
+        self.assertEqual((result["merged_waiting"], result["closed"], result["open"]), ([], [], []))
+
+    def test_merged_not_deployed_waits(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}}, self.base)
+        result = self.merged(run)
+        self.assertEqual(result["merged_deployed"], [])
+        self.assertEqual([item["ref"] for item in result["merged_waiting"]], [7])
+        self.assertIn("préprod", result["merged_waiting"][0]["why"])
+
+    def test_closed_mr_is_listed(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        result = self.merged(self.glab({5: {"state": "closed", "sha": self.merge}}, self.later))
+        self.assertEqual(result["closed"], [7])
+        self.assertEqual(result["merged_deployed"], [])
+
+    def test_open_mr_is_ignored(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"},
+                                      {"ref": 8, "status": "Fait"}],
+                       {**self.link(7, 5), **self.link(8, 6)})
+        mrs = {5: {"state": "opened", "sha": self.merge},
+               6: {"state": "merged", "merge_commit_sha": self.merge}}
+        result = self.merged(self.glab(mrs, self.later))
+        self.assertEqual(result["open"], [7])
+        self.assertEqual((result["merged_deployed"], result["merged_waiting"], result["closed"]),
+                         ([], [], []))
+
+    def test_fast_forward_merge_uses_the_head_sha(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": None,
+                             "squash_commit_sha": None, "sha": self.merge}}, self.later)
+        self.assertEqual(self.merged(run)["merged_deployed"], [7])
+
+    def test_row_with_two_mrs_needs_every_one_deployed(self):
+        links = {"7": [
+            {"repo": "shop", "url": "https://gitlab.example.org/acme/shop/-/merge_requests/5",
+             "iid": 5},
+            {"repo": "other", "url": "https://gitlab.example.org/acme/other/-/merge_requests/9",
+             "iid": 9},
+        ]}
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], links)
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge},
+                         9: {"state": "merged", "merge_commit_sha": self.merge}}, self.later)
+        result = self.merged(run)
+        self.assertEqual(result["merged_deployed"], [])
+        self.assertEqual([item["ref"] for item in result["merged_waiting"]], [7])
+        self.assertIn("other", result["merged_waiting"][0]["why"])
+
+    def test_row_with_mrs_in_two_repos(self):
+        links = {"7": [
+            {"repo": "shop", "url": "https://gitlab.example.org/acme/shop/-/merge_requests/5",
+             "iid": 5},
+            {"repo": "other", "url": "https://gitlab.example.org/acme/other/-/merge_requests/9",
+             "iid": 9},
+        ]}
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], links)
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge},
+                         9: {"state": "closed"}}, self.later)
+        result = self.merged(run)
+        self.assertEqual(result["closed"], [7])
+        self.assertEqual(result["merged_deployed"], [])
+
+    def test_newest_run_links_the_ref(self):
+        older = self.run_dir.parent / "20260101-run"
+        (older / "fix").mkdir(parents=True)
+        self.write_run(older, [], self.link(7, 1))
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge},
+                         1: {"state": "closed"}}, self.later)
+        self.assertEqual(self.merged(run)["merged_deployed"], [7])
+
+    def test_glab_unavailable_never_deploys(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+
+        def run(command, **kwargs):
+            if command[0] == "glab":
+                raise FileNotFoundError("glab")
+            return subprocess.run(command, **kwargs)
+
+        result = self.merged(run)
+        self.assertEqual(result["merged_deployed"], [])
+        self.assertEqual([item["ref"] for item in result["merged_waiting"]], [7])
+        self.assertTrue(any("glab" in note for note in result["notes"]))
+
+    def test_v2_links_file_reads(self):
+        (self.run_dir / "fix" / "mr-links.json").write_text(json.dumps(
+            {"links": {"7": [{"url": "https://gitlab.example.org/acme/shop/-/merge_requests/5"}]}}),
+            encoding="utf-8")
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}}, self.later)
+        self.assertEqual(self.merged(run)["merged_deployed"], [7])
+
+    def test_unknown_merge_commit_waits(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        unknown = "0123456789abcdef0123456789abcdef01234567"
+        result = self.merged(self.glab({5: {"state": "merged", "merge_commit_sha": unknown}},
+                                       self.later))
+        self.assertEqual([item["ref"] for item in result["merged_waiting"]], [7])
+
+    def test_unknown_deployed_sha_waits(self):
+        """Final wave R1: no deployment read from GitLab: the row waits, with the reason."""
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        result = self.merged(self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}},
+                                       None))
+        self.assertEqual(result["merged_deployed"], [])
+        self.assertEqual([(item["ref"], item["why"]) for item in result["merged_waiting"]],
+                         [(7, "shop : commit déployé en préprod inconnu")])
+
+    def test_a_repo_absent_from_the_context_waits_with_a_note(self):
+        """Final wave R1: a link to a repo the context does not know cannot be checked locally."""
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}],
+                       self.link(7, 9, repo="other"))
+        result = self.merged(self.glab({9: {"state": "merged", "merge_commit_sha": self.merge}},
+                                       self.later))
+        self.assertEqual([(item["ref"], item["why"]) for item in result["merged_waiting"]],
+                         [(7, "other : repo local inconnu")])
+        self.assertIn("other : repo absent de context.json, déploiement non vérifié.",
+                      result["notes"])
+
+    def test_a_link_without_repo_is_matched_on_host_and_project_path(self):
+        """Final wave R1: an entry without « repo » (v2 file) is tied to a repo of the context
+        only when its URL has the repo's host and exact project path; a URL of another host or
+        of a path that merely contains it names no local repo."""
+        same = "https://gitlab.example.org/acme/shop/-/merge_requests/5"
+        other_host = "https://gitlab.other.example.org/acme/shop/-/merge_requests/6"
+        longer_path = "https://gitlab.example.org/legacy/acme/shop/-/merge_requests/8"
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"},
+                                      {"ref": 8, "status": "En review"},
+                                      {"ref": 9, "status": "En review"}],
+                       {"7": [{"url": same}], "8": [{"url": other_host}], "9": [{"url": longer_path}]})
+        mrs = {iid: {"state": "merged", "merge_commit_sha": self.merge} for iid in (5, 6, 8)}
+        result = self.merged(self.glab(mrs, self.later))
+        self.assertEqual(result["merged_deployed"], [7])
+        self.assertEqual([(item["ref"], item["why"]) for item in result["merged_waiting"]],
+                         [(8, "repo inconnu : repo local inconnu"),
+                          (9, "repo inconnu : repo local inconnu")])
+
+    def test_a_row_in_review_without_any_link_is_noted(self):
+        """Final wave R1: a row « En review » that no run links to a merge request is said."""
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"},
+                                      {"ref": 8, "status": "En review"}], self.link(8, 5))
+        result = self.merged(self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}},
+                                       self.later))
+        self.assertEqual(result["merged_deployed"], [8])
+        self.assertIn("CQ-7 : « En review » sans MR connue dans les runs du projet : "
+                      "non vérifiée.", result["notes"])
+
+    def test_a_failed_fetch_is_noted(self):
+        """Final wave R1: the deployment is still judged on the local refs, and a note says
+        that git fetch origin failed."""
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        real_git(self.repo, "remote", "set-url", "origin", str(self.root / "missing.git"))
+        result = self.merged(self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}},
+                                       self.later))
+        self.assertEqual(result["merged_deployed"], [7])
+        self.assertIn("shop : git fetch origin a échoué : déploiement jugé sur les refs locales.",
+                      result["notes"])
+
+
 class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
-        for name in ("doctor", "candidates", "open", "stage", "start", "pass-start", "validate",
-                     "guard", "drop",
-                     "check", "mr-body", "publish", "finish", "summary", "abandon"):
+        for name in ("doctor", "candidates", "open", "stage", "start", "section-start",
+                     "section-end", "pass-start", "validate", "guard", "review-scope", "waive-secret", "drop",
+                     "reorder", "reword", "leave",
+                     "check", "mr-body", "publish", "finish", "summary", "abandon", "merged", "stack-core"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)
 

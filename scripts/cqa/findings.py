@@ -242,6 +242,8 @@ def _finding_problems(item: dict, app_path: str) -> list[str]:
         problems.extend(_probe_problems(item["needs_probes"], app_path))
     if "tool_dates" in item:
         problems.extend(_tool_dates_problems(item["tool_dates"]))
+    if "in_repo" in item and not isinstance(item["in_repo"], bool):
+        problems.append("« in_repo » doit être un booléen (true ou false)")
     return problems
 
 

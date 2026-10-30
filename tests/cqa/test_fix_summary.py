@@ -9,16 +9,21 @@ from tests.cqa.test_cli_fix import FixCase
 LONG_DASH = "\u2014"
 
 
-def row(outcome, reason=None):
-    return {"outcome": outcome, "reason": reason, "commits": [], "pass": 1, "attention": None}
+def row(outcome, reason=None, section="securite"):
+    return {"outcome": outcome, "reason": reason, "commits": [], "pass": 1, "attention": None,
+            "section": section}
 
 
-def key(repo, category, slug, rows, *, mr=None, step="done", kept_local=False, push_ready=True):
+def key(repo, category, alias, rows, *, branch="feature/checklist-qa-fix", mr=None, step="done",
+        kept_local=False, push_ready=True):
     return {
-        "repo": repo, "category": category, "slug": slug, "push_ready": push_ready,
-        "branch": f"feature/checklist-qa-fix-{slug}", "base": "develop", "start_sha": "a" * 40,
+        "repo": repo, "push_ready": push_ready,
+        "branch": branch, "base": "develop", "start_sha": "a" * 40,
         "worktree": None, "reused": None, "mr": mr, "step": step, "pass": 1,
-        "dev_fingerprint": None, "kept_local": kept_local, "rows": rows,
+        "dev_fingerprint": None, "kept_local": kept_local,
+        "sections": [{"category": category, "alias": alias, "refs": [int(ref) for ref in rows],
+                      "state": "settled", "reason": None}],
+        "pass_sections": {"1": alias}, "rows": rows,
     }
 
 
@@ -34,25 +39,26 @@ class SummaryCase(FixCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.run_dir = Path(tmp.name) / "run"
-        (self.run_dir / "fix" / "front" / "securite").mkdir(parents=True)
-        (self.run_dir / "fix" / "back" / "seo").mkdir(parents=True)
+        (self.run_dir / "fix" / "front").mkdir(parents=True)
+        (self.run_dir / "fix" / "back").mkdir(parents=True)
         (self.run_dir / "context.json").write_text(
-            json.dumps({"name": "Boutique Exemple"}), encoding="utf-8")
+            json.dumps({"name": "Nom du contexte"}), encoding="utf-8")
         cand = lambda ref, title, **more: {"ref": ref, "title": title, **more}
         candidates = {
             "keys": [
-                {"key": "front/securite", "repo": "front", "category": "SÉCURITÉ", "slug": "securite",
-                 "rows": [cand(3, "Trois"), cand(12, "Douze", semi_auto=True), cand(13, "Treize"),
-                          cand(14, "Quatorze"), cand(15, "Quinze")]},
-                {"key": "back/seo", "repo": "back", "category": "SEO", "slug": "seo",
-                 "rows": [cand(20, "Vingt")]},
+                {"key": "front", "repo": "front", "sections": [
+                    {"category": "SÉCURITÉ", "alias": "securite",
+                     "rows": [cand(3, "Trois"), cand(12, "Douze", semi_auto=True),
+                              cand(13, "Treize"), cand(14, "Quatorze"), cand(15, "Quinze")]}]},
+                {"key": "back", "repo": "back", "sections": [
+                    {"category": "SEO", "alias": "seo", "rows": [cand(20, "Vingt")]}]},
             ],
             "left": [{"ref": 40, "title": "Quarante", "category": "SÉCURITÉ", "reason": "Manuel",
                       "url": None}],
         }
         (self.run_dir / "fix" / "candidates.json").write_text(json.dumps(candidates), encoding="utf-8")
         self.write_state(push="mr")
-        (self.run_dir / "fix" / "front" / "securite" / "checks.json").write_text(json.dumps({
+        (self.run_dir / "fix" / "front" / "checks.json").write_text(json.dumps({
             "checks": [{"name": "php -l", "status": "passed", "files": ["a.php"], "detail": None}],
             "not_run": [{"name": "Makefile (test)", "command": "make test", "why": "x"}],
         }), encoding="utf-8")
@@ -64,11 +70,12 @@ class SummaryCase(FixCase):
         state = {
             "started_at": "2026-10-29T09:00:00Z", "finished_at": None, "stage": "notion",
             "mode": "present", "push": push, "notion": True,
+            "project_name": "Boutique Exemple",
             "keys": {
-                "front/securite": key("front", "SÉCURITÉ", "securite", rows,
-                                      mr=mr if front_mr else None, **front),
-                "back/seo": key("back", "SEO", "seo", {"20": row("fixed")}, mr=None,
-                                kept_local=True),
+                "front": key("front", "SÉCURITÉ", "securite", rows,
+                             mr=mr if front_mr else None, **front),
+                "back": key("back", "SEO", "seo", {"20": row("fixed", section="seo")},
+                            branch="feature/checklist-qa-fix-2", mr=None, kept_local=True),
             },
         }
         fix_state.save(self.run_dir, state)
@@ -101,17 +108,18 @@ class SummaryTest(SummaryCase):
         self.assertIn("Makefile (test)", checks)
         self.assertIn("make test", checks)
         local = section(text, "Branches restées en local")
-        self.assertIn("back", local)
-        self.assertIn("feature/checklist-qa-fix-seo", local)
-        self.assertNotIn("feature/checklist-qa-fix-securite", local)
+        self.assertIn("- back : feature/checklist-qa-fix-2", local)
+        self.assertNotIn("front", local)
         self.assertIn("Commentaire du skill non remplacé, un second a été créé : CQ-3, CQ-12",
                       section(text, "Notion"))
         self.assertIn("recette", section(text, "Suite"))
+        self.assertIn("reprend d'elle-même les lignes « En review »", section(text, "Suite"))
+        self.assertNotIn("passer les lignes en « Mis en place »", section(text, "Suite"))
         self.assertNotIn(LONG_DASH, text)
 
     def test_optional_sections_are_left_out(self):
         state = fix_state.load(self.run_dir)
-        state["keys"]["back/seo"]["kept_local"] = False
+        state["keys"]["back"]["kept_local"] = False
         fix_state.save(self.run_dir, state)
         text = json.loads(self.summary()[1])["text"]
         self.assertNotIn("## Branches restées en local", text)
@@ -121,14 +129,14 @@ class SummaryTest(SummaryCase):
         self.write_state(push="local", front_mr=False)
         text = json.loads(self.summary()[1])["text"]
         local = section(text, "Branches restées en local")
-        self.assertIn("securite", local)
-        self.assertIn("seo", local)
+        self.assertIn("- front : feature/checklist-qa-fix", local)
+        self.assertIn("- back : feature/checklist-qa-fix-2", local)
 
     def test_checks_are_deduplicated_across_keys(self):
         state = fix_state.load(self.run_dir)
-        state["keys"]["back/seo"]["mr"] = {"iid": 8, "url": "https://gitlab.example.org/acme/api/-/merge_requests/8"}
+        state["keys"]["back"]["mr"] = {"iid": 8, "url": "https://gitlab.example.org/acme/api/-/merge_requests/8"}
         fix_state.save(self.run_dir, state)
-        (self.run_dir / "fix" / "back" / "seo" / "checks.json").write_text(json.dumps({
+        (self.run_dir / "fix" / "back" / "checks.json").write_text(json.dumps({
             "checks": [], "not_run": [{"name": "Makefile (test)", "command": "make test", "why": "x"}],
         }), encoding="utf-8")
         text = json.loads(self.summary()[1])["text"]
@@ -136,7 +144,7 @@ class SummaryTest(SummaryCase):
 
     def test_team_message_lists_every_mr(self):
         state = fix_state.load(self.run_dir)
-        state["keys"]["back/seo"]["mr"] = {"iid": 8, "url": "https://gitlab.example.org/acme/api/-/merge_requests/8"}
+        state["keys"]["back"]["mr"] = {"iid": 8, "url": "https://gitlab.example.org/acme/api/-/merge_requests/8"}
         fix_state.save(self.run_dir, state)
         message = json.loads(self.summary()[1])["team_message"]
         self.assertEqual(message, (
@@ -155,7 +163,7 @@ class SummaryTest(SummaryCase):
     def test_team_message_counts_one_branch_in_the_singular(self):
         self.write_state(push="local", front_mr=False)
         state = fix_state.load(self.run_dir)
-        state["keys"]["back/seo"]["branch"] = None
+        state["keys"]["back"]["branch"] = None
         fix_state.save(self.run_dir, state)
         message = json.loads(self.summary()[1])["team_message"]
         self.assertEqual(message, (
@@ -164,12 +172,222 @@ class SummaryTest(SummaryCase):
     def test_a_row_covered_by_another_fix_ships_in_the_mr(self):
         """A row « couverte par le correctif de CQ-x » is fixed by the MR, not left to the devs."""
         state = fix_state.load(self.run_dir)
-        state["keys"]["front/securite"]["rows"]["13"]["reason"] = (
+        state["keys"]["front"]["rows"]["13"]["reason"] = (
             "corrigé par le commit de CQ-3 d'une passe précédente")
         fix_state.save(self.run_dir, state)
         text = json.loads(self.summary()[1])["text"]
         self.assertNotIn("Treize", section(text, "Laissées aux devs"))
         self.assertIn("- CQ-13 : Treize (couverte par le correctif de CQ-3)", section(text, "MR"))
+
+    def test_team_message_starts_with_the_project_name(self):
+        """The project name recorded by open heads the synthesis and the team message, never
+        the run id nor the « name » of context.json."""
+        result = json.loads(self.summary()[1])
+        self.assertEqual(result["team_message"].split("\n")[0], "Boutique Exemple")
+        self.assertEqual(result["text"].split("\n")[0],
+                         "# Boutique Exemple : synthèse de la passe de correction")
+        for absent in ("Nom du contexte", self.run_dir.name):
+            self.assertNotIn(absent, result["team_message"])
+        state = fix_state.load(self.run_dir)
+        state["project_name"] = None
+        state["finished_at"] = None
+        fix_state.save(self.run_dir, state)
+        (self.run_dir / "context.json").write_text(json.dumps({
+            "name": "Nom du contexte", "project": {"name": "Acme - Boutique"},
+            "repos": [{"name": "front", "path": "/tmp/Acme - Autre - WordPress"}]}),
+            encoding="utf-8")
+        result = json.loads(self.summary()[1])
+        self.assertEqual(result["team_message"].split("\n")[0], "Acme - Boutique")
+
+    def test_summary_marks_partial_rows_failed_sections_and_reorder_conflicts(self):
+        state = fix_state.load(self.run_dir)
+        front, back = state["keys"]["front"], state["keys"]["back"]
+        front["rows"]["3"]["remaining"] = "Traduire la page anglaise."
+        front["rows"]["12"].update(remaining="Reste du rapport.",
+                                   corrections={"remaining": "Reste relu."})
+        front["sections"].append({
+            "category": "QUALITÉ", "alias": "qualite", "refs": [16], "state": "failed",
+            "reason": "Revue illisible.",
+            "leftover": {"patch": "fix/front/leftover-1.patch", "base": "b" * 40,
+                         "untracked": ["notes.txt"]}})
+        front["rows"]["16"] = row("dropped", "Revue illisible.", section="qualite")
+        back["reorder_conflicts"] = ["fix(seo CQ-20): add the canonical link"]
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary("--in-review", "CQ-3,CQ-12")
+        self.assertEqual(code, 0, err)
+        text = json.loads(out)["text"]
+        mr = section(text, "MR")
+        self.assertIn("Lignes mises en MR : 2, dont 2 partielles.", mr)
+        self.assertIn("- CQ-3 : Trois (partielle, reste à faire : Traduire la page anglaise.)", mr)
+        self.assertIn("- CQ-12 : Douze (Semi-auto) (partielle, reste à faire : Reste relu.)", mr)
+        self.assertNotIn("Reste du rapport.", text)
+        self.assertEqual(section(text, "Points d'attention").strip().split("\n"), [
+            "- front : section QUALITÉ non aboutie : Revue illisible. Modifications non "
+            "commitées sauvées dans fix/front/leftover-1.patch.",
+            "- back : Commits non rangés par section : conflit de rejeu "
+            "(`fix(seo CQ-20): add the canonical link`).",
+        ])
+        self.assertIn("Revue illisible. :\n- CQ-16 : sans titre", section(text, "Laissées aux devs"))
+        self.assertIn("Lignes passées « En review » : 2 (CQ-3, CQ-12).", section(text, "Notion"))
+        self.assertNotIn(LONG_DASH, text)
+
+    def test_summary_lists_the_keys_left_to_the_lead(self):
+        """Ruling P19: a key left (key["left"] of the state) is named with its reason, its
+        branch and its worktree, and its branch is not counted as a prepared fix."""
+        state = fix_state.load(self.run_dir)
+        back = state["keys"]["back"]
+        back.update(step="reviewed", worktree="/srv/run/fix/back/wt",
+                    left={"reason": "commit de fusion dans la branche", "at": "2026-10-29T10:00:00Z"})
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        text = result["text"]
+        self.assertEqual(section(text, "Clés laissées au lead").strip(), (
+            "- back : commit de fusion dans la branche (branche feature/checklist-qa-fix-2, "
+            "worktree /srv/run/fix/back/wt).\n"
+            "  - CQ-20 : Vingt : corrigée sur la branche"))
+        self.assertLess(text.index("## Clés laissées au lead"), text.index("## Laissées aux devs"))
+        self.assertEqual(result["left_keys"], [{
+            "key": "back", "reason": "commit de fusion dans la branche", "at": "2026-10-29T10:00:00Z",
+            "branch": "feature/checklist-qa-fix-2", "worktree": "/srv/run/fix/back/wt",
+            "rows": [{"ref": 20, "title": "Vingt", "state": "corrigée sur la branche"}]}])
+        self.assertNotIn("## Branches restées en local", text)
+        self.assertNotIn(LONG_DASH, text)
+        state = fix_state.load(self.run_dir)
+        state["finished_at"] = None
+        state["keys"]["back"]["left"] = None
+        fix_state.save(self.run_dir, state)
+        result = json.loads(self.summary()[1])
+        self.assertNotIn("## Clés laissées au lead", result["text"])
+        self.assertEqual(result["left_keys"], [])
+        self.assertIn("- back : feature/checklist-qa-fix-2",
+                      section(result["text"], "Branches restées en local"))
+
+    def test_a_left_key_lists_its_rows_and_hides_its_merge_request(self):
+        """Final wave L2 and F1: a left key that took over an MR gets no MR block and no URL
+        in the team message, which counts the keys left; its rows are listed under it, each
+        with its state, and nowhere else."""
+        state = fix_state.load(self.run_dir)
+        back = state["keys"]["back"]
+        back.update(step="reviewed", worktree="/srv/run/fix/back/wt", reused="mr", kept_local=False,
+                    mr={"iid": 9, "url": "https://gitlab.example.org/acme/api/-/merge_requests/9"},
+                    left={"reason": "commit de fusion dans la branche", "at": "2026-10-29T10:00:00Z"})
+        back["rows"]["21"] = row("skipped", "Trop risqué.", section="seo")
+        back["rows"]["22"] = row("dropped", "Revue bloquante.", section="seo")
+        back["rows"]["23"] = row("question", "Quel contact ?", section="seo")
+        back["rows"]["24"] = row("pending", section="seo")
+        back["rows"]["25"] = row("done_before", section="seo")
+        back["sections"][0]["refs"] = [20, 21, 22, 23, 24, 25]
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        text = result["text"]
+        self.assertNotIn("merge_requests/9", text)
+        self.assertNotIn("### back", section(text, "MR"))
+        self.assertEqual(section(text, "Clés laissées au lead").strip().split("\n"), [
+            "- back : commit de fusion dans la branche (branche feature/checklist-qa-fix-2, "
+            "worktree /srv/run/fix/back/wt).",
+            "  - CQ-20 : Vingt : corrigée sur la branche",
+            "  - CQ-21 : sans titre : écartée : Trop risqué.",
+            "  - CQ-22 : sans titre : retirée : Revue bloquante.",
+            "  - CQ-23 : sans titre : question sans réponse",
+            "  - CQ-24 : sans titre : non traitée",
+            "  - CQ-25 : sans titre : déjà sur la branche",
+        ])
+        left = section(text, "Laissées aux devs")
+        for absent in ("CQ-21", "CQ-22", "CQ-23", "Trop risqué."):
+            self.assertNotIn(absent, left)
+        self.assertEqual(result["team_message"], (
+            "Boutique Exemple\n"
+            "Correctifs automatiques de la checklist PRE-MEL : 1 MR en brouillon à relire.\n"
+            "https://gitlab.example.org/acme/shop/-/merge_requests/7\n"
+            "1 repo laissé au lead : back."
+        ))
+        self.assertNotIn(LONG_DASH, text)
+
+    def test_a_key_left_before_its_start_is_listed_with_its_rows(self):
+        """Final wave F1: a key whose start failed (left at « selected », no branch) does not
+        vanish from the synthesis: its rows are listed, and the team message counts it."""
+        self.write_state(push="local", front_mr=False)
+        state = fix_state.load(self.run_dir)
+        front = state["keys"]["front"]
+        front.update(step="selected", branch=None, worktree=None, start_sha=None,
+                     left={"reason": "la branche feature/checklist-qa-fix est extraite dans "
+                                     "votre dossier", "at": "2026-10-29T10:00:00Z"})
+        for item in front["rows"].values():
+            item.update(outcome="pending", reason=None)
+        state["keys"]["back"].update(
+            left={"reason": "origin/develop est introuvable", "at": "2026-10-29T10:01:00Z"})
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        text = result["text"]
+        self.assertEqual(section(text, "Clés laissées au lead").strip().split("\n"), [
+            "- front : la branche feature/checklist-qa-fix est extraite dans votre dossier "
+            "(branche aucune, worktree aucun).",
+            "  - CQ-3 : Trois : non traitée",
+            "  - CQ-12 : Douze : non traitée",
+            "  - CQ-13 : Treize : non traitée",
+            "  - CQ-14 : Quatorze : non traitée",
+            "  - CQ-15 : Quinze : non traitée",
+            "- back : origin/develop est introuvable (branche feature/checklist-qa-fix-2, "
+            "worktree aucun).",
+            "  - CQ-20 : Vingt : corrigée sur la branche",
+        ])
+        self.assertNotIn("## Branches restées en local", text)
+        self.assertEqual(section(text, "MR").strip(), "Aucune MR créée.")
+        self.assertEqual(result["team_message"], (
+            "Boutique Exemple\nAucun correctif préparé.\n2 repos laissés au lead : front, back."))
+        self.assertEqual([item["key"] for item in result["left_keys"]], ["front", "back"])
+        self.assertEqual(result["left_keys"][0]["rows"][0],
+                         {"ref": 3, "title": "Trois", "state": "non traitée"})
+
+    def test_summary_gives_a_rescue_command_for_the_dropped_commits(self):
+        """Ruling P11: the SHAs a drop removed (dropped_commits) are listed with the git
+        command that keeps them; a leftover patch saved at abandon or open is named too."""
+        state = fix_state.load(self.run_dir)
+        front = state["keys"]["front"]
+        front["rows"]["13"].update(outcome="dropped", dropped_commits=["a" * 40])
+        front["rows"]["15"].update(outcome="dropped", reason="Revue bloquante.",
+                                   dropped_commits=["b" * 40, "c" * 40])
+        front["rows"]["3"]["dropped_commits"] = ["d" * 40]
+        front["leftover"] = {"patch": "fix/front/leftover-2.patch", "base": "e" * 40,
+                             "untracked": ["draft.txt"]}
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        text = json.loads(out)["text"]
+        self.assertEqual(section(text, "Commits retirés de la branche").strip().split("\n"), [
+            f"- front : CQ-13 : Treize : `git branch rescue/cq-13 {'a' * 40}`",
+            f"- front : CQ-15 : Quinze : `git branch rescue/cq-15 {'b' * 40}`",
+            f"- front : CQ-15 : Quinze : `git branch rescue/cq-15-2 {'c' * 40}`",
+        ])
+        self.assertNotIn("d" * 40, text)
+        self.assertLess(text.index("## Points d'attention"), text.index("## Commits retirés"))
+        self.assertIn("- front : modifications non commitées du worktree sauvées dans "
+                      "fix/front/leftover-2.patch.", section(text, "Points d'attention"))
+        self.assertNotIn(LONG_DASH, text)
+        state = fix_state.load(self.run_dir)
+        state["finished_at"] = None
+        for row in state["keys"]["front"]["rows"].values():
+            row.pop("dropped_commits", None)
+        fix_state.save(self.run_dir, state)
+        self.assertNotIn("## Commits retirés", json.loads(self.summary()[1])["text"])
+
+    def test_review_status_count_needs_the_option(self):
+        """The count of rows moved to « En review » is printed only when --in-review gives it."""
+        self.assertEqual(self.summary("--in-review", "oops")[0], 2)
+        state = fix_state.load(self.run_dir)
+        self.assertTrue(state["notion"])
+        text = json.loads(self.summary()[1])["text"]
+        self.assertNotIn("Lignes passées « En review »", text)
+        state["finished_at"] = None
+        fix_state.save(self.run_dir, state)
+        text = json.loads(self.summary("--in-review", "")[1])["text"]
+        self.assertIn("Lignes passées « En review » : 0.", section(text, "Notion"))
 
     def test_summary_closes_the_pass(self):
         deferred.add(self.run_dir, "question", "Question de l'audit", "CQ-3")
@@ -185,7 +403,7 @@ class SummaryTest(SummaryCase):
     def test_summary_refuses_a_secret(self):
         deferred.add(self.run_dir, "fix_question", "Question du fix", "CQ-14")
         state = fix_state.load(self.run_dir)
-        state["keys"]["front/securite"]["rows"]["13"]["reason"] = "clé AKIAIOSFODNN7EXAMPLE trouvée"
+        state["keys"]["front"]["rows"]["13"]["reason"] = "clé AKIAIOSFODNN7EXAMPLE trouvée"
         fix_state.save(self.run_dir, state)
         code, out, err = self.summary()
         self.assertEqual(code, 7)

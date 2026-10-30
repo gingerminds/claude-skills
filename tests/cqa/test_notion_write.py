@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 import cqa_notion
 from cqa.comments import to_rich_text
 from cqa.notion_api import NotionClient, NotionError
-from cqa.notion_write import ReferenceWriteRefused, apply_plan
+from cqa.notion_write import ReferenceWriteRefused, apply_plan, text_digest
 from cqa.plan import operation_key
 from tests.cqa.fakes import Call, FakeClock, apply_report, failure
 
@@ -55,7 +55,8 @@ class FakeNotion:
     and comments_unreachable makes every GET /comments fail. A post fault may also be
     "rate_limited" (429 with Retry-After, nothing stored). live_options are the "Assignée à"
     options of the copy, and data_source_error an HTTP failure (status, body) of its schema read.
-    pages maps a page id to the id of its child database, for resolve.
+    pages maps a page id to the id of its child database, for resolve. statuses maps a page id
+    to its « Statut », read by GET /pages/<id> and changed by a status write.
     writes lists what was stored, in order: (label, page id, payload).
     """
 
@@ -73,6 +74,7 @@ class FakeNotion:
         self.data_source_error = None
         self.posts = 0
         self.comment_errors = {}
+        self.statuses = {}
 
     def __call__(self, method, url, headers, data):
         self.calls.append(Call(method, url, dict(headers), data))
@@ -93,6 +95,10 @@ class FakeNotion:
             return self._change_comment(method, path.rsplit("/", 1)[1], body)
         if method == "PATCH" and path.startswith("/pages/"):
             return self._patch_page(path.rsplit("/", 1)[1], body["properties"])
+        if method == "GET" and path.startswith("/pages/"):
+            page_id = path.rsplit("/", 1)[1]
+            status = {"type": "status", "status": {"name": self.statuses[page_id]}}
+            return reply(200, {"object": "page", "id": page_id, "properties": {"Statut": status}})
         if method == "GET" and path.startswith("/data_sources/"):
             if self.data_source_error:
                 return reply(*self.data_source_error)
@@ -160,6 +166,8 @@ class FakeNotion:
             status, payload = self.page_errors[page]
             return reply(status, payload)
         label = "status" if "Statut" in properties else "assign"
+        if label == "status":
+            self.statuses[page] = properties["Statut"]["status"]["name"]
         self.writes.append((label, page, properties))
         return reply(200, {"object": "page", "id": page})
 
@@ -202,6 +210,13 @@ OLD_LAYOUT = (
 def verdict_blocks(label, note="x"):
     head = "Audit PRE-MEL · 27/10/2026 · lancé par Camille D"
     return f"{head}\n\nVerdict :\n{label}\n\nConstat :\n{note}"
+
+
+def fix_text(reason="laissée aux devs par le lead", day="20"):
+    return (
+        f"Correctif automatique · {day}/10/2026 · lancé par Camille D\n\nNon traité :\n{reason}\n"
+        "Réf CQ-1 · develop@abc1234 · gm:checklist-quality-audit 0.15.0"
+    )
 
 
 class StubClient:
@@ -255,6 +270,16 @@ def comment_op(page_id, ref, text="Constat : à corriger"):
 
 def page_comment_op(text="Décompte par statut", page_id=COPY_PAGE):
     return op("page_comment", page_id, None, text=text, verdict=None)
+
+
+def fix_comment_op(page_id, ref, text):
+    return op("fix_comment", page_id, ref, text=text, verdict=None)
+
+
+def review_op(page_id, ref, expected="À traiter", after="En review"):
+    item = op("status", page_id, ref, after=after, before=expected, verdict=None)
+    item["expected"] = expected
+    return item
 
 
 def row_state(page_id, ref, before, after="Ok / Recetté"):
@@ -998,6 +1023,180 @@ class CommentReplacementTest(ApplyTestCase):
         self.assertEqual(self.notion.requests("POST"), [])
         [entry] = self.applied()
         self.assertEqual(entry["mode"], "update")
+
+
+class FixCommentReplacementTest(ApplyTestCase):
+    MIMIC = (
+        "Correctif automatique · 21/10/2026 · lancé par Inès\n\nNon traité :\nà voir\n"
+        "Réf CQ-1 · develop@abc1234 · gm:checklist-quality-audit 0.15.0"
+    )
+
+    def seed(self):
+        self.notion.add_comment(PAGE_1, verdict_blocks("À traiter (confiance haute)"),
+                                comment_id="audit", created="2026-10-01T10:00:00.000Z")
+        self.notion.add_comment(PAGE_1, fix_text(), comment_id="fix",
+                                created="2026-10-02T10:00:00.000Z")
+        self.notion.add_comment(PAGE_1, self.MIMIC, author="user-1", comment_id="human",
+                                created="2026-10-03T10:00:00.000Z")
+
+    def test_audit_and_fix_comments_replace_only_their_own(self):
+        self.seed()
+        audit = verdict_blocks("Ok / Recetté", "Revu")
+        result = self.apply(comment_op(PAGE_1, 1, audit))
+        self.assertEqual((result["done"], result["replace_failed"]), (1, []))
+        [update] = self.notion.requests("PATCH")
+        self.assertTrue(update.url.endswith("/comments/audit"))
+        self.assertEqual(self.notion.requests("DELETE"), [])
+        self.assertEqual(self.notion.texts(PAGE_1), [audit, fix_text(), self.MIMIC])
+
+        fixed = fix_text("hors du dépôt", day="29")
+        result = self.apply(fix_comment_op(PAGE_1, 1, fixed))
+        self.assertEqual(result["done"], 1)
+        [_, update] = self.notion.requests("PATCH")
+        self.assertTrue(update.url.endswith("/comments/fix"))
+        self.assertEqual(self.notion.requests("DELETE"), [])
+        self.assertEqual(self.notion.requests("POST"), [])
+        self.assertEqual(self.notion.texts(PAGE_1), [audit, fixed, self.MIMIC])
+        entry = self.applied()[-1]
+        self.assertEqual((entry["kind"], entry["comment_id"], entry["mode"]),
+                         ("fix_comment", "fix", "update"))
+
+    def test_a_fix_comment_is_created_next_to_the_audit_comment(self):
+        self.notion.add_comment(PAGE_1, verdict_blocks("À traiter"), comment_id="audit")
+        fixed = fix_text()
+        self.apply(fix_comment_op(PAGE_1, 1, fixed))
+        self.assertEqual(self.notion.requests("PATCH"), [])
+        self.assertEqual(self.notion.texts(PAGE_1), [verdict_blocks("À traiter"), fixed])
+
+    def test_an_audit_comment_is_created_next_to_the_fix_comment(self):
+        self.notion.add_comment(PAGE_1, fix_text(), comment_id="fix")
+        audit = verdict_blocks("À traiter")
+        self.apply(comment_op(PAGE_1, 1, audit))
+        self.assertEqual(self.notion.requests("PATCH"), [])
+        self.assertEqual(self.notion.requests("DELETE"), [])
+        self.assertEqual(self.notion.texts(PAGE_1), [fix_text(), audit])
+
+    def test_surplus_fix_comments_are_deleted_and_the_same_text_skipped(self):
+        self.notion.add_comment(PAGE_1, fix_text("a"), comment_id="fix-old",
+                                created="2026-10-01T10:00:00.000Z")
+        self.notion.add_comment(PAGE_1, fix_text("b"), comment_id="fix-new",
+                                created="2026-10-02T10:00:00.000Z")
+        result = self.apply(fix_comment_op(PAGE_1, 1, fix_text("b")))
+        self.assertEqual((result["done"], result["skipped"]), (0, 1))
+        [delete] = self.notion.requests("DELETE")
+        self.assertTrue(delete.url.endswith("/comments/fix-old"))
+        self.assertEqual(self.notion.texts(PAGE_1), [fix_text("b")])
+
+    def test_fix_comment_comes_after_the_status_and_the_audit_comment(self):
+        result = self.apply(
+            page_comment_op("Correctifs automatiques"),
+            fix_comment_op(PAGE_1, 1, fix_text()),
+            comment_op(PAGE_1, 1, verdict_blocks("À traiter")),
+            status_op(PAGE_1, 1, after="À traiter", before="Mis en place"),
+        )
+        self.assertEqual(result["done"], 4)
+        self.assertEqual([entry["kind"] for entry in self.applied()],
+                         ["status", "comment", "fix_comment", "page_comment"])
+
+    def test_malformed_fix_operations_are_refused_before_any_request(self):
+        empty = fix_comment_op(PAGE_1, 1, "")
+        wrong = review_op(PAGE_1, 1)
+        wrong["expected"] = 3
+        blank = review_op(PAGE_1, 1)
+        blank["expected"] = " "
+        for item in (empty, wrong, blank):
+            with self.subTest(item=item):
+                with self.assertRaises(ValueError):
+                    self.apply(item)
+        self.assertEqual(self.notion.calls, [])
+
+
+class AuditRewriteTest(ApplyTestCase):
+    """A « comment » with « replaces » rewrites the audit comment only when it is still the one
+    the plan read (fix-plan removing the v2 « MR : » block)."""
+
+    READ = (verdict_blocks("À traiter (confiance haute)")
+            + "\n\nMR :\nhttps://gitlab.example.org/a/b/-/merge_requests/1")
+
+    def rewrite_op(self, text=None):
+        item = comment_op(PAGE_1, 1, text or verdict_blocks("À traiter (confiance haute)"))
+        item["replaces"] = text_digest(self.READ)
+        return item
+
+    def test_the_audit_comment_read_by_the_plan_is_rewritten(self):
+        self.notion.add_comment(PAGE_1, self.READ, comment_id="audit")
+        result = self.apply(self.rewrite_op())
+        self.assertEqual(result["done"], 1)
+        self.assertEqual(self.notion.texts(PAGE_1), [verdict_blocks("À traiter (confiance haute)")])
+
+    def test_an_audit_comment_changed_since_the_plan_is_left_alone(self):
+        rewritten = verdict_blocks("Ok / Recetté", "Revu par la relance")
+        self.notion.add_comment(PAGE_1, rewritten, comment_id="audit")
+        self.notion.add_comment(PAGE_1, fix_text(), comment_id="fix")
+        result = self.apply(self.rewrite_op(), fix_comment_op(PAGE_1, 1, fix_text("hors du dépôt")))
+        self.assertEqual((result["done"], result["skipped"], result["errors"]), (1, 1, []))
+        self.assertEqual(self.notion.texts(PAGE_1), [rewritten, fix_text("hors du dépôt")])
+        self.assertIn("CQ-1 (comment) : non écrit, commentaire d'audit changé depuis le plan",
+                      self.log)
+        self.assertEqual([entry["kind"] for entry in self.applied()], ["fix_comment"])
+
+    def test_a_deleted_audit_comment_is_not_created_again(self):
+        result = self.apply(self.rewrite_op())
+        self.assertEqual((result["done"], result["skipped"]), (0, 1))
+        self.assertEqual(self.notion.requests("POST"), [])
+
+    def test_an_invalid_digest_is_refused_before_any_request(self):
+        for value in ("", "abc", 3):
+            item = self.rewrite_op()
+            item["replaces"] = value
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    self.apply(item)
+        self.assertEqual(self.notion.calls, [])
+
+
+class ExpectedStatusTest(ApplyTestCase):
+    def test_status_written_only_if_unchanged(self):
+        self.notion.statuses = {PAGE_1: "À traiter", PAGE_2: "Mis en place", PAGE_3: "En review"}
+        changed = review_op(PAGE_2, 2)
+        result = self.apply(
+            review_op(PAGE_1, 1),
+            changed,
+            fix_comment_op(PAGE_2, 2, fix_text()),
+            review_op(PAGE_3, 3, expected="Mise en place partielle"),
+        )
+        self.assertEqual(
+            [write for write in self.notion.writes if write[0] == "status"],
+            [("status", PAGE_1, {"Statut": {"status": {"name": "En review"}}})],
+        )
+        self.assertEqual(self.notion.statuses[PAGE_2], "Mis en place")
+        self.assertEqual((result["done"], result["skipped"], result["errors"]), (2, 2, []))
+        self.assertEqual(
+            result["status_changed"],
+            [{"key": changed["key"], "ref": 2, "current": "Mis en place",
+              "reason": "statut changé depuis le lancement"}],
+        )
+        self.assertEqual(self.notion.stored(PAGE_2), [fix_text()])
+        self.assertIn("CQ-2 (status) : non écrit, statut changé depuis le lancement "
+                      "(« Mis en place »)", self.log)
+        journal = {(entry["ref"], entry["kind"]): entry for entry in self.applied()}
+        self.assertEqual(journal[(1, "status")]["value"], "En review")
+        self.assertNotIn((2, "status"), journal)
+        self.assertEqual(journal[(3, "status")]["value"], "En review")
+
+    def test_a_resumed_apply_reads_the_status_again(self):
+        self.notion.statuses = {PAGE_1: "Mis en place"}
+        item = review_op(PAGE_1, 1)
+        self.apply(item)
+        self.notion.statuses[PAGE_1] = "À traiter"
+        result = self.apply(item)
+        self.assertEqual((result["done"], result["status_changed"]), (1, []))
+        self.assertEqual(self.notion.statuses[PAGE_1], "En review")
+
+    def test_a_status_without_expected_is_written_without_reading_the_page(self):
+        result = self.apply(status_op(PAGE_1, 1))
+        self.assertEqual(result, apply_report(1, 0))
+        self.assertFalse([call for call in self.notion.requests("GET") if "/pages/" in call.url])
 
 
 class CommentReplacementEdgeTest(ApplyTestCase):

@@ -1,4 +1,5 @@
 """Detect and mask secrets. Scans report labels, never values."""
+import bisect
 import fnmatch
 import os
 import re
@@ -12,7 +13,7 @@ _MIN_ENV_LENGTH = 6
 
 _PRIVATE_KEY = re.compile(
     r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"
-    r"[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----|\Z)"
+    r"[\s\S]*?(?:(?P<end>-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----)|\Z)"
 )
 _AWS = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 _GITLAB = re.compile(r"\bgl(?:pat|dt|rt|ptt|cbt|oas|ft|imt|agent|soat)-[0-9A-Za-z_.\-]{20,}")
@@ -42,6 +43,26 @@ _CREDENTIAL = re.compile(
     )
     (?!\[secret\ masqué\])
     (?P<val>(?(q)(?:(?!\\?(?P=q))[^\n]){4,}|[^\s"'`]{4,}))
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# A PHP constant whose name says it holds a credential (DB_PASSWORD, API_TOKEN...) or a
+# WordPress salt, defined with a non-empty literal: define( 'DB_PASSWORD', '...' ). A value
+# that is an expression (getenv( 'X' ), $password, A_CONSTANT) is not matched.
+_DEFINE = re.compile(
+    r"""
+    (?P<pre>
+        (?<![\w$>:])define\s*\(\s*
+        (?P<nq>["'])
+        (?:\w*(?:password|passwd|pwd|secret|token|api_?key)\w*
+           |(?:secure_)?auth_(?:key|salt)|logged_in_(?:key|salt)|nonce_(?:key|salt))
+        (?P=nq)\s*,\s*
+        (?P<q>["'])
+    )
+    (?!\[secret\ masqué\])
+    (?P<val>(?:(?!(?P=q))[^\n])+)
+    (?=(?P=q))
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -179,6 +200,7 @@ _PATTERNS = (
     ("notion_token", _NOTION),
     ("jwt", _JWT),
     ("credential_assignment", _CREDENTIAL),
+    ("credential_define", _DEFINE),
     ("authorization_header", _AUTH_HEADER),
     ("mysql_password_option", _MYSQL_PASSWORD),
     ("kube_client_key", _KUBE_CLIENT_KEY),
@@ -192,6 +214,54 @@ def scan_text(text: str, known_values: list[str]) -> list[str]:
         labels.append("known_value")
     labels.extend(label for label, pattern in _PATTERNS if _search(pattern, text))
     return labels
+
+
+def scan_lines(text: str, known_values: list[str]) -> list[tuple[str, int]]:
+    """Return the (label, line) pairs found in text, line counted from 1 where a match starts.
+
+    The labels are those of scan_text; each pair comes once, by line, then in the order of
+    scan_text. A value is never returned.
+    """
+    found = []
+    for label, first, _ in scan_spans(text, known_values):
+        if (label, first) not in found:
+            found.append((label, first))
+    return found
+
+
+def scan_spans(text: str, known_values: list[str]) -> list[tuple[str, int, int]]:
+    """Return the (label, first line, last line) of every match in text, lines counted from 1
+    on "\\n" only (a "\\r" is part of its line, as git counts it).
+
+    A define( or a private key written over several lines spans them; a private key without
+    its END line spans its first line only (the match runs to the end of the text). Each
+    triple comes once, by first line, then in the order of scan_text, then by last line. A
+    value is never returned.
+    """
+    starts = [0] + [index + 1 for index, char in enumerate(text) if char == "\n"]
+    found = set()
+    for value in {value for value in known_values if value}:
+        found.update(("known_value", *_span_of(starts, match))
+                     for match in re.finditer(re.escape(value), text))
+    for label, pattern in _PATTERNS:
+        for match in pattern.finditer(text):
+            if _skipped(pattern, match):
+                continue
+            first, last = _span_of(starts, match)
+            if pattern is _PRIVATE_KEY and match.group("end") is None:
+                last = first
+            found.add((label, first, last))
+    order = ["known_value"] + [label for label, _ in _PATTERNS]
+    return sorted(found, key=lambda item: (item[1], order.index(item[0]), item[2]))
+
+
+def _span_of(starts: list, match: re.Match) -> tuple[int, int]:
+    first = _line_of(starts, match.start())
+    return first, max(first, _line_of(starts, match.end() - 1))
+
+
+def _line_of(starts: list, offset: int) -> int:
+    return bisect.bisect_right(starts, offset)
 
 
 def _search(pattern: re.Pattern, text: str) -> bool:

@@ -105,7 +105,6 @@ def build_plan(
     missing_in_copy: Optional[list] = None,
     recette_refs: frozenset = frozenset(),
     comment_dates: Optional[dict] = None,
-    mr_links: Optional[dict[int, list[str]]] = None,
 ) -> dict:
     """Return the plan.json document: the Notion writes the run proposes, and their summary.
 
@@ -124,8 +123,8 @@ def build_plan(
     the summary, and "plan_id", a digest of the plan that scopes the journal of the writes to it.
     missing_in_copy is the list of rows of the model absent from the copy. comment_dates maps
     the ref of a row judged again in a rerun to the date of that rerun, which its comment
-    gives instead of run_date. mr_links maps the ref of a row put in merge requests to their URLs:
-    the comment of that row keeps the "MR :" block.
+    gives instead of run_date. The comments never carry the "MR :" block of the v2 fix mode:
+    the fix comment of a row (cqa_notion.py fix-plan) names its merge requests.
     """
     notion = context["notion"]
     common = {
@@ -149,7 +148,6 @@ def build_plan(
                 visible_verdicts,
                 history,
                 ref in recette_refs,
-                (mr_links or {}).get(ref),
             )
             if verdict == "unknown":
                 unknown.append(ref)
@@ -209,9 +207,7 @@ def filter_plan(plan: dict, *, skip_human_overrides: bool) -> dict:
     return result
 
 
-def _finding_operations(
-    row, finding, common, followup_done, visible_verdicts, history, recette=False, mr_links=None
-):
+def _finding_operations(row, finding, common, followup_done, visible_verdicts, history, recette=False):
     ref = row["ref"]
     if finding is None:
         finding = _missing_finding(ref)
@@ -224,7 +220,7 @@ def _finding_operations(
     if verdict == "ok_human" and lead and lead not in assignees:
         ops.append(_operation("assign", row, verdict, assignees, assignees + [lead]))
     if _needs_comment(ref, verdict, status_changed, visible_verdicts, history):
-        text = format_comment(finding=finding, row=row, mr_links=mr_links, **common)
+        text = format_comment(finding=finding, row=row, **common)
         ops.append(_operation("comment", row, verdict, None, None, text))
     return ops, verdict
 

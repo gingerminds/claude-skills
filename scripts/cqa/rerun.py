@@ -145,6 +145,38 @@ def latest_findings(
     return latest
 
 
+_RERUN_NAME = re.compile(r".+-rerun-([0-9]{2})\.json")
+
+
+def rerun_dates(run_dir: Path) -> dict:
+    """Return {NN: date} of the closed reruns that recorded their date (rerun-close)."""
+    dates = _read_object(Path(run_dir) / "reruns.json").get("dates")
+    found = {}
+    for key, value in (dates.items() if isinstance(dates, dict) else []):
+        if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            try:
+                found[key] = datetime.strptime(value, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+    return found
+
+
+def comment_dates(run_dir: Path, sources: dict) -> dict:
+    """Return {ref: date of its rerun} for the rows whose latest finding comes from a rerun
+    (sources: {ref: name of the findings file of its latest finding}).
+
+    Their comment then says when they were judged again; a rerun closed before its date was
+    recorded keeps the date of the run.
+    """
+    dates = rerun_dates(run_dir)
+    found = {}
+    for ref, name in sources.items():
+        match = _RERUN_NAME.fullmatch(name)
+        if match and match.group(1) in dates:
+            found[ref] = dates[match.group(1)]
+    return found
+
+
 def parse_instant(value) -> Optional[datetime]:
     """Return the instant of a UTC "...Z" date with or without fraction, None when invalid."""
     if not isinstance(value, str):
