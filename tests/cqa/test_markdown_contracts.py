@@ -2539,6 +2539,50 @@ class FixPassOrchestrationTest(unittest.TestCase):
         self.assertNotIn('--resolve <id> --fix\n', end)
         self.assertIn("the lead's answer", end)
 
+    def test_a_start_failure_leaves_the_key(self):
+        """Final wave F1: a key whose start exits 2 (branch checked out by the dev, diverged
+        remote, failed fetch, missing origin/<base>) is left at « selected », asked in present
+        mode, set aside in autonomous mode, and named with its rows at step 8."""
+        start = _between(self.keys, "a. Branch and worktree", "Sections: the `sections`")
+        for needle in ("Exit 2", "« C'est réglé, relancer »", "« Laisser ce repo »",
+                       'leave "$RUN" "<repo>" --reason', "before any start",
+                       "set it aside", "go on with the next key", "runs nothing of step 5",
+                       "with its rows"):
+            with self.subTest(part="5.a", needle=needle):
+                self.assertIn(needle, start)
+        resume = _between(self.section, "« Reprendre les correctifs »", "**2. ")
+        rule = _between(resume, "Keys left (5.f)", "Before the step")
+        for needle in ("5.a", "`selected`", "nothing of step 5"):
+            with self.subTest(part="resume", needle=needle):
+                self.assertIn(needle, rule)
+        end = _between(self.section, "**6. ", "**7. ")
+        key_left = _between(end, "A key left (", "Any other entry")
+        self.assertIn("still at `selected`", key_left)
+        self.assertIn("5.a", key_left)
+        closing = self.section[self.section.index("**8. Summary.**"):]
+        self.assertIn("with its rows", closing)
+        self.assertIn("counts the keys left", closing)
+
+    def test_a_left_key_runs_nothing_of_step_5(self):
+        """Final wave L1: the resume rule and the answer passes of step 6 skip a left key;
+        the « clé laissée » entry is set aside in both modes so that present mode asks again
+        after a resume; only the lead's « C'est réglé, reprendre » runs leave --clear."""
+        resume = _between(self.section, "« Reprendre les correctifs »", "**2. ")
+        rule = _between(resume, "Keys left (5.f)", "Before the step")
+        for needle in ("nothing of step 5", "no `start`", "answer passes of step 6",
+                       "Nothing else ever runs `leave --clear`"):
+            with self.subTest(part="resume", needle=needle):
+                self.assertIn(needle, rule)
+        left = _between(self.keys, "A key is left when", "g. Publication")
+        for needle in ("In both modes", "set it aside too", "resumed before an answer",
+                       "Present mode: ask now", "close the entry with the answer"):
+            with self.subTest(part="5.f", needle=needle):
+                self.assertIn(needle, left)
+        self.assertNotIn("Autonomous mode: set it aside (`cqa_plan.py defer", left)
+        end = _between(self.section, "**6. ", "**7. ")
+        answers = _between(end, "Then, for each key with other answers", "Close each entry")
+        self.assertIn("but a key left", answers)
+
     def test_an_answer_pass_without_a_valid_report_is_closed(self):
         """Task 13 round 1, item 2: the empty report closes a pass of a settled section."""
         end = _between(self.section, "**6. ", "**7. ")

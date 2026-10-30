@@ -5,7 +5,7 @@ French and never hold a long dash.
 """
 from typing import Optional
 
-from cqa import fix_mr, fix_rows
+from cqa import fix_mr, fix_rows, fix_state
 from cqa.checklist import ref_label
 
 NO_REASON = "Raison non précisée"
@@ -21,6 +21,11 @@ PARTIAL = "partielle, reste à faire : {remaining}"
 SUITE = ("Relire et ajuster les MR, les fusionner et déployer en préprod, puis lancer "
          "`/gm:checklist-quality-audit recette` : elle reprend d'elle-même les lignes « En review ». "
          "Une ligne restée à un autre statut dans Notion est à passer d'abord en « Mis en place ».")
+# The state of a row of a key left to the lead, by outcome (a reason follows when it has one).
+ROW_STATES = {
+    "pending": "non traitée", "fixed": "corrigée sur la branche", "skipped": "écartée",
+    "dropped": "retirée", "question": "question sans réponse", "done_before": "déjà sur la branche",
+}
 _LEFT_OUTCOMES = ("skipped", "dropped", "question")
 _RAN = ("passed", "failed")
 
@@ -34,6 +39,8 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
     in_review: refs the Notion stage moved to « En review », counted only when given (None:
     no line). Partial rows are marked with what is left to do; a
     failed section (with its reason and its leftover patch) and a reorder conflict are named.
+    A key left to the lead (fix_state.is_left) has its own section, with every row of the key
+    and its state: no MR block, no branch line and no row of it anywhere else.
     """
     info = _titles(candidates)
     keys = state["keys"]
@@ -41,13 +48,9 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
     notes = _attention_lines(keys)
     if notes:
         parts.append(("Points d'attention", "\n".join(notes)))
-    left_keys = _left_keys(keys)
+    left_keys = _left_keys(keys, info)
     if left_keys:
-        parts.append(("Clés laissées au lead", "\n".join(
-            LEFT_KEY.format(repo=item["key"], reason=item["reason"],
-                            branch=item["branch"] or NO_BRANCH,
-                            worktree=item["worktree"] or NO_WORKTREE)
-            for item in left_keys)))
+        parts.append(("Clés laissées au lead", "\n".join(_left_key_lines(left_keys))))
     left = _left(keys, candidates, info)
     if left:
         parts.append(("Laissées aux devs", left))
@@ -65,19 +68,39 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
             "left_keys": left_keys}
 
 
-def _is_left(key: dict) -> bool:
-    """True for a key left to the lead (cqa_fix.py leave: key["left"] = {"reason", "at"})."""
-    return isinstance(key.get("left"), dict)
+_is_left = fix_state.is_left
 
 
-def _left_keys(keys: dict) -> list:
+def _left_keys(keys: dict, info: dict) -> list:
     """Return the keys left to the lead, in the order of the pass, each with its reason, the
-    time it was left, its branch and its worktree."""
+    time it was left, its branch, its worktree and its rows ({"ref", "title", "state"})."""
     return [
         {"key": name, "reason": (key["left"].get("reason") or "").strip() or NO_REASON,
-         "at": key["left"].get("at"), "branch": key.get("branch"), "worktree": key.get("worktree")}
+         "at": key["left"].get("at"), "branch": key.get("branch"), "worktree": key.get("worktree"),
+         "rows": [_row_state(int(ref), row, info)
+                  for ref, row in sorted(key["rows"].items(), key=lambda item: int(item[0]))
+                  if isinstance(row, dict)]}
         for name, key in keys.items() if _is_left(key)
     ]
+
+
+def _row_state(ref: int, row: dict, info: dict) -> dict:
+    state = ROW_STATES.get(row.get("outcome")) or str(row.get("outcome"))
+    reason = (row.get("reason") or "").strip()
+    if reason and row.get("outcome") in ("skipped", "dropped"):
+        state = f"{state} : {reason}"
+    return {"ref": ref, "title": (info.get(ref) or {}).get("title") or NO_TITLE, "state": state}
+
+
+def _left_key_lines(left_keys: list) -> list:
+    lines = []
+    for item in left_keys:
+        lines.append(LEFT_KEY.format(repo=item["key"], reason=item["reason"],
+                                     branch=item["branch"] or NO_BRANCH,
+                                     worktree=item["worktree"] or NO_WORKTREE))
+        lines.extend(f"  - {ref_label(row['ref'])} : {row['title']} : {row['state']}"
+                     for row in item["rows"])
+    return lines
 
 
 def _clean(text: str) -> str:
@@ -107,7 +130,7 @@ def _mr_section(keys: dict, info: dict) -> str:
     blocks = []
     for key in keys.values():
         mr = key.get("mr")
-        if not mr:
+        if not mr or _is_left(key):
             continue
         categories = ", ".join(section.get("category") or section.get("alias") or ""
                                for section in key.get("sections") or [])
@@ -187,6 +210,8 @@ def _left(keys: dict, candidates: dict, info: dict) -> str:
             groups.setdefault(entry.get("reason") or NO_REASON, []).append(
                 f"- {ref_label(entry['ref'])} : {entry.get('title') or NO_TITLE}")
     for key in keys.values():
+        if _is_left(key):
+            continue
         covered = fix_mr.covered_refs(key["rows"])
         for ref in _refs(key, *_LEFT_OUTCOMES):
             if ref in covered:
@@ -199,7 +224,7 @@ def _left(keys: dict, candidates: dict, info: dict) -> str:
 def _checks_section(keys: dict, checks: dict) -> str:
     seen, lines = set(), []
     for name, key in keys.items():
-        document = checks.get(name) if key.get("mr") else None
+        document = checks.get(name) if key.get("mr") and not _is_left(key) else None
         if not isinstance(document, dict):
             continue
         entries = [(item.get("name"), None) for item in document.get("checks") or []
@@ -234,15 +259,24 @@ def _local_lines(state: dict) -> list:
 
 
 def _team_message(project: str, state: dict) -> str:
-    urls = [key["mr"]["url"] for key in state["keys"].values() if key.get("mr")]
+    """Return the message for the team: the project, the merge requests to review (or the
+    local branches), then the count of the keys left to the lead, whose merge request, if
+    any, is not to be reviewed."""
+    urls = [key["mr"]["url"] for key in state["keys"].values()
+            if key.get("mr") and not _is_left(key)]
     if urls:
-        return "\n".join([
-            project,
-            f"Correctifs automatiques de la checklist PRE-MEL : {len(urls)} MR en brouillon à relire.",
-            *urls,
-        ])
-    count = sum(1 for _, empty in _local_keys(state) if not empty)
-    if not count:
-        return f"{project}\n{NOTHING_PREPARED}"
-    word = "branche" if count == 1 else "branches"
-    return f"{project}\nCorrectifs préparés en branches locales : {count} {word}."
+        lines = [project,
+                 f"Correctifs automatiques de la checklist PRE-MEL : {len(urls)} MR en brouillon à relire.",
+                 *urls]
+    else:
+        count = sum(1 for _, empty in _local_keys(state) if not empty)
+        if not count:
+            lines = [project, NOTHING_PREPARED]
+        else:
+            word = "branche" if count == 1 else "branches"
+            lines = [project, f"Correctifs préparés en branches locales : {count} {word}."]
+    left = [name for name, key in state["keys"].items() if _is_left(key)]
+    if left:
+        plural = "s" if len(left) > 1 else ""
+        lines.append(f"{len(left)} repo{plural} laissé{plural} au lead : {', '.join(left)}.")
+    return "\n".join(lines)

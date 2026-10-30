@@ -506,8 +506,6 @@ class PassTest(FixCase):
             ["mr-body", self.run_dir, key],
             ["publish", self.run_dir, key],
             ["finish", self.run_dir, key],
-            ["leave", self.run_dir, key, "--reason", "commit de fusion"],
-            ["leave", self.run_dir, key, "--clear"],
         ):
             with self.subTest(command=argv[0]):
                 code, out, err = self.run_main(argv)

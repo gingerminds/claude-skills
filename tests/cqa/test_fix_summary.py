@@ -245,11 +245,13 @@ class SummaryTest(SummaryCase):
         text = result["text"]
         self.assertEqual(section(text, "Clés laissées au lead").strip(), (
             "- back : commit de fusion dans la branche (branche feature/checklist-qa-fix-2, "
-            "worktree /srv/run/fix/back/wt)."))
+            "worktree /srv/run/fix/back/wt).\n"
+            "  - CQ-20 : Vingt : corrigée sur la branche"))
         self.assertLess(text.index("## Clés laissées au lead"), text.index("## Laissées aux devs"))
         self.assertEqual(result["left_keys"], [{
             "key": "back", "reason": "commit de fusion dans la branche", "at": "2026-10-29T10:00:00Z",
-            "branch": "feature/checklist-qa-fix-2", "worktree": "/srv/run/fix/back/wt"}])
+            "branch": "feature/checklist-qa-fix-2", "worktree": "/srv/run/fix/back/wt",
+            "rows": [{"ref": 20, "title": "Vingt", "state": "corrigée sur la branche"}]}])
         self.assertNotIn("## Branches restées en local", text)
         self.assertNotIn(LONG_DASH, text)
         state = fix_state.load(self.run_dir)
@@ -261,6 +263,87 @@ class SummaryTest(SummaryCase):
         self.assertEqual(result["left_keys"], [])
         self.assertIn("- back : feature/checklist-qa-fix-2",
                       section(result["text"], "Branches restées en local"))
+
+    def test_a_left_key_lists_its_rows_and_hides_its_merge_request(self):
+        """Final wave L2 and F1: a left key that took over an MR gets no MR block and no URL
+        in the team message, which counts the keys left; its rows are listed under it, each
+        with its state, and nowhere else."""
+        state = fix_state.load(self.run_dir)
+        back = state["keys"]["back"]
+        back.update(step="reviewed", worktree="/srv/run/fix/back/wt", reused="mr", kept_local=False,
+                    mr={"iid": 9, "url": "https://gitlab.example.org/acme/api/-/merge_requests/9"},
+                    left={"reason": "commit de fusion dans la branche", "at": "2026-10-29T10:00:00Z"})
+        back["rows"]["21"] = row("skipped", "Trop risqué.", section="seo")
+        back["rows"]["22"] = row("dropped", "Revue bloquante.", section="seo")
+        back["rows"]["23"] = row("question", "Quel contact ?", section="seo")
+        back["rows"]["24"] = row("pending", section="seo")
+        back["rows"]["25"] = row("done_before", section="seo")
+        back["sections"][0]["refs"] = [20, 21, 22, 23, 24, 25]
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        text = result["text"]
+        self.assertNotIn("merge_requests/9", text)
+        self.assertNotIn("### back", section(text, "MR"))
+        self.assertEqual(section(text, "Clés laissées au lead").strip().split("\n"), [
+            "- back : commit de fusion dans la branche (branche feature/checklist-qa-fix-2, "
+            "worktree /srv/run/fix/back/wt).",
+            "  - CQ-20 : Vingt : corrigée sur la branche",
+            "  - CQ-21 : sans titre : écartée : Trop risqué.",
+            "  - CQ-22 : sans titre : retirée : Revue bloquante.",
+            "  - CQ-23 : sans titre : question sans réponse",
+            "  - CQ-24 : sans titre : non traitée",
+            "  - CQ-25 : sans titre : déjà sur la branche",
+        ])
+        left = section(text, "Laissées aux devs")
+        for absent in ("CQ-21", "CQ-22", "CQ-23", "Trop risqué."):
+            self.assertNotIn(absent, left)
+        self.assertEqual(result["team_message"], (
+            "Boutique Exemple\n"
+            "Correctifs automatiques de la checklist PRE-MEL : 1 MR en brouillon à relire.\n"
+            "https://gitlab.example.org/acme/shop/-/merge_requests/7\n"
+            "1 repo laissé au lead : back."
+        ))
+        self.assertNotIn(LONG_DASH, text)
+
+    def test_a_key_left_before_its_start_is_listed_with_its_rows(self):
+        """Final wave F1: a key whose start failed (left at « selected », no branch) does not
+        vanish from the synthesis: its rows are listed, and the team message counts it."""
+        self.write_state(push="local", front_mr=False)
+        state = fix_state.load(self.run_dir)
+        front = state["keys"]["front"]
+        front.update(step="selected", branch=None, worktree=None, start_sha=None,
+                     left={"reason": "la branche feature/checklist-qa-fix est extraite dans "
+                                     "votre dossier", "at": "2026-10-29T10:00:00Z"})
+        for item in front["rows"].values():
+            item.update(outcome="pending", reason=None)
+        state["keys"]["back"].update(
+            left={"reason": "origin/develop est introuvable", "at": "2026-10-29T10:01:00Z"})
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        text = result["text"]
+        self.assertEqual(section(text, "Clés laissées au lead").strip().split("\n"), [
+            "- front : la branche feature/checklist-qa-fix est extraite dans votre dossier "
+            "(branche aucune, worktree aucun).",
+            "  - CQ-3 : Trois : non traitée",
+            "  - CQ-12 : Douze : non traitée",
+            "  - CQ-13 : Treize : non traitée",
+            "  - CQ-14 : Quatorze : non traitée",
+            "  - CQ-15 : Quinze : non traitée",
+            "- back : origin/develop est introuvable (branche feature/checklist-qa-fix-2, "
+            "worktree aucun).",
+            "  - CQ-20 : Vingt : corrigée sur la branche",
+        ])
+        self.assertNotIn("## Branches restées en local", text)
+        self.assertEqual(section(text, "MR").strip(), "Aucune MR créée.")
+        self.assertEqual(result["team_message"], (
+            "Boutique Exemple\nAucun correctif préparé.\n2 repos laissés au lead : front, back."))
+        self.assertEqual([item["key"] for item in result["left_keys"]], ["front", "back"])
+        self.assertEqual(result["left_keys"][0]["rows"][0],
+                         {"ref": 3, "title": "Trois", "state": "non traitée"})
 
     def test_review_status_count_needs_the_option(self):
         """The count of rows moved to « En review » is printed only when --in-review gives it."""

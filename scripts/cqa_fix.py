@@ -634,6 +634,7 @@ def _cmd_start(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _key(state, args.key)
+    _not_left(key, args.key, "start")
     path = _repo_path(run_dir, key["repo"])
     worktree = _worktree_path(run_dir, key)
     if key.get("branch") is None:
@@ -1919,15 +1920,18 @@ def _cmd_leave(args, services: Services) -> int:
     """Leave the key to the lead (--reason), or take it back (--clear).
 
     A left key (a merge commit or a rewritten history in its branch, a failed section that
-    could not be rebuilt) keeps its branch and its worktree as they are: reorder, reword,
-    mr-body, publish and finish refuse it (exit 2) until --clear, and the summary names it
-    with its reason. The record is key["left"] = {"reason", "at"} in fix/state.json, so it
-    lives and dies with the pass. Both forms are idempotent: changed says whether the state
-    moved; the same reason again keeps the first record.
+    could not be rebuilt, a start that failed) keeps its branch and its worktree as they are:
+    start, reorder, reword, mr-body, publish and finish refuse it (exit 2) until --clear, and
+    the summary names it with its reason and its rows. A key at « selected » (its start
+    failed: no branch to protect) is accepted. The record is key["left"] = {"reason", "at"}
+    in fix/state.json, so it lives and dies with the pass. Both forms are idempotent: changed
+    says whether the state moved; the same reason again keeps the first record.
     """
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
-    key = _started_key(state, args.key)
+    key = _key(state, args.key)
+    if key.get("branch"):
+        _started_key(state, args.key)
     current = key.get("left") if fix_state.is_left(key) else None
     if args.clear:
         changed = current is not None

@@ -1473,6 +1473,33 @@ class AbandonTest(GitCase):
         self.assertEqual(again["branch"], BASE + "-2")
 
 
+class LeaveBeforeStartTest(GitCase):
+    """Final wave F1: a key whose start fails is left before it has a branch, and start
+    refuses a left key until leave --clear."""
+
+    def test_leave_accepts_a_key_at_selected_and_start_refuses_a_left_key(self):
+        self.open_pass()
+        reason = "la branche est extraite dans votre dossier"
+        code, out, err = self.run_main(["leave", self.run_dir, KEY, "--reason", reason])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {
+            "key": KEY, "left": self.key()["left"], "changed": True, "branch": None,
+            "worktree": None})
+        self.assertEqual((self.key()["left"]["reason"], self.key()["step"]), (reason, "selected"))
+        code, out, err = self.start()
+        self.assertEqual(code, 2, err)
+        self.assertIn(f"La clé {KEY} est laissée au lead ({reason})", err)
+        self.assertIn("start", err)
+        self.assertIsNone(self.key()["branch"])
+        self.assertFalse((self.run_dir / "fix" / "front" / "wt").exists())
+        code, out, err = self.run_main(["leave", self.run_dir, KEY, "--clear"])
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(self.key()["left"])
+        started = self.start_ok()
+        self.assertEqual(started["branch"], BASE)
+        self.assertEqual(self.key()["step"], "started")
+
+
 class LeftKeyTest(ReplayCase):
     """A key left to the lead (a merge commit or a rewritten history in its branch) is recorded
     in fix/state.json by leave: reorder, reword, mr-body, publish and finish refuse it until
