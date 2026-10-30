@@ -16,12 +16,14 @@ allowed-tools: Bash(${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh *), Bash($
 
 Format points that `ticket-format.md` leaves implicit — apply them strictly:
 
+- The note is written in **BBCode** (Mantis does not render Markdown): only the tags listed in the Rendering section of `ticket-format.md`, never `**`, `#`, `- ` / `1.` lists or backticks.
 - The note is the template body **without** any surrounding code fence and **without** any preamble. The marker line `[gm:ticket-refine] Note de qualification du <JJ/MM/AAAA>` is the very first line of `refine.md` and of the posted note; the `Verdict :` line is the second. Consumers parse these two lines.
 - The verdict line is exactly one of: `Verdict : prêt`, `Verdict : prêt avec hypothèses`, `Verdict : pas prêt — <ce qui manque>`. The `<ce qui manque>` text must not itself contain ` — ` (use commas): consumers may split from the right.
 - Annotations in `<…>` are guidance, never output. Where the template offers alternatives with `|`, write only one of them.
-- When the ticket is not a bug, drop the whole OBSERVÉ / ATTENDU section: the heading, its lines, and the `<section présente uniquement pour un bug>` annotation.
+- When the ticket is not a bug, drop the whole OBSERVÉ / ATTENDU section: the heading, its `[list]` block, and the `<section présente uniquement pour un bug>` annotation.
+- When REPRODUCTION is `Non reproductible en l'état : …` or `Sans objet (demande / évolution) : …`, that line replaces the whole `[list]` block under the heading.
 - In REPRODUCTION, environment URLs and role names are allowed; credentials (logins, passwords, tokens) never are, even if the ticket contains them; code pointers never are.
-- An empty list is written as the bare placeholder, without a number or dash: `(aucune)`, `(rien à signaler)` — not `1. (aucune)`.
+- An empty list is written as the bare placeholder, without any `[list]` block: `(aucune)`, `(rien à signaler)` — not `[list=1][*](aucune)[/list]`.
 - Every acceptance criterion is checkable by observing the product: a page, a behaviour, a log, a test result. Answering or informing the client is never a criterion: it goes to QUESTIONS OUVERTES or the project-manager part.
 
 ## Arguments and mode
