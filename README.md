@@ -11,6 +11,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | Skill | Invocation | Rôle |
 | :--- | :--- | :--- |
 | `ticket` | `/gm:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation, pièces jointes chargées à la demande — pour amorcer le contexte avant une session dev spécifique à la stack. Détecte la stack du projet pour router vers le bon skill dev, et classe le ticket en bug ou feature/refactor pour appliquer la discipline adaptée (hypothèse de cause racine, ou esquisse d'ampleur/approches). Orienté Mantis + GitLab. |
+| `ticket-refine` | `/gm:ticket-refine` | Qualifie un ticket Mantis (ou une issue GitLab / GitHub via son URL, en lecture seule) en note interne **privée**, rédigée en BBCode pour le rendu Mantis (devs et chefs de projet, jamais le client) — objectif en langage clair, hors périmètre, questions ouvertes prêtes à relayer au client, comment tester, reproduction, critères d'acceptation testables — avec un verdict de préparation (prêt / prêt avec hypothèses / pas prêt). Écrit `.gm/handoff/<id>/refine.md` puis publie la note privée sur Mantis (avec ton accord en usage manuel ; directement en mode agent ou avec `--publish` ; `--dry-run` n'envoie rien). Le compte Mantis du token doit pouvoir ajouter des notes privées. Une issue GitLab / GitHub est lue via `glab` / `gh` mais jamais commentée : la note reste dans `.gm/handoff/`. À utiliser avant d'assigner ou de développer ; pour préparer une session dev, voir `ticket`. |
 | `drupal` | `/gm:drupal` | Expertise backend Drupal 10/11 — architecture, services, plugins, events, entités, cache, sécurité. |
 | `vue` | `/gm:vue` | Expertise frontend Vue 3 / Nuxt 3 — Composition API, composables, Pinia, SSR/SSG, TypeScript, architecture de composants. |
 | `react` | `/gm:react` | Expertise frontend React (dont Next.js) — hooks, architecture de composants, state client/serveur, data fetching, TypeScript. |
@@ -67,10 +68,11 @@ Sur un clone local, fais d'abord un `git pull` dans le dépôt, puis `/plugin ma
 Tape `/gm:<skill>` dans Claude Code. Les skills se chaînent — un flux Drupal typique :
 
 ```
-/gm:ticket        # digère le ticket Mantis en brief
-/gm:drupal        # implémente en s'appuyant sur le brief + le code existant
-/gm:review        # verdict severity-ranked sur le diff
-/gm:merge-request # ouvre la MR GitLab (Draft) liée au ticket
+/gm:ticket-refine  # (optionnel) qualifie le ticket en note Mantis privée
+/gm:ticket         # digère le ticket Mantis en brief
+/gm:drupal         # implémente en s'appuyant sur le brief + le code existant
+/gm:review         # verdict severity-ranked sur le diff
+/gm:merge-request  # ouvre la MR GitLab (Draft) liée au ticket
 ```
 
 Côté reviewer, `/gm:merge-review` prend une MR existante (URL ou numéro), charge le ticket lié et rédige la note de review. `/gm:security` fait un audit dépendances + infra à part entière, `/gm:docker-devops` couvre tout le volet conteneurs / CI.
@@ -85,12 +87,16 @@ claude-skills/
 │   ├── marketplace.json     # déclare le marketplace "gingerminds" + le plugin "gm"
 │   └── plugin.json          # manifeste du plugin "gm" (nom + version) — sert au dev local via --plugin-dir
 ├── scripts/
-│   └── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
+│   ├── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
+│   └── mantis-note.sh       # publie une note Mantis privée (ticket-refine)
 ├── shared/                  # ressources transverses (indépendantes de la techno)
 │   ├── runner.md            # ordre de priorité du runner : make → docker → lando
 │   ├── stack-detect.md      # cheatsheet de détection de stack + règle de chargement
 │   ├── root-cause.md        # investigation de cause racine (tickets bug) — consommé par ticket
-│   └── scope-classification.md  # classification bounded/architectural (tickets feature) — consommé par ticket
+│   ├── scope-classification.md  # classification bounded/architectural (tickets feature) — consommé par ticket
+│   └── ticket-format.md     # gabarit de la note de qualification — consommé par ticket-refine
+├── tests/
+│   └── mantis-note.test.sh  # tests de scripts/mantis-note.sh
 ├── stack/                   # spécificités par techno, chargées à la demande
 │   ├── drupal/              # Forme 2 : dispatcher + natures découpées
 │   │   ├── MAIN.md          #   route vers core + la nature (dev | review | security)
@@ -104,6 +110,7 @@ claude-skills/
 │       └── MAIN.md
 └── skills/
     ├── ticket/SKILL.md
+    ├── ticket-refine/SKILL.md
     ├── drupal/SKILL.md      # point d'entrée : charge stack/drupal/MAIN.md (dev)
     ├── vue/SKILL.md         # point d'entrée : charge stack/vue/MAIN.md (dev)
     ├── react/SKILL.md       # point d'entrée : charge stack/react/MAIN.md (dev)
@@ -122,7 +129,7 @@ claude-skills/
         └── assets/          # template.html figé + model.example.js (contrat)
 ```
 
-Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh` — une seule copie, pas de duplication.
+Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh` — une seule copie, pas de duplication. `ticket-refine` y ajoute l'écriture : il publie sa note privée via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-note.sh`.
 
 ### Architecture stack-agnostique
 
@@ -145,5 +152,7 @@ Pour développer en local, lance Claude Code avec le plugin lu **directement dep
 claude --plugin-dir ~/claude-skills   # lit les skills en place (le plugin.json fixe le namespace gm)
 /reload-plugins                       # applique tes édits dans la session, sans redémarrer
 ```
+
+Pour tester le script de publication de notes Mantis : `bash tests/mantis-note.test.sh` (aucun appel réseau, tout est simulé).
 
 À l'inverse, `/plugin marketplace update gingerminds` puis `/plugin install gm@gingerminds` recopient depuis la source — plus lourd, à réserver à la vérification d'une version installée.
