@@ -25,6 +25,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `merge-review` | `/gm:merge-review` | Review côté reviewer d'une MR GitLab existante — fond, forme, langue, standards — charge le ticket Mantis lié et rédige une note + recommandation approve / request-changes. Stack-agnostique (via `gm:review`). |
 | `security` | `/gm:security` | Audit sécurité des dépendances et de l'infra — `composer audit` / `npm audit`, advisories CMS/framework, config Docker — priorisé par criticité réelle, avec correctifs ou marches à suivre. Stack-agnostique : les checks spécifiques (ex. SA Drupal) viennent de `stack/`. |
 | `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressources dédiées par techno quand elles existent. |
+| `visual-regression` | `/gm:visual-regression` | Non-régression visuelle avec Playwright — capture des baselines, compare et rapporte les diffs pixel par pixel avec un verdict accept/reject par snapshot. Supporte aussi la comparaison directe de deux URLs live (sans baseline committée), pour auditer une migration/refonte : `/gm:visual-regression <url-ancien-site> <url-nouveau-site>`. Stack-agnostique (cible n'importe quelle URL rendue). |
 
 ## Installation
 
@@ -77,6 +78,8 @@ Côté reviewer, `/gm:merge-review` prend une MR existante (URL ou numéro), cha
 
 Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépare, génère et maintient un modèle **C4 interactif** (HTML autonome) dans `.archi/` — vue projet (C1/C2) dans `.archi/index.html` et une page par unité custom (C3, C4 à la demande), à ouvrir dans le navigateur.
 
+Pour la non-régression visuelle, `/gm:visual-regression` met en place et fait tourner des tests Playwright (baselines committées comparées au code courant), ou compare directement deux URLs live sans baseline — utile pour auditer une migration/refonte contre l'ancien site encore accessible.
+
 ## Structure
 
 ```
@@ -117,9 +120,10 @@ claude-skills/
     ├── merge-request/SKILL.md
     ├── merge-review/SKILL.md
     ├── security/SKILL.md    # générique : détecte la stack → charge stack/<x>/MAIN.md (security)
-    └── archi-c4/
-        ├── SKILL.md
-        └── assets/          # template.html figé + model.example.js (contrat)
+    ├── archi-c4/
+    │   ├── SKILL.md
+    │   └── assets/          # template.html figé + model.example.js (contrat)
+    └── visual-regression/SKILL.md
 ```
 
 Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh` — une seule copie, pas de duplication.
