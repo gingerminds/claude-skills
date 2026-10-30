@@ -375,6 +375,32 @@ class PassTest(FixCase):
         self.assertEqual(self.state()["project_name"], "Acme - Boutique")
         self.assertEqual(json.loads(out)["project_name"], "Acme - Boutique")
 
+    def test_open_carries_only_the_stack_cores_whose_folder_exists(self):
+        """Final wave S1: a core folder gone since stack-core ran (a cache cleaned, a folder
+        moved) is not given to the sub-agents; a note names it."""
+        present = self.run_dir / "core"
+        present.mkdir()
+        gone = self.run_dir / "gone"
+        (self.run_dir / "fix" / "stack-core.json").write_text(json.dumps({
+            "front": {"stack": "wordpress", "version": "6.5.2", "path": str(present),
+                      "source": "cache"},
+            "back": {"stack": "drupal", "version": "10.2", "path": str(gone), "source": "path"},
+        }), encoding="utf-8")
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(list(self.state()["stack_core"]), ["front"])
+        self.assertEqual(json.loads(out)["notes"], [
+            f"Cœur drupal du repo back introuvable ({gone}) : non repris, relancez cqa_fix.py "
+            "stack-core."])
+        self.finish()
+        (self.run_dir / "fix" / "stack-core.json").write_text(json.dumps({
+            "back": {"stack": "drupal", "version": "10.2", "path": str(gone), "source": "path"},
+        }), encoding="utf-8")
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("stack_core", self.state())
+        self.assertEqual(len(json.loads(out)["notes"]), 1)
+
     def test_dry_run_forces_notion_off(self):
         code, out, err = self.open(mode="autonomous", push="dry_run", notion="yes")
         self.assertEqual(code, 0, err)
@@ -699,6 +725,65 @@ class MergedTest(FixCase):
         result = self.merged(self.glab({5: {"state": "merged", "merge_commit_sha": unknown}},
                                        self.later))
         self.assertEqual([item["ref"] for item in result["merged_waiting"]], [7])
+
+    def test_unknown_deployed_sha_waits(self):
+        """Final wave R1: no deployment read from GitLab: the row waits, with the reason."""
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        result = self.merged(self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}},
+                                       None))
+        self.assertEqual(result["merged_deployed"], [])
+        self.assertEqual([(item["ref"], item["why"]) for item in result["merged_waiting"]],
+                         [(7, "shop : commit déployé en préprod inconnu")])
+
+    def test_a_repo_absent_from_the_context_waits_with_a_note(self):
+        """Final wave R1: a link to a repo the context does not know cannot be checked locally."""
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}],
+                       self.link(7, 9, repo="other"))
+        result = self.merged(self.glab({9: {"state": "merged", "merge_commit_sha": self.merge}},
+                                       self.later))
+        self.assertEqual([(item["ref"], item["why"]) for item in result["merged_waiting"]],
+                         [(7, "other : repo local inconnu")])
+        self.assertIn("other : repo absent de context.json, déploiement non vérifié.",
+                      result["notes"])
+
+    def test_a_link_without_repo_is_matched_on_host_and_project_path(self):
+        """Final wave R1: an entry without « repo » (v2 file) is tied to a repo of the context
+        only when its URL has the repo's host and exact project path; a URL of another host or
+        of a path that merely contains it names no local repo."""
+        same = "https://gitlab.example.org/acme/shop/-/merge_requests/5"
+        other_host = "https://gitlab.other.example.org/acme/shop/-/merge_requests/6"
+        longer_path = "https://gitlab.example.org/legacy/acme/shop/-/merge_requests/8"
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"},
+                                      {"ref": 8, "status": "En review"},
+                                      {"ref": 9, "status": "En review"}],
+                       {"7": [{"url": same}], "8": [{"url": other_host}], "9": [{"url": longer_path}]})
+        mrs = {iid: {"state": "merged", "merge_commit_sha": self.merge} for iid in (5, 6, 8)}
+        result = self.merged(self.glab(mrs, self.later))
+        self.assertEqual(result["merged_deployed"], [7])
+        self.assertEqual([(item["ref"], item["why"]) for item in result["merged_waiting"]],
+                         [(8, "repo inconnu : repo local inconnu"),
+                          (9, "repo inconnu : repo local inconnu")])
+
+    def test_a_row_in_review_without_any_link_is_noted(self):
+        """Final wave R1: a row « En review » that no run links to a merge request is said."""
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"},
+                                      {"ref": 8, "status": "En review"}], self.link(8, 5))
+        result = self.merged(self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}},
+                                       self.later))
+        self.assertEqual(result["merged_deployed"], [8])
+        self.assertIn("CQ-7 : « En review » sans MR connue dans les runs du projet : "
+                      "non vérifiée.", result["notes"])
+
+    def test_a_failed_fetch_is_noted(self):
+        """Final wave R1: the deployment is still judged on the local refs, and a note says
+        that git fetch origin failed."""
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        real_git(self.repo, "remote", "set-url", "origin", str(self.root / "missing.git"))
+        result = self.merged(self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}},
+                                       self.later))
+        self.assertEqual(result["merged_deployed"], [7])
+        self.assertIn("shop : git fetch origin a échoué : déploiement jugé sur les refs locales.",
+                      result["notes"])
 
 
 class RegistrationTest(FixCase):

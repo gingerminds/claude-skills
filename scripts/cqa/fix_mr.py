@@ -33,6 +33,11 @@ _MR_URL = re.compile(r"https?://\S+?/-/merge_requests/([0-9]+)\b")
 # The reason of a row skipped because the commit of another row, in an earlier pass, fixed it.
 _COVERED_REASON = re.compile(r"^corrigé par le commit de CQ-([0-9]+)(?![0-9])")
 COVERED = "couverte par le correctif de {ref}"
+# The fixer's notice of a heuristic secret alert left to the lead (agents/cqa-fixer.md), and
+# its wording once the lead waived the line (cqa_fix.py waive-secret).
+_ALERT_NOTICE = re.compile(
+    r"Alerte de secret à confirmer par le lead : (?P<path>\S.*?), ligne (?P<line>[0-9]+)(?![0-9])")
+WAIVED_ALERT = "Alerte de secret levée par le lead : {path}, ligne {line}"
 
 
 def title(count: int, sections: int) -> str:
@@ -494,16 +499,20 @@ def _attention(key: dict, reports: list, reviews: list, since: int) -> list:
     then those of the fixed rows of the reports, in the section of the row, once each.
 
     The review of a pass of a failed section gives none; the remark of the pass that fixed a
-    row is the review's correction when it has one.
+    row is the review's correction when it has one. The fixer's notice « Alerte de secret à
+    confirmer par le lead : <chemin>, ligne <n> » reads « levée par le lead » once the lead
+    waived that line (key secret_waivers, same path and line).
     """
     rows = key["rows"]
     owners = key.get("pass_sections") if isinstance(key.get("pass_sections"), dict) else {}
     failed = {section.get("alias") for section in key.get("sections") or []
               if section.get("state") == "failed"}
+    waived = {(item.get("path"), item.get("line")) for item in key.get("secret_waivers") or []
+              if isinstance(item, dict)}
     notes = []
 
     def add(section, text):
-        note = {"section": section, "text": text}
+        note = {"section": section, "text": _waived_alerts(text, waived)}
         if note not in notes:
             notes.append(note)
 
@@ -528,6 +537,19 @@ def _attention(key: dict, reports: list, reviews: list, since: int) -> list:
             if isinstance(note, str) and note.strip():
                 add(row.get("section"), f"{ref_label(ref)} : {note.strip()}")
     return notes
+
+
+def _waived_alerts(text: str, waived: set) -> str:
+    """Reword each secret alert notice of text whose path and line the lead waived."""
+    if not waived:
+        return text
+
+    def reword(found) -> str:
+        if (found.group("path"), int(found.group("line"))) in waived:
+            return WAIVED_ALERT.format(path=found.group("path"), line=found.group("line"))
+        return found.group(0)
+
+    return _ALERT_NOTICE.sub(reword, text)
 
 
 def _corrections(row: dict) -> dict:

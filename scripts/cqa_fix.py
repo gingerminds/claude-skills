@@ -293,6 +293,8 @@ def _cmd_merged(args, services: Services) -> int:
     result = {"merged_deployed": [], "merged_waiting": [], "closed": [], "open": []}
     for ref in refs:
         if ref not in links:
+            notes.append(f"{ref_label(ref)} : « {STATUS_REVIEW} » sans MR connue dans les runs du "
+                         "projet : non vérifiée.")
             continue
         verdicts = [checker.verdict(entry) for entry in links[ref]]
         states = [state for state, _ in verdicts]
@@ -446,19 +448,27 @@ class _MergeChecker:
         return self._deployment(name, repo, host, project, info["sha"])
 
     def _repo_of_url(self, url: str) -> Optional[dict]:
+        """Return the repo of the context whose remote has the host and the exact project
+        path of a merge request URL (an entry without « repo », v2 file), else None."""
+        try:
+            host, project = _host_and_project_of_url(url)
+        except ValueError:
+            return None
         for repo in self.repos.values():
             try:
-                project = fix_gitlab.host_and_path(repo.get("remote") or "")[1]
+                remote_host, remote_path = fix_gitlab.host_and_path(repo.get("remote") or "")
             except ValueError:
                 continue
-            if f"/{project}/-/merge_requests/" in url:
+            if (remote_host.lower(), remote_path.strip("/")) == (host.lower(), project.strip("/")):
                 return repo
         return None
 
     def _deployment(self, name: str, repo: dict, host: str, project: str, sha: str) -> tuple:
         path = repo["path"]
         if name not in self._deployed:
-            fix_git.fetch(path, self.run)
+            if not fix_git.fetch(path, self.run):
+                self._note(f"{name} : git fetch origin a échoué : déploiement jugé sur les refs "
+                           "locales.")
             env = dict(os.environ)
             env["GITLAB_HOST"] = host
             run = functools.partial(self.run, cwd=path, env=env)
@@ -590,7 +600,7 @@ def _cmd_open(args, services: Services) -> int:
         )
     except (KeyError, TypeError, AttributeError, ValueError):
         raise UsageError("fix/candidates.json : clés invalides, relancez cqa_fix.py candidates.")
-    records = _stack_records(run_dir)
+    records, notes = _present_stack_records(run_dir)
     if records:
         state["stack_core"] = records
     removed, archived, leftovers = (_archive(run_dir, old, services.run) if old is not None
@@ -600,9 +610,24 @@ def _cmd_open(args, services: Services) -> int:
         "started_at": state["started_at"], "stage": state["stage"], "mode": state["mode"],
         "push": state["push"], "notion": state["notion"], "project_name": state["project_name"],
         "keys": list(state["keys"]), "archived": archived, "removed": removed,
-        "leftovers": leftovers,
+        "leftovers": leftovers, "notes": notes,
     })
     return EXIT_OK
+
+
+def _present_stack_records(run_dir: Path) -> tuple:
+    """Return (the stack core records whose folder still exists, a note for each other one):
+    a core gone since stack-core ran is never given to the sub-agents."""
+    records, notes = {}, []
+    for name, record in _stack_records(run_dir).items():
+        path = record.get("path") if isinstance(record, dict) else None
+        if isinstance(path, str) and path and Path(path).is_dir():
+            records[name] = record
+        else:
+            stack = record.get("stack") if isinstance(record, dict) else None
+            notes.append(f"Cœur {stack or 'de la stack'} du repo {name} introuvable ({path}) : "
+                         "non repris, relancez cqa_fix.py stack-core.")
+    return records, notes
 
 
 def _project_name(context: dict) -> Optional[str]:
@@ -1813,11 +1838,12 @@ def _cmd_publish(args, services: Services) -> int:
     pushed = remote != head
     if pushed:
         _push(worktree, run, branch)
-    # Recorded before the MR exists: a branch pushed without MR is not a local branch.
-    key["pushed"] = True
-    fix_state.save(run_dir, state)
     created = updated = False
     if key.get("mr") is None:
+        # Recorded before the MR exists: a branch pushed without MR is not a local branch.
+        # A taken-over MR needs no such record: the branch is already on GitLab with it.
+        key["pushed"] = True
+        fix_state.save(run_dir, state)
         # The state is written once, with the MR and the step: after a failure from here,
         # a rerun finds this MR on GitLab and adopts it instead of describing it twice.
         key["mr"] = _create_mr(run, host, encoded, worktree, project_ref, branch=branch,
@@ -1906,22 +1932,27 @@ def _delete_empty_branch(path, run, key: dict) -> Optional[str]:
     if not any(fix_names.is_pass_branch(branch, base)
                for base in (fix_names.BRANCH_BASE, fix_names.DRY_RUN_BASE)):
         return "ce n'est pas une branche de passe"
+    head = fix_git.rev(path, run, f"refs/heads/{branch}")
+    if head is None:
+        return "branche introuvable dans le repo"
+    if head != start:
+        return "la branche porte des commits de la passe"
+    if _reflog_moved(path, run, branch):
+        return "la branche a porté des commits retirés (reflog) : gardée, voir la synthèse"
+    if fix_git.unpushed(path, run, branch):
+        return "la branche porte des commits absents d'origin"
     try:
-        head = fix_git.rev(path, run, f"refs/heads/{branch}")
-        if head is None:
-            return "branche introuvable dans le repo"
-        if head != start:
-            return "la branche porte des commits de la passe"
-        if _reflog_moved(path, run, branch):
-            return "la branche a porté des commits retirés (reflog) : gardée, voir la synthèse"
-        if fix_git.unpushed(path, run, branch):
-            return "la branche porte des commits absents d'origin"
-        if any(entry["branch"] == branch for entry in fix_git.worktrees(path, run)):
-            return "branche extraite dans un worktree ou dans votre repo"
-        if fix_git.remote_has(path, run, branch):
-            return "branche présente sur origin"
+        checked_out = any(entry["branch"] == branch for entry in fix_git.worktrees(path, run))
+    except fix_git.GitRefused:
+        return "git worktree list a échoué : branche gardée"
+    if checked_out:
+        return "branche extraite dans un worktree ou dans votre repo"
+    try:
+        on_origin = fix_git.remote_has(path, run, branch)
     except fix_git.GitRefused:
         return "origin injoignable : branche gardée"
+    if on_origin:
+        return "branche présente sur origin"
     deleted = fix_names.git(path, run, "update-ref", "-d", f"refs/heads/{branch}", start)
     if deleted.returncode != 0:
         return f"git update-ref a échoué : {deleted.stderr.strip()}"

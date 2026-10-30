@@ -2613,6 +2613,15 @@ class FixPassOrchestrationTest(unittest.TestCase):
         finish = self.publication[self.publication.index('cqa_fix.py" finish "$RUN" "<repo>"'):]
         self.assertIn("reflog", finish)
 
+    def test_small_final_wave_wordings(self):
+        """Final wave G1 and S1: the waived alert reads « levée par le lead » in the MR; open
+        carries only the stack cores whose folder still exists."""
+        self.assertIn("« Alerte de secret levée par le lead : <chemin>, ligne <n> »",
+                      self.publication)
+        diagnostic = _between(self.section, "**2. Diagnostic.**", "**3. ")
+        self.assertIn("whose folder still exists", diagnostic)
+        self.assertIn("`notes`", diagnostic)
+
     def test_an_answer_pass_without_a_valid_report_is_closed(self):
         """Task 13 round 1, item 2: the empty report closes a pass of a settled section."""
         end = _between(self.section, "**6. ", "**7. ")

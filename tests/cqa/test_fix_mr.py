@@ -330,6 +330,28 @@ class MaterialTest(unittest.TestCase):
         self.assertEqual([note["text"] for note in later["attention"]],
                          ["Ajouter un test.", "Nommer la constante."])
 
+    def test_a_waived_secret_alert_reads_waived_in_the_description(self):
+        """Final wave G1: the fixer's notice « Alerte de secret à confirmer par le lead :
+        <chemin>, ligne <n> » reads « levée par le lead » once the lead waived that line
+        (key secret_waivers: same path and line); another line keeps « à confirmer »."""
+        notice = "Alerte de secret à confirmer par le lead : wp-config.php, ligne 12"
+        other = "Alerte de secret à confirmer par le lead : inc/db.php, ligne 3"
+        reports = [(1, {"rows": [
+            {"ref": 3, "outcome": "fixed",
+             "attention": f"À valider avec soin : le mot de passe vient du BO. {notice}. {other}"},
+        ]})]
+        self.key["secret_waivers"] = [
+            {"blob": "f" * 40, "path": "wp-config.php", "line": 12,
+             "label": "credential_define", "at": "2026-10-29T10:00:00Z"}]
+        found = self.material(reports=reports)
+        self.assertEqual([note["text"] for note in found["attention"]], [
+            "CQ-3 : À valider avec soin : le mot de passe vient du BO. Alerte de secret levée "
+            "par le lead : wp-config.php, ligne 12. " + other,
+        ])
+        self.key.pop("secret_waivers")
+        found = self.material(reports=reports)
+        self.assertIn(notice, found["attention"][0]["text"])
+
     def test_material_takes_the_latest_report_and_the_current_files(self):
         reports = [
             (1, {"rows": [{"ref": 3, "outcome": "fixed", "change": "c1", "uat": "u1"}]}),
@@ -668,7 +690,7 @@ class FakeGitLab:
     def __init__(self):
         self.git, self.calls, self.mrs = [], [], {}
         self.next_iid, self.create_output, self.fail_git = 12, None, None
-        self.fail_create = False
+        self.fail_create = self.fail_update = False
 
     def url(self, iid):
         return f"https://{HOST}/acme/shop/-/merge_requests/{iid}"
@@ -709,6 +731,8 @@ class FakeGitLab:
                 out = f"\n!{iid} Draft: correctifs ({self.mrs[iid]['source_branch']})\n {self.url(iid)}\n\n"
             return done(command, out)
         if args[:2] == ["mr", "update"]:
+            if self.fail_update:
+                return done(command, "", 1, "500 Internal Server Error")
             description = next(a for a in args if a.startswith("--description="))
             self.mrs[int(args[2])]["description"] = description[len("--description="):]
             return done(command, self.url(int(args[2])) + "\n")
@@ -1434,6 +1458,28 @@ class PublishTest(MrCase):
         self.assertEqual((key["mr"], key["step"], key.get("pushed")), (None, "reviewed", True))
         self.assertEqual(self.remote(self.branch), self.head(self.worktree))
 
+    def test_publish_of_a_taken_over_mr_saves_nothing_before_the_description(self):
+        """Final wave N2: the early save of « pushed » belongs to the create path only; a
+        taken-over MR keeps the earlier resume behaviour (nothing recorded before the
+        description is added, the rerun pushes nothing more and completes it)."""
+        self.open_mr()
+        self.reviewed()
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.gitlab.fail_update = True
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 2)
+        self.assertIn("glab mr update", err)
+        key = self.key()
+        self.assertEqual((key["step"], key.get("pushed")), ("reviewed", None))
+        self.assertEqual(self.remote(self.branch), self.head(self.worktree))
+        self.gitlab.fail_update = False
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual((result["pushed"], result["updated"], result["created"]),
+                         (False, True, False))
+        self.assertEqual(self.key()["step"], "published")
+
     def test_publish_without_any_commit_publishes_nothing(self):
         self.reviewed(fix=False)
         self.assertEqual(self.cli("mr-body", KEY)[0], 0)
@@ -1632,7 +1678,17 @@ class FinishTest(MrCase):
         self.reviewed(push="local", fix=False)
         start = self.key()["start_sha"]
         self.gitlab.fail_git = "ls-remote"
-        self.assert_kept(self.finish(), start, "origin")
+        self.assert_kept(self.finish(), start, "injoignable")
+
+    def test_finish_names_a_worktree_listing_failure_apart_from_origin(self):
+        """Final wave FI1: « origin injoignable » is for a remote failure only; a failed
+        git worktree list gives its own reason."""
+        self.reviewed(push="local", fix=False)
+        start = self.key()["start_sha"]
+        self.gitlab.fail_git = "list"
+        result = self.finish()
+        self.assert_kept(result, start, "git worktree list")
+        self.assertNotIn("injoignable", result["branch_kept"])
 
     def test_finish_keeps_an_empty_branch_whose_reflog_holds_dropped_commits(self):
         """Ruling P11: a pass that committed then dropped everything back to start_sha keeps

@@ -755,7 +755,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" stack-core "$RUN" --repo <repo>
 ```
 
-`found` true: nothing to ask. `found` false: ask « Cœur WordPress pour les sous-agents ? » (« Cœur Drupal pour les sous-agents ? » for Drupal), saying that a folder is typed in « Autre », with « Télécharger la version <x> » (only for WordPress with a known `version`: `stack-core "$RUN" --repo <repo> --download`, the official release, its checksum checked, into the shared cache), « Indiquer un dossier » (the folder typed in « Autre », else asked next: `stack-core "$RUN" --repo <repo> --path <dossier>`) and « Continuer sans » (the sub-agents rely on how the repo calls the core). Exit 2 (a folder without the core, a version unknown) or 5 (a download refused, nothing kept): show the message and ask again. The chosen folder is recorded per repo in `fix/stack-core.json`, `open` carries it into `fix/state.json` (`stack_core`), and both sub-agents only read it (read-only).
+`found` true: nothing to ask. `found` false: ask « Cœur WordPress pour les sous-agents ? » (« Cœur Drupal pour les sous-agents ? » for Drupal), saying that a folder is typed in « Autre », with « Télécharger la version <x> » (only for WordPress with a known `version`: `stack-core "$RUN" --repo <repo> --download`, the official release, its checksum checked, into the shared cache), « Indiquer un dossier » (the folder typed in « Autre », else asked next: `stack-core "$RUN" --repo <repo> --path <dossier>`) and « Continuer sans » (the sub-agents rely on how the repo calls the core). Exit 2 (a folder without the core, a version unknown) or 5 (a download refused, nothing kept): show the message and ask again. The chosen folder is recorded per repo in `fix/stack-core.json`, `open` carries into `fix/state.json` (`stack_core`) the records whose folder still exists (its `notes` name the others, gone since: run `stack-core` again for them before the pass), and both sub-agents only read it (read-only).
 
 Commit signing, one call per repo (`path` of `context.json`):
 
@@ -1050,7 +1050,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" mr-body "$RUN" "<repo>"
 ```
 
-It needs every section of the key settled or failed (exit 2 names the one that is not: `section-end` first). It writes `mr-title.txt` and `mr.md` for a new merge request, or `mr-addition.md` for a merge request already open (a section « Ajouts du <date> » and « Hors-scope » updated; the rest of its description, which the reviewer may have edited, is kept), its rows grouped by section in the order of the commits, and prints `{"title", "file", "kind", "sections", "fixed", "partial", "covered", "waiting", "out_of_scope"}`.
+It needs every section of the key settled or failed (exit 2 names the one that is not: `section-end` first). It writes `mr-title.txt` and `mr.md` for a new merge request, or `mr-addition.md` for a merge request already open (a section « Ajouts du <date> » and « Hors-scope » updated; the rest of its description, which the reviewer may have edited, is kept), its rows grouped by section in the order of the commits (under « Points d'attention », a secret alert the lead waived reads « Alerte de secret levée par le lead : <chemin>, ligne <n> » instead of « à confirmer »), and prints `{"title", "file", "kind", "sections", "fixed", "partial", "covered", "waiting", "out_of_scope"}`.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
