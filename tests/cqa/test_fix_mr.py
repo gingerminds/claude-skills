@@ -667,6 +667,7 @@ class FakeGitLab:
     def __init__(self):
         self.git, self.calls, self.mrs = [], [], {}
         self.next_iid, self.create_output, self.fail_git = 12, None, None
+        self.fail_create = False
 
     def url(self, iid):
         return f"https://{HOST}/acme/shop/-/merge_requests/{iid}"
@@ -697,6 +698,8 @@ class FakeGitLab:
                 ]))
             return done(command, "", 1, "404 Not Found")
         if args[:2] == ["mr", "create"]:
+            if self.fail_create:
+                return done(command, "", 1, "500 Internal Server Error")
             iid = self.next_iid
             description = next(a for a in args if a.startswith("--description="))
             self.add(iid, args[args.index("--source-branch") + 1], description[len("--description="):])
@@ -1418,6 +1421,17 @@ class PublishTest(MrCase):
         self.assertEqual(self.gitlab.mrs[12]["description"].count("### CQ-3 : Ligne 3"), 1)
         self.assertEqual((self.key()["mr"], self.key()["step"]), ({"iid": 12, "url": MR_URL}, "published"))
         self.assertEqual(self.links(), {"links": {"3": [link()]}})
+
+    def test_publish_records_the_push_before_creating_the_mr(self):
+        self.reviewed()
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.gitlab.fail_create = True
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 2)
+        self.assertIn("est poussée, sans MR", err)
+        key = self.key()
+        self.assertEqual((key["mr"], key["step"], key.get("pushed")), (None, "reviewed", True))
+        self.assertEqual(self.remote(self.branch), self.head(self.worktree))
 
     def test_publish_without_any_commit_publishes_nothing(self):
         self.reviewed(fix=False)

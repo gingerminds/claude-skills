@@ -38,15 +38,16 @@ def pass_rows(state: dict, candidates: dict, reports: dict) -> dict:
     (done_before), and the rows of fix/candidates.json left out as outside the repo (their
     reason starts with « hors du dépôt »). reports maps a key name to its [(N, report)].
 
-    A row is {"mrs", "branches", "done", "remaining", "uat", "commits", "not_done", "group",
-    "in_mr", "fixed", "partial"}. A row fixed (or covered by the fix of another row) in a key
-    lists the MR of a published key (in_mr) or the local branch of another one, with the
-    texts of its fix; otherwise not_done gives the reason and group its group of GROUPS. A
-    row of several keys is fixed when one of them fixed it. Local branches are named
-    « <branche> du repo <repo> » when several keys keep one.
+    A row is {"mrs", "pushed", "branches", "done", "remaining", "uat", "commits", "not_done",
+    "group", "in_mr", "fixed", "partial"}. A row fixed (or covered by the fix of another row)
+    in a key lists the MR of a published key (in_mr), or the branch of another key: in pushed
+    when publish pushed it (key « pushed ») but no MR followed, in branches when it stayed
+    local; with the texts of its fix. Otherwise not_done gives the reason and group its group
+    of GROUPS. A row of several keys is fixed when one of them fixed it. Branches are named
+    « <branche> du repo <repo> » when several unpublished keys keep a branch with a fix.
     """
     keys = state.get("keys") or {}
-    local_keys = [key for key in keys.values() if not published(key) and key.get("branch")]
+    unpublished = [key for key in keys.values() if _branch_with_fixes(key)]
     found = {}
     for name, key in keys.items():
         rows = key.get("rows") or {}
@@ -54,8 +55,9 @@ def pass_rows(state: dict, candidates: dict, reports: dict) -> dict:
         branch = None
         if mr is None and key.get("branch") and not key.get("branch_deleted"):
             branch = key["branch"]
-            if len(local_keys) > 1:
+            if len(unpublished) > 1:
                 branch = f"{branch} du repo {key['repo']}"
+        pushed = bool(key.get("pushed"))
         covered = fix_mr.covered_refs(rows)
         for ref_text, row in sorted(rows.items(), key=lambda item: int(item[0])):
             if not isinstance(row, dict) or row.get("outcome") == "done_before":
@@ -63,7 +65,8 @@ def pass_rows(state: dict, candidates: dict, reports: dict) -> dict:
             ref, outcome = int(ref_text), row.get("outcome")
             entry = found.setdefault(ref, _empty())
             if outcome == "fixed" or ref in covered:
-                _add_fix(entry, ref, row, rows, covered, reports.get(name) or [], mr, branch)
+                _add_fix(entry, ref, row, rows, covered, reports.get(name) or [], mr, branch,
+                         pushed)
             else:
                 entry["reasons"].append(_not_done(row))
     for item in candidates.get("left") or []:
@@ -80,29 +83,39 @@ def status_before(row: dict, entries: list) -> Optional[str]:
     fix/mr-links.json for one of its merge requests, None when none has it."""
     for url in row["mrs"]:
         for entry in entries or []:
-            value = entry.get("status_before") if isinstance(entry, dict) else None
-            if entry.get("url") == url and isinstance(value, str) and value.strip():
+            if not isinstance(entry, dict) or entry.get("url") != url:
+                continue
+            value = entry.get("status_before")
+            if isinstance(value, str) and value.strip():
                 return value
     return None
 
 
 def closed_target(entries: list) -> tuple:
-    """Return (url, status_before) of the newest link of a row (the last entry): the merge
-    request to name and the status to write back; status_before falls back to an older entry,
-    None when no entry has it."""
-    url = entries[-1].get("url")
-    for entry in reversed(entries):
-        value = entry.get("status_before")
-        if isinstance(value, str) and value.strip():
-            return url, value
-    return url, None
+    """Return (urls, status_before) of a row whose merge request was closed unmerged, from its
+    entries in the newest fix/mr-links.json that links it: the URL of the newest entry of each
+    repo, in the order of the file, and the status_before of the newest entry (None when it
+    has none: no fallback to an older entry)."""
+    newest = {}
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("url"), str):
+            newest.pop(entry.get("repo"), None)
+            newest[entry.get("repo")] = entry
+    last = entries[-1] if entries and isinstance(entries[-1], dict) else {}
+    before = last.get("status_before")
+    urls = [entry["url"] for entry in newest.values()]
+    return urls, before if isinstance(before, str) and before.strip() else None
 
 
-def closed_reason(url: str, before: Optional[str]) -> str:
-    """Return the « Non traité » reason of a row whose merge request was closed unmerged."""
+def closed_reason(urls: list, before: Optional[str]) -> str:
+    """Return the « Non traité » reason of a row whose merge request was closed unmerged. Its
+    status goes back only if it is still « En review », so the text says so."""
+    links = "\n".join(urls)
     if before:
-        return f"MR fermée sans fusion, statut remis à « {before} » :\n{url}"
-    return f"MR fermée sans fusion :\n{url}"
+        return (f"MR fermée sans fusion, statut remis à « {before} » s'il était encore "
+                f"« En review » :\n{links}")
+    return ("MR fermée sans fusion, statut laissé tel quel (statut d'avant la passe inconnu) :"
+            f"\n{links}")
 
 
 def not_done_groups(rows: dict) -> list:
@@ -112,11 +125,19 @@ def not_done_groups(rows: dict) -> list:
 
 
 def _empty() -> dict:
-    return {"mrs": [], "branches": [], "done": [], "remaining": [], "uat": [], "commits": [],
-            "reasons": [], "in_mr": False, "fixed": False}
+    return {"mrs": [], "pushed": [], "branches": [], "done": [], "remaining": [], "uat": [],
+            "commits": [], "reasons": [], "in_mr": False, "fixed": False}
 
 
-def _add_fix(entry, ref, row, rows, covered, reports, mr, branch) -> None:
+def _branch_with_fixes(key: dict) -> bool:
+    """Return True for an unpublished key whose branch is still there and carries a fix."""
+    rows = key.get("rows") or {}
+    fixed = any(isinstance(row, dict) and row.get("outcome") == "fixed" for row in rows.values())
+    return (not published(key) and bool(key.get("branch")) and not key.get("branch_deleted")
+            and (fixed or bool(fix_mr.covered_refs(rows))))
+
+
+def _add_fix(entry, ref, row, rows, covered, reports, mr, branch, pushed=False) -> None:
     by = covered.get(ref)
     source = row if by is None else (rows.get(str(by)) or {})
     texts = fix_mr.fixed_texts(ref if by is None else by, source, reports)
@@ -130,7 +151,7 @@ def _add_fix(entry, ref, row, rows, covered, reports, mr, branch) -> None:
         entry["in_mr"] = True
         _extend(entry["mrs"], [mr])
     elif branch:
-        _extend(entry["branches"], [branch])
+        _extend(entry["pushed" if pushed else "branches"], [branch])
     _extend(entry["done"], [done])
     _extend(entry["uat"], [texts["uat"]])
     _extend(entry["remaining"], [remaining])
@@ -169,7 +190,8 @@ def _settled(entry: dict) -> dict:
         return ("\n".join(entry[name]) or None) if fixed else None
 
     return {
-        "mrs": entry["mrs"], "branches": entry["branches"], "done": joined("done"),
+        "mrs": entry["mrs"], "pushed": entry["pushed"], "branches": entry["branches"],
+        "done": joined("done"),
         "remaining": joined("remaining"), "uat": joined("uat"),
         "commits": entry["commits"] if fixed else [], "not_done": reason, "group": group,
         "in_mr": entry["in_mr"], "fixed": fixed, "partial": fixed and bool(entry["remaining"]),

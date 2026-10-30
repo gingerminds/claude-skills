@@ -12,6 +12,7 @@ import subprocess
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from cqa.checklist import STATUS_REVIEW, parse_refs, ref_label, validate_schema
 from cqa import fix_notion, fix_state, report
@@ -38,9 +39,16 @@ from cqa.notion_read import (
     write_fiches,
     write_json,
 )
-from cqa.notion_write import ReferenceWriteRefused, apply_plan, skill_comments, validate_plan
+from cqa.notion_write import (
+    ReferenceWriteRefused,
+    apply_plan,
+    skill_comments,
+    text_digest,
+    validate_plan,
+)
 from cqa.plan import filter_plan, operation_key, plan_digest
 from cqa.rerun import (
+    comment_dates,
     latest_findings,
     list_of,
     read_grounded_findings,
@@ -362,9 +370,11 @@ def _cmd_fix_plan(args, client) -> int:
     review = _review_option(client, notion, concerned, notes)
     latest = []
 
-    def findings() -> dict:
+    def findings() -> tuple:
         if not latest:
-            latest.append(_latest_findings(run_dir, context))
+            sources = {}
+            found = _latest_findings(run_dir, context, sources)
+            latest.append((found, comment_dates(run_dir, sources)))
         return latest[0]
 
     ops, in_review, reverted = [], [], []
@@ -375,10 +385,10 @@ def _cmd_fix_plan(args, client) -> int:
                          "cette ligne.")
             continue
         if ref in reverts:
-            url, before = reverts[ref]
+            urls, before = reverts[ref]
             text = format_fix_comment(row=row, **common, mrs=[], done=None, remaining=None,
                                       uat=None, commits=[],
-                                      not_done=fix_notion.closed_reason(url, before))
+                                      not_done=fix_notion.closed_reason(urls, before))
             if before:
                 ops.append(_fix_op("status", row, before=STATUS_REVIEW, after=before,
                                    expected=STATUS_REVIEW))
@@ -389,8 +399,8 @@ def _cmd_fix_plan(args, client) -> int:
         else:
             item = concerned[ref]
             text = format_fix_comment(
-                row=row, **common, mrs=item["mrs"], branches=item["branches"],
-                done=item["done"], remaining=item["remaining"], uat=item["uat"],
+                row=row, **common, mrs=item["mrs"], pushed=item["pushed"],
+                branches=item["branches"], done=item["done"], remaining=item["remaining"], uat=item["uat"],
                 commits=item["commits"], not_done=item["not_done"],
             )
             if item["in_mr"] and review:
@@ -404,9 +414,13 @@ def _cmd_fix_plan(args, client) -> int:
                     in_review.append(ref)
         audit = _audit_without_mr_block(client, row, notion["bot_id"], findings, context, common)
         if audit is not None:
-            ops.append(_fix_op("comment", row, text=audit[0], verdict=audit[1]))
+            rewritten, verdict, read = audit
+            ops.append(_fix_op("comment", row, text=rewritten, verdict=verdict,
+                               replaces=text_digest(read)))
         ops.append(_fix_op("fix_comment", row, text=text))
-    if state is not None:
+    if state is not None and not concerned:
+        notes.append("Aucune ligne de la passe à écrire dans Notion : pas de commentaire de page.")
+    elif state is not None:
         page_id = notion.get("copy_page_id")
         if isinstance(page_id, str) and page_id.strip():
             text = _fix_page_comment(state, concerned, common, not review, in_review, reverted)
@@ -519,11 +533,14 @@ def _review_option(client, notion: dict, concerned: dict, notes: list) -> bool:
 
 def _audit_without_mr_block(client, row: dict, bot_id: str, findings, context: dict,
                             common: dict):
-    """Return (text, verdict) of the audit comment of a row rewritten without the « MR : »
-    block of the v2 fix mode, None when it has no such block (or no audit comment).
+    """Return (text, verdict, read) for the audit comment of a row rewritten without the
+    « MR : » block of the v2 fix mode (read: the text it replaces), None when it has no such
+    block (comments.has_mr_block) or no audit comment.
 
     A comment with a verdict keeps its text; a reduced v2 comment (no verdict) is written again
-    from the latest finding of the row, dated by the audit, and only loses its block without one.
+    from the latest finding of the row, dated as the audit plan dates it (the date of the rerun
+    that judged the row, else the start of the run), and only loses its block without one.
+    findings() gives ({ref: latest finding}, {ref: date of its rerun}).
     """
     own = skill_comments(client.comments(row["page_id"]), bot_id, "comment")
     if not own:
@@ -532,16 +549,19 @@ def _audit_without_mr_block(client, row: dict, bot_id: str, findings, context: d
     if not has_mr_block(text):
         return None
     verdict = parse_verdict(text)
-    finding = findings().get(row["ref"]) if verdict is None else None
+    found, dates = findings() if verdict is None else ({}, {})
+    finding = found.get(row["ref"])
     if finding is None:
-        return without_mr_block(text), verdict
-    try:
-        day = report.run_start(context.get("run_id")).date()
-    except ValueError:
-        day = common["run_date"]
+        return without_mr_block(text), verdict, text
+    day = dates.get(row["ref"])
+    if day is None:
+        try:
+            day = report.run_start(context.get("run_id")).date()
+        except ValueError:
+            day = common["run_date"]
     judged = apply_guardrails(finding, row, followup_done=True)
     rebuilt = format_comment(finding=judged, row=row, **{**common, "run_date": day})
-    return rebuilt, judged["verdict"]
+    return rebuilt, judged["verdict"], text
 
 
 def _fix_page_comment(state: dict, concerned: dict, common: dict, review_missing: bool,
@@ -550,22 +570,29 @@ def _fix_page_comment(state: dict, concerned: dict, common: dict, review_missing
     for key in state["keys"].values():
         if fix_notion.published(key) and key["mr"]["url"] not in mrs:
             mrs.append(key["mr"]["url"])
-    local = [ref for ref, item in concerned.items() if item["fixed"] and not item["in_mr"]]
-    branches = []
-    for ref in local:
-        branches.extend(name for name in concerned[ref]["branches"] if name not in branches)
+    outside = [item for item in concerned.values() if item["fixed"] and not item["in_mr"]]
+    pushed, branches = [], []
+    for item in outside:
+        pushed.extend(name for name in item["pushed"] if name not in pushed)
+        branches.extend(name for name in item["branches"] if name not in branches)
+    pushed_rows = [ref for ref, item in concerned.items()
+                   if item["fixed"] and not item["in_mr"] and item["pushed"]]
+    local = [ref for ref, item in concerned.items()
+             if item["fixed"] and not item["in_mr"] and not item["pushed"]]
     return format_fix_page_comment(
         run_date=common["run_date"], lead_option=common["lead_option"], mrs=mrs,
         branches=branches, in_mr=[ref for ref, item in concerned.items() if item["in_mr"]],
         local=local, partial=[ref for ref, item in concerned.items() if item["partial"]],
         in_review=in_review, review_missing=review_missing,
-        not_done=fix_notion.not_done_groups(concerned), reverted=reverted,
+        not_done=fix_notion.not_done_groups(concerned), reverted=reverted, pushed=pushed,
+        pushed_rows=pushed_rows,
     )
 
 
 def _fix_op(kind: str, row: dict, *, text: str = "", verdict=None, before=None, after=None,
-            expected=None) -> dict:
-    """Return an operation of fix/notion-plan.json; expected makes a status conditional."""
+            expected=None, replaces=None) -> dict:
+    """Return an operation of fix/notion-plan.json; expected makes a status conditional,
+    replaces an audit comment rewrite (see notion_write.apply_plan)."""
     operation = {
         "key": operation_key(kind, row["page_id"], after, text),
         "kind": kind,
@@ -579,22 +606,29 @@ def _fix_op(kind: str, row: dict, *, text: str = "", verdict=None, before=None, 
     }
     if expected is not None:
         operation["expected"] = expected
+    if replaces is not None:
+        operation["replaces"] = replaces
     return operation
 
 
-def _latest_findings(run_dir: Path, context: dict) -> dict:
-    """Return {ref: latest valid finding} of the run, {} when lots.json is missing."""
+def _latest_findings(run_dir: Path, context: dict, sources: Optional[dict] = None) -> dict:
+    """Return {ref: latest valid finding} of the run, {} when lots.json is missing. sources,
+    when given, receives {ref: name of the findings file of its latest finding}."""
     try:
         lots = json.loads((run_dir / "lots.json").read_text(encoding="utf-8"))["lots"]
     except (OSError, ValueError, KeyError, TypeError):
         return {}
     if not isinstance(lots, list):
         return {}
-    return latest_findings(
-        run_dir,
-        lots,
-        lambda lot, name: read_grounded_findings(run_dir, context, lot, name),
-    )
+
+    def read(lot, name):
+        found = read_grounded_findings(run_dir, context, lot, name)
+        if sources is not None:
+            for item in found[0] if found else []:
+                sources[item["ref"]] = name
+        return found
+
+    return latest_findings(run_dir, lots, read)
 
 
 def _fix_date(run_dir: Path) -> date:

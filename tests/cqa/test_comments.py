@@ -12,6 +12,7 @@ from cqa.comments import (
     format_fix_comment,
     format_fix_page_comment,
     format_page_summary,
+    has_mr_block,
     is_audit_comment,
     is_fix_comment,
     is_linkable_url,
@@ -865,11 +866,27 @@ class MrBlockTest(unittest.TestCase):
     def test_without_mr_block_removes_the_v2_block(self):
         body, foot = EXPECTED_KO_TEXT.rsplit("\n", 1)
         with_block = f"{body}\n\nMR :\n{MR_URL}\n{MR_URL_2}\n{foot}"
+        self.assertTrue(has_mr_block(with_block))
+        self.assertTrue(has_mr_block(REDUCED_V2))
         self.assertEqual(without_mr_block(with_block), EXPECTED_KO_TEXT)
+        self.assertFalse(has_mr_block(EXPECTED_KO_TEXT))
         self.assertEqual(without_mr_block(EXPECTED_KO_TEXT), EXPECTED_KO_TEXT)
         self.assertEqual(
             without_mr_block(f"Verdict :\nÀ traiter\n\nMR :\n{MR_URL}"), "Verdict :\nÀ traiter"
         )
+
+    def test_an_mr_line_inside_a_block_is_not_the_v2_block(self):
+        body, foot = EXPECTED_KO_TEXT.rsplit("\n", 1)
+        inside = [
+            body.replace("À faire :\n", f"À faire :\nMR :\n{MR_URL}\n") + "\n" + foot,
+            f"{body}\n\nMR :\n{MR_URL}\nvoir avec l'équipe\n{foot}",
+            f"{body}\n\nMR :\n{foot}",
+            f"{HEADER}\n\nVerdict :\nÀ traiter\n\nMR :\n{MR_URL}\n\nConstat :\nx\n{FOOTER}",
+        ]
+        for text in inside:
+            with self.subTest(text=text[-120:]):
+                self.assertFalse(has_mr_block(text))
+                self.assertEqual(without_mr_block(text), text)
 
     def test_reduced_mr_comment_counts_as_the_skill_comment(self):
         self.assertTrue(is_skill_comment(REDUCED_V2))
@@ -949,6 +966,22 @@ class FixCommentTest(unittest.TestCase):
             ]),
         )
         self.assertNotIn("MR :", text)
+
+    def test_fix_comment_on_a_branch_pushed_without_mr(self):
+        text = fix_comment(mrs=[], pushed=["feature/checklist-qa-fix"], uat=None, commits=[])
+        self.assertEqual(
+            text,
+            "\n".join([
+                FIX_HEAD,
+                "",
+                "Branche poussée sans MR : feature/checklist-qa-fix",
+                "",
+                "Fait :",
+                "Ajoute l'en-tête HSTS dans la configuration nginx.",
+                FIX_FOOT,
+            ]),
+        )
+        self.assertNotIn("non poussée", text)
 
     def test_fix_comment_stays_within_the_limit(self):
         text = fix_comment(mrs=[MR_URL, MR_URL_2], done="d" * 600, uat="u" * 600,
@@ -1057,12 +1090,50 @@ class FixPageCommentTest(unittest.TestCase):
                 f"MR : {MR_URL_2}",
                 "Lignes mises en MR : 1.",
                 "Statut « En review » non posé : option absente de la copie.",
-                "MR fermées sans fusion : CQ-5, CQ-6 remises à leur statut d'avant la passe.",
+                "MR fermées sans fusion : CQ-5, CQ-6 remises à leur statut d'avant la passe si "
+                "elles étaient encore « En review ».",
                 "Suite : relire et tester les MR, les fusionner, déployer en préprod, puis lancer "
                 "/gm:checklist-quality-audit recette.",
             ]),
         )
         self.assertNotIn(EM_DASH, text)
+
+    def test_page_comment_of_a_mixed_pass(self):
+        text = self.page(branches=["feature/checklist-qa-fix du repo front"],
+                         pushed=["feature/checklist-qa-fix du repo back"], in_mr=[101],
+                         local=[108], pushed_rows=[109, 110], partial=[109], in_review=[101],
+                         not_done=[], reverted=[5])
+        self.assertEqual(
+            text,
+            "\n".join([
+                "Correctifs automatiques · 29/10/2026 · lancé par Camille D",
+                f"MR : {MR_URL}",
+                "Branche poussée sans MR : feature/checklist-qa-fix du repo back",
+                "Branche locale : feature/checklist-qa-fix du repo front (non poussée)",
+                "Lignes mises en MR : 1.",
+                "Statut « En review » : 1 ligne, sauf statut changé depuis le lancement.",
+                "Lignes corrigées sur la branche poussée sans MR : 2, dont 1 partielle ; "
+                "statuts inchangés.",
+                "Lignes corrigées sur la branche locale : 1 ; statuts inchangés.",
+                "MR fermées sans fusion : CQ-5 remise à son statut d'avant la passe si elle était "
+                "encore « En review ».",
+                "Suite (MR) : relire et tester la MR, la fusionner, déployer en préprod, puis "
+                "lancer /gm:checklist-quality-audit recette.",
+                "Suite (branche poussée sans MR) : ouvrir la MR, la relire et la tester, la "
+                "fusionner, déployer en préprod, puis lancer /gm:checklist-quality-audit recette.",
+                "Suite (branche locale) : pousser la branche et ouvrir la MR, la relire et la "
+                "tester, la fusionner, déployer en préprod, puis lancer "
+                "/gm:checklist-quality-audit recette.",
+            ]),
+        )
+        only_pushed = self.page(mrs=[], pushed=["feature/checklist-qa-fix"], in_mr=[],
+                                pushed_rows=[101], partial=[], in_review=[], not_done=[])
+        self.assertTrue(only_pushed.endswith(
+            "Branche poussée sans MR : feature/checklist-qa-fix\n"
+            "Lignes corrigées sur la branche poussée sans MR : 1 ; statuts inchangés.\n"
+            "Suite : ouvrir la MR, la relire et la tester, la fusionner, déployer en préprod, "
+            "puis lancer /gm:checklist-quality-audit recette."))
+        self.assertNotIn("pousser", only_pushed.replace("poussée", ""))
 
     def test_page_comment_shortens_long_lists(self):
         text = self.page(not_done=[("écartées", list(range(1, 400)))])

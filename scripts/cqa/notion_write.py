@@ -1,5 +1,7 @@
 """Writing a plan to Notion: the only code that changes the copy, behind its safety gates."""
+import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -15,12 +17,19 @@ ASSIGNEE_PROPERTY = "Assignée à"
 REFUSED_MESSAGE = "écriture refusée : data source du modèle"
 REFUSED_PAGE_MESSAGE = "écriture refusée : page du modèle"
 STATUS_CHANGED = "statut changé depuis le lancement"
+AUDIT_CHANGED = "commentaire d'audit changé depuis le plan"
 
 _KIND_ORDER = {"status": 0, "assign": 1, "comment": 2, "fix_comment": 3, "page_comment": 4}
 _COMMENT_KINDS = ("comment", "fix_comment", "page_comment")
 # The skill comment each kind replaces: the audit comment, or the fix comment.
 _OWN = {"comment": is_audit_comment, "fix_comment": is_fix_comment}
 _STOPPING_STATUSES = (0, 401, 429)
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def text_digest(text: str) -> str:
+    """Return the sha256 of a comment text, edge spaces aside: the « replaces » of an operation."""
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
 class ReferenceWriteRefused(ValueError):
@@ -58,6 +67,9 @@ def apply_plan(
     A status operation with "expected" reads the status of the page first and writes only
     when it is still expected: otherwise it is skipped (status_changed, not journaled, so a
     rerun reads it again); a page that already has the target status is skipped and journaled.
+    A comment with "replaces" (text_digest of the audit comment its plan read) rewrites the
+    audit comment only while it is still that text: otherwise, or when it is gone, it is
+    skipped without being journaled, and nothing is created.
 
     A plan whose copy is the reference data source, or with an operation on reference_page_id
     (the page of the template), is refused with ReferenceWriteRefused, and a malformed plan or
@@ -133,6 +145,10 @@ def apply_plan(
             )
             log(f"{label} : non écrit, {STATUS_CHANGED} (« {current or 'aucun'} »)")
             continue
+        if sent.get("audit_changed"):
+            result["skipped"] += 1
+            log(f"{label} : non écrit, {AUDIT_CHANGED}")
+            continue
         recorded.add(key)
         entries.append(_entry(item, sent, plan_id))
         write_json(journal, {"applied": entries})
@@ -201,6 +217,11 @@ def _problem(item) -> Optional[str]:
         not isinstance(expected, str) or not expected.strip()
     ):
         return "« expected » doit être le nom d'un statut"
+    replaces = item.get("replaces")
+    if replaces is not None and (
+        kind != "comment" or not isinstance(replaces, str) or not _DIGEST.fullmatch(replaces)
+    ):
+        return "« replaces » doit être l'empreinte sha256 d'un commentaire d'audit"
     if kind == "assign" and not _is_names(after):
         return "« after » doit être la liste des noms assignés"
     if kind in _COMMENT_KINDS and not (text and text.strip()):
@@ -265,6 +286,9 @@ def _send(client, item: dict, bot_id: Optional[str]) -> dict:
         own = _skill_comments(existing, bot_id, kind) if kind in _OWN else []
         if own and _plain_text(own[-1]).strip() == item["text"].strip():
             return {"skipped": True, "failed": _delete_all(client, own[:-1])}
+        replaces = item.get("replaces")
+        if replaces is not None and (not own or text_digest(_plain_text(own[-1])) != replaces):
+            return {"skipped": True, "audit_changed": True, "failed": []}
         if not own and _shown_in(existing, item["text"], bot_id):
             return {"skipped": True, "failed": []}
         return _write_comment(client, page_id, item["text"], own)

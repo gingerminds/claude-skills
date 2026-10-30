@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 import cqa_notion
 from cqa.comments import to_rich_text
 from cqa.notion_api import NotionClient, NotionError
-from cqa.notion_write import ReferenceWriteRefused, apply_plan
+from cqa.notion_write import ReferenceWriteRefused, apply_plan, text_digest
 from cqa.plan import operation_key
 from tests.cqa.fakes import Call, FakeClock, apply_report, failure
 
@@ -1106,6 +1106,50 @@ class FixCommentReplacementTest(ApplyTestCase):
         blank["expected"] = " "
         for item in (empty, wrong, blank):
             with self.subTest(item=item):
+                with self.assertRaises(ValueError):
+                    self.apply(item)
+        self.assertEqual(self.notion.calls, [])
+
+
+class AuditRewriteTest(ApplyTestCase):
+    """A « comment » with « replaces » rewrites the audit comment only when it is still the one
+    the plan read (fix-plan removing the v2 « MR : » block)."""
+
+    READ = (verdict_blocks("À traiter (confiance haute)")
+            + "\n\nMR :\nhttps://gitlab.example.org/a/b/-/merge_requests/1")
+
+    def rewrite_op(self, text=None):
+        item = comment_op(PAGE_1, 1, text or verdict_blocks("À traiter (confiance haute)"))
+        item["replaces"] = text_digest(self.READ)
+        return item
+
+    def test_the_audit_comment_read_by_the_plan_is_rewritten(self):
+        self.notion.add_comment(PAGE_1, self.READ, comment_id="audit")
+        result = self.apply(self.rewrite_op())
+        self.assertEqual(result["done"], 1)
+        self.assertEqual(self.notion.texts(PAGE_1), [verdict_blocks("À traiter (confiance haute)")])
+
+    def test_an_audit_comment_changed_since_the_plan_is_left_alone(self):
+        rewritten = verdict_blocks("Ok / Recetté", "Revu par la relance")
+        self.notion.add_comment(PAGE_1, rewritten, comment_id="audit")
+        self.notion.add_comment(PAGE_1, fix_text(), comment_id="fix")
+        result = self.apply(self.rewrite_op(), fix_comment_op(PAGE_1, 1, fix_text("hors du dépôt")))
+        self.assertEqual((result["done"], result["skipped"], result["errors"]), (1, 1, []))
+        self.assertEqual(self.notion.texts(PAGE_1), [rewritten, fix_text("hors du dépôt")])
+        self.assertIn("CQ-1 (comment) : non écrit, commentaire d'audit changé depuis le plan",
+                      self.log)
+        self.assertEqual([entry["kind"] for entry in self.applied()], ["fix_comment"])
+
+    def test_a_deleted_audit_comment_is_not_created_again(self):
+        result = self.apply(self.rewrite_op())
+        self.assertEqual((result["done"], result["skipped"]), (0, 1))
+        self.assertEqual(self.notion.requests("POST"), [])
+
+    def test_an_invalid_digest_is_refused_before_any_request(self):
+        for value in ("", "abc", 3):
+            item = self.rewrite_op()
+            item["replaces"] = value
+            with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     self.apply(item)
         self.assertEqual(self.notion.calls, [])

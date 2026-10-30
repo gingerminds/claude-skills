@@ -53,7 +53,8 @@ def read_mr_links(run_dir: Path) -> dict:
 def read_mr_link_entries(run_dir: Path) -> dict:
     """Return {ref: [entry, ...]} from fix/mr-links.json, in the order of the file (the newest
     link last); {} when the file is absent. An entry is {"repo", "url", "iid", "partial",
-    "status_before"} (older files lack the last two).
+    "status_before"}; a file of the v2 fix mode has neither of the last two: partial is then
+    False and status_before None (also for a value that is no status name).
 
     Raises ValueError when the file cannot be read as {"links": {"<ref>": [{"url": ...}]}}.
     """
@@ -73,8 +74,14 @@ def read_mr_link_entries(run_dir: Path) -> dict:
         if not str(key).isdigit() or not all(isinstance(url, str) and url.strip() for url in urls):
             raise ValueError(f"{LINKS_FILE} est illisible : « {key} » doit lister des entrées avec une « url ».")
         if listed:
-            found[int(key)] = [dict(entry) for entry in listed]
+            found[int(key)] = [_link_entry(entry) for entry in listed]
     return found
+
+
+def _link_entry(entry: dict) -> dict:
+    before = entry.get("status_before")
+    return {**entry, "partial": bool(entry.get("partial")),
+            "status_before": before if isinstance(before, str) and before.strip() else None}
 
 
 def now() -> str:

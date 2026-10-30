@@ -1554,6 +1554,9 @@ def _cmd_publish(args, services: Services) -> int:
     pushed = remote != head
     if pushed:
         _push(worktree, run, branch)
+    # Recorded before the MR exists: a branch pushed without MR is not a local branch.
+    key["pushed"] = True
+    fix_state.save(run_dir, state)
     created = updated = False
     if key.get("mr") is None:
         # The state is written once, with the MR and the step: after a failure from here,

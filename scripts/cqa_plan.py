@@ -37,7 +37,13 @@ from cqa.lots import TOOLS, build_lots, coverage, select_rows
 from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
 from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_digest
-from cqa.rerun import latest_findings, read_grounded_findings, rerun_candidates
+from cqa.rerun import (
+    comment_dates,
+    latest_findings,
+    read_grounded_findings,
+    rerun_candidates,
+    rerun_dates,
+)
 from cqa.project import parse_project_md, project_name, project_slug, sibling_repos
 from cqa.secrets import known_values_from_env, scan_tree
 from cqa import crawl_budget
@@ -1037,15 +1043,7 @@ def _closed_reruns(run_dir: Path) -> set:
 
 def _rerun_dates(run_dir: Path) -> dict:
     """Return {NN: date} of the closed reruns that recorded their date (rerun-close)."""
-    dates = _read_json_object(run_dir / "reruns.json").get("dates")
-    found = {}
-    for key, value in (dates.items() if isinstance(dates, dict) else []):
-        if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
-            try:
-                found[key] = datetime.strptime(value, "%Y-%m-%d").date()
-            except ValueError:
-                continue
-    return found
+    return rerun_dates(run_dir)
 
 
 def _read_json_object(path: Path) -> dict:
@@ -1231,13 +1229,7 @@ def _comment_dates(run_dir: Path, sources: dict) -> dict:
     Their comment then says when they were judged again; a rerun closed before its date was
     recorded keeps the date of the run.
     """
-    dates = _rerun_dates(run_dir)
-    found = {}
-    for ref, name in sources.items():
-        match = _RERUN_FILE.fullmatch(name)
-        if match and match.group(2) in dates:
-            found[ref] = dates[match.group(2)]
-    return found
+    return comment_dates(run_dir, sources)
 
 
 def _check_closed(run_dir: Path, number: int) -> None:
