@@ -1,6 +1,6 @@
 ---
 name: nuxt4-migration
-description: Audits a Nuxt 3 project for Nuxt 4 migration readiness and drives the migration — runs `nuxt upgrade` and the official codemods, checks each breaking-change area (directory structure, useAsyncData/useFetch reactivity, Vite Environment API, jiti/case-sensitive routing, window.__NUXT__), audits and bumps the module ecosystem (Node version, Nuxt modules, TypeScript/Vite) to Nuxt-4-compatible versions, and produces a prioritized migration plan. Use when the user asks to migrate/upgrade a Nuxt project to v4, or invokes /gm:nuxt4-migration.
+description: Audits a Nuxt 3 project for Nuxt 4 migration readiness and drives the migration — runs `nuxt upgrade` and the official codemods, checks each breaking-change area (directory structure, useAsyncData/useFetch behaviour, normalized component names, inline styles, Unhead v2, TypeScript config, window.__NUXT__, removed config), audits and bumps the module ecosystem (Node version, Nuxt modules, TypeScript/Vite) to Nuxt-4-compatible versions, and produces a prioritized migration plan. Use when the user asks to migrate/upgrade a Nuxt project to v4, or invokes /gm:nuxt4-migration.
 ---
 
 # Nuxt 3 → 4 Migration

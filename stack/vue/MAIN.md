@@ -166,7 +166,7 @@ grep -E 'compatibilityVersion|future' nuxt.config.ts 2>/dev/null
 Two Nuxt-provided tools do the mechanical work — run them before any manual pass:
 
 ```bash
-npx nuxt upgrade                             # bump the nuxt package + resolve peer versions
+npx nuxt upgrade                             # bump the nuxt package + resolve peer versions (or: npm install nuxt@^4.0.0)
 npx codemod@0.18.7 nuxt/4/migration-recipe   # apply the full set of automated codemods
 ```
 
@@ -177,6 +177,7 @@ Ask before running the codemods on a dirty tree — they rewrite files across th
 - `nuxt/4/deprecated-dedupe-value` — updates `refresh`/`dedupe` parameter usage.
 - `nuxt/4/shallow-function-reactivity` — adapts code that relied on deep reactivity of fetched data.
 - `nuxt/4/template-compilation-changes` — migrates EJS-style template usage.
+- `nuxt/4/absolute-watch-path` — adapts `builder:watch` hooks to absolute paths.
 
 After running them, diff the result (`git diff --stat`) and read through the non-trivial changes — codemods are mechanical and can mis-transform edge cases.
 
@@ -184,71 +185,84 @@ After running them, diff the result (`git diff --stat`) and read through the non
 
 `nuxt upgrade` only bumps the `nuxt` package itself — every module/plugin the project depends on needs its own pass, and this is where migrations often get stuck silently:
 
-- **Node version**: confirm the runtime satisfies Nuxt 4's minimum, and Node 22.19+ if relying on native config loading (see `jiti` below). Bump `.nvmrc`/`package.json` `engines.node` and the CI/Docker base image together — not just the local machine.
+- **Node version**: confirm the runtime satisfies Nuxt 4's minimum (the official upgrade guide gives no number: read `engines` in the installed `nuxt` package after `nuxt upgrade`, and the Node requirement of each module). Bump `.nvmrc`/`package.json` `engines.node` and the CI/Docker base image together — not just the local machine.
 - **Inventory every module**: read `modules` in `nuxt.config.ts` and cross-reference with `package.json` (`@nuxtjs/*`, `@pinia/nuxt`, `@nuxt/image`, `@vueuse/nuxt`, UI kits, etc.).
 - **Check Nuxt 4 compatibility per module**: `npm view <package> peerDependencies` (or the module's changelog/GitHub releases) to find the minimum version that declares `"nuxt": "^4"` support. A module still pinned to a Nuxt-3-only peer range will either fail to install or silently misbehave at runtime.
 - **Bump each module individually**, not with a blind `npm update` — a wide bump drags unrelated majors along and makes a failure hard to attribute. `npm install <module>@<compat-version>` one at a time, build/test between each.
 - **Read the module's own changelog for its bump** — a module's jump to its Nuxt-4-compatible release often carries *its own* breaking changes, independent of anything in the Nuxt core guide below (e.g. a major `@nuxtjs/i18n` or `@pinia/nuxt` bump). Treat these exactly like the Nuxt core breaking changes: find where the project uses the old API and adjust the code — don't just bump the version number and move on.
-- **TypeScript / Vite**: if the project pins `typescript` or `vite` directly as a devDependency (rather than relying on Nuxt's bundled version), check they satisfy Nuxt 4's requirements (Vite 6) and bump if needed.
+- **TypeScript / Vite**: if the project pins `typescript` or `vite` directly as a devDependency (rather than relying on Nuxt's bundled version), check their versions against the peer ranges of the installed `nuxt` package (`npm ls typescript vite`) and bump if needed.
 - **Swiper**: `grep -E '"(swiper|vue-awesome-swiper)"' package.json` — if either is present, run **`/gm:swiper-migration`** before moving on. It audits every slider for a legacy wrapper/API (`vue-awesome-swiper`, the old single `options` prop, the `v-swiper` directive) and migrates it to the modern `swiper/vue` components. Don't attempt this inline here — it's its own multi-step audit with its own output format.
 - **Regenerate and commit the lockfile** after the round of bumps — don't leave it stale relative to `package.json`.
 
 ### Audit each breaking-change area
 
-Go through these in order; for each, state **found / not applicable / already compliant** for this project, with the concrete files affected — don't just restate the guide.
+Go through these in order; for each, state **found / not applicable / already compliant** for this project, with the concrete files affected — don't just restate the guide. The catalog follows the official [Nuxt 4 upgrade guide](https://nuxt.com/docs/4.x/getting-started/upgrade) ("Migrating to Nuxt 4"); re-read it if Nuxt has shipped a newer 4.x guide, and flag any v4 change in it that is missing below.
 
 #### 1. Directory structure (impact: significant)
-Nuxt 4's default `srcDir` is `app/`. Existing `components/`, `composables/`, `layouts/`, `middleware/`, `pages/`, `plugins/`, `assets/` at the root move under `app/`; `server/` and `public/` stay at the root. Nuxt still auto-detects the old layout for backwards compatibility, but moving explicitly is the recommended end state (better type-safety and IDE performance). Check `nuxt.config.ts` for a custom `srcDir`/`dir.*` override — those need updating too.
+Nuxt 4's default `srcDir` is `app/`. Existing `assets/`, `components/`, `composables/`, `layouts/`, `middleware/`, `pages/`, `plugins/`, `utils/`, `app.vue`, `error.vue`, `app.config.ts` move under `app/`; `nuxt.config.ts`, `server/`, `public/`, `modules/`, `layers/`, `content/` and the new `shared/` (code shared between the Vue app and Nitro, auto-imports for `shared/utils/` and `shared/types/`) stay at the root. The `~` alias now points to `app/`. Nuxt auto-detects the old layout, so moving is not required, but it is the recommended end state (IDE type-safety, faster FS watching). Check:
+- `nuxt.config.ts` for a custom `srcDir`/`dir.*` override: with a custom `srcDir`, `modules/`, `public/`, `shared/` and `server/` now resolve from `rootDir`, so `dir.modules`, `dir.public` or `serverDir` may need setting. `serverDir` now defaults to `<rootDir>/server`.
+- Third-party config (`tailwindcss`, `eslint`, test runners) with hard-coded paths to the old layout.
+- To keep the v3 layout deliberately: `srcDir: '.'` plus `dir: { app: 'app' }` (the latter is where `router.options.ts` and `spa-loading-template.html` are looked up).
 
-#### 2. `jiti` no longer bundled by default (impact: medium)
-Config files load natively now (requires Node 22.19+). Check:
-- Relative imports inside config files (`nuxt.config.ts`, modules) missing an extension (`./build/my-plugin` → `./build/my-plugin.ts`).
-- TypeScript `enum` usage in config-loaded code — replace with `as const` objects.
-- If the project genuinely needs `jiti`'s runtime transform behaviour, it can be installed explicitly as a devDependency.
+#### 2. `useAsyncData` / `useFetch` behaviour (impact: moderate to medium — check carefully, silent bugs here)
+- **Shared refs per key** (moderate): calls with the same key share `data`/`error`/`status`. Calls with an explicit key must not have conflicting `deep`, `transform`, `pick`, `getCachedData` or `default` (Nuxt warns) — extract them into one composable.
+- **`getCachedData`** is now called on every fetch, including watcher and `refreshNuxtData` triggers, and receives a third `ctx` argument (`ctx.cause`: `'initial' | 'refresh:hook' | 'refresh:manual' | 'watch'`). A custom implementation ignoring it may serve stale cache on manual refresh.
+- **Data cleanup**: data is removed once the last consuming component unmounts — code relying on it persisting needs `useState` or an explicit cache.
+- **Reactive keys** (`ref`/`computed`/getter) are supported — an opportunity, not a break, where a manual `watch` + re-fetch could simplify.
+- **Shallow reactivity** (minimal): `data` is a `shallowRef`. Code mutating nested fields of `data.value` and expecting reactivity needs `deep: true` per call (or replace the whole object). Codemod: `nuxt/4/shallow-function-reactivity`.
+- **`pending` alignment** (medium): `pending` is now computed and `true` only while `status` is `'pending'`; with `immediate: false` it stays `false` until the first request. Template logic like `v-if="!pending"` as a "loaded" check should use `status === 'success'`.
+- **Key change behaviour** (medium): with `immediate: false`, a key/option change only refetches if a first fetch already happened (`useFetch` now behaves like `useAsyncData`). A non-immediate fetch must be triggered once with `execute()`/`refresh()`.
+- **Defaults** (minimal): `data` and `error` default to `undefined`, not `null` — update `=== null` checks. Codemod: `nuxt/4/default-data-error-value`.
+- **`dedupe`** (minimal): boolean values for `refresh({ dedupe })` are removed (`true` → `'cancel'`, `false` → `'defer'`). Codemod: `nuxt/4/deprecated-dedupe-value`.
+- **Clearing**: `clear`/`clearNuxtData` reset `data` to a custom `default` value instead of unsetting it.
+- Opt-outs while migrating: `experimental.granularCachedData: false` + `purgeCachedData: false`, `experimental.pendingWhenIdle: true`, `experimental.alwaysRunFetchOnKeyChange: true`, `experimental.defaults.useAsyncData.deep: true` (not recommended).
 
-#### 3. Case-sensitive routing (impact: minimal, but breaking for mismatched links)
-`/About` no longer matches `pages/about.vue`. Grep for internal links/`navigateTo`/`<NuxtLink>` targets whose casing doesn't match the file-based route.
+#### 3. Normalized component names (impact: moderate)
+Vue now generates component names matching Nuxt's auto-import pattern (`components/SomeFolder/MyComponent.vue` is `SomeFolderMyComponent`, no longer `MyComponent`). Grep for `<KeepAlive include/exclude>` filters and `findComponent({ name })` / `findComponent('Name')` in tests that rely on the old name. Opt-out: `experimental.normalizeComponentNames: false`.
 
-#### 4. Custom Vite plugins / `extendViteConfig` (impact: medium, only if present)
-Nuxt 4 adopts Vite 6's Environment API. Any module calling `extendViteConfig(fn, { server: false })` to target client-only needs rewriting to `addVitePlugin` with `configEnvironment`/`applyToEnvironment`:
+#### 4. More granular inline styles (impact: moderate)
+Only Vue component CSS is inlined now, not global CSS (global CSS stays as `<link>`). Check for CSP rules, critical-CSS tooling or visual-regression/perf baselines that assumed inlined global CSS. Restore with `features: { inlineStyles: true }`.
 
-```ts
-// Before
-extendViteConfig((config) => {
-  config.optimizeDeps.include.push('my-package')
-}, { server: false })
+#### 5. Shared prerender data (impact: medium, only with prerendering/`nuxt generate`)
+`useAsyncData`/`useFetch` data is now shared across prerendered pages. Every key must resolve to the same data: a `useAsyncData` in a dynamic page (`[slug].vue`) whose key does not include the slug is now a bug (wrong data across pages). Disable with `experimental.sharedPrerenderData: false`.
 
-// After
-addVitePlugin(() => ({
-  name: 'my-plugin',
-  configEnvironment(name, config) {
-    if (name === 'client') config.optimizeDeps?.include?.push('my-package')
-  },
-  applyToEnvironment: (environment) => environment.name === 'client',
-}))
-```
+#### 6. Directory index scanning in `app/middleware/` (impact: medium, only with nested middleware folders)
+`index` files in child folders of `app/middleware/` are now registered as middleware (consistent with `app/plugins/`). Grep for `middleware/**/index.*` files that were not meant to be middleware; filter them with an `app:resolve` hook if needed.
 
-Check the project's local modules and `nuxt.config.ts` for `extendViteConfig` usage.
+#### 7. Module loading order in layers (impact: minimal, only with `extends`/`layers/`)
+Layer modules now load first (deeper layers first) and project modules last, so the project can override layers (previously reversed). Check modules that depend on a specific order, or work around the old one; use the `modules:done` hook when a module needs to register a hook after all others. Applies to both `modules` in `nuxt.config.ts` and auto-discovered `modules/`.
 
-#### 5. Remote layers via `giget` (impact: minimal, only if used)
-If `extends` in `nuxt.config.ts` points at a remote layer (GitHub/git URL), `giget` must now be installed explicitly, or switch the layer to a normal `devDependency` (`"my-theme": "github:org/repo#sha"`) — simpler and lockfile-pinned.
+#### 8. Route and page metadata (impact: minimal)
+- `route.meta.name`, `route.meta.path` etc. from `definePageMeta` are only on the route now: use `route.name`.
+- Page meta is scanned **after** `pages:extend` (`experimental.scanPageMeta` enabled): move metadata overrides from the `pages:extend` hook to `pages:resolved`. Opt-out: `experimental.scanPageMeta: true`.
 
-#### 6. `useAsyncData` / `useFetch` behaviour (impact: medium — check carefully, silent bugs here)
-- Same key now returns **shared refs** for `data`/`error`/`status` across call sites — code assuming independent instances per call needs review.
-- `getCachedData` now receives a `ctx` argument with `ctx.cause` (`'initial' | 'refresh:hook' | 'refresh:manual' | 'watch'`) — a custom `getCachedData` implementation ignoring this may cache/skip incorrectly under the new signature.
-- Fetched data is **shallow-reactive** by default now — code mutating nested fields of `data.value` and expecting reactivity needs `data.value = { ...data.value, nested: ... }` or an explicit deep-reactive option.
-- Data attached to a key is cleaned up automatically once the last consuming component unmounts — code relying on it persisting after unmount needs `useState` or an explicit cache instead.
-- Keys can now be reactive (`ref`/`computed`/getter) — an opportunity, not a break, but worth flagging where a manual `watch` + re-`useFetch` pattern could simplify.
+#### 9. Unhead v2 (impact: minimal)
+Grep `useHead`/`useSeoMeta` calls for the removed props `vmid`, `hid`, `children`, `body`, and for promise input (no longer supported). Tags are sorted with Capo.js by default. Template Params and Alias Tag Sorting must be opted into explicitly (`TemplateParamsPlugin`, `AliasSortingPlugin` from `@unhead/vue/plugins`, registered via `injectHead().use(...)` in a plugin). Prefer importing from `#imports` / `nuxt/app` rather than `@unhead/vue`. Opt-out: `unhead: { legacy: true }`.
 
-#### 7. `window.__NUXT__` removed (impact: minimal, only if referenced directly)
-Grep for `window.__NUXT__` / direct payload access in app code or third-party integrations (analytics snippets, debug tooling) — replace with `useNuxtApp().payload`.
+#### 10. SPA loading screen location (impact: minimal, only with `ssr: false` + `spa-loading-template.html`)
+The template now renders next to the app root (`<div id="__nuxt"></div>` then the template) instead of inside it. Update CSS/`document.querySelector` selectors targeting it, or use `app.spaLoaderTag`/`app.spaLoaderAttrs`; revert with `experimental.spaLoadingTemplateLocation: 'within'`.
 
-#### 8. Vue Options API (impact: minimal)
-Unaffected unless `future.compatibilityVersion: 5` is adopted (see below) — flag only if the project is going that far.
+#### 11. Parsed `error.data` (impact: minimal)
+`error.data` is now parsed into an object. Remove manual `JSON.parse(error.data)` in a custom `error.vue`.
+
+#### 12. `window.__NUXT__` removed (impact: minimal, only if referenced directly)
+The global is removed after hydration. Grep for `window.__NUXT__` / direct payload access in app code or third-party integrations (analytics snippets, debug tooling) — replace with `useNuxtApp().payload`.
+
+#### 13. Removed config: `generate` and experimental flags (impact: minimal)
+- Top-level `generate` is gone: `generate.exclude` → `nitro.prerender.ignore`, `generate.routes` → `nitro.prerender.routes`.
+- `experimental.treeshakeClientOnly` (now `true`), `configSchema` (`true`), `polyfillVueUseHead` (`false`) and `respectNoSSRHeader` (`false`) are no longer configurable; `vite.devBundler` is gone (uses `vite-node`). Remove them from `nuxt.config.ts`; the last two behaviours can be reimplemented in user land (plugin / server middleware) if needed.
+
+#### 14. TypeScript configuration (impact: minimal, mostly opt-in)
+- `compilerOptions.noUncheckedIndexedAccess` now defaults to `true`: run a typecheck and fix new errors (recommended), or override via `typescript.tsConfig`.
+- Nuxt now generates split configs (`.nuxt/tsconfig.app.json`, `.server.json`, `.node.json`, `.shared.json`, plus the legacy `.nuxt/tsconfig.json`). Existing projects extending `.nuxt/tsconfig.json` keep working. To opt in to project references: replace the root `tsconfig.json` content (remove the `extends`, they are mutually exclusive) with `"files": []` + `references` to the four files, delete manual `server/tsconfig.json` files, switch the script to `vue-tsc -b --noEmit`, and move type augmentations into `app/`, `server/` or `shared/` (augmentations outside them stop working). Customize via `typescript.tsConfig`, `sharedTsConfig`, `nodeTsConfig` and `nitro.typescript.tsConfig`. Update CI typecheck scripts accordingly.
+
+#### 15. Local module authors (impact: minimal, only for modules in `modules/` or published by the project)
+- Template compilation: `lodash/template` (EJS `.ejs` sources in `addTemplate`) and the `serialize`/`importName`/`importSources` utilities are removed — use `getContents()`, `es-toolkit/compat` or `knitwork`. Codemod: `nuxt/4/template-compilation-changes`.
+- `builder:watch` now emits **absolute** paths: normalize with `relative(nuxt.options.srcDir, resolve(nuxt.options.srcDir, path))`. Codemod: `nuxt/4/absolute-watch-path`.
 
 ### `future.compatibilityVersion` (opt-in, don't force it)
 
-`nuxt.config.ts` → `future: { compatibilityVersion: 5 }` previews Nuxt 5 behaviour (automatic Vite Environment API, case-sensitive routing on by default, Options API compiled out by default, typed routes, client-only placeholder comments). Only propose this if the user explicitly wants to get ahead of Nuxt 5 — it stacks additional breaking changes on top of the v4 migration and should be a separate, later step, not bundled into the v3→v4 pass.
+`nuxt.config.ts` → `future: { compatibilityVersion: 5 }` (Nuxt 4.2+) previews Nuxt 5 behaviour. Per the official guide ("Testing Nuxt 5"), on Nuxt 4 it enables, among others: the Vite Environment API (`experimental.viteEnvironmentApi`; `extendViteConfig(..., { server: false })` then needs a `addVitePlugin` with `configEnvironment`/`applyToEnvironment`), case-sensitive routing (`/About` no longer matches `pages/about.vue`), normalized page component names (`<KeepAlive>` filters), `clearNuxtState` resetting to the `useState` initial value (`{ reset: false }` to keep the old behaviour), serializable page meta extraction, client payload extraction, `navigateTo` early return, no auto-import of `useServerHead*`/`useServerSeoMeta`, PostCSS `autoprefixer`/`cssnano` off by default, typed pages and typed `$fetch`, comment-node placeholders for client-only components, Nitro auto-imports off, Options API compiled out, and a stricter generated `tsconfig.json`. Nuxt 5 also brings changes no flag enables (e.g. Nitro v3). None of this belongs to the v3 → v4 audit: only propose it if the user explicitly wants to get ahead of Nuxt 5, as a separate, later step. Related: from Nuxt 4.6, server code can import handlers from `nuxt/server` to run on both Nuxt 4 (h3 v1) and Nuxt 5 (h3 v2) — optional, also out of scope for the v4 pass.
 
 ### Build, test, iterate
 
@@ -259,7 +273,7 @@ After each meaningful chunk, not just at the end:
 <runner> <test command>
 ```
 
-Fix as you go rather than batching every area then debugging one giant failure. The `useAsyncData`/`useFetch` changes are the likeliest source of silent runtime bugs (shared refs, shallow reactivity) — these won't always fail the build, so exercise the affected pages manually or via existing tests, don't just check for a green build.
+Fix as you go rather than batching every area then debugging one giant failure. The `useAsyncData`/`useFetch` changes are the likeliest source of silent runtime bugs (shared refs, shallow reactivity, `pending` semantics) — these won't always fail the build, so exercise the affected pages manually or via existing tests, don't just check for a green build.
 
 ### Output format
 
@@ -272,7 +286,7 @@ Lead with a one-line status: how many breaking-change areas apply to this projec
 | Module ecosystem | Yes | `@nuxtjs/i18n` 8→9, `@pinia/nuxt` bump | Medium (module's own breaking changes) |
 | Directory structure | Yes | root-level `components/`, `pages/`, … | Low (mechanical) |
 | useAsyncData/useFetch | Yes | `composables/useUser.ts`, 3 pages | Medium (shared refs) |
-| Vite plugins | No | — | — |
+| Unhead v2 | No | — | — |
 
 Then a **prioritized action list**, most-breaking-risk first, each with the concrete fix (codemod already applied vs. manual step still needed). Close with what's left to verify manually (pages to click through, tests to add).
 
