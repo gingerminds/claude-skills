@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+import cqa_fix
 from cqa import fix_git, fix_gitlab, fix_names, fix_state
 from tests.cqa.test_cli_fix import FixCase, REMOTE
 from tests.cqa.test_git_tools import commit, git as real_git
@@ -842,6 +843,32 @@ class ReplayCase(GitCase):
 
 
 class ReplayTest(ReplayCase):
+    def test_drop_keeps_the_dropped_shas_on_the_row(self):
+        """Ruling P11: the SHAs a drop removes stay on the row (dropped_commits), so that the
+        summary can give the rescue command; a row taken along keeps its too."""
+        one, two, three = self.three_notes(DOC)
+        self.record(r3=[one], r5=[two], r12=[three])
+        code, result, err = self.main_json("drop", "--refs", "CQ-3", "--reason", "Revue bloquante.")
+        self.assertEqual(code, 0, err)
+        rows = self.key()["rows"]
+        self.assertEqual(rows["3"]["dropped_commits"], [one])
+        self.assertNotIn("dropped_commits", rows["5"])
+        five = rows["5"]["commits"]
+        code, result, err = self.main_json("drop", "--refs", "CQ-5", "--reason", "Revue bloquante.")
+        self.assertEqual(code, 0, err)
+        rows = self.key()["rows"]
+        self.assertEqual((rows["5"]["outcome"], rows["5"]["commits"], rows["5"]["dropped_commits"]),
+                         ("dropped", [], five))
+        key = {"rows": {"3": {"outcome": "fixed", "commits": ["a" * 40], "section": "securite"},
+                        "5": {"outcome": "fixed", "commits": ["b" * 40, "c" * 40],
+                              "section": "securite", "dropped_commits": ["d" * 40]}},
+               "sections": [{"alias": "securite", "state": "active"}]}
+        also, retry = cqa_fix._settle_drops({"stage": "keys"}, key, [3], {3, 5}, "Raison.", "ricochet")
+        self.assertEqual((also, retry), ([5], [5]))
+        self.assertEqual(key["rows"]["3"]["dropped_commits"], ["a" * 40])
+        self.assertEqual((key["rows"]["5"]["outcome"], key["rows"]["5"]["dropped_commits"]),
+                         ("pending", ["d" * 40, "b" * 40, "c" * 40]))
+
     def test_replay_keeps_only_the_replayed_doc_additions(self):
         one, two, three = self.three_notes(DOC)
         self.record(r3=[one], r5=[two], r12=[three])
@@ -1415,7 +1442,8 @@ class V2PassTest(GitCase):
         code, out, err = self.run_main(["abandon", self.run_dir])
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out), {"removed": [str(worktree)],
-                                           "unpushed": [{"branch": branch, "commits": 1}]})
+                                           "unpushed": [{"branch": branch, "commits": 1}],
+                                           "leftovers": []})
         self.assertNotIn(worktree.resolve(), self.worktree_paths())
         self.assertIsNotNone(self.state()["finished_at"])
         self.write_run(flight(branches=[{"branch": branch, "where": "local", "refs": [3]}]))
@@ -1437,8 +1465,9 @@ class AbandonTest(GitCase):
         (Path(busy["worktree"]) / "draft.txt").write_text("uncommitted", encoding="utf-8")
         code, out, err = self.run_main(["abandon", self.run_dir])
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), {"removed": [busy["worktree"]],
-                                           "unpushed": [{"branch": BASE, "commits": 2}]})
+        self.assertEqual(json.loads(out), {
+            "removed": [busy["worktree"]], "unpushed": [{"branch": BASE, "commits": 2}],
+            "leftovers": [{"key": KEY, "patch": "fix/front/leftover-1.patch"}]})
         self.assertFalse(Path(busy["worktree"]).exists())
         self.assertNotIn(Path(busy["worktree"]), self.worktree_paths())
         real_git(self.repo, "rev-parse", "--verify", f"refs/heads/{BASE}")
@@ -1451,8 +1480,52 @@ class AbandonTest(GitCase):
         self.assertEqual(idle["branch"], BASE + "-2")
         code, out, err = self.run_main(["abandon", self.run_dir])
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(out), {"removed": [idle["worktree"]], "unpushed": []})
+        self.assertEqual(json.loads(out), {"removed": [idle["worktree"]], "unpushed": [],
+                                           "leftovers": []})
         real_git(self.repo, "rev-parse", "--verify", f"refs/heads/{BASE}-2")
+
+    def test_abandon_saves_the_uncommitted_changes_before_removing_the_worktree(self):
+        """Final wave F3: a forced removal never destroys uncommitted work: abandon saves it
+        in fix/<repo>/leftover-<N>.patch first, names the patch and records it on the key."""
+        self.open_pass()
+        busy = self.start_ok()
+        worktree = Path(busy["worktree"])
+        self.fixer_commit(worktree, "1.txt", "fix(securite CQ-3): one")
+        (worktree / "1.txt").write_text("edited by hand", encoding="utf-8")
+        (worktree / "draft.txt").write_text("uncommitted", encoding="utf-8")
+        code, out, err = self.run_main(["abandon", self.run_dir])
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result["leftovers"], [{"key": KEY, "patch": "fix/front/leftover-1.patch"}])
+        patch = (self.run_dir / "fix" / "front" / "leftover-1.patch").read_text(encoding="utf-8")
+        self.assertIn("draft.txt", patch)
+        self.assertIn("edited by hand", patch)
+        self.assertFalse(worktree.exists())
+        record = self.key()["leftover"]
+        self.assertEqual((record["patch"], record["untracked"]),
+                         ("fix/front/leftover-1.patch", ["draft.txt"]))
+        self.assertEqual(record["base"], self.head(self.repo, f"refs/heads/{BASE}"))
+
+    def test_open_saves_the_uncommitted_changes_of_a_finished_pass(self):
+        """Final wave F3: the next open archives the pass and saves what its worktree still
+        held (a finish refused on a dirty worktree) under the archive folder."""
+        self.open_pass()
+        started = self.start_ok()
+        worktree = Path(started["worktree"])
+        self.fixer_commit(worktree, "1.txt", "fix(securite CQ-3): one")
+        (worktree / "draft.txt").write_text("uncommitted", encoding="utf-8")
+        state = self.state()
+        state["finished_at"] = "2026-10-29T10:00:00Z"
+        fix_state.save(self.run_dir, state)
+        result = self.open_pass()
+        archived = result["archived"]
+        self.assertEqual(result["leftovers"], [{"key": KEY, "patch": f"{archived}/front/leftover-1.patch"}])
+        patch = self.run_dir / archived / "front" / "leftover-1.patch"
+        self.assertIn("draft.txt", patch.read_text(encoding="utf-8"))
+        self.assertFalse(worktree.exists())
+        old = json.loads((self.run_dir / archived / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(old["keys"][KEY]["leftover"]["patch"], f"{archived}/front/leftover-1.patch")
+        self.assertNotIn("leftover", self.key())
 
     def test_open_removes_the_worktrees_of_a_finished_pass(self):
         self.open_pass()
@@ -1463,7 +1536,7 @@ class AbandonTest(GitCase):
         state["finished_at"] = "2026-10-29T10:00:00Z"
         fix_state.save(self.run_dir, state)
         result = self.open_pass()
-        self.assertEqual(result["removed"], [started["worktree"]])
+        self.assertEqual((result["removed"], result["leftovers"]), ([started["worktree"]], []))
         self.assertNotIn(Path(started["worktree"]), self.worktree_paths())
         archived = self.run_dir / result["archived"]
         self.assertTrue((archived / "front" / "report-1.json").is_file())

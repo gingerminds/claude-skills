@@ -345,6 +345,38 @@ class SummaryTest(SummaryCase):
         self.assertEqual(result["left_keys"][0]["rows"][0],
                          {"ref": 3, "title": "Trois", "state": "non traitée"})
 
+    def test_summary_gives_a_rescue_command_for_the_dropped_commits(self):
+        """Ruling P11: the SHAs a drop removed (dropped_commits) are listed with the git
+        command that keeps them; a leftover patch saved at abandon or open is named too."""
+        state = fix_state.load(self.run_dir)
+        front = state["keys"]["front"]
+        front["rows"]["13"].update(outcome="dropped", dropped_commits=["a" * 40])
+        front["rows"]["15"].update(outcome="dropped", reason="Revue bloquante.",
+                                   dropped_commits=["b" * 40, "c" * 40])
+        front["rows"]["3"]["dropped_commits"] = ["d" * 40]
+        front["leftover"] = {"patch": "fix/front/leftover-2.patch", "base": "e" * 40,
+                             "untracked": ["draft.txt"]}
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        text = json.loads(out)["text"]
+        self.assertEqual(section(text, "Commits retirés de la branche").strip().split("\n"), [
+            f"- front : CQ-13 : Treize : `git branch rescue/cq-13 {'a' * 40}`",
+            f"- front : CQ-15 : Quinze : `git branch rescue/cq-15 {'b' * 40}`",
+            f"- front : CQ-15 : Quinze : `git branch rescue/cq-15-2 {'c' * 40}`",
+        ])
+        self.assertNotIn("d" * 40, text)
+        self.assertLess(text.index("## Points d'attention"), text.index("## Commits retirés"))
+        self.assertIn("- front : modifications non commitées du worktree sauvées dans "
+                      "fix/front/leftover-2.patch.", section(text, "Points d'attention"))
+        self.assertNotIn(LONG_DASH, text)
+        state = fix_state.load(self.run_dir)
+        state["finished_at"] = None
+        for row in state["keys"]["front"]["rows"].values():
+            row.pop("dropped_commits", None)
+        fix_state.save(self.run_dir, state)
+        self.assertNotIn("## Commits retirés", json.loads(self.summary()[1])["text"])
+
     def test_review_status_count_needs_the_option(self):
         """The count of rows moved to « En review » is printed only when --in-review gives it."""
         self.assertEqual(self.summary("--in-review", "oops")[0], 2)

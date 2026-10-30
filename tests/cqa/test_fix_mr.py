@@ -1634,6 +1634,21 @@ class FinishTest(MrCase):
         self.gitlab.fail_git = "ls-remote"
         self.assert_kept(self.finish(), start, "origin")
 
+    def test_finish_keeps_an_empty_branch_whose_reflog_holds_dropped_commits(self):
+        """Ruling P11: a pass that committed then dropped everything back to start_sha keeps
+        its branch (the dropped commits stay reachable through its reflog), and the summary
+        gives the rescue command."""
+        self.reviewed(push="local")
+        code, out, err = self.cli("drop", KEY, "--refs", "CQ-3", "--reason", "Revue bloquante.")
+        self.assertEqual(code, 0, err)
+        start = self.key()["start_sha"]
+        self.assertEqual(self.head(self.worktree), start)
+        self.assertEqual(self.key()["rows"]["3"]["dropped_commits"], [self.fixed])
+        self.assert_kept(self.finish(), start, "reflog")
+        code, out, err = self.cli("summary")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"`git branch rescue/cq-3 {self.fixed}`", json.loads(out)["text"])
+
     def test_finish_keeps_a_taken_over_branch_without_new_commits(self):
         """A local pass takes over a pass branch that an earlier local pass left with its
         commits, and adds nothing: start_sha is that branch's head, which finish must keep."""

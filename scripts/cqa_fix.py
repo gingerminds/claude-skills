@@ -593,12 +593,14 @@ def _cmd_open(args, services: Services) -> int:
     records = _stack_records(run_dir)
     if records:
         state["stack_core"] = records
-    removed, archived = _archive(run_dir, old, services.run) if old is not None else ([], None)
+    removed, archived, leftovers = (_archive(run_dir, old, services.run) if old is not None
+                                    else ([], None, []))
     fix_state.save(run_dir, state)
     _emit({
         "started_at": state["started_at"], "stage": state["stage"], "mode": state["mode"],
         "push": state["push"], "notion": state["notion"], "project_name": state["project_name"],
         "keys": list(state["keys"]), "archived": archived, "removed": removed,
+        "leftovers": leftovers,
     })
     return EXIT_OK
 
@@ -1337,11 +1339,17 @@ def _settle_drops(state: dict, key: dict, refs: list, dropped: set, reason: str,
     The rows of refs leave the branch with reason. A row taken along (its fix depended on a
     removed commit) goes back to pending once, with ricochet as its reason and retry true,
     for one more pass of the fixer in its section (_can_retry); it leaves for good with that
-    reason when it already had its retry, or when its section can no longer run a pass.
+    reason when it already had its retry, or when its section can no longer run a pass. The
+    SHAs removed from every row stay on it (dropped_commits, ruling P11): the summary gives
+    the command that keeps them.
     """
     also, retry = sorted(set(dropped) - set(refs)), []
     for ref in sorted(dropped):
         row = key["rows"][str(ref)]
+        removed = [sha for sha in row.get("commits") or [] if isinstance(sha, str)]
+        if removed:
+            kept = [sha for sha in row.get("dropped_commits") or [] if isinstance(sha, str)]
+            row["dropped_commits"] = kept + [sha for sha in removed if sha not in kept]
         if ref in refs:
             row.update(outcome="dropped", commits=[], reason=reason)
         elif not row.get("retry") and _can_retry(state, key, row):
@@ -1884,11 +1892,13 @@ def _delete_empty_branch(path, run, key: dict) -> Optional[str]:
     commit; return None once deleted, else why it stays (in French).
 
     Only a pass branch that the pass created (never a taken-over one: reused or taken_head,
-    whatever its head), whose head is still start_sha (the origin/<base> it started from) and
-    whose commits are all on origin, checked out in no worktree (the dev's own checkout
-    included) and absent from origin goes. git update-ref deletes it only while it points at
-    start_sha, so a branch with a commit is never deleted. When origin cannot be asked, the
-    branch stays.
+    whatever its head), whose head is still start_sha (the origin/<base> it started from),
+    whose reflog shows no move since its creation (a pass that committed, then dropped
+    everything, keeps its branch: the dropped commits stay reachable through its reflog,
+    ruling P11) and whose commits are all on origin, checked out in no worktree (the dev's
+    own checkout included) and absent from origin goes. git update-ref deletes it only while
+    it points at start_sha, so a branch with a commit is never deleted. When origin cannot be
+    asked, the branch stays.
     """
     branch, start = key["branch"], key["start_sha"]
     if key.get("reused") or key.get("taken_head"):
@@ -1902,6 +1912,8 @@ def _delete_empty_branch(path, run, key: dict) -> Optional[str]:
             return "branche introuvable dans le repo"
         if head != start:
             return "la branche porte des commits de la passe"
+        if _reflog_moved(path, run, branch):
+            return "la branche a porté des commits retirés (reflog) : gardée, voir la synthèse"
         if fix_git.unpushed(path, run, branch):
             return "la branche porte des commits absents d'origin"
         if any(entry["branch"] == branch for entry in fix_git.worktrees(path, run)):
@@ -1914,6 +1926,14 @@ def _delete_empty_branch(path, run, key: dict) -> Optional[str]:
     if deleted.returncode != 0:
         return f"git update-ref a échoué : {deleted.stderr.strip()}"
     return None
+
+
+def _reflog_moved(path, run, branch: str) -> bool:
+    """True when the reflog of the branch holds an entry after its creation: the branch
+    pointed at a commit of the pass once (a drop put it back), and that commit is reachable
+    only through this reflog. A branch without reflog counts as never moved."""
+    listing = fix_names.git(path, run, "reflog", "show", "--format=%H", f"refs/heads/{branch}")
+    return listing.returncode == 0 and len(listing.stdout.split()) > 1
 
 
 def _cmd_leave(args, services: Services) -> int:
@@ -2279,7 +2299,7 @@ def _cmd_abandon(args, services: Services) -> int:
     state = _read_state(run_dir, required=True)
     if state.get("finished_at"):
         raise UsageError("Aucune passe fix inachevée : rien à abandonner.")
-    removed = _remove_worktrees(run_dir, state, services.run)
+    removed, leftovers = _remove_worktrees(run_dir, state, services.run)
     unpushed = []
     for key in state["keys"].values():
         if key.get("branch"):
@@ -2290,7 +2310,7 @@ def _cmd_abandon(args, services: Services) -> int:
     _close_fix_questions(run_dir)
     state["finished_at"] = fix_state.now()
     fix_state.save(run_dir, state)
-    _emit({"removed": removed, "unpushed": unpushed})
+    _emit({"removed": removed, "unpushed": unpushed, "leftovers": leftovers})
     return EXIT_OK
 
 
@@ -2449,22 +2469,49 @@ def _base(run_dir: Path, name: str) -> str:
     return "develop"
 
 
-def _remove_worktrees(run_dir: Path, state: dict, run) -> list:
-    """Remove the worktrees the keys of the pass still have; return their paths."""
-    removed = []
-    for key in state["keys"].values():
+def _remove_worktrees(run_dir: Path, state: dict, run) -> tuple:
+    """Remove the worktrees the keys of the pass still have, each after its uncommitted
+    changes were saved in fix/<repo>/leftover-<N>.patch (fix_git.save_leftovers, recorded on
+    the key as « leftover »: nothing is ever destroyed unsaved); return (the paths removed,
+    [{"key", "patch"}] of the patches written)."""
+    removed, leftovers = [], []
+    for name, key in state["keys"].items():
         worktree = _worktree_path(run_dir, key)
-        if worktree.exists():
-            if fix_git.remove_worktree(_repo_path(run_dir, key["repo"]), run, worktree):
-                removed.append(str(worktree))
-    return removed
+        if not worktree.exists():
+            continue
+        saved = _save_leftovers(run_dir, key, worktree, run)
+        if saved is not None:
+            key["leftover"] = saved
+            leftovers.append({"key": name, "patch": saved["patch"]})
+        if fix_git.remove_worktree(_repo_path(run_dir, key["repo"]), run, worktree):
+            removed.append(str(worktree))
+    return removed, leftovers
+
+
+def _save_leftovers(run_dir: Path, key: dict, worktree: Path, run):
+    """Save the uncommitted changes of a worktree about to be removed; return the record
+    {"patch" (relative to the run), "base", "untracked"}, None when it had none."""
+    try:
+        found = fix_git.save_leftovers(worktree, run, _key_folder(run_dir, key))
+    except fix_git.GitRefused as error:
+        raise fix_git.GitRefused(
+            f"{error} Le worktree {worktree} n'a pas été retiré : ses modifications non "
+            "commitées, s'il en a, seraient perdues. Sauvez-les ou retirez-le vous-même "
+            "(git worktree remove --force), puis relancez."
+        )
+    if found is None:
+        return None
+    return {"patch": found["path"].relative_to(run_dir).as_posix(), "base": found["base"],
+            "untracked": found["untracked"]}
 
 
 def _archive(run_dir: Path, old: dict, run) -> tuple:
-    """Move a finished pass, state and key folders, to fix/_history/<stamp>/."""
-    removed = _remove_worktrees(run_dir, old, run)
+    """Move a finished pass, state and key folders, to fix/_history/<stamp>/; return (the
+    worktrees removed, the archive folder, the leftover patches saved, named where they now
+    are, as the archived state names them)."""
+    removed, leftovers = _remove_worktrees(run_dir, old, run)
     target = _new_history_dir(run_dir)
-    for key in old["keys"].values():
+    for name, key in old["keys"].items():
         folder = _key_folder(run_dir, key)
         if folder.is_dir():
             destination = target / folder.relative_to(run_dir / "fix")
@@ -2472,8 +2519,18 @@ def _archive(run_dir: Path, old: dict, run) -> tuple:
             shutil.move(str(folder), str(destination))
             if folder.parent != run_dir / "fix" and not any(folder.parent.iterdir()):
                 folder.parent.rmdir()
+            saved = key.get("leftover")
+            if isinstance(saved, dict) and isinstance(saved.get("patch"), str):
+                inside = Path(saved["patch"])
+                if inside.is_relative_to(folder.relative_to(run_dir)):
+                    saved["patch"] = (destination / inside.relative_to(
+                        folder.relative_to(run_dir))).relative_to(run_dir).as_posix()
+    for item in leftovers:
+        item["patch"] = old["keys"][item["key"]]["leftover"]["patch"]
+    if leftovers:
+        fix_state.save(run_dir, old)
     os.replace(run_dir / fix_state.STATE_FILE, target / "state.json")
-    return removed, target.relative_to(run_dir).as_posix()
+    return removed, target.relative_to(run_dir).as_posix(), leftovers
 
 
 def _new_history_dir(run_dir: Path) -> Path:

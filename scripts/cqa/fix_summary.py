@@ -15,6 +15,8 @@ NO_CHECK = "Aucune vérification en attente."
 NOTHING_PREPARED = "Aucun correctif préparé."
 EMPTY_BRANCH = " (aucun commit)"
 LEFT_KEY = "- {repo} : {reason} (branche {branch}, worktree {worktree})."
+LEFTOVER = "- {repo} : modifications non commitées du worktree sauvées dans {patch}."
+RESCUE = "- {repo} : {ref} : {title} : `git branch rescue/cq-{number}{suffix} {sha}`"
 NO_BRANCH = "aucune"
 NO_WORKTREE = "aucun"
 PARTIAL = "partielle, reste à faire : {remaining}"
@@ -48,6 +50,9 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
     notes = _attention_lines(keys)
     if notes:
         parts.append(("Points d'attention", "\n".join(notes)))
+    rescue = _rescue_lines(keys, info)
+    if rescue:
+        parts.append(("Commits retirés de la branche", "\n".join(rescue)))
     left_keys = _left_keys(keys, info)
     if left_keys:
         parts.append(("Clés laissées au lead", "\n".join(_left_key_lines(left_keys))))
@@ -183,6 +188,25 @@ def _attention_lines(keys: dict) -> list:
         if conflicts:
             names = ", ".join(f"`{subject}`" for subject in conflicts)
             lines.append(f"- {key['repo']} : {fix_mr.REORDER_CONFLICT} ({names}).")
+        saved = key.get("leftover")
+        if isinstance(saved, dict) and saved.get("patch"):
+            lines.append(LEFTOVER.format(repo=key["repo"], patch=saved["patch"]))
+    return lines
+
+
+def _rescue_lines(keys: dict, info: dict) -> list:
+    """Return, for each dropped row that still names the commits a drop removed
+    (dropped_commits), the git command that keeps each of them (ruling P11)."""
+    lines = []
+    for key in keys.values():
+        for ref in _refs(key, "dropped"):
+            shas = [sha for sha in key["rows"][str(ref)].get("dropped_commits") or []
+                    if isinstance(sha, str) and sha.strip()]
+            for index, sha in enumerate(shas):
+                lines.append(RESCUE.format(
+                    repo=key["repo"], ref=ref_label(ref),
+                    title=(info.get(ref) or {}).get("title") or NO_TITLE, number=ref,
+                    suffix="" if index == 0 else f"-{index + 1}", sha=sha))
     return lines
 
 

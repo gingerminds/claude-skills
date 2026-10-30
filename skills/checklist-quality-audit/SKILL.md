@@ -703,7 +703,7 @@ python3 "$S/cqa_plan.py" context "$RUN" --check
 
 When the run has `write_pending` true, say « Terminez d'abord l'écriture de l'audit (/gm:checklist-quality-audit rerun). » and stop. When it has `fix_pending` true, read `push` in `fix/state.json`. With `--dry-run` and a stored `push` other than `dry_run`, say « Une passe fix réelle est inachevée sur ce run : relancez /gm:checklist-quality-audit fix sans --dry-run pour la reprendre ou l'abandonner. » and stop. Otherwise ask « Une passe fix est inachevée. », followed in the same question by its stored push mode (« Publication : MR en brouillon. » for `mr`, « Publication : branches locales. » for `local`, « Publication : --dry-run, rien n'est poussé. » for `dry_run`: the stored mode wins over the invocation), with « Reprendre les correctifs » and « Abandonner ». A pass of the v2 fix mode (its keys in `fix/state.json` carry a `slug`; the commands exit 2 with « Passe v2 inachevée ») cannot be resumed: offer « Abandonner » and « Annuler » (stop) instead.
 
-- « Abandonner »: abandon the pass, then go on with step 2 for a new pass. It removes the worktrees of the pass and prints `{"removed", "unpushed"}`: tell the lead which local branches keep commits not pushed (`unpushed`); they are never deleted.
+- « Abandonner »: abandon the pass, then go on with step 2 for a new pass. It removes the worktrees of the pass, after saving the uncommitted changes of each in `fix/<repo>/leftover-<N>.patch`, and prints `{"removed", "unpushed", "leftovers"}`: tell the lead which local branches keep commits not pushed (`unpushed`; they are never deleted) and which patch holds the changes of each worktree (`leftovers`: `{"key", "patch"}`).
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -829,7 +829,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" open "$RUN" --mode <autonomous|present> --push <mr|local|dry_run> --notion <yes|no>
 ```
 
-It writes `fix/state.json` (stage `keys`, every key at step `selected`, every section `pending`) and archives a finished earlier pass in `fix/_history/`.
+It writes `fix/state.json` (stage `keys`, every key at step `selected`, every section `pending`) and archives a finished earlier pass in `fix/_history/`: its worktrees are removed, each after its uncommitted changes were saved in a `leftover-<N>.patch` under the archive folder (`leftovers` in its output, `{"key", "patch"}`: tell the lead).
 
 **4. Keep the workstation awake** for the whole pass:
 
@@ -1071,7 +1071,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" finish "$RUN" "<repo>"
 ```
 
-It removes the worktree (exit 5 while it has uncommitted changes: show them to the lead, never clean them), deletes the local branch only when this pass created it and left it without any commit (never a taken-over branch; its head is still the start, no checkout has it, origin does not have it) and prints `{"removed", "branch", "kept_local", "branch_deleted", "branch_kept", "unpushed"}` (`branch_kept`: why the branch stays). After « Garder la branche en local »:
+It removes the worktree (exit 5 while it has uncommitted changes: show them to the lead, never clean them, and ask « Le worktree de <repo> a des modifications non commitées. » with « C'est réglé, reprendre » (`finish` again) and « Garder le worktree » (the key stays at its step, with its worktree and its branch; the next `open` of a fix pass on this run saves them in `fix/<repo>/leftover-<N>.patch` under the archive folder before it removes the worktree)), deletes the local branch only when this pass created it and left it without any commit (never a taken-over branch; its head is still the start, its reflog shows no move since its creation (a pass that committed, then dropped everything, keeps its branch: the dropped commits stay reachable through it), no checkout has it, origin does not have it) and prints `{"removed", "branch", "kept_local", "branch_deleted", "branch_kept", "unpushed"}` (`branch_kept`: why the branch stays). After « Garder la branche en local »:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -1167,7 +1167,7 @@ RUN="<run_dir>"
 bash "$S/cqa-keepawake.sh" stop "$RUN"
 ```
 
-End, in French: show `text` (its section « Clés laissées au lead » gives each key left with its reason, its branch and its worktree, as `left_keys` does, with its rows and their state, a key left before its start included: the lead takes that branch by hand; such a key has no MR block, and the team message counts the keys left instead of listing their merge request), then the failed sections with their reason and patch, the rows `also_dropped` with the row they depended on, and the message for the team, ready to paste (`team_message`). Once merged and deployed in preprod, the rows « En review » are taken by `/gm:checklist-quality-audit recette` (section 11, `cqa_fix.py merged`).
+End, in French: show `text` (its section « Clés laissées au lead » gives each key left with its reason, its branch and its worktree, as `left_keys` does, with its rows and their state, a key left before its start included: the lead takes that branch by hand; such a key has no MR block, and the team message counts the keys left instead of listing their merge request), then the failed sections with their reason and patch, the section « Commits retirés de la branche » (each commit a drop removed, with the command that keeps it before a `git gc` loses it, `git branch rescue/cq-<ref> <sha>`), the rows `also_dropped` with the row they depended on, and the message for the team, ready to paste (`team_message`). Once merged and deployed in preprod, the rows « En review » are taken by `/gm:checklist-quality-audit recette` (section 11, `cqa_fix.py merged`).
 
 ## Exit codes
 

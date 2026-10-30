@@ -2583,6 +2583,36 @@ class FixPassOrchestrationTest(unittest.TestCase):
         answers = _between(end, "Then, for each key with other answers", "Close each entry")
         self.assertIn("but a key left", answers)
 
+    def test_forced_removals_save_the_uncommitted_work(self):
+        """Final wave F3: abandon and the next open save a dirty worktree in a patch before
+        removing it; finish refused on a dirty worktree has its continuation."""
+        finish = self.publication[self.publication.index('cqa_fix.py" finish "$RUN" "<repo>"'):]
+        for needle in ("« C'est réglé, reprendre »", "« Garder le worktree »",
+                       "saves them in `fix/<repo>/leftover-<N>.patch`"):
+            with self.subTest(part="5.g", needle=needle):
+                self.assertIn(needle, finish)
+        abandon = _between(self.section, "- « Abandonner »:", "- « Reprendre les correctifs »")
+        for needle in ('`{"removed", "unpushed", "leftovers"}`', "`leftovers`", "patch"):
+            with self.subTest(part="abandon", needle=needle):
+                self.assertIn(needle, abandon)
+        launch = _between(self.section, "**3. ", "**4. ")
+        self.assertIn("`leftovers`", launch)
+        table = _section(_text(FIX_MD), "1. Keys, sections, passes and files")
+        line = next(item for item in table.splitlines() if item.startswith("| `leftover-<N>.patch`"))
+        for needle in ("`cqa_fix.py abandon`", "`cqa_fix.py open`"):
+            with self.subTest(part="fix.md", needle=needle):
+                self.assertIn(needle, line)
+
+    def test_dropped_commits_stay_rescuable(self):
+        """Ruling P11: the summary lists the dropped commits with the rescue command, and
+        finish keeps a branch whose reflog shows dropped commits."""
+        closing = self.section[self.section.index("**8. Summary.**"):]
+        for needle in ("« Commits retirés de la branche »", "`git branch rescue/cq-<ref> <sha>`"):
+            with self.subTest(part="step 8", needle=needle):
+                self.assertIn(needle, closing)
+        finish = self.publication[self.publication.index('cqa_fix.py" finish "$RUN" "<repo>"'):]
+        self.assertIn("reflog", finish)
+
     def test_an_answer_pass_without_a_valid_report_is_closed(self):
         """Task 13 round 1, item 2: the empty report closes a pass of a settled section."""
         end = _between(self.section, "**6. ", "**7. ")

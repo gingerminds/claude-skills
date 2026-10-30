@@ -16,7 +16,7 @@ The conventions of the fix mode (`/gm:checklist-quality-audit fix`, section 12 o
 | `notes-<N>.json` | orchestrator | the answers and problems sent to pass N (below) |
 | `review-<N>.json` | reviewer, or the orchestrator for a light review | the verdicts on pass N (section 8) |
 | `checks.json`, `check/` | `cqa_fix.py check` | the checks of the changed files (section 9) |
-| `leftover-<N>.patch` | `cqa_fix.py section-end --failed` | the uncommitted changes of a failed section |
+| `leftover-<N>.patch` | `cqa_fix.py section-end --failed`, `cqa_fix.py abandon`, `cqa_fix.py open` | the uncommitted changes of a failed section, or of a worktree removed by `abandon` or by the next `open` (then under `fix/_history/<stamp>/<repo>/`) |
 | `mr-title.txt`, `mr.md`, `mr-addition.md` | `cqa_fix.py mr-body` | the title and description of the merge request |
 
 - A pass is one dispatch of the fixer on one section of a key, numbered from 1 over the whole key. The first pass of a section takes its selected rows. A later pass of the section takes the rows the lead answered (questions, section 5), the rows a check or the review sent back (correction, section 6), or the rows a drop took along (`retry`, section 6).
