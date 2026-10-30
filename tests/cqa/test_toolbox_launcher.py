@@ -990,6 +990,8 @@ class CheckTest(LauncherCase):
             self.assertTrue(has_pair(call, "--network", "none"))
             # R19: a missing image is never downloaded in the middle of a fix pass.
             self.assertTrue(has_pair(call, "--pull", "never"))
+            self.assertTrue(has_pair(call, "--cap-drop", "ALL"))
+            self.assertTrue(has_pair(call, "--security-opt", "no-new-privileges"))
             self.assertIn("--rm", call)
             self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
             self.assertTrue(has_pair(call, "--env", "HOME=/tmp"))
@@ -1142,9 +1144,12 @@ class CheckTest(LauncherCase):
         self.put(self.check_dir, "base/docker/nginx/conf.d/default.conf",
                  "server { location / { proxy_pass http://old.example.test; } }\n")
         self.put(self.check_dir, "base/docker/varnish/default.vcl", 'backend b { .host = "app"; }\n')
+        self.put(self.worktree, "conf/nginx.conf",
+                 "events {}\nhttp { server { location / { proxy_pass http://main.example.test; } } }\n")
+        self.put(self.worktree, "conf/other.conf", "server { location / { proxy_pass http://sibling.example.test; } }\n")
         (self.check_dir / "files.txt").write_text(
             "a.php\ndocker/nginx/conf.d/default.conf\ndocker/nginx/templates/site.conf.template\n"
-            "docker/varnish/default.vcl\nother/site.conf\nREADME.md\n", encoding="utf-8")
+            "docker/varnish/default.vcl\nother/site.conf\nconf/nginx.conf\nREADME.md\n", encoding="utf-8")
         result = self.check(**SECRETS)
         self.assertEqual(0, result.returncode, result.stderr)
         runs = self.config_runs()
@@ -1155,6 +1160,8 @@ class CheckTest(LauncherCase):
                               [c[:2] + c[-1:] for c in self.calls() if c[:2] == ["image", "inspect"]])
                 self.assertTrue(has_pair(call, "--network", "none"))
                 self.assertTrue(has_pair(call, "--pull", "never"))
+                self.assertTrue(has_pair(call, "--cap-drop", "ALL"))
+                self.assertTrue(has_pair(call, "--security-opt", "no-new-privileges"))
                 self.assertIn("--rm", call)
                 self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
                 self.assertEqual(["HOME=/tmp"], env_args(call))
@@ -1171,18 +1178,19 @@ class CheckTest(LauncherCase):
 
         self.assertEqual(
             [f"{host}:127.0.0.1" for host in
-             ("api.example.test", "app-1", "dns.example.test", "example.test", "old.example.test",
-              "one-line", "php", "two-line")],
+             ("api.example.test", "app-1", "dns.example.test", "example.test", "main.example.test",
+              "old.example.test", "one-line", "php", "two-line")],
             hosts(runs["nginx"][0]))
         self.assertEqual(["app:127.0.0.1", "cms.example.test:127.0.0.1"], hosts(runs["varnish"][0]))
         self.assertEqual(
             "nginx\tdocker/nginx\tdocker/nginx/conf.d/default.conf\n"
             "nginx\tdocker/nginx\tdocker/nginx/templates/site.conf.template\n"
-            "varnish\tdocker/varnish\tdocker/varnish/default.vcl\n",
+            "varnish\tdocker/varnish\tdocker/varnish/default.vcl\n"
+            "nginx\tconf\tconf/nginx.conf\n",
             (self.check_dir / "config-plan.tsv").read_text(encoding="utf-8"))
         self.assertTrue((self.check_dir / "config.tsv").is_file())
         self.assertTrue((self.check_dir / "syntax.tsv").is_file())
-        self.assertEqual(["docker"], sorted(p.name for p in self.worktree.iterdir()))
+        self.assertEqual(["conf", "docker"], sorted(p.name for p in self.worktree.iterdir()))
 
     def test_check_without_a_server_file_starts_no_config_container(self):
         self.assertEqual(0, self.check().returncode)
@@ -1228,11 +1236,14 @@ class CheckTest(LauncherCase):
         self.put(repo, "docker/nginx/snippets/deny.conf", "location ~ /\\. { deny all; }\n")
         self.put(repo, "docker/nginx/templates/site.conf.template",
                  "server { listen ${APP_PORT}; server_name ${SERVER_NAME}; set $x ${host}; }\n")
+        self.put(repo, "nginx.conf", "events {}\nhttp {\n BROKEN\n}\n")
+        self.put(repo, "README.md", "x\n")
         inbox = self.tmp / "in"
         self.put(inbox, "base/docker/nginx/conf.d/default.conf", "server {\n BROKEN\n}\n")
         self.put(inbox, "config-plan.tsv", "".join(
             f"nginx\tdocker/nginx\tdocker/nginx/{name}\n"
-            for name in ("nginx.conf", "conf.d/default.conf", "snippets/deny.conf", "templates/site.conf.template")))
+            for name in ("nginx.conf", "conf.d/default.conf", "snippets/deny.conf", "templates/site.conf.template"))
+            + "nginx\t.\tnginx.conf\n")
         work = self.tmp / "work"
         log = self.tmp / "nginx.log"
         fake = self.fake_bin("nginx", f"""import json, re, sys
@@ -1273,7 +1284,11 @@ if body.lstrip().startswith("location") and level == "http":
             ("head", "docker/nginx/templates/site.conf.template"): ("ok", ""),
             ("base", "docker/nginx/conf.d/default.conf"):
                 ("ko", 'unexpected "}" in docker/nginx/conf.d/default.conf:2'),
+            ("head", "nginx.conf"): ("ko", 'unexpected "}" in nginx.conf:2'),
         }, status)
+        self.assertEqual(sorted(p.name for p in (work / "head" / ".cqa-root").iterdir()),
+                         ["fastcgi_params", "nginx.conf"])
+        self.assertEqual([], [p for p in work.rglob("*.cqa-part")])
         copy = work / "head" / "docker" / "nginx"
         self.assertEqual("server { listen 1; server_name example.test; set $x ${host}; }\n",
                          (copy / "templates" / "site.conf").read_text(encoding="utf-8"))
@@ -1289,6 +1304,36 @@ if body.lstrip().startswith("location") and level == "http":
         self.assertNotIn("server {", deny[0]["conf"])
         self.assertIn("server {", deny[1]["conf"])
         self.assertFalse((repo / "docker" / "nginx" / "templates" / "site.conf").exists())
+
+    def test_nginx_script_never_reuses_a_half_built_copy(self):
+        if os.getuid() == 0:
+            self.skipTest("root reads every file")
+        etc = self.tmp / "etc-nginx"
+        self.put(etc, "nginx.conf", "events {}\n")
+        root = self.tmp / "fake-root"
+        repo = root / "repos" / "front"
+        self.put(repo, "nginx/a.conf", "server {}\n")
+        self.put(repo, "nginx/b.conf", "server {}\n")
+        self.put(repo, "nginx/secret.conf", "x\n")
+        (repo / "nginx" / "secret.conf").chmod(0)
+        self.addCleanup((repo / "nginx" / "secret.conf").chmod, 0o644)
+        inbox = self.tmp / "in"
+        self.put(inbox, "config-plan.tsv", "nginx\tnginx\tnginx/a.conf\nnginx\tnginx\tnginx/b.conf\n")
+        work = self.tmp / "work"
+        fake = self.fake_bin("nginx", "import sys\n")
+        script = (embedded_script("NGINX_SCRIPT")
+                  .replace("plan=/in/config-plan.tsv", f"plan={inbox}/config-plan.tsv")
+                  .replace("base_root=/in/base", f"base_root={inbox}/base")
+                  .replace('head_root="/repos/$repo"', f'head_root="{root}/repos/$repo"')
+                  .replace("etc=/etc/nginx", f"etc={etc}")
+                  .replace("work=/tmp/cqa", f"work={work}"))
+        env = dict(os.environ, PATH=f"{fake}{os.pathsep}{os.environ['PATH']}")
+        result = subprocess.run(["sh", "-c", script, "sh", "front"], capture_output=True, text=True, env=env)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([["head", "skip", "nginx -t", "nginx/a.conf", "copie du dossier nginx impossible"],
+                          ["head", "skip", "nginx -t", "nginx/b.conf", "copie du dossier nginx impossible"]],
+                         [line.split("\t") for line in result.stdout.splitlines()])
+        self.assertEqual([], list((work / "head").iterdir()))
 
     def test_varnish_script_compiles_each_side_and_keeps_the_compiler_message(self):
         root = self.tmp / "fake-root"

@@ -612,10 +612,11 @@ SCRIPT
 
 # nginx -t of the nginx files of /in/config-plan.tsv (kind, folder, path), run by sh in the
 # official nginx image, on the worktree (head) and on /in/base (the folders at the start of the
-# pass). Each folder is copied over a copy of /etc/nginx, its /etc/nginx/ paths pointed at the
-# copy and its *.template rendered with dummy values; a file without events or http block is
-# included by a minimal main file, in a server then a location block when its directives need
-# them. Prints one line per file and side: side, ok|ko|skip, check, path, message.
+# pass). Each nginx folder (a lone nginx.conf: that file only) is copied over a copy of
+# /etc/nginx, built aside and renamed when complete, its /etc/nginx/ paths pointed at the copy
+# and its *.template rendered with dummy values; a file without events or http block is included
+# by a minimal main file, in a server then a location block when its directives need them.
+# Prints one line per file and side: side, ok|ko|skip, check, path, message.
 IFS= read -r -d '' NGINX_SCRIPT <<'SCRIPT' || true
 repo="$1"
 plan=/in/config-plan.tsv
@@ -635,14 +636,28 @@ first_emerg() {
   line="$(printf '%s\n' "$1" | grep -m1 -E '\[(emerg|alert|crit)\]')" || line="$(printf '%s\n' "$1" | grep -m1 .)"
   printf '%s\n' "$line" | sed -E 's/^.*\[(emerg|alert|crit)\] ([0-9]+#[0-9]+: )?//'
 }
+# prepare <work dir> <root> <folder> <file>: the copy is built in <work dir>.cqa-part and renamed
+# only when complete, so that a copy that failed half-way is never used.
 prepare() {
-  w="$work/$1/$3"
-  [ -d "$w" ] && return 0
-  mkdir -p "$w" && cp -R "$etc/." "$w/" && cp -R "$2/$3/." "$w/" && chmod -R u+w "$w" || return 1
-  grep -rlI -F /etc/nginx/ "$w" 2>/dev/null | while IFS= read -r f; do
-    swap /etc/nginx/ "$w/" <"$f" >"$f.cqa-tmp" && mv "$f.cqa-tmp" "$f"
+  [ -d "$1" ] && return 0
+  part="$1.cqa-part"
+  rm -rf "$part"
+  if ! build "$part" "$1" "$2" "$3" "$4" || ! mv "$part" "$1"; then
+    rm -rf "$part"
+    return 1
+  fi
+}
+build() {
+  mkdir -p "$1" && cp -R "$etc/." "$1/" || return 1
+  case "/$4" in
+    */nginx) cp -R "$3/$4/." "$1/" || return 1 ;;
+    *) cp "$3/$5" "$1/" || return 1 ;;
+  esac
+  chmod -R u+w "$1" || return 1
+  grep -rlI -F /etc/nginx/ "$1" 2>/dev/null | while IFS= read -r f; do
+    swap /etc/nginx/ "$2/" <"$f" >"$f.cqa-tmp" && mv "$f.cqa-tmp" "$f"
   done
-  find "$w" -type f -name '*.template' | while IFS= read -r t; do
+  find "$1" -type f -name '*.template' | while IFS= read -r t; do
     sed -e 's/\${[A-Z_][A-Z0-9_]*_PORT}/1/g' -e 's/\${[A-Z_][A-Z0-9_]*}/example.test/g' "$t" >"${t%.template}"
   done
 }
@@ -653,10 +668,10 @@ wrap() {
     *) printf 'events {}\nhttp {\nserver {\nlocation / {\ninclude "%s";\n}\n}\n}\n' "$2" ;;
   esac
 }
+# check_one <side> <work dir> <path in the work dir> <path in the repo>
 check_one() {
-  w="$work/$1/$2"
-  rel="${3#"$2"/}"
-  target="$w/${rel%.template}"
+  w="$2"
+  target="$w/${3%.template}"
   levels="1 2 3"
   if grep -Eq '^[[:space:]]*(events|http)[[:space:]]*([{]|$)' "$target" 2>/dev/null; then
     levels=0
@@ -670,7 +685,7 @@ check_one() {
       wrap "$level" "$target" >"$conf"
     fi
     if out="$(nginx -t -q -e stderr -c "$conf" 2>&1)"; then
-      emit "$1" ok "$3" ""
+      emit "$1" ok "$4" ""
       return 0
     fi
     case "$out" in
@@ -678,15 +693,23 @@ check_one() {
     esac
     break
   done
-  emit "$1" ko "$3" "$(first_emerg "$out" | swap "$w/cqa-wrapper.conf" "(fichier englobant du contrôle)" | swap "$work/$1/" "")"
+  emit "$1" ko "$4" "$(first_emerg "$out" | swap "$w/cqa-wrapper.conf" "(fichier englobant du contrôle)" \
+    | swap "$work/$1/.cqa-root/" "" | swap "$work/$1/" "")"
 }
 while IFS="$tab" read -r kind folder file || [ -n "$kind" ]; do
   [ "$kind" = nginx ] || continue
+  if [ "$folder" = . ]; then
+    sub=.cqa-root
+    rel="$file"
+  else
+    sub="$folder"
+    rel="${file#"$folder"/}"
+  fi
   for side in head base; do
     if [ "$side" = head ]; then root="$head_root"; else root="$base_root"; fi
     [ -f "$root/$file" ] || continue
-    if prepare "$side" "$root" "$folder"; then
-      check_one "$side" "$folder" "$file"
+    if prepare "$work/$side/$sub" "$root" "$folder" "$file"; then
+      check_one "$side" "$work/$side/$sub" "$rel" "$file"
     else
       emit "$side" skip "$file" "copie du dossier nginx impossible"
     fi
@@ -763,7 +786,8 @@ config_run() {
     return 0
   fi
   part="$check_dir/config-$image.part"
-  docker run --rm --pull never --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+  docker run --rm --pull never --network none --cap-drop ALL --security-opt no-new-privileges \
+    --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
     -v "$check_dir:/in:ro" -v "$worktree:/repos/$repo:ro" "$@" \
     --entrypoint sh "$ref" -c "$script" sh "$repo" >"$part" </dev/null || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -785,7 +809,7 @@ config_checks() {
   local -a nginx_hosts varnish_hosts
   nginx_hosts=()
   varnish_hosts=()
-  grep -Eq '(^|/)nginx/.*\.conf(\.template)?$|\.vcl$' "$check_dir/files.txt" || return 0
+  grep -Eq '(^|/)nginx/.*\.conf(\.template)?$|(^|/)nginx\.conf$|\.vcl$' "$check_dir/files.txt" || return 0
   : >"$check_dir/config.tsv"
   if ! lines="$(python3 -I -c "$CONFIG_PLAN_PY" "$S" "$check_dir" "$worktree" </dev/null)"; then
     say "check : la liste des fichiers nginx et Varnish n'a pas pu être établie."
@@ -835,7 +859,8 @@ cmd_check() {
   mkdir -p -- "$check_dir/tools/stylelint/raw" || return 1
   config_checks "$check_dir" "$worktree" "$repo" "$uid_gid"
 
-  docker run --rm --pull never --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+  docker run --rm --pull never --network none --cap-drop ALL --security-opt no-new-privileges \
+    --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
     -v "$check_dir:/in:ro" -v "$worktree:/repos/$repo:ro" \
     --entrypoint sh "$(image_ref agence)" -c "$SYNTAX_SCRIPT" sh "$repo" \
     >"$check_dir/syntax.tsv" </dev/null || rc=$?
@@ -845,7 +870,8 @@ cmd_check() {
     return 1
   fi
   if grep -Eq '\.(css|scss|sass|less|vue)$' "$check_dir/files.txt"; then
-    docker run --rm --pull never --network none --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+    docker run --rm --pull never --network none --cap-drop ALL --security-opt no-new-privileges \
+      --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
       -v "$check_dir:/in:ro" -v "$check_dir/tools:/out" -v "$worktree:/repos/$repo:ro" \
       "$(image_ref agence)" stylelint --repos /repos --context /in/context.json </dev/null || {
       say "check : stylelint a échoué."

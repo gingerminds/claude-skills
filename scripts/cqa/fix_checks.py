@@ -24,6 +24,7 @@ STYLE_EXTENSIONS = (".css", ".scss", ".sass", ".less", ".vue")
 MAX_DETAIL = 10
 SCSS = "Syntaxe SCSS (postcss-scss)"
 ALREADY_BROKEN = "erreur déjà présente avant le correctif"
+OUTSIDE = "contrôle impossible hors de l'environnement du projet"
 MISSING = "résultat absent de la boîte à outils"
 # kind -> (label, check column of config.tsv)
 CONFIG = {
@@ -37,6 +38,17 @@ _NGINX_PASS = re.compile(r"\b(?:proxy|fastcgi|uwsgi|scgi|grpc|memcached)_pass\s+
 _NGINX_SERVER = re.compile(r"(?:^|[{;])\s*server\s+([^;\s{]+)", re.MULTILINE)
 _NGINX_RESOLVER = re.compile(r"\bresolver\s+([^;]+);")
 _VCL_HOST = re.compile(r"\.host\s*=\s*\"([^\"]*)\"")
+# Errors the offline image gives whatever the change: a module, a file, a certificate or a host
+# of the project's environment is missing. They are not_run, never failed, with or without a base.
+_ENVIRONMENT = {
+    "nginx": re.compile(r"unknown directive|cannot load certificate|BIO_new_file|no such file|"
+                        r"dlopen\(\)|load_module|host not found", re.IGNORECASE),
+    "varnish": re.compile(r"could not (?:find|open|load) vmod|cannot read file|no such file|"
+                          r"could not be resolved", re.IGNORECASE),
+}
+_MAIN_BLOCK = re.compile(r"^[ \t]*(?:events|http)[ \t]*(?:\{|$)", re.MULTILINE)
+_NGINX_AT = re.compile(r" in (\S+):(\d+)\s*$")
+_VCL_AT = re.compile(r"\('(.+?)' Line (\d+) Pos \d+\)")
 _HOST = re.compile(r"(?=.*[A-Za-z_])[A-Za-z0-9_](?:[A-Za-z0-9_.-]{0,251}[A-Za-z0-9_])?")
 _MAX_HOSTS = 100
 _MAX_FILES = 500
@@ -170,12 +182,13 @@ def host_syntax(worktree: Path, files: list, run) -> list:
 
 
 def config_kind(path: str) -> Optional[str]:
-    """Return "nginx" for a *.conf or *.conf.template under an nginx folder, "varnish" for a
-    *.vcl, else None."""
+    """Return "nginx" for a *.conf or *.conf.template under an nginx folder or any nginx.conf,
+    "varnish" for a *.vcl, else None."""
     parts = path.split("/")
     if parts[-1].endswith(".vcl"):
         return "varnish"
-    if "nginx" in parts[:-1] and parts[-1].endswith((".conf", ".conf.template")):
+    if parts[-1] == "nginx.conf" or (
+            "nginx" in parts[:-1] and parts[-1].endswith((".conf", ".conf.template"))):
         return "nginx"
     return None
 
@@ -184,7 +197,8 @@ def config_plan(files: list) -> list:
     """Return [(kind, folder, path)] of the nginx and Varnish files among files.
 
     folder is what the check copies and the base keeps: the outermost nginx folder of an nginx
-    file (copied over the image's /etc/nginx), the folder of a VCL file ("." at the root).
+    file, copied whole over the image's /etc/nginx; the folder of an nginx.conf outside such a
+    folder, of which only that file is copied; the folder of a VCL file. "." is the root.
     """
     plan = []
     for path in files:
@@ -192,12 +206,18 @@ def config_plan(files: list) -> list:
         if kind is None:
             continue
         parts = path.split("/")
-        if kind == "nginx":
+        if kind == "nginx" and "nginx" in parts[:-1]:
             folder = "/".join(parts[: parts.index("nginx") + 1])
         else:
             folder = "/".join(parts[:-1]) or "."
         plan.append((kind, folder, path))
     return plan
+
+
+def whole_folder(kind: str, folder: str) -> bool:
+    """True when the check copies all of folder: an nginx folder, not the folder of a lone
+    nginx.conf (its last segment is never "nginx")."""
+    return kind == "nginx" and folder.split("/")[-1] == "nginx"
 
 
 def write_config_plan(check_dir: Path, worktree: Path) -> list:
@@ -213,26 +233,37 @@ def write_config_plan(check_dir: Path, worktree: Path) -> list:
         "".join(f"{kind}\t{folder}\t{path}\n" for kind, folder, path in plan), encoding="utf-8")
     found = []
     for kind in CONFIG:
-        folders = sorted({folder for each, folder, _ in plan if each == kind})
-        if not folders:
+        entries = sorted({(folder, path) for each, folder, path in plan if each == kind})
+        if not entries:
             continue
         hosts = {DUMMY_HOST} if kind == "nginx" else set()
         for root in (Path(worktree), check_dir / "base"):
-            for folder in folders:
-                for path in _folder_files(root / folder, kind):
-                    hosts.update(_hosts(kind, _read_small(path)))
+            for folder, path in entries:
+                lone = root / path
+                if kind == "varnish" or whole_folder(kind, folder):
+                    scanned = _folder_files(root / folder, kind)
+                else:
+                    scanned = [lone] if lone.is_file() and not lone.is_symlink() else []
+                for scanned_path in scanned:
+                    hosts.update(_hosts(kind, _read_small(scanned_path)))
         found.extend((kind, host) for host in sorted(hosts)[:_MAX_HOSTS])
     return found
 
 
 def export_base(worktree: Path, start_sha: str, plan: list, base: Path, run) -> None:
-    """Write the folders of plan as they are at start_sha under base (only the VCL files of a
-    Varnish folder). A folder absent at start_sha gives nothing: its files have no base."""
-    kinds = {}
-    for kind, folder, _ in plan:
-        kinds.setdefault(folder, set()).add(kind)
-    for folder, folder_kinds in sorted(kinds.items()):
-        listing = fix_names.git(worktree, run, "ls-tree", "-r", "-l", "-z", start_sha, "--", folder)
+    """Write what the check copies, as it is at start_sha, under base: an nginx folder, a lone
+    nginx.conf, the VCL files of a Varnish folder. A file absent at start_sha has no base."""
+    queries = set()
+    for kind, folder, path in plan:
+        if kind == "varnish":
+            queries.add((folder, ".vcl"))
+        elif whole_folder(kind, folder):
+            queries.add((folder, ""))
+        else:
+            queries.add((path, ""))
+    written = set()
+    for pathspec, suffix in sorted(queries):
+        listing = fix_names.git(worktree, run, "ls-tree", "-r", "-l", "-z", start_sha, "--", pathspec)
         if listing.returncode != 0:
             raise ValueError(f"git ls-tree a échoué : {listing.stderr.strip()}")
         count = 0
@@ -241,7 +272,7 @@ def export_base(worktree: Path, start_sha: str, plan: list, base: Path, run) -> 
             fields = meta.split()
             if len(fields) != 4 or fields[0] not in ("100644", "100755") or fields[1] != "blob":
                 continue
-            if "nginx" not in folder_kinds and not path.endswith(".vcl"):
+            if not path.endswith(suffix) or path in written:
                 continue
             parts = PurePosixPath(path).parts
             if not parts or PurePosixPath(path).is_absolute() or ".." in parts:
@@ -254,6 +285,7 @@ def export_base(worktree: Path, start_sha: str, plan: list, base: Path, run) -> 
             target = Path(base, *parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(blob.stdout)
+            written.add(path)
             count += 1
 
 
@@ -315,11 +347,12 @@ def run_checks(run, launcher: Path, check_dir: Path, worktree: Path, repo: str, 
         config = check_dir / "config.tsv"
         head, base = _read_config(config)
         why = MISSING if config.is_file() else TOOLBOX_DOWN
-        for kind, (label, name) in CONFIG.items():
+        roots = (Path(worktree), check_dir / "base")
+        for kind, (_, name) in CONFIG.items():
             wanted = [path for each, _, path in plan if each == kind]
             if wanted:
-                checks.append(_config_check(label, wanted, [e for e in head if e["check"] == name],
-                                            [e for e in base if e["check"] == name], why))
+                checks.append(_config_check(kind, wanted, [e for e in head if e["check"] == name],
+                                            [e for e in base if e["check"] == name], why, roots))
     return checks + unsupported
 
 
@@ -337,18 +370,24 @@ def _syntax_check(label: str, wanted: list, entries: list, missing: str) -> dict
     return _check(label, "not_run", [path for path in wanted if path not in passed], detail)
 
 
-def _config_check(label: str, wanted: list, head: list, base: list, missing: str) -> dict:
-    """An nginx or Varnish check: a file fails only on an error its base does not have."""
+def _config_check(kind: str, wanted: list, head: list, base: list, missing: str,
+                  roots: tuple) -> dict:
+    """An nginx or Varnish check of wanted. An error of the environment (_outside) is not_run;
+    another one fails unless its base has the same error. roots: (worktree, base folder)."""
+    label = CONFIG[kind][0]
     now = {entry["path"]: entry for entry in head}
     before = {entry["path"]: entry for entry in base}
-    failed, known, passed = [], [], []
+    failed, known, outside, passed = [], [], [], []
     for path in wanted:
         entry = now.get(path, {})
         if entry.get("status") == "ok":
             passed.append(path)
         elif entry.get("status") == "ko":
             old = before.get(path, {})
-            if old.get("status") == "ko" and _error_key(old["message"]) == _error_key(entry["message"]):
+            if _outside(kind, entry["message"], Path(roots[0]) / path):
+                outside.append(path)
+            elif old.get("status") == "ko" and (_error_key(kind, old["message"], roots[1])
+                                                == _error_key(kind, entry["message"], roots[0])):
                 known.append(path)
             else:
                 failed.append(path)
@@ -358,20 +397,51 @@ def _config_check(label: str, wanted: list, head: list, base: list, missing: str
     if len(passed) == len(wanted):
         return _check(label, "passed", passed, "")
     rest = [path for path in wanted if path not in passed]
+    reasons = []
     if known:
-        detail = f"{ALREADY_BROKEN} (" + " ; ".join(
-            f"{path} : {now[path]['message']}".rstrip(" :") for path in known) + ")"
-    else:
+        reasons.append(f"{ALREADY_BROKEN} (" + " ; ".join(
+            f"{path} : {now[path]['message']}".rstrip(" :") for path in known) + ")")
+    reasons.extend(f"{OUTSIDE} : {now[path]['message']}" for path in outside)
+    if not reasons:
         skipped = [now[path] for path in rest if now.get(path, {}).get("status") == "skip"]
-        detail = skipped[0]["message"] if skipped else missing
-    return _check(label, "not_run", rest, detail)
+        reasons.append(skipped[0]["message"] if skipped else missing)
+    return _check(label, "not_run", rest, " ; ".join(reasons))
 
 
-def _error_key(message: str) -> str:
-    """The message without its line and column numbers, which move when lines are added."""
-    text = re.sub(r"(?::\d+)+", "", message)
-    text = re.sub(r"\b(?:[Ll]ine|[Pp]os)\s+\d+", "", text)
-    return " ".join(text.split())
+def _outside(kind: str, message: str, source: Path) -> bool:
+    """True when the error comes from the offline image, not from the change: see _ENVIRONMENT,
+    and for nginx a directive still misplaced after the last wrapper (the file was checked out of
+    the context the project includes it in; a main file is never wrapped)."""
+    if _ENVIRONMENT[kind].search(message):
+        return True
+    return (kind == "nginx" and "is not allowed here" in message
+            and not _MAIN_BLOCK.search(_read_small(source)))
+
+
+def _error_key(kind: str, message: str, root: Path) -> str:
+    """The message without the line and column numbers of its location, which move when lines
+    are added, plus the trimmed source line it points at under root, so that the same text on
+    another line of code is another error."""
+    text = re.sub(r"( in \S+):\d+(?=\s|$)", r"\1", message)
+    text = re.sub(r"\b(?:Line|Pos)\s+\d+", "", text)
+    return " ".join(text.split()) + "\n" + _source_line(kind, message, Path(root))
+
+
+def _source_line(kind: str, message: str, root: Path) -> str:
+    """Return the trimmed line the message points at under root ("" when unknown)."""
+    found = (_VCL_AT if kind == "varnish" else _NGINX_AT).findall(message)
+    if not found:
+        return ""
+    path, number = found[-1]
+    parts = PurePosixPath(path).parts
+    if not parts or PurePosixPath(path).is_absolute() or ".." in parts:
+        return ""
+    for candidate in (Path(root, *parts), Path(root, *parts[:-1], parts[-1] + ".template")):
+        if candidate.is_file() and not candidate.is_symlink():
+            lines = _read_small(candidate).split("\n")
+            index = int(number) - 1
+            return lines[index].strip() if 0 <= index < len(lines) else ""
+    return ""
 
 
 def _read_config(path: Path) -> tuple:

@@ -22,6 +22,7 @@ VARNISH = "Syntaxe Varnish (varnishd -C)"
 SCSS = "Syntaxe SCSS (postcss-scss)"
 ALREADY = "erreur déjà présente avant le correctif"
 NO_IMAGE = "image nginx absente de la boîte à outils : lancez cqa-toolbox.sh pull"
+OUTSIDE = "contrôle impossible hors de l'environnement du projet"
 
 
 def write(root, path, content):
@@ -309,9 +310,62 @@ class RunChecksTest(unittest.TestCase):
             ("nginx", "docker/nginx", "docker/nginx/templates/site.conf.template"),
             ("nginx", "nginx", "nginx/nginx.conf"),
             ("nginx", "a/nginx", "a/nginx/b/nginx/c.conf"),
+            ("nginx", "docker", "docker/nginx.conf"),
+            ("nginx", ".", "nginx.conf"),
             ("varnish", ".", "default.vcl"),
             ("varnish", "varnish/conf", "varnish/conf/a.vcl"),
         ])
+
+    def test_environment_errors_are_not_run_even_without_a_base(self):
+        write(self.worktree, "docker/nginx/a.conf", "location / {}\n")
+        write(self.worktree, "docker/nginx/nginx.conf", "events {}\nhttp {\n}\n")
+        nginx = [
+            ("docker/nginx/a.conf", 'unknown directive "brotli" in docker/nginx/a.conf:2'),
+            ("docker/nginx/a.conf", 'cannot load certificate "/etc/ssl/x.pem": BIO_new_file() failed '
+                                    '(SSL: error:80000002:system library::No such file or directory)'),
+            ("docker/nginx/a.conf", 'BIO_new_file("/etc/ssl/dhparam.pem") failed'),
+            ("docker/nginx/a.conf", 'open() "docker/nginx/snippets/x.conf" failed (2: No such file or '
+                                    'directory) in docker/nginx/a.conf:1'),
+            ("docker/nginx/nginx.conf", 'dlopen() "/etc/nginx/modules/ngx_x.so" failed (cannot open shared '
+                                        'object file) in docker/nginx/nginx.conf:1'),
+            ("docker/nginx/nginx.conf", '"load_module" directive is specified too late in '
+                                        'docker/nginx/nginx.conf:4'),
+            ("docker/nginx/a.conf", 'host not found in upstream "app.example.test" in docker/nginx/a.conf:3'),
+            ("docker/nginx/a.conf", '"location" directive is not allowed here in docker/nginx/a.conf:1'),
+        ]
+        varnish = [
+            "Could not find VMOD geoip9 ('docker/varnish/a.vcl' Line 2 Pos 8)",
+            "Could not open VMOD std ('docker/varnish/a.vcl' Line 2 Pos 8)",
+            "Could not load VMOD x ('docker/varnish/a.vcl' Line 2 Pos 8)",
+            "Cannot read file 'missing.vcl' (No such file or directory) ('docker/varnish/a.vcl' Line 2 Pos 9)",
+            "Backend host '\"app\"' could not be resolved to an IP address: ('docker/varnish/a.vcl' Line 1 Pos 27)",
+        ]
+        cases = [("nginx -t", NGINX, path, message) for path, message in nginx]
+        cases += [("varnishd -C", VARNISH, "docker/varnish/a.vcl", message) for message in varnish]
+        for index, (tool, label, path, message) in enumerate(cases):
+            for base in ("", f"base\tok\t{tool}\t{path}\t\n"):
+                with self.subTest(message=message, existing=bool(base)):
+                    self.check_dir = self.root / f"check-{index}-{bool(base)}"
+                    self.config = f"head\tko\t{tool}\t{path}\t{message}\n{base}"
+                    check = self.by_name(self.checks([path]))[label]
+                    self.assertEqual(check, {"name": label, "status": "not_run", "files": [path],
+                                             "detail": f"{OUTSIDE} : {message}"})
+
+    def test_a_misplaced_directive_in_a_main_file_fails(self):
+        write(self.worktree, "docker/nginx/nginx.conf", "events {}\nhttp {\n}\nlocation / {}\n")
+        self.config = ('head\tko\tnginx -t\tdocker/nginx/nginx.conf\t"location" directive is not allowed '
+                       'here in docker/nginx/nginx.conf:4\n')
+        check = self.by_name(self.checks(["docker/nginx/nginx.conf"]))[NGINX]
+        self.assertEqual(check["status"], "failed")
+
+    def test_the_base_comparison_keeps_port_numbers(self):
+        message = 'invalid port in "php:{}" of the "fastcgi_pass" directive in nginx/a.conf:{}'
+        for port, status in ((9001, "failed"), (9000, "not_run")):
+            with self.subTest(port=port):
+                self.check_dir = self.root / f"check-{port}"
+                self.config = (f"head\tko\tnginx -t\tnginx/a.conf\t{message.format(port, 4)}\n"
+                               f"base\tko\tnginx -t\tnginx/a.conf\t{message.format(9000, 3)}\n")
+                self.assertEqual(self.by_name(self.checks(["nginx/a.conf"]))[NGINX]["status"], status)
 
     def test_check_falls_back_to_host_binaries(self):
         self.code = 2
@@ -463,6 +517,7 @@ class CheckCommandTest(GitCase):
             "docker/varnish/default.vcl": "vcl 4.1;\n",
             "docker/varnish/README.md": "x\n",
             "docker/php/Dockerfile": "FROM php\n",
+            "docker/nginx.conf": "events {}\nhttp {}\n",
         })
         real_git(self.repo, "push", "-q", "origin", "develop")
 
@@ -473,30 +528,46 @@ class CheckCommandTest(GitCase):
             "docker/nginx/conf.d/default.conf": "server {\n    add_header X-A b;\n    brotli on;\n}\n",
             "docker/nginx/conf.d/new.conf": "server {}\n",
             "docker/varnish/default.vcl": "vcl 4.1;\n# x\n",
+            "docker/nginx.conf": "events {}\nhttp { server_tokens off; }\n",
         })
         self.config = ""
         self.config_check()
-        self.assertEqual(self.base, ["docker/nginx/conf.d/default.conf", "docker/nginx/fastcgi_params",
-                                     "docker/varnish/default.vcl"])
+        self.assertEqual(self.base, ["docker/nginx.conf", "docker/nginx/conf.d/default.conf",
+                                     "docker/nginx/fastcgi_params", "docker/varnish/default.vcl"])
         self.assertEqual(self.base_text["docker/nginx/conf.d/default.conf"], "server {\n    brotli on;\n}\n")
 
+    def broken_header_on_develop(self):
+        commit_files(self, self.repo, "chore: server", {
+            "docker/nginx/conf.d/default.conf": "server {\n    add_header X-A;\n}\n"})
+        real_git(self.repo, "push", "-q", "origin", "develop")
+
+    def header_error(self, side, line):
+        return (f"{side}\tko\tnginx -t\tdocker/nginx/conf.d/default.conf\tinvalid number of arguments in "
+                f"\"add_header\" directive in docker/nginx/conf.d/default.conf:{line}\n")
+
     def test_nginx_error_already_on_the_base_is_not_run(self):
-        self.nginx_on_develop()
+        self.broken_header_on_develop()
         worktree = self.started()
-        self.commit(worktree, "fix(CQ-3): headers", {
-            "docker/nginx/conf.d/default.conf": "server {\n    add_header X-A b;\n    brotli on;\n}\n"})
-        self.config = (
-            "head\tko\tnginx -t\tdocker/nginx/conf.d/default.conf\tunknown directive \"brotli\" in "
-            "docker/nginx/conf.d/default.conf:3\n"
-            "base\tko\tnginx -t\tdocker/nginx/conf.d/default.conf\tunknown directive \"brotli\" in "
-            "docker/nginx/conf.d/default.conf:2\n")
+        self.commit(worktree, "fix(CQ-3): listen", {
+            "docker/nginx/conf.d/default.conf": "server {\n    listen 80;\n    add_header X-A;\n}\n"})
+        self.config = self.header_error("head", 3) + self.header_error("base", 2)
         out = self.config_check()
         check = {c["name"]: c for c in out["checks"]}[NGINX]
         self.assertEqual(check["status"], "not_run")
         self.assertEqual(check["files"], ["docker/nginx/conf.d/default.conf"])
         self.assertTrue(check["detail"].startswith(ALREADY), check["detail"])
-        self.assertIn('unknown directive "brotli"', check["detail"])
+        self.assertIn('invalid number of arguments in "add_header"', check["detail"])
         self.assertEqual(out["failed_refs"], [])
+
+    def test_a_repaired_base_error_does_not_hide_a_new_one(self):
+        self.broken_header_on_develop()
+        worktree = self.started()
+        self.commit(worktree, "fix(CQ-3): headers", {
+            "docker/nginx/conf.d/default.conf": "server {\n    add_header X-A b;\n    add_header X-B;\n}\n"})
+        self.config = self.header_error("head", 3) + self.header_error("base", 2)
+        out = self.config_check()
+        self.assertEqual({c["name"]: c for c in out["checks"]}[NGINX]["status"], "failed")
+        self.assertEqual(out["failed_refs"], [3])
 
     def test_new_nginx_error_fails_its_rows(self):
         self.nginx_on_develop()
