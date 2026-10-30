@@ -966,9 +966,13 @@ def _cmd_check(args, services: Services) -> int:
     check_dir.mkdir(parents=True)
     checks = []
     if files:
-        checks = fix_checks.run_checks(
-            services.run, LAUNCHER, check_dir, worktree, key["repo"], files, added, third_party,
-        )
+        try:
+            checks = fix_checks.run_checks(
+                services.run, LAUNCHER, check_dir, worktree, key["repo"], files, added, third_party,
+                start_sha=key["start_sha"],
+            )
+        except ValueError as error:
+            raise UsageError(str(error))
     refs = fix_checks.failed_refs(worktree, key["start_sha"], checks, services.run)
     not_run = [{**item, "why": fix_checks.NOT_RUN_WHY} for item in fix_checks.project_commands(worktree)]
     write_json(folder / "checks.json", {"checks": checks, "not_run": not_run})
