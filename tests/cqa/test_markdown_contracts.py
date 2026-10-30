@@ -85,18 +85,23 @@ _ASSIGN_QUESTION = "« Écrire ces <n> assignations dans Notion ? »"
 _ASSIGN_APPLY = 'apply "$RUN" --plan notion/assign-plan.json'
 _SESSION_CREDENTIALS = "when the session holds the Basic Auth credentials"
 FIXER_DISPATCH = (
-    "Run dir: <run_dir>. Fix: <repo>/<slug>. Worktree: <path>. Pass: <N>. Rows: CQ-3, CQ-12. "
-    "Notes: <path|none>. Follow your instructions."
+    "Run dir: <run_dir>. Fix: <repo>. Section: <alias>. Worktree: <path>. Pass: <N>. "
+    "Rows: CQ-3, CQ-12. Notes: <path|none>. Stack core: <path|none>. Follow your instructions."
 )
 REVIEWER_DISPATCH = (
-    "Run dir: <run_dir>. Review: <repo>/<slug>. Worktree: <path>. Base: <sha>. Pass: <N>. "
+    "Run dir: <run_dir>. Review: <repo>. Worktree: <path>. Base: <sha>. Pass: <N>. "
     "Follow your instructions."
 )
 FIX_COMMIT = (
     'git -C "<worktree>" -c core.hooksPath=/dev/null -c core.fsmonitor=false commit '
-    '-m "<subject>" -m "<body>"'
+    '-F "<message file>"'
 )
-FIX_VALIDATE = 'cqa_fix.py" validate "<run dir>" "<repo>/<slug>" {kind} --pass <N>'
+FIX_VALIDATE = 'cqa_fix.py" validate "<run dir>" "<repo>" {kind} --pass <N>'
+# The fixer guards its index and its planned message before each commit (design 4.2.4).
+FIX_GUARD_STAGED = (
+    'cqa_fix.py" guard "<run dir>" "<repo>" --staged --message-file "<message file>"'
+)
+FIX_MESSAGE_FILE = "fix/<repo>/commit-<N>.txt"
 # The commands a fix sub-agent must never run (design 4.6, 4.11 and the global constraints).
 FIX_FORBIDDEN = (
     "git push", "git add -A", "git stash", "docker compose", "`make`", "`composer`", "`npm`",
@@ -104,6 +109,15 @@ FIX_FORBIDDEN = (
 )
 # The reviewer stages and commits nothing: git add as a whole is forbidden.
 REVIEWER_FORBIDDEN = ("git add", "git commit", "git checkout", *FIX_FORBIDDEN[2:])
+# What neither fix sub-agent may do (design 4.3.5), and the waiver kept for the lead (4.2.1),
+# written the same way in the hard rules of both.
+FIX_SCOPE_RULES = (
+    "Never run a command in the background",
+    "Never search from `/`",
+    "Never run code, not even a trial",
+    "Never read another project",
+    "Never run `waive-secret`",
+)
 # Exact labels of the fix mode (design 4.1, 4.4 and 4.13).
 FIX_LABELS = (
     "« Terminez d'abord l'écriture de l'audit (/gm:checklist-quality-audit rerun). »",
@@ -1364,6 +1378,20 @@ class AgentsTest(unittest.TestCase):
         self.assertEqual(loaded, {tool for tool in _tools(BROWSER) if tool in CHROME_TOOLS})
         self.assertEqual(loaded, CHROME_TOOLS)
 
+    def test_auditor_says_when_the_fix_lies_outside_the_repos(self):
+        """Design 4.3.4: in_repo false leaves the row to the devs before any fixer pass."""
+        output = _section(_text(AUDITOR), "Output")
+        for needle in (
+            "fill `in_repo`",
+            "`false` when all the work of the `todo` lies outside the repos",
+            "back office", "database", "host", "new plugin", "dependency",
+            "Leave it out when `todo` is `null`",
+            "In doubt, `true`",
+            "a follow-up, a rerun and a recette",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, output)
+
     def test_cited_plugin_paths_exist(self):
         for path in (AUDITOR, BROWSER, FIXER, FIX_REVIEWER, VERDICTS_MD, FIX_MD):
             for cited in _PLUGIN_PATH.findall(_text(path)):
@@ -1395,17 +1423,21 @@ class FixAgentsTest(unittest.TestCase):
             "${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/references/fix.md",
             "${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md",
             "nature `dev`",
-            "fix/<repo>/<slug>/report-<N>.json",
+            "fix/<repo>/report-<N>.json",
             FIX_COMMIT,
+            FIX_GUARD_STAGED,
+            FIX_MESSAGE_FILE,
             FIX_VALIDATE.format(kind="report"),
             'until it prints `"ok": true`',
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
+        self.assertNotIn("<repo>/<slug>", text)
         rules = _section(text, "Hard rules")
         for needle in (
             "Edit and Write only under the absolute path of `Worktree:`",
             "your report file",
+            "your commit message file",
             "`vendor/`, `node_modules/`",
             "never write there and never run anything there",
             "Never ask the lead anything",
@@ -1433,16 +1465,17 @@ class FixAgentsTest(unittest.TestCase):
             "${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md",
             "nature `review`",
             "${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/references/fix.md",
-            "fix/<repo>/<slug>/review-<N>.json",
+            "fix/<repo>/review-<N>.json",
             FIX_VALIDATE.format(kind="review"),
             "`ok`",
             "`blocking`",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
+        self.assertNotIn("<repo>/<slug>", text)
         rules = _section(text, "Hard rules")
         for needle in (
-            "Write only `fix/<repo>/<slug>/review-<N>.json`",
+            "Write only `fix/<repo>/review-<N>.json`",
             "never write there and never run anything there",
             "Never ask the lead anything",
             "git push",
@@ -1451,32 +1484,97 @@ class FixAgentsTest(unittest.TestCase):
             with self.subTest(rule=needle):
                 self.assertIn(needle, rules)
 
-    def test_fix_agents_only_validate_their_own_file(self):
+    def test_fix_agents_only_run_their_own_commands(self):
+        """The reviewer validates its file; the fixer also guards its index before each
+        commit (design 4.2.4); neither waives a secret alert, which is the lead's (4.2.1)."""
         known = _python_commands(cqa_fix)
-        for path in (FIXER, FIX_REVIEWER):
+        for path, expected in ((FIXER, {"validate", "guard"}), (FIX_REVIEWER, {"validate"})):
             calls = [(command, rest) for cli, command, rest in _CLI_CALL.findall(_text(path))
                      if cli == "cqa_fix.py"]
             with self.subTest(agent=path.name):
                 self.assertTrue(calls)
-                self.assertEqual({command for command, _ in calls}, {"validate"})
+                self.assertEqual({command for command, _ in calls}, expected)
                 for command, rest in calls:
-                    self.assertLessEqual(set(_FLAG.findall(_shell_segment(rest))), known[command])
+                    flags = set(_FLAG.findall(_shell_segment(rest)))
+                    self.assertLessEqual(flags, known[command])
+                    if command == "guard":
+                        self.assertEqual(flags, {"--staged", "--message-file"})
         for path in (FIXER, FIX_REVIEWER):
             with self.subTest(agent=path.name):
                 self.assertNotRegex(_text(path), r"cqa_(?:notion|plan|ssh_ro)\.py|cqa-toolbox\.sh")
 
+    def test_fix_agents_keep_to_their_scope(self):
+        """Design 4.3.5: no background command, no search from /, no code run, no other
+        project; the stack core of 4.3.6 is read-only."""
+        for path in (FIXER, FIX_REVIEWER):
+            text = _text(path)
+            rules = _section(text, "Hard rules")
+            for needle in (*FIX_SCOPE_RULES, "stack core",
+                           "never write there and never run anything from it"):
+                with self.subTest(agent=path.name, needle=needle):
+                    self.assertIn(needle, rules)
+            with self.subTest(agent=path.name, needle="stack_core"):
+                self.assertIn('`stack_core["<repo>"]`', text)
+
+    def test_fixer_follows_the_0_15_conventions(self):
+        """Design 4.1.3, 4.2.4, 4.3.3, 4.5.1 and 4.5.3."""
+        text = _text(FIXER)
+        for needle in (
+            "`Section`",
+            "`Stack core`",
+            '`pass_sections["<N>"]`',
+            "`type(<alias> CQ-107): imperative summary`",
+            f"{fix_names.SUBJECT_MAX} characters at most",
+            "Never commit while the guard reports a problem",
+            "`waivable` true",
+            "`remaining`",
+            "« partiel »",
+            "Never offer an option that leaves the row as it is",
+            "the orchestrator adds « Laisser aux devs » itself",
+            "Check every option in the code, the `default` first, as if it were the fix",
+            "`retry` true",
+            "« garde indisponible : <cause courte> »",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        self.assertNotIn("`type(CQ-107)", text)
+        self.assertNotIn("`source` `guard`", text)
+        self.assertNotIn("its `attention` is always set", text)
+
+    def test_fix_reviewer_corrects_texts_without_a_pass(self):
+        """Design 4.3.1: an ok verdict carries the text corrections that validate accepts."""
+        text = _text(FIX_REVIEWER)
+        for needle in (
+            "`ok` with `corrections`",
+            *(f"`{name}`" for name in fix_guard.CORRECTION_LIMITS),
+            "never `blocking` for a text alone",
+            "A problem of the commit message alone is never `blocking`",
+            "`remaining`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        self.assertNotIn("a misleading `change` or a `uat` that tests nothing is `blocking`", text)
+
     def test_fix_reference_mirrors_the_guard(self):
         text = _text(FIX_MD)
-        for prefix in (fix_names.BRANCH_PREFIX, fix_names.DRY_RUN_PREFIX):
-            with self.subTest(prefix=prefix):
-                self.assertIn(f"`{prefix}<slug>`", _section(text, "2. Branches"))
+        branches = _section(text, "2. Branches")
+        for base in (fix_names.BRANCH_BASE, fix_names.DRY_RUN_BASE):
+            with self.subTest(base=base):
+                self.assertIn(f"`{base}`", branches)
+        self.assertIn(f"`{fix_names.BRANCH_PREFIX}<slug>`", branches)
         commits = _section(text, "3. Commits")
         self.assertIn(f"`{fix_names.SUBJECT.pattern}`", commits)
         for kind in fix_names.COMMIT_TYPES:
             with self.subTest(type=kind):
                 self.assertIn(f"`{kind}`", commits)
+        for alias in fix_names.SECTION_ALIASES.values():
+            with self.subTest(alias=alias):
+                self.assertIn(f"`{alias}`", commits)
         for needle in (FIX_COMMIT, "core.hooksPath=/dev/null", "A commit carries one row only",
-                       "`covered_by`", "Co-Authored-By", "Generated with", "git add -A"):
+                       "`covered_by`", "Co-Authored-By", "Generated with", "git add -A",
+                       f"{fix_names.SUBJECT_MAX} characters at most",
+                       "`cqa_fix.py guard <run_dir> <key> --staged --message-file <file>`",
+                       "never commits while the guard reports a problem"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, commits)
         evaluation = _section(text, "4. Self-evaluation")
@@ -1517,19 +1615,82 @@ class FixAgentsTest(unittest.TestCase):
         for needle in (
             FIXER_DISPATCH,
             REVIEWER_DISPATCH,
-            "fix/<repo>/<slug>/notes-<N>.json",
+            "fix/<repo>/notes-<N>.json",
             '{"answers": [{"ref", "answer"}], '
-            '"problems": [{"ref", "source": "guard"|"check"|"review", "detail"}]}',
+            '"problems": [{"ref", "source": "check"|"review", "detail"}]}',
             "« Abandon : »",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
+        self.assertNotIn("<repo>/<slug>/", text)
+
+    def test_fix_reference_describes_one_key_per_repo_with_sections(self):
+        """Design 4.1: a key is a repo, its sections run one after the other in its worktree,
+        a pass belongs to one section, and the stack core is read-only (4.3.6)."""
+        text = _text(FIX_MD)
+        keys = _section(text, "1. Keys")
+        for needle in (
+            "A key is a repo",
+            "`sections`",
+            "`cqa_fix.py section-start",
+            "`cqa_fix.py section-end",
+            "--failed",
+            "`cqa_fix.py pass-start <run_dir> <key> --pass <N> --section <alias>`",
+            "« Réf d'une autre section (<alias>) »",
+            "`Section`",
+            "`Stack core`",
+            '`stack_core["<repo>"]`',
+            "read-only",
+            FIX_MESSAGE_FILE.removeprefix("fix/<repo>/"),
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, keys)
+        self.assertNotIn("A key is one checklist category in one repo", keys)
+
+    def test_fix_reference_settles_guard_problems_without_the_fixer(self):
+        """Design 4.2.5: a form problem is reworded, a content problem drops the row at once,
+        and only the lead waives a heuristic secret alert (4.2.1)."""
+        correction = _section(_text(FIX_MD), "6. Correction pass")
+        for needle in (
+            "never goes to the fixer",
+            "`form`", "`content`", "`suspect`",
+            "`cqa_fix.py reword`",
+            "`cqa_fix.py drop`",
+            "without a correction pass",
+            "only the lead",
+            "`cqa_fix.py waive-secret`",
+            "no sub-agent ever runs it",
+            "`retry` true",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, correction)
+        self.assertNotIn("The fixer gives the row up", correction)
+
+    def test_fix_reference_questions_options_and_texts(self):
+        """Design 4.1.7, 4.3.1, 4.3.3, 4.5.1 and 4.5.4."""
+        text = _text(FIX_MD)
+        questions = _section(text, "5. Questions")
+        for needle in (
+            "Never an option that leaves the row as it is",
+            "the orchestrator adds « Laisser aux devs » itself",
+            "checked in the code as if it were the fix, the `default` first",
+            "the same file and the same element",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, questions)
+        files = _section(text, "8. Report and review files")
+        for needle in ("`remaining`", "« partiel »", "`corrections`", "`ok` with `corrections`",
+                       "`cqa_fix.py review-scope <run_dir> <key> --pass <N>`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, files)
+        self.assertIn("Always set for a Semi-auto row reported `fixed`", files)
+        self.assertNotIn("Always set for a Semi-auto row (section 4)", files)
 
     def test_each_fixer_pass_gets_its_own_review(self):
         """R14: pass-start records Base before pass N, review N judges the rows of pass N."""
         reference = _text(FIX_MD)
         for section, needles in (
-            ("1. Keys", ("`cqa_fix.py pass-start <run_dir> <key> --pass <N>`",
+            ("1. Keys", ("`cqa_fix.py pass-start <run_dir> <key> --pass <N> --section <alias>`",
                          "Every fixer pass N that leaves rows fixed is followed by its own review N",
                          "review p is recorded and blocks none of them",
                          "a pass that fixes no row needs no review",
@@ -1610,6 +1771,8 @@ class FixAgentsTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual({entry["outcome"] for entry in entries}, set(fix_guard.REPORT_OUTCOMES))
         self.assertTrue(any(row.get("covered_by") for row in report["rows"]))
+        self.assertTrue(any(entry["remaining"] for entry in entries))
+        self.assertEqual(report["key"], "front")
         state = {str(entry["ref"]): {"outcome": entry["outcome"], "pass": report["pass"]}
                  for entry in entries}
         blocking, errors = fix_guard.validate_review(
@@ -1617,6 +1780,7 @@ class FixAgentsTest(unittest.TestCase):
         )
         self.assertEqual(errors, [])
         self.assertTrue(blocking)
+        self.assertTrue(fix_guard.review_corrections(review))
 
     def test_skill_routes_fix_to_section_12_and_the_reference(self):
         arguments = _section(_text(SKILL), "2. Arguments")

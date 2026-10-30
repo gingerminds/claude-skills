@@ -843,10 +843,10 @@ python3 "$S/cqa_fix.py" pass-start "$RUN" "<repo>/<slug>" --pass <N> --section <
 Dispatch `gm:cqa-fixer` with the line, exactly:
 
 ```
-Run dir: <run_dir>. Fix: <repo>/<slug>. Worktree: <path>. Pass: <N>. Rows: CQ-3, CQ-12. Notes: <path|none>. Follow your instructions.
+Run dir: <run_dir>. Fix: <repo>. Section: <alias>. Worktree: <path>. Pass: <N>. Rows: CQ-3, CQ-12. Notes: <path|none>. Stack core: <path|none>. Follow your instructions.
 ```
 
-`Worktree` is the absolute `worktree` that `start` printed. Pass 1: `Rows` are the rows of the key still `pending` in `fix/state.json`, and `Notes: none`. A later pass: the rows it answers (5.c) or corrects (5.f), and `Notes: fix/<repo>/<slug>/notes-<N>.json`, written before the dispatch with Write, in the format of `references/fix.md`, section 1. Then validate the report again (the fixer validated it too):
+`Worktree` is the absolute `worktree` that `start` printed. `Section` is the alias of the section of the pass, as `pass-start` recorded it. `Stack core` is the `path` of `stack_core["<repo>"]` in `fix/state.json`, `none` without one (read-only for the sub-agents, `references/fix.md`, section 1). Pass 1: `Rows` are the rows of the key still `pending` in `fix/state.json`, and `Notes: none`. A later pass: the rows it answers (5.c) or corrects (5.f), and `Notes: fix/<repo>/<slug>/notes-<N>.json`, written before the dispatch with Write, in the format of `references/fix.md`, section 1. Then validate the report again (the fixer validated it too):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -921,7 +921,7 @@ python3 "$S/cqa_fix.py" review-scope "$RUN" "<repo>/<slug>" --pass <N>
 It prints `{"light", "lines", "files"}` for the diff `bases["<N>"]..HEAD`: `light` is true when every file is documentation (`*.md`, `*.rst`, `*.adoc`) and the added plus removed lines are 40 at most. When `light` is true, write `review-<N>.json` yourself, by the rules of `gm:cqa-fix-reviewer`; otherwise dispatch `gm:cqa-fix-reviewer` with the line, exactly:
 
 ```
-Run dir: <run_dir>. Review: <repo>/<slug>. Worktree: <path>. Base: <sha>. Pass: <N>. Follow your instructions.
+Run dir: <run_dir>. Review: <repo>. Worktree: <path>. Base: <sha>. Pass: <N>. Follow your instructions.
 ```
 
 `Base` is the `base` that `pass-start` printed for pass N (`bases["<N>"]` of the key in `fix/state.json`). A pass without fixed rows needs no review. Then:
