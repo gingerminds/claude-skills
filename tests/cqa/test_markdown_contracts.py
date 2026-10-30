@@ -1860,15 +1860,16 @@ class FixAgentsTest(unittest.TestCase):
             with self.subTest(agent=needle):
                 self.assertIn(needle, fixer)
 
-    def test_a_guard_problem_without_a_row_fails_the_section(self):
-        """Fix round 1, items 1 and 8 (ruling P17): a secret in a message is reworded, a
-        content problem without a row ends the section as failed."""
+    def test_a_guard_problem_without_a_row_leaves_the_key(self):
+        """Fix round 1, items 1 and 8 (ruling P17, revised in Task 13): a secret in a message
+        is reworded, a content problem without a row leaves the key."""
         correction = _section(_text(FIX_MD), "6. Correction pass")
         for needle in ("`path` null and a `label`, whatever its `kind`",
                        "no `path` and no `label` (a merge commit, a rewritten history: its "
                        "`ref` is null",
                        "changed outside the pass",
-                       "`cqa_fix.py section-end --failed`"):
+                       "`cqa_fix.py section-end --failed`",
+                       "the orchestrator leaves the key"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, correction)
 
@@ -2441,6 +2442,88 @@ class FixPassOrchestrationTest(unittest.TestCase):
         arguments = _section(self.skill, "2. Arguments")
         recette = next(line for line in arguments.splitlines() if line.startswith("- `recette`:"))
         self.assertIn("« En review »", recette)
+
+    def test_history_problems_leave_the_key(self):
+        """Task 13 round 1, item 1 (ruling P17 revised): a merge commit or a rewritten history
+        belongs to the key; section-end --failed refuses it (exit 5)."""
+        line = next(item for item in self.problems.splitlines()
+                    if "`content` with no `path` and no `label`" in item)
+        for needle in ("the key is left", "go on with the next key", "tell the lead at once"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, line)
+        self.assertNotIn("End the section as failed", line)
+        for needle in ("when `section-end --failed` itself exits 2", "or 5 (",
+                       "« C'est réglé, reprendre »", "« Laisser cette clé »"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.keys + _between(self.section, "**6. ", "**7. "))
+        failing = _between(self.problems, "fails instead", "--failed --reason")
+        for absent in ("a guard problem without a row", "uncommitted changes"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, failing)
+        table = self.skill[self.skill.index("## Exit codes"):]
+        row = next(item for item in table.splitlines() if item.startswith("| `cqa_fix.py` |"))
+        self.assertIn("a merge commit or a rewritten history", row)
+        no_row = next(item for item in _section(_text(FIX_MD), "6. Correction pass").splitlines()
+                      if "**No row**" in item)
+        self.assertIn("leaves the key", no_row)
+        self.assertNotIn("ends the section as failed", no_row)
+
+    def test_an_answer_pass_without_a_valid_report_is_closed(self):
+        """Task 13 round 1, item 2: the empty report closes a pass of a settled section."""
+        end = _between(self.section, "**6. ", "**7. ")
+        for needle in ('`{"key": "<repo>", "pass": <N>, "rows": []}`', "validate it",
+                       "a pass in progress"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, end)
+
+    def test_a_dirty_worktree_keeps_its_section_for_the_lead(self):
+        """Task 13 round 1, item 3 (ruling P18, design 4.1.5)."""
+        fixer_pass = _between(self.keys, "b. Fixer pass", "c. Questions")
+        dirty = next(item for item in fixer_pass.splitlines()
+                     if item.startswith("- A fixer that stopped on uncommitted changes"))
+        for needle in ("never clean it yourself", "stays `active`", "« C'est réglé, reprendre »",
+                       "« Abandonner la section »", "go on with the next key",
+                       "« <repo> : modifications non commitées dans le worktree »"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, dirty)
+        self.assertNotIn("end the section as failed the same way", dirty)
+        end = _between(self.section, "**6. ", "**7. ")
+        for needle in ("« C'est réglé, reprendre »", "« Abandonner la section »",
+                       "`section-end --failed`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, end)
+
+    def test_notion_rule_names_the_status_put_back(self):
+        """Task 13 round 1, item 4."""
+        intro = self.section[:self.section.index("**1. Run.**")]
+        line = next(item for item in intro.splitlines() if item.startswith("- In Notion,"))
+        self.assertIn("the status the row had before its pass", line)
+        self.assertNotIn("never writes another status", line)
+
+    def test_secret_alerts_set_aside_are_told_apart(self):
+        """Task 13 round 1, item 5: a secret alert is a fix_question entry too."""
+        prefix = "« <repo> : Alerte de secret à confirmer par le lead"
+        resume = _between(self.section, "« Reprendre les correctifs »", "**2. ")
+        for part, text in (("5.f", self.problems), ("resume", resume),
+                           ("step 6", _between(self.section, "**6. ", "**7. "))):
+            with self.subTest(part=part):
+                self.assertIn(prefix, text)
+        self.assertNotIn("a secret alert for instance", self.section)
+
+    def test_in_review_needs_a_write(self):
+        """Task 13 round 1, item 6."""
+        summary = _between(self.section, "**8. Summary.**", "End, in French")
+        self.assertIn("exited 0 or 7", summary)
+
+    def test_fix_reference_retries_like_the_skill(self):
+        """Task 13 round 1, item 7: fix.md says what SKILL.md 5.f does with a retried row."""
+        retry = next(item for item in _section(_text(FIX_MD), "6. Correction pass").splitlines()
+                     if item.startswith("- **Rows taken along by a drop**"))
+        for needle in ("a problem of the message is reworded",
+                       "a waivable alert goes to the lead", "without a correction pass"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, retry)
+        self.assertNotIn("at the least problem after it (check, guard or review)", retry)
 
     def test_commands_cited_inline_exist(self):
         """Every backticked subcommand with options (`section-end --failed`) exists with

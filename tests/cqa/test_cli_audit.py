@@ -3138,6 +3138,31 @@ class FixPlanCommandTest(FixPlanCase):
         self.assertEqual(json.loads(out)["reverted"], [107])
         self.assertEqual(set(self.ops("status")), {107})
 
+    def test_closed_only_plan_refuses_a_run_without_notion_writes(self):
+        """The recette path honours the launch consent too: notion_write « none » or a dry
+        run prepares nothing (README: « none » n'écrit rien, garanti par le code)."""
+        self.write(self.run_dir.parent / "2026-10-10-0900", "fix/mr-links.json", {"links": {
+            "107": [{"repo": "laravel", "url": CLOSED_URL, "iid": 9, "status_before": "À traiter"}],
+        }})
+        original = self.read(self.run_dir, "context.json")
+        plan = self.run_dir / "fix" / "notion-plan.json"
+        for name, value, needle in (("notion_write", "none", "« none »"),
+                                    ("dry_run", True, "--dry-run")):
+            with self.subTest(**{name: value}):
+                self.write(self.run_dir, "context.json", {**original, name: value})
+                if plan.exists():
+                    plan.unlink()
+                code, out, err = self.run_fix_plan(FixNotion(), "--closed-only", "--closed",
+                                                   "CQ-107")
+                self.assertEqual(code, 2, err)
+                self.assertIn(needle, err)
+                self.assertIn("rien n'est", err)
+                self.assertFalse(plan.exists())
+        self.write(self.run_dir, "context.json", {**original, "notion_write": "keep_human",
+                                                  "dry_run": False})
+        code, out, err = self.run_fix_plan(FixNotion(), "--closed-only", "--closed", "CQ-107")
+        self.assertEqual(code, 0, err)
+
     def test_closed_mrs_during_a_pass_and_the_option_checks(self):
         self.write(self.run_dir.parent / "2026-10-10-0900", "fix/mr-links.json", {"links": {
             "107": [{"repo": "laravel", "url": CLOSED_URL, "iid": 9, "status_before": "À traiter"}],

@@ -345,6 +345,11 @@ def _cmd_fix_plan(args, client) -> int:
     closed = sorted({ref for text in args.closed for ref in _parse_refs(text)})
     if args.closed_only and not closed:
         raise UsageError("--closed-only attend les Réf des MR fermées sans fusion (--closed CQ-12).")
+    if args.closed_only:
+        _refuse_when_none(run_dir)
+        if isinstance(context, dict) and context.get("dry_run") is True:
+            raise UsageError("context.json : dry_run vaut true (--dry-run) : rien n'est préparé "
+                             "pour Notion.")
     common = {
         "lead_option": _lead_option(context),
         "repos": context.get("repos") or [],

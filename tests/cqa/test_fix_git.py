@@ -728,6 +728,34 @@ class SectionTest(GitCase):
         self.assertEqual(self.key()["step"], "reviewed")
 
 
+    def test_an_answer_pass_without_a_valid_report_is_closed_by_an_empty_report(self):
+        """SKILL.md section 12, step 6: an answer pass in a settled section whose report stays
+        invalid drops its rows, then an empty report closes the pass, else the key stays with
+        a pass in progress and nothing can publish or keep it."""
+        self.write_run(flight(), sections={"securite": (3,)})
+        self.open_pass(mode="autonomous")
+        worktree = Path(self.start_ok()["worktree"])
+        self.section_start()
+        self.assertEqual(self.pass_start(1)[0], 0)
+        question = [{"ref": 3, "outcome": "question", "question": self.QUESTION}]
+        self.assertEqual(self.validate("report", 1, question)[0], 0)
+        self.assertEqual(self.section("end", "securite")[0], 0)
+        self.assertEqual(self.run_main(["stage", self.run_dir, "questions"])[0], 0)
+        self.assertEqual(self.pass_start(2)[0], 0)
+        self.fixer_commit(worktree, "contact.txt", "fix(securite CQ-3): add the contact")
+        code, out, err = self.run_main(["drop", self.run_dir, KEY, "--refs", "CQ-3", "--reason",
+                                        "rapport invalide après une nouvelle tentative"])
+        self.assertEqual(code, 0, err)
+        code, out, err = self.run_main(["reorder", self.run_dir, KEY])
+        self.assertEqual(code, 2, err)
+        self.assertIn("La passe 2 est commencée sans rapport validé", err)
+        code, result, err = self.validate("report", 2, [])
+        self.assertEqual(code, 0, err)
+        key = self.key()
+        self.assertEqual((key["pass"], key["step"]), (2, "reviewed"))
+        self.assertEqual(key["rows"]["3"]["outcome"], "dropped")
+        self.assertEqual(self.run_main(["reorder", self.run_dir, KEY])[0], 0)
+
 DOC = "docs/WORDPRESS.md"
 ROBOTS = "robots.txt"
 FAILED = "Rapport invalide après une nouvelle tentative."
