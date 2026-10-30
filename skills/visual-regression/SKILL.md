@@ -1,5 +1,6 @@
 ---
 name: visual-regression
+disable-model-invocation: true
 description: Sets up and runs visual (screenshot) regression testing with Playwright — detects/configures the tooling if absent, captures baselines, runs comparisons, and reports pixel diffs with a clear accept/reject call per snapshot. Also supports comparing two live URLs directly (no committed baseline needed) — the case of a rewritten/migrated repo with no relevant local history, checked against the still-live old site; invoke as `/gm:visual-regression <old-url> <new-url>` to go straight to that mode. Stack-agnostic (targets any rendered URL: Drupal, WordPress, Laravel, Vue/Nuxt, Django...). Manual invocation only. Use when the user asks to check for visual regressions, compare UI screenshots before/after a change or a migration, diff two environments/URLs visually, set up screenshot testing, or invokes /gm:visual-regression.
 ---
 
@@ -30,7 +31,7 @@ Catch unintended UI/CSS changes by comparing screenshots of rendered pages again
 
 ## How to reach the running app
 
-Apply `../../shared/runner.md` (make → docker compose → lando) to find how the project boots. Then:
+Apply `${CLAUDE_SKILL_DIR}/../../shared/runner.md` (make → docker compose → lando) to find how the project boots. Then:
 
 - If one command reliably boots the full stack and blocks until ready, wire it as Playwright's `webServer` (`command`, `url`, `reuseExistingServer: !process.env.CI`) so `playwright test` starts it automatically.
 - Otherwise, assume the app is already running locally and just ask the user for the base URL (`http://localhost:8080`, a Lando/DDEV URL, etc.) — set it as `use.baseURL`.
@@ -58,7 +59,7 @@ Committed PNGs never get garbage-collected — every accepted diff replaces the 
 
 - **Default — git-committed baselines** (as described in Flow 1/2): fine for a small suite (a handful of pages × breakpoints, total baseline weight staying in the low MBs). Keep doing this unless a trigger below applies.
 - **Switch to release-based baselines** for a large suite (many pages × several breakpoints) or a repo where GitLab storage is already a concern: don't commit the PNGs to the working tree at all. Zip the current `*-snapshots/**` set and attach it as an asset to a tagged GitLab Release, named `visual-baseline-v<N>-<YYYY-MM-DD>` (`<N>` increments by one on every accepted set, e.g. `visual-baseline-v4-2026-09-23`) — the number gives an at-a-glance sequence, the date gives an at-a-glance age. Keep only a small manifest in git (the current release tag to use). Flow 3 downloads and unzips the latest release's asset before comparing; accepting a diff (Flow 2) creates a new release + asset instead of a new git blob.
-- **Keep only the last 3 baseline releases**: there's no value hoarding older ones. When Flow 2 creates a new baseline release, delete the release and its asset once there are more than 3 (oldest first) — a fixed, small footprint instead of an ever-growing list.
+- **Keep only the last 3 baseline releases**: there's no value hoarding older ones. When Flow 2 creates a new baseline release and there are now more than 3, list the ones that would be deleted (oldest first) and **ask the user to confirm before deleting** each release and its asset — deletion is irreversible. The result is a fixed, small footprint instead of an ever-growing list.
 - **Either way, treat a baseline set as having a shelf life**: if its date (commit date, or release tag date) is older than roughly a quarter, flag it to the user before trusting it as ground truth — offer to recapture (Flow 2) rather than silently comparing against a possibly-outdated reference. A failing diff against a 6-month-old baseline says as much about staleness as about a real regression.
 - Ask the user which strategy fits during setup (Flow 1) if the repo/team has no existing convention; don't switch strategies mid-project without confirming — it changes what "accepting a diff" actually does.
 
@@ -103,15 +104,30 @@ One-shot audit, not an ongoing baseline: validates that a rewritten/migrated sit
 2. Install just `@playwright/test` (or `playwright` if no test runner is wanted) plus `pixelmatch` and `pngjs` as devDependencies — no `playwright.config.ts` scaffolding needed for a one-shot script.
 3. Write a small script (not a persistent spec suite) that, **for each paired route, in the same run**: opens a fresh, isolated `browser.newContext()` per URL (no shared cookies/session bleed between the two), navigates to `REF_URL + route`, screenshots (`fullPage: true`); does the same for `TARGET_URL + route`; then diffs the two PNGs with `pixelmatch`, writing a `<route-slug>.diff.png` plus the diff-pixel ratio into a report folder, e.g.:
 
+   `pixelmatch` throws if the two images differ in size, and two `fullPage` captures of different sites almost never share the same height — so **normalize to a common size first**: pad both PNGs (bottom/right) to `max(width)` × `max(height)` with an opaque background color that is neither image's page background (so the padded strip counts as diff), then diff. Record the original heights and report the gap per route (a height gap is itself a finding: missing/extra content or a reflow). If the height gap is large, also diff per viewport-height slice so a shifted block doesn't turn every row below it into noise:
+
    ```ts
-   const [refPng, newPng] = [PNG.sync.read(refBuffer), PNG.sync.read(newBuffer)];
-   const diff = new PNG({ width: refPng.width, height: refPng.height });
-   const diffPixels = pixelmatch(refPng.data, newPng.data, diff.data, refPng.width, refPng.height, { threshold: 0.1 });
-   const diffRatio = diffPixels / (refPng.width * refPng.height);
+   // Pad a PNG to width × height, filling the extra area with an opaque magenta.
+   const pad = (src: PNG, width: number, height: number): PNG => {
+     const out = new PNG({ width, height });
+     for (let i = 0; i < out.data.length; i += 4) out.data.set([255, 0, 255, 255], i);
+     PNG.bitblt(src, out, 0, 0, src.width, src.height, 0, 0);
+     return out;
+   };
+
+   const [refRaw, newRaw] = [PNG.sync.read(refBuffer), PNG.sync.read(newBuffer)];
+   const width = Math.max(refRaw.width, newRaw.width);
+   const height = Math.max(refRaw.height, newRaw.height);
+   const [refPng, newPng] = [pad(refRaw, width, height), pad(newRaw, width, height)];
+   const heightGap = Math.abs(refRaw.height - newRaw.height); // report this per route
+   const diff = new PNG({ width, height });
+   // threshold 0.2 = same per-pixel sensitivity as Mode A's `toHaveScreenshot`, so ratios stay comparable
+   const diffPixels = pixelmatch(refPng.data, newPng.data, diff.data, width, height, { threshold: 0.2 });
+   const diffRatio = diffPixels / (width * height);
    ```
 
-   Mask/crop genuinely-expected differences (a domain-specific cookie banner, a date, an A/B-test badge, **a rotating/autoplay carousel or slider in the hero area**) before diffing rather than letting them dominate the ratio — same discipline as Mode A's `mask: [...]`. A live carousel captured via two independent browser contexts can land on different slides/transition frames between the ref and target run even when the underlying slide content is identical — locate the carousel's pixel bounds and blank/mask that region before computing the ratio, rather than reporting it as a regression. Mismatched image dimensions (common with different scrollbar/viewport behavior across domains) count as a full diff for that route unless normalized first (same viewport size, same device-scale-factor on both contexts).
-4. Report a table — route, diff ratio, one-line description of what visibly changed — flag anything above the same tolerance used in Mode A (`~2%` by default) as "à vérifier". Cross-domain diffing is inherently noisier than same-repo diffing (different CDN fonts, cache states, live/rotating content, consent banners) — call this out and don't over-claim a real regression from a single run; re-run a borderline route before flagging it, and always eyeball the flagged route's before/after screenshots yourself (not just the diff percentage) before reporting it as a real change — a masked or re-checked false positive (e.g. a rotating carousel) should be downgraded and explained, not left as a flagged regression.
+   Mask/crop genuinely-expected differences (a domain-specific cookie banner, a date, an A/B-test badge, **a rotating/autoplay carousel or slider in the hero area**) before diffing rather than letting them dominate the ratio — same discipline as Mode A's `mask: [...]`. A live carousel captured via two independent browser contexts can land on different slides/transition frames between the ref and target run even when the underlying slide content is identical — locate the carousel's pixel bounds and blank/mask that region before computing the ratio, rather than reporting it as a regression. Keep the viewport width and device-scale-factor identical on both contexts (different scrollbar/viewport behavior across domains shifts widths) — only the page height is allowed to differ, and it is handled by the padding above.
+4. Report a table — route, diff ratio, height gap (ref vs target, in px), one-line description of what visibly changed — flag anything above the same tolerance used in Mode A (`~2%` by default) as "à vérifier". Cross-domain diffing is inherently noisier than same-repo diffing (different CDN fonts, cache states, live/rotating content, consent banners) — call this out and don't over-claim a real regression from a single run; re-run a borderline route before flagging it, and always eyeball the flagged route's before/after screenshots yourself (not just the diff percentage) before reporting it as a real change — a masked or re-checked false positive (e.g. a rotating carousel) should be downgraded and explained, not left as a flagged regression.
 5. This audit's output is a report, not a baseline — don't auto-commit anything from it. Once the migration is validated, offer to **seed Mode A baselines from the target** (Flow 2, `baseURL` = the now-validated target) so the new repo gets ongoing regression tracking going forward.
 
 ## Non-goals
