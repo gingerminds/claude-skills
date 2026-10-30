@@ -3795,6 +3795,32 @@ class V2FixPlanTest(FixPlanCase):
         self.assertIn(f"MR : {V2_URL_31}", page["text"])
         self.assertEqual(client.schema_reads, 1)
 
+    def test_a_candidates_json_rewritten_since_the_v2_launch_is_not_trusted(self):
+        """Ruling P22: cqa_fix.py candidates rewrites fix/candidates.json from the current
+        rows.json; a copy newer than the v2 started_at never gives the expected status."""
+        candidates = self.v2_candidates()
+        for entry in candidates["keys"]:
+            for row in entry["rows"]:
+                row["status"] = "Mis en place"
+        self.write(self.run_dir, "fix/candidates.json", candidates)
+        stamp = datetime(2026, 10, 27, 12, 0, 0, tzinfo=timezone.utc).timestamp() + 600
+        os.utime(self.run_dir / "fix" / "candidates.json", (stamp, stamp))
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            {ref: item["expected"] for ref, item in self.ops("status").items()},
+            {101: "À traiter", 103: "Mise en place partielle"},
+        )
+
+    def test_a_v2_state_without_a_readable_start_gives_no_status(self):
+        state = self.v2_state()
+        state["started_at"] = "29/10/2026"
+        self.write(self.run_dir, "fix/state.json", state)
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 2)
+        self.assertIn("started_at", err)
+        self.assertFalse((self.run_dir / "fix" / "notion-plan.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

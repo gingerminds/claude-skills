@@ -345,12 +345,11 @@ def _cmd_fix_plan(args, client) -> int:
     and the page comment says which pass it resumes. An unfinished v2 state is refused.
 
     A link without status_before (every link of the v2 fix mode) takes the status of the row
-    in fix/candidates.json, else in rows.json, and only when rows.json is older than the
-    pass (its mtime before started_at: the snapshot read right before open). A rows.json
-    rewritten since (assign, rerun, recette, the step 2 of a later fix) may carry a status a
-    dev set after the pass: it is not trusted, no status is written for those rows, and one
-    note says so (ruling P22). « En review » thus always carries the status read at launch
-    as expected.
+    in fix/candidates.json, else in rows.json, each only when older than the pass (its mtime
+    before started_at: the snapshot read right before open). A file rewritten since (assign,
+    rerun, recette, the step 2 or candidates of a later fix) may carry a status a dev set
+    after the pass: it is not trusted, and when no trusted file gives the status of a row, no
+    status is written for it and one note says so (ruling P22).
     """
     run_dir = args.run_dir
     notion = _notion_context(run_dir, "copy_data_source_id", "bot_id")
@@ -386,8 +385,11 @@ def _cmd_fix_plan(args, client) -> int:
         reports = {name: _key_reports(run_dir, key) for name, key in state["keys"].items()}
         concerned = fix_notion.pass_rows(state, candidates, reports)
         links = fix_state.read_mr_link_entries(run_dir)
-        rows_trusted = _rows_predate(run_dir, state)
-        launch_statuses = _launch_statuses(candidates, rows.values() if rows_trusted else ())
+        candidates_trusted = _predates(run_dir / "fix" / "candidates.json", state)
+        rows_trusted = _predates(run_dir / "rows.json", state)
+        launch_statuses = _launch_statuses(candidates if candidates_trusted else {},
+                                           rows.values() if rows_trusted else ())
+        rows_trusted = rows_trusted and candidates_trusted
     reverts = _closed_targets(run_dir, closed, concerned, notes)
     unknown = []
     review = _review_option(client, notion, concerned, notes)
@@ -449,7 +451,8 @@ def _cmd_fix_plan(args, client) -> int:
     if unknown:
         kind = " v2" if fix_state.is_v2(state) else ""
         count = f"{len(unknown)} ligne{'s' if len(unknown) > 1 else ''}"
-        notes.append(f"rows.json réécrit depuis le lancement de la passe{kind} : statut au "
+        notes.append(f"rows.json ou fix/candidates.json réécrit depuis le lancement de la "
+                     f"passe{kind} : statut au "
                      f"lancement de la passe{kind} inconnu pour {count} "
                      f"({', '.join(ref_label(ref) for ref in unknown)}) : « {STATUS_REVIEW} » à "
                      "poser à la main si la ligne n'a pas bougé.")
@@ -513,12 +516,13 @@ def _notion_pass(run_dir: Path) -> dict:
     return state
 
 
-def _rows_predate(run_dir: Path, state: dict) -> bool:
-    """True when rows.json is older than the pass (mtime before started_at): it is then the
-    copy as read right before open, never a copy rewritten since (ruling P22)."""
+def _predates(path: Path, state: dict) -> bool:
+    """True when path (rows.json, fix/candidates.json) is older than the pass (mtime before
+    started_at): it is then the copy as read right before open, never a copy rewritten since
+    (ruling P22)."""
     try:
         started = datetime.strptime(state["started_at"], "%Y-%m-%dT%H:%M:%SZ")
-        written = (run_dir / "rows.json").stat().st_mtime
+        written = path.stat().st_mtime
     except (KeyError, TypeError, ValueError, OSError):
         return False
     return written < started.replace(tzinfo=timezone.utc).timestamp()
