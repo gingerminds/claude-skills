@@ -1319,6 +1319,7 @@ def _cmd_drop(args, services: Services) -> int:
     reason = _reason(args.reason)
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
+    _not_left(key, args.key, "drop")
     rows = key["rows"]
     unknown = [ref for ref in refs if str(ref) not in rows]
     if unknown:
@@ -1937,7 +1938,10 @@ def _delete_empty_branch(path, run, key: dict) -> Optional[str]:
         return "branche introuvable dans le repo"
     if head != start:
         return "la branche porte des commits de la passe"
-    if _reflog_moved(path, run, branch):
+    moved = _reflog_moved(path, run, branch)
+    if moved is None:
+        return "git reflog show a échoué : branche gardée"
+    if moved:
         return "la branche a porté des commits retirés (reflog) : gardée, voir la synthèse"
     if fix_git.unpushed(path, run, branch):
         return "la branche porte des commits absents d'origin"
@@ -1959,12 +1963,15 @@ def _delete_empty_branch(path, run, key: dict) -> Optional[str]:
     return None
 
 
-def _reflog_moved(path, run, branch: str) -> bool:
+def _reflog_moved(path, run, branch: str) -> Optional[bool]:
     """True when the reflog of the branch holds an entry after its creation: the branch
     pointed at a commit of the pass once (a drop put it back), and that commit is reachable
-    only through this reflog. A branch without reflog counts as never moved."""
+    only through this reflog. A branch without reflog counts as never moved; None when git
+    could not read it (the caller keeps the branch)."""
     listing = fix_names.git(path, run, "reflog", "show", "--format=%H", f"refs/heads/{branch}")
-    return listing.returncode == 0 and len(listing.stdout.split()) > 1
+    if listing.returncode != 0:
+        return None
+    return len(listing.stdout.split()) > 1
 
 
 def _cmd_leave(args, services: Services) -> int:
@@ -2510,12 +2517,19 @@ def _remove_worktrees(run_dir: Path, state: dict, run) -> tuple:
         worktree = _worktree_path(run_dir, key)
         if not worktree.exists():
             continue
-        saved = _save_leftovers(run_dir, key, worktree, run)
-        if saved is not None:
-            key["leftover"] = saved
-            leftovers.append({"key": name, "patch": saved["patch"]})
-        if fix_git.remove_worktree(_repo_path(run_dir, key["repo"]), run, worktree):
-            removed.append(str(worktree))
+        try:
+            saved = _save_leftovers(run_dir, key, worktree, run)
+            if saved is not None:
+                key["leftover"] = saved
+                leftovers.append({"key": name, "patch": saved["patch"]})
+            if fix_git.remove_worktree(_repo_path(run_dir, key["repo"]), run, worktree):
+                removed.append(str(worktree))
+        except (fix_git.GitRefused, fix_git.Refused) as error:
+            # The records of the earlier keys stay: saved in the state, named to the lead.
+            fix_state.save(run_dir, state)
+            written = ", ".join(item["patch"] for item in leftovers)
+            raise type(error)(f"{error}" + (
+                f" Patch déjà écrits et enregistrés dans l'état : {written}." if written else ""))
     return removed, leftovers
 
 
@@ -2542,6 +2556,7 @@ def _archive(run_dir: Path, old: dict, run) -> tuple:
     are, as the archived state names them)."""
     removed, leftovers = _remove_worktrees(run_dir, old, run)
     target = _new_history_dir(run_dir)
+    remapped = False
     for name, key in old["keys"].items():
         folder = _key_folder(run_dir, key)
         if folder.is_dir():
@@ -2556,9 +2571,10 @@ def _archive(run_dir: Path, old: dict, run) -> tuple:
                 if inside.is_relative_to(folder.relative_to(run_dir)):
                     saved["patch"] = (destination / inside.relative_to(
                         folder.relative_to(run_dir))).relative_to(run_dir).as_posix()
+                    remapped = True
     for item in leftovers:
         item["patch"] = old["keys"][item["key"]]["leftover"]["patch"]
-    if leftovers:
+    if remapped:
         fix_state.save(run_dir, old)
     os.replace(run_dir / fix_state.STATE_FILE, target / "state.json")
     return removed, target.relative_to(run_dir).as_posix(), leftovers

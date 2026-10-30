@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 from urllib.parse import urljoin, urlsplit
@@ -3132,6 +3132,30 @@ class FixPlanCommandTest(FixPlanCase):
         self.assertNotIn("MR :", page["text"])
         self.assertIn("- clé laissée au lead : CQ-101, CQ-103, CQ-104, CQ-105", page["text"])
 
+    def test_the_rows_of_a_key_left_before_its_start_get_a_fixed_reason(self):
+        """Residual item 3: the raw start error (paths of the workstation) never reaches
+        Notion: a key left at « selected » gives a fixed short reason."""
+        state = self.state()
+        state["keys"]["laravel"].update(
+            step="selected", branch=None, worktree=None, start_sha=None, mr=None,
+            left={"reason": "La branche feature/checklist-qa-fix est extraite dans votre dossier "
+                            "/home/camille/projets/shop : changez de branche, puis relancez.",
+                  "at": "2026-10-29T13:00:00Z"})
+        for row in state["keys"]["laravel"]["rows"].values():
+            row.update(outcome="pending", reason=None, commits=[])
+        self.write(self.run_dir, "fix/state.json", state)
+        code, out, err = self.run_fix_plan(FixNotion())
+        self.assertEqual(code, 0, err)
+        fixes = self.ops("fix_comment")
+        self.assertEqual(sorted(fixes), [101, 102, 103, 104, 105, 106])
+        for ref in (101, 103, 104, 105, 106):
+            self.assertEqual(fixes[ref]["text"], self.fix_text(
+                ref, "Non traité :", "clé laissée au lead : la passe n'a pas pu démarrer"))
+        self.assertNotIn("/home/camille", json.dumps(self.plan(), ensure_ascii=False))
+        self.assertEqual(self.ops("status"), {})
+        [page] = self.ops("page_comment").values()
+        self.assertIn("- clé laissée au lead : CQ-101, CQ-103, CQ-104, CQ-105, CQ-106", page["text"])
+
     def test_fix_plan_skips_a_status_changed_since_launch(self):
         self.assertEqual(self.run_fix_plan(FixNotion())[0], 0)
         client = FixNotion(statuses={"page-101": "Mis en place",
@@ -3595,6 +3619,14 @@ class V2FixPlanTest(FixPlanCase):
         self.write(self.run_dir, "fix/laravel/seo/report-1.json", self.v2_report(
             "laravel/seo", [self.v2_report_row(106, "skipped", reason="contenu en base")]))
         self.edit_row(self.run_dir, 103, status="Mise en place partielle")
+        self.age_rows()
+
+    def age_rows(self, older=True):
+        """Date rows.json before (or after) the v2 started_at: only a snapshot older than the
+        v2 launch is the copy as it was read then (ruling P22)."""
+        started = datetime(2026, 10, 27, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+        stamp = started - 600 if older else started + 600
+        os.utime(self.run_dir / "rows.json", (stamp, stamp))
 
     @staticmethod
     def v2_report(key, rows):
@@ -3730,11 +3762,38 @@ class V2FixPlanTest(FixPlanCase):
         self.edit(self.run_dir, "rows.json",
                   lambda document: [row.update(status=None) for row in document["rows"]
                                     if row["ref"] == 101])
+        self.age_rows()
         code, out, err = self.run_fix_plan(FixNotion())
         self.assertEqual(code, 0, err)
         printed = json.loads(out)
         self.assertEqual(printed["in_review"], [103])
         self.assertTrue(any("CQ-101" in note and "inconnu" in note for note in printed["notes"]))
+
+    def test_a_rows_json_rewritten_since_the_v2_launch_gives_no_status(self):
+        """Ruling P22: rows.json is rewritten by assign, rerun, recette and the fix step 2;
+        a copy newer than the v2 started_at may carry a status a dev set since, which must
+        never become the expected status of « En review »: no status op, one note."""
+        self.edit_row(self.run_dir, 101, status="Mis en place")
+        self.age_rows(older=False)
+        client = FixNotion()
+        code, out, err = self.run_fix_plan(client)
+        self.assertEqual(code, 0, err)
+        printed = json.loads(out)
+        self.assertEqual((printed["ops"], printed["in_review"]),
+                         ({"fix_comment": 5, "page_comment": 1}, []))
+        self.assertEqual(self.ops("status"), {})
+        self.assertEqual(len(printed["notes"]), 1)
+        note = printed["notes"][0]
+        for needle in ("rows.json", "statut au lancement de la passe v2 inconnu",
+                       "« En review » à poser à la main si la ligne n'a pas bougé", "2 lignes",
+                       "CQ-101", "CQ-103"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, note)
+        self.assertFalse(any("statut d'avant la passe inconnu" in item for item in printed["notes"]))
+        [page] = self.ops("page_comment").values()
+        self.assertNotIn("En review", page["text"])
+        self.assertIn(f"MR : {V2_URL_31}", page["text"])
+        self.assertEqual(client.schema_reads, 1)
 
 
 if __name__ == "__main__":

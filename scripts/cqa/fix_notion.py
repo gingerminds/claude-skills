@@ -13,6 +13,9 @@ NOT_HANDLED = "non traitée pendant la passe"
 NO_REASON = "raison non précisée"
 NO_REVIEW_OPTION = "option En review absente de la copie"
 LEFT_KEY = "clé laissée au lead ({reason})"
+# A key left before any start (no branch): its recorded reason is the raw start error, with
+# the paths of the workstation; Notion gets this fixed text instead.
+LEFT_BEFORE_START = "clé laissée au lead : la passe n'a pas pu démarrer"
 EARLIER_FIX = "Correctif d'une passe précédente (voir la MR)."
 # Groups of the rows not handled, in the order of the page comment.
 GROUPS = (
@@ -51,7 +54,8 @@ def pass_rows(state: dict, candidates: dict, reports: dict) -> dict:
     ({"name", "iid"}) when the key took over an open MR whose new commits stayed local, in
     branches when it stayed local; with the texts of its fix. Otherwise not_done gives the
     reason and group its group of GROUPS. Every row of a key left to the lead
-    (fix_state.is_left) is « clé laissée au lead (<raison>) ». A row of several keys is fixed
+    (fix_state.is_left) is « clé laissée au lead (<raison>) », or LEFT_BEFORE_START for a key
+    left before any start (its reason is the raw start error). A row of several keys is fixed
     when one of them fixed it. Branches are named « <branche> du repo <repo> » when several
     unpublished keys keep a branch with a fix.
     """
@@ -60,7 +64,10 @@ def pass_rows(state: dict, candidates: dict, reports: dict) -> dict:
     found = {}
     for name, key in keys.items():
         rows = key.get("rows") or {}
-        left = key["left"]["reason"] if fix_state.is_left(key) else None
+        left = None
+        if fix_state.is_left(key):
+            left = (LEFT_KEY.format(reason=key["left"]["reason"]) if key.get("branch")
+                    else LEFT_BEFORE_START)
         mr = key["mr"]["url"] if published(key) else None
         earlier = mr is not None and key.get("reused") != "mr"
         branch, unpushed = None, None
@@ -81,7 +88,7 @@ def pass_rows(state: dict, candidates: dict, reports: dict) -> dict:
                 continue
             entry = found.setdefault(ref, _empty())
             if left is not None:
-                entry["reasons"].append((LEFT_KEY.format(reason=left), "left"))
+                entry["reasons"].append((left, "left"))
             elif outcome == "done_before":
                 _add_earlier(entry, ref, row, reports.get(name) or [], mr)
             elif outcome == "fixed" or ref in covered:

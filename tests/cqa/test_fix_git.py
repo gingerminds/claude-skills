@@ -1527,6 +1527,50 @@ class AbandonTest(GitCase):
         self.assertEqual(old["keys"][KEY]["leftover"]["patch"], f"{archived}/front/leftover-1.patch")
         self.assertNotIn("leftover", self.key())
 
+    def test_open_archives_the_patch_path_of_an_earlier_abandon(self):
+        """Residual item 2: a leftover saved by abandon is moved with the key folder at the
+        next open, and the archived state names it where it now is, even when open itself
+        saves no new patch."""
+        self.open_pass()
+        busy = self.start_ok()
+        (Path(busy["worktree"]) / "draft.txt").write_text("uncommitted", encoding="utf-8")
+        code, out, err = self.run_main(["abandon", self.run_dir])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.key()["leftover"]["patch"], "fix/front/leftover-1.patch")
+        result = self.open_pass()
+        archived = result["archived"]
+        self.assertEqual(result["leftovers"], [])
+        self.assertTrue((self.run_dir / archived / "front" / "leftover-1.patch").is_file())
+        old = json.loads((self.run_dir / archived / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(old["keys"][KEY]["leftover"]["patch"], f"{archived}/front/leftover-1.patch")
+
+    def test_abandon_keeps_the_patches_already_written_when_a_later_key_fails(self):
+        """Residual item 2: a failure on the second key leaves the first key's record saved
+        in the state and named in the message; nothing of the first key is lost."""
+        context = json.loads((self.run_dir / "context.json").read_text(encoding="utf-8"))
+        context["repos"].append({"name": "back", "path": str(self.other), "remote": REMOTE})
+        (self.run_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
+        candidates = json.loads((self.run_dir / "fix" / "candidates.json").read_text(encoding="utf-8"))
+        candidates["keys"].append({"key": "back", "repo": "back", "push_ready": True, "sections": [
+            {"category": "SÉCURITÉ", "alias": "securite", "rows": [{"ref": 9, "title": "Neuf"}]}]})
+        self.write_json("fix/candidates.json", candidates)
+        self.open_pass()
+        busy = self.start_ok()
+        (Path(busy["worktree"]) / "draft.txt").write_text("uncommitted", encoding="utf-8")
+        broken = self.run_dir / "fix" / "back" / "wt"
+        broken.mkdir(parents=True)
+        (broken / "stray.txt").write_text("not a worktree", encoding="utf-8")
+        code, out, err = self.run_main(["abandon", self.run_dir])
+        self.assertEqual(code, 2, out)
+        self.assertIn("fix/front/leftover-1.patch", err)
+        self.assertIn(str(broken), err)
+        self.assertTrue((self.run_dir / "fix" / "front" / "leftover-1.patch").is_file())
+        state = self.state()
+        self.assertEqual(state["keys"][KEY]["leftover"]["patch"], "fix/front/leftover-1.patch")
+        self.assertIsNone(state["finished_at"])
+        self.assertFalse(Path(busy["worktree"]).exists())
+        self.assertTrue((broken / "stray.txt").is_file())
+
     def test_open_removes_the_worktrees_of_a_finished_pass(self):
         self.open_pass()
         started = self.start_ok()
@@ -1638,7 +1682,8 @@ class LeftKeyTest(ReplayCase):
         message.write_text("fix(securite CQ-3): add the a file\n", encoding="utf-8")
         before = self.key()
         for argv in (["reorder"], ["reword", "--commit", sha, "--message-file", str(message)],
-                     ["mr-body"], ["publish"], ["finish"], ["finish", "--keep-local"]):
+                     ["mr-body"], ["publish"], ["finish"], ["finish", "--keep-local"],
+                     ["drop", "--refs", "CQ-3", "--reason", "Revue bloquante."]):
             with self.subTest(command=" ".join(argv)):
                 code, result, err = self.main_json(*argv)
                 self.assertEqual((code, result), (2, None), err)

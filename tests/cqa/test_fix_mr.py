@@ -1680,6 +1680,15 @@ class FinishTest(MrCase):
         self.gitlab.fail_git = "ls-remote"
         self.assert_kept(self.finish(), start, "injoignable")
 
+    def test_finish_keeps_an_empty_branch_when_its_reflog_cannot_be_read(self):
+        """Residual item 6 (ruling P11): no reflog read, no deletion."""
+        self.reviewed(push="local", fix=False)
+        start = self.key()["start_sha"]
+        self.gitlab.fail_git = "reflog"
+        result = self.finish()
+        self.assert_kept(result, start, "git reflog show a échoué")
+        self.assertNotIn("injoignable", result["branch_kept"])
+
     def test_finish_names_a_worktree_listing_failure_apart_from_origin(self):
         """Final wave FI1: « origin injoignable » is for a remote failure only; a failed
         git worktree list gives its own reason."""

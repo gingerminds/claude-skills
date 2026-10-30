@@ -341,10 +341,16 @@ def _cmd_fix_plan(args, client) -> int:
 
     A FINISHED state of the v2 fix mode (plugin 0.14.0 and before, keys per repo and
     category) is written the same way, after the fact (ruling P20): its rows and reports
-    (fix/<repo>/<slug>/report-<N>.json), its fix/mr-links.json; the status before the pass
-    comes from the rows of fix/candidates.json, else rows.json (both read at its launch), so
-    « En review » is written only where that status still holds; the comments are dated
-    today, and the page comment says which pass it resumes. An unfinished v2 state is refused.
+    (fix/<repo>/<slug>/report-<N>.json), its fix/mr-links.json; the comments are dated today,
+    and the page comment says which pass it resumes. An unfinished v2 state is refused.
+
+    A link without status_before (every link of the v2 fix mode) takes the status of the row
+    in fix/candidates.json, else in rows.json, and only when rows.json is older than the
+    pass (its mtime before started_at: the snapshot read right before open). A rows.json
+    rewritten since (assign, rerun, recette, the step 2 of a later fix) may carry a status a
+    dev set after the pass: it is not trusted, no status is written for those rows, and one
+    note says so (ruling P22). « En review » thus always carries the status read at launch
+    as expected.
     """
     run_dir = args.run_dir
     notion = _notion_context(run_dir, "copy_data_source_id", "bot_id")
@@ -380,8 +386,10 @@ def _cmd_fix_plan(args, client) -> int:
         reports = {name: _key_reports(run_dir, key) for name, key in state["keys"].items()}
         concerned = fix_notion.pass_rows(state, candidates, reports)
         links = fix_state.read_mr_link_entries(run_dir)
-        launch_statuses = _launch_statuses(candidates, rows.values())
+        rows_trusted = _rows_predate(run_dir, state)
+        launch_statuses = _launch_statuses(candidates, rows.values() if rows_trusted else ())
     reverts = _closed_targets(run_dir, closed, concerned, notes)
+    unknown = []
     review = _review_option(client, notion, concerned, notes)
     latest = []
 
@@ -423,7 +431,9 @@ def _cmd_fix_plan(args, client) -> int:
                 before = fix_notion.status_before(item, links.get(ref))
                 if before is None:
                     before = launch_statuses.get(ref)
-                if before is None:
+                if before is None and not rows_trusted:
+                    unknown.append(ref)
+                elif before is None:
                     notes.append(f"{ref_label(ref)} : statut d'avant la passe inconnu : statut "
                                  f"« {STATUS_REVIEW} » non posé.")
                 elif before != STATUS_REVIEW:
@@ -436,6 +446,13 @@ def _cmd_fix_plan(args, client) -> int:
             ops.append(_fix_op("comment", row, text=rewritten, verdict=verdict,
                                replaces=text_digest(read)))
         ops.append(_fix_op("fix_comment", row, text=text))
+    if unknown:
+        kind = " v2" if fix_state.is_v2(state) else ""
+        count = f"{len(unknown)} ligne{'s' if len(unknown) > 1 else ''}"
+        notes.append(f"rows.json réécrit depuis le lancement de la passe{kind} : statut au "
+                     f"lancement de la passe{kind} inconnu pour {count} "
+                     f"({', '.join(ref_label(ref) for ref in unknown)}) : « {STATUS_REVIEW} » à "
+                     "poser à la main si la ligne n'a pas bougé.")
     if state is not None and not concerned:
         notes.append("Aucune ligne de la passe à écrire dans Notion : pas de commentaire de page.")
     elif state is not None:
@@ -496,11 +513,23 @@ def _notion_pass(run_dir: Path) -> dict:
     return state
 
 
+def _rows_predate(run_dir: Path, state: dict) -> bool:
+    """True when rows.json is older than the pass (mtime before started_at): it is then the
+    copy as read right before open, never a copy rewritten since (ruling P22)."""
+    try:
+        started = datetime.strptime(state["started_at"], "%Y-%m-%dT%H:%M:%SZ")
+        written = (run_dir / "rows.json").stat().st_mtime
+    except (KeyError, TypeError, ValueError, OSError):
+        return False
+    return written < started.replace(tzinfo=timezone.utc).timestamp()
+
+
 def _launch_statuses(candidates: dict, rows) -> dict:
     """Return {ref: status} as the copy read at the launch of the pass: the rows of
     fix/candidates.json (under the sections of a key, or under a key of the v2 fix mode),
-    then rows.json, the first status found for a ref winning. The fallback of a link of
-    fix/mr-links.json without status_before (every link of the v2 fix mode)."""
+    then rows (those of rows.json, given only when it predates the pass), the first status
+    found for a ref winning. The fallback of a link of fix/mr-links.json without
+    status_before (every link of the v2 fix mode)."""
     found = {}
     listed = []
     for entry in candidates.get("keys") or []:
