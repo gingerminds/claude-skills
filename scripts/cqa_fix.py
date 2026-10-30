@@ -36,7 +36,7 @@ EXIT_SECRET = 7
 LAUNCHER = Path(__file__).resolve().parent / "cqa-toolbox.sh"
 
 UNFINISHED = "Une passe fix est inachevée : reprenez-la ou abandonnez-la (cqa_fix.py abandon)."
-UNFINISHED_V2 = "Passe v2 inachevée : abandonnez-la (cqa_fix.py abandon), puis relancez fix."
+UNFINISHED_V2 = fix_state.UNFINISHED_V2
 _REVIEW_FILE = re.compile(r"review-([0-9]+)\.json")
 NO_PASS = "Aucune passe fix en cours : lancez d'abord cqa_fix.py open."
 NEED_BODY = "Lancez d'abord cqa_fix.py mr-body."

@@ -16,6 +16,7 @@ from cqa import fix_names
 from cqa.notion_read import write_json
 
 STATE_FILE = "fix/state.json"
+UNFINISHED_V2 = "Passe v2 inachevée : abandonnez-la (cqa_fix.py abandon), puis relancez fix."
 STAGES = ("keys", "questions", "notion", "summary")
 STEPS = ("selected", "started", "fixed", "checked", "reviewed", "published", "done")
 OUTCOMES = ("pending", "fixed", "skipped", "question", "dropped", "done_before")

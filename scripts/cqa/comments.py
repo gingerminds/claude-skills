@@ -35,7 +35,13 @@ NOT_DONE_LABEL = "Non traité :"
 REMAINING_LABEL = "Reste à faire :"
 LOCAL_BRANCH = "Branche locale : {name} (non poussée)"
 PUSHED_BRANCH = "Branche poussée sans MR : {name}"
+MR_UNPUSHED = "Branche {name} poussée, MR !{iid} ouverte : nouveaux commits non poussés"
+RESUMED = "(reprise de la passe du {day:%d/%m/%Y})"
 NO_REVIEW_OPTION_LINE = "Statut « En review » non posé : option absente de la copie."
+# The last plugin version whose plan.py wrote the « MR : » block in the audit comment: a
+# block under a later footer is text of the comment (has_mr_block).
+_LAST_MR_BLOCK_VERSION = (0, 14)
+_FOOTER_VERSION = re.compile(r"gm:checklist-quality-audit ([0-9]+)\.([0-9]+)(?:\.([0-9]+))?")
 
 _MAX_EVIDENCE = 5
 _SKILL = "gm:checklist-quality-audit"
@@ -125,7 +131,7 @@ def without_mr_block(text: str) -> str:
     (see has_mr_block); the footer ("Réf CQ-...") then comes right after what is left. A text
     without that block is returned unchanged."""
     lines, foot = _split_footer(text)
-    start = _v2_block_start(lines)
+    start = _v2_block_start(lines) if _may_hold_mr_block(foot) else None
     if start is None:
         return text
     body = lines[:start]
@@ -136,9 +142,21 @@ def without_mr_block(text: str) -> str:
 
 def has_mr_block(text: str) -> bool:
     """Return True when a comment ends with the "MR :" block of the v2 fix mode: its last
-    block before the footer is "MR :" followed by URL lines only. A "MR :" line anywhere
-    else (in a finding, a todo) is not that block."""
-    return _v2_block_start(_split_footer(text)[0]) is not None
+    block before the footer is "MR :" followed by URL lines only, and its footer names a
+    plugin version that still wrote that block (0.14 and before), or no version at all. A
+    "MR :" line anywhere else (in a finding, a todo), or under a later footer, is not that
+    block."""
+    lines, foot = _split_footer(text)
+    return _may_hold_mr_block(foot) and _v2_block_start(lines) is not None
+
+
+def _may_hold_mr_block(foot: list) -> bool:
+    """True unless the footer names a plugin version later than the last one that wrote the
+    « MR : » block."""
+    found = _FOOTER_VERSION.search(foot[0]) if foot else None
+    if found is None:
+        return True
+    return (int(found.group(1)), int(found.group(2))) <= _LAST_MR_BLOCK_VERSION
 
 
 def _split_footer(text: str) -> tuple:
@@ -207,14 +225,17 @@ def format_fix_comment(
     not_done: Optional[str],
     branches: Optional[list[str]] = None,
     pushed: Optional[list[str]] = None,
+    unpushed: Optional[list[dict]] = None,
 ) -> str:
     """Return the fix comment of a row, at most MAX_COMMENT_LENGTH characters.
 
     The header « Correctif automatique · <date> · lancé par <lead> », then blocks laid out
     as in the audit comment: "MR :" (one URL per line), one « Branche poussée sans MR : <nom> »
-    line per branch pushed without merge request (pushed) and one « Branche locale : <nom>
-    (non poussée) » line per branch left local (branches), then "Fait :", "Reste à faire :",
-    "À tester :", "Commits :" (short
+    line per branch pushed without merge request (pushed), one « Branche <nom> poussée, MR
+    !<iid> ouverte : nouveaux commits non poussés » line per branch of an open merge request
+    whose new commits stayed local (unpushed: [{"name", "iid"}]) and one « Branche locale :
+    <nom> (non poussée) » line per branch left local (branches), then "Fait :", "Reste à
+    faire :", "À tester :", "Commits :" (short
     SHAs), then the footer of the audit comment. A row not put in a merge request (not_done)
     gets "Non traité :" and its reason instead of every other block. Empty blocks are left
     out and blank lines inside a text are dropped. A text too long loses the end of "À
@@ -227,6 +248,8 @@ def format_fix_comment(
         return _finish(_fix_render(head, [[NOT_DONE_LABEL, reason]], foot))
     place = [[MR_LABEL, *mrs]] if mrs else []
     place.extend([PUSHED_BRANCH.format(name=name)] for name in pushed or [])
+    place.extend([MR_UNPUSHED.format(name=item["name"], iid=item["iid"])]
+                 for item in unpushed or [])
     place.extend([LOCAL_BRANCH.format(name=name)] for name in branches or [])
     fields = [["Fait :", _block_text(done)], [REMAINING_LABEL, _block_text(remaining)],
               ["À tester :", _block_text(uat)]]
@@ -285,23 +308,31 @@ def format_fix_page_comment(
     reverted=(),
     pushed=(),
     pushed_rows=(),
+    unpushed=(),
+    resumed: Optional[date] = None,
 ) -> str:
     """Return the comment of a fix pass for the copy page, laid out as the audit's one.
 
-    « Correctifs automatiques · <date> · lancé par <lead> », one « MR : <url> » line per merge
-    request, one « Branche poussée sans MR : <nom> » line per branch pushed without merge
-    request (pushed) and one « Branche locale : <nom> (non poussée) » line per local branch,
-    the rows put in a merge request (with the partial ones) and their « En review » status,
-    the rows fixed on a branch pushed without merge request (pushed_rows) or left local
-    (local), the closed merge requests whose rows get their status back if still « En
-    review » (reverted), the rows not handled by reason (not_done: [(label, refs)], empty
-    ones left out), then what comes next: one « Suite » per kind of branch, labelled when
-    there are several. Over MAX_COMMENT_LENGTH the refs lists lose their last refs (« et N
-    autres »), down to a bare count.
+    « Correctifs automatiques · <date> · lancé par <lead> » (with « (reprise de la passe du
+    <date>) » after the title when the pass is written after the fact, resumed being the
+    day it started), one « MR : <url> » line per merge request, one « Branche poussée sans
+    MR : <nom> » line per branch pushed without merge request (pushed), one « Branche <nom>
+    poussée, MR !<iid> ouverte : nouveaux commits non poussés » line per branch of an open
+    merge request whose new commits stayed local (unpushed: [{"name", "iid"}]) and one
+    « Branche locale : <nom> (non poussée) » line per local branch, the rows put in a merge
+    request (with the partial ones) and their « En review » status, the rows fixed on a
+    branch pushed without merge request (pushed_rows) or left local, unpushed branches
+    included (local), the closed merge requests whose rows get their status back if still
+    « En review » (reverted), the rows not handled by reason (not_done: [(label, refs)],
+    empty ones left out), then what comes next: one « Suite » per kind of branch, labelled
+    when there are several. Over MAX_COMMENT_LENGTH the refs lists lose their last refs
+    (« et N autres »), down to a bare count.
     """
-    lines = [f"{FIX_PAGE_TITLE} · {run_date:%d/%m/%Y} · lancé par {lead_option}"]
+    title = FIX_PAGE_TITLE if resumed is None else f"{FIX_PAGE_TITLE} {RESUMED.format(day=resumed)}"
+    lines = [f"{title} · {run_date:%d/%m/%Y} · lancé par {lead_option}"]
     lines += [f"{MR_LABEL} {url}" for url in mrs]
     lines += [PUSHED_BRANCH.format(name=name) for name in pushed]
+    lines += [MR_UNPUSHED.format(name=item["name"], iid=item["iid"]) for item in unpushed]
     lines += [LOCAL_BRANCH.format(name=name) for name in branches]
     if mrs:
         lines.append(f"Lignes mises en MR : {len(in_mr)}{_partial_part(in_mr, partial)}.")
@@ -320,11 +351,11 @@ def format_fix_page_comment(
                      f"{len(pushed_rows)}{_partial_part(pushed_rows, partial)} ; statuts inchangés.")
         kinds.append((label, _pushed_suite(several)))
     if local:
-        several = len(branches) > 1
+        several = len(branches) + len(unpushed) > 1
         label = "branches locales" if several else "branche locale"
         lines.append(f"Lignes corrigées sur {'les' if several else 'la'} {label} : "
                      f"{len(local)}{_partial_part(local, partial)} ; statuts inchangés.")
-        kinds.append((label, _local_suite(several)))
+        kinds.append((label, _local_suite(several, mr_open=bool(unpushed) and not branches)))
     if reverted:
         names = ", ".join(ref_label(ref) for ref in reverted)
         if len(reverted) == 1:
@@ -389,11 +420,16 @@ def _pushed_suite(several: bool) -> str:
             f"préprod, puis lancer {_RECETTE}.")
 
 
-def _local_suite(several: bool) -> str:
+def _local_suite(several: bool, mr_open: bool = False) -> str:
+    """The next steps for local branches; mr_open when every one already has its open MR."""
     if several:
-        start, them = "pousser les branches et ouvrir les MR", "les"
+        them = "les"
+        start = "pousser les branches (leurs MR sont déjà ouvertes)" if mr_open else (
+            "pousser les branches et ouvrir les MR")
     else:
-        start, them = "pousser la branche et ouvrir la MR", "la"
+        them = "la"
+        start = "pousser la branche (sa MR est déjà ouverte)" if mr_open else (
+            "pousser la branche et ouvrir la MR")
     return (f"{start}, {them} relire et {them} tester, {them} fusionner, déployer en préprod, "
             f"puis lancer {_RECETTE}.")
 

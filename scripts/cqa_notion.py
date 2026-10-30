@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from cqa.checklist import STATUS_REVIEW, parse_refs, ref_label, validate_schema
-from cqa import fix_notion, fix_state, report
+from cqa import fix_notion, fix_rows, fix_state, report
 from cqa.comments import (
     MAX_COMMENT_LENGTH,
     format_comment,
@@ -338,6 +338,13 @@ def _cmd_fix_plan(args, client) -> int:
     alone, without a pass. Prints {"ops", "in_review", "reverted", "notes"}: the count of each
     kind of operation, the refs set to « En review », the refs whose status goes back, and what
     the plan leaves out.
+
+    A FINISHED state of the v2 fix mode (plugin 0.14.0 and before, keys per repo and
+    category) is written the same way, after the fact (ruling P20): its rows and reports
+    (fix/<repo>/<slug>/report-<N>.json), its fix/mr-links.json; the status before the pass
+    comes from the rows of fix/candidates.json, else rows.json (both read at its launch), so
+    « En review » is written only where that status still holds; the comments are dated
+    today, and the page comment says which pass it resumes. An unfinished v2 state is refused.
     """
     run_dir = args.run_dir
     notion = _notion_context(run_dir, "copy_data_source_id", "bot_id")
@@ -358,19 +365,22 @@ def _cmd_fix_plan(args, client) -> int:
     rows = {item["ref"]: item for item in _read_rows(run_dir)
             if isinstance(item, dict) and isinstance(item.get("ref"), int)}
     notes = []
-    state, concerned, links = None, {}, {}
+    state, concerned, links, launch_statuses, resumed = None, {}, {}, {}, None
     if args.closed_only:
         common["run_date"] = date.today()
     else:
         state = _notion_pass(run_dir)
-        common["run_date"] = _fix_date(run_dir)
+        if fix_state.is_v2(state):
+            common["run_date"], resumed = date.today(), _fix_date(run_dir)
+        else:
+            common["run_date"] = _fix_date(run_dir)
         candidates = _read_json(run_dir / "fix" / "candidates.json",
                                 "lancer d'abord cqa_fix.py candidates")
+        candidates = candidates if isinstance(candidates, dict) else {}
         reports = {name: _key_reports(run_dir, key) for name, key in state["keys"].items()}
-        concerned = fix_notion.pass_rows(
-            state, candidates if isinstance(candidates, dict) else {}, reports
-        )
+        concerned = fix_notion.pass_rows(state, candidates, reports)
         links = fix_state.read_mr_link_entries(run_dir)
+        launch_statuses = _launch_statuses(candidates, rows.values())
     reverts = _closed_targets(run_dir, closed, concerned, notes)
     review = _review_option(client, notion, concerned, notes)
     latest = []
@@ -405,11 +415,14 @@ def _cmd_fix_plan(args, client) -> int:
             item = concerned[ref]
             text = format_fix_comment(
                 row=row, **common, mrs=item["mrs"], pushed=item["pushed"],
-                branches=item["branches"], done=item["done"], remaining=item["remaining"], uat=item["uat"],
-                commits=item["commits"], not_done=item["not_done"],
+                unpushed=item["unpushed"], branches=item["branches"], done=item["done"],
+                remaining=item["remaining"], uat=item["uat"], commits=item["commits"],
+                not_done=item["not_done"],
             )
             if item["in_mr"] and review:
                 before = fix_notion.status_before(item, links.get(ref))
+                if before is None:
+                    before = launch_statuses.get(ref)
                 if before is None:
                     notes.append(f"{ref_label(ref)} : statut d'avant la passe inconnu : statut "
                                  f"« {STATUS_REVIEW} » non posé.")
@@ -428,7 +441,8 @@ def _cmd_fix_plan(args, client) -> int:
     elif state is not None:
         page_id = notion.get("copy_page_id")
         if isinstance(page_id, str) and page_id.strip():
-            text = _fix_page_comment(state, concerned, common, not review, in_review, reverted)
+            text = _fix_page_comment(state, concerned, common, not review, in_review, reverted,
+                                     resumed=resumed)
             ops.append(_fix_op("page_comment", {"page_id": page_id, "ref": None}, text=text))
         else:
             notes.append("copy_page_id absent de context.json (copie donnée par l'URL de la "
@@ -461,13 +475,17 @@ def _lead_option(context) -> str:
 
 
 def _notion_pass(run_dir: Path) -> dict:
-    """Return fix/state.json of a pass whose result may go to Notion; exit 2 otherwise."""
+    """Return fix/state.json of a pass whose result may go to Notion; exit 2 otherwise: no
+    state, a dry run, no consent, or an unfinished pass of the v2 fix mode (a finished one is
+    written after the fact, ruling P20)."""
     try:
         state = fix_state.load(run_dir)
     except FileNotFoundError:
         raise UsageError("fix/state.json est introuvable : aucune passe de correctifs dans ce run.")
     except fix_state.StateError as error:
         raise UsageError(str(error))
+    if fix_state.is_v2(state) and not state.get("finished_at"):
+        raise UsageError(fix_state.UNFINISHED_V2)
     if state.get("push") == "dry_run":
         raise UsageError("Passe --dry-run : rien n'est écrit dans Notion.")
     if not state.get("notion"):
@@ -476,6 +494,25 @@ def _notion_pass(run_dir: Path) -> dict:
             "(« notion » vaut false) : rien n'est préparé."
         )
     return state
+
+
+def _launch_statuses(candidates: dict, rows) -> dict:
+    """Return {ref: status} as the copy read at the launch of the pass: the rows of
+    fix/candidates.json (under the sections of a key, or under a key of the v2 fix mode),
+    then rows.json, the first status found for a ref winning. The fallback of a link of
+    fix/mr-links.json without status_before (every link of the v2 fix mode)."""
+    found = {}
+    listed = []
+    for entry in candidates.get("keys") or []:
+        if not isinstance(entry, dict):
+            continue
+        listed.extend(fix_rows.key_rows(entry))
+        listed.extend(row for row in (entry.get("rows") or []) if isinstance(row, dict))
+    for row in listed + [row for row in rows if isinstance(row, dict)]:
+        ref, status = row.get("ref"), row.get("status")
+        if isinstance(ref, int) and isinstance(status, str) and status.strip():
+            found.setdefault(ref, status)
+    return found
 
 
 def _key_reports(run_dir: Path, key: dict) -> list:
@@ -572,15 +609,16 @@ def _audit_without_mr_block(client, row: dict, bot_id: str, findings, context: d
 
 
 def _fix_page_comment(state: dict, concerned: dict, common: dict, review_missing: bool,
-                      in_review: list, reverted: list) -> str:
+                      in_review: list, reverted: list, resumed=None) -> str:
     mrs = []
     for key in state["keys"].values():
         if fix_notion.published(key) and key["mr"]["url"] not in mrs:
             mrs.append(key["mr"]["url"])
     outside = [item for item in concerned.values() if item["fixed"] and not item["in_mr"]]
-    pushed, branches = [], []
+    pushed, unpushed, branches = [], [], []
     for item in outside:
         pushed.extend(name for name in item["pushed"] if name not in pushed)
+        unpushed.extend(entry for entry in item["unpushed"] if entry not in unpushed)
         branches.extend(name for name in item["branches"] if name not in branches)
     pushed_rows = [ref for ref, item in concerned.items()
                    if item["fixed"] and not item["in_mr"] and item["pushed"]]
@@ -592,7 +630,7 @@ def _fix_page_comment(state: dict, concerned: dict, common: dict, review_missing
         local=local, partial=[ref for ref, item in concerned.items() if item["partial"]],
         in_review=in_review, review_missing=review_missing,
         not_done=fix_notion.not_done_groups(concerned), reverted=reverted, pushed=pushed,
-        pushed_rows=pushed_rows,
+        pushed_rows=pushed_rows, unpushed=unpushed, resumed=resumed,
     )
 
 

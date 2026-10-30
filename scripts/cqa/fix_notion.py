@@ -4,7 +4,7 @@ of the page comment. Everything here is pure: the caller reads the run files and
 """
 from typing import Optional
 
-from cqa import fix_mr, fix_rows
+from cqa import fix_mr, fix_rows, fix_state
 from cqa.checklist import ref_label
 
 LEFT_BY_LEAD = "laissée aux devs par le lead"
@@ -12,6 +12,8 @@ NO_ANSWER = "sans réponse du lead"
 NOT_HANDLED = "non traitée pendant la passe"
 NO_REASON = "raison non précisée"
 NO_REVIEW_OPTION = "option En review absente de la copie"
+LEFT_KEY = "clé laissée au lead ({reason})"
+EARLIER_FIX = "Correctif d'une passe précédente (voir la MR)."
 # Groups of the rows not handled, in the order of the page comment.
 GROUPS = (
     ("outside", "hors du dépôt"),
@@ -19,6 +21,7 @@ GROUPS = (
     ("dropped", "retirées"),
     ("lead", "laissées aux devs"),
     ("unanswered", "sans réponse"),
+    ("left", "clé laissée au lead"),
 )
 _SHORT_SHA = 8
 
@@ -34,39 +37,56 @@ def published(key: dict) -> bool:
 def pass_rows(state: dict, candidates: dict, reports: dict) -> dict:
     """Return {ref: row} for the rows the pass writes a fix comment to (design 4.6.1).
 
-    Those are the rows of its keys, but the ones already on the branch before it
-    (done_before), and the rows of fix/candidates.json left out as outside the repo (their
-    reason starts with « hors du dépôt »). reports maps a key name to its [(N, report)].
+    Those are the rows of its keys, and the rows of fix/candidates.json left out as outside
+    the repo (their reason starts with « hors du dépôt »). The rows already on the branch
+    before the pass (done_before) count only when the pass created the merge request that
+    ships them (a taken-over local branch, key « reused » other than « mr »): they get its
+    link with « Correctif d'une passe précédente » (ruling P21); the rows of an MR of an
+    earlier pass stay untouched. reports maps a key name to its [(N, report)].
 
-    A row is {"mrs", "pushed", "branches", "done", "remaining", "uat", "commits", "not_done",
-    "group", "in_mr", "fixed", "partial"}. A row fixed (or covered by the fix of another row)
-    in a key lists the MR of a published key (in_mr), or the branch of another key: in pushed
-    when publish pushed it (key « pushed ») but no MR followed, in branches when it stayed
-    local; with the texts of its fix. Otherwise not_done gives the reason and group its group
-    of GROUPS. A row of several keys is fixed when one of them fixed it. Branches are named
-    « <branche> du repo <repo> » when several unpublished keys keep a branch with a fix.
+    A row is {"mrs", "pushed", "unpushed", "branches", "done", "remaining", "uat", "commits",
+    "not_done", "group", "in_mr", "fixed", "partial"}. A row fixed (or covered by the fix of
+    another row) in a key lists the MR of a published key (in_mr), or the branch of another
+    key: in pushed when publish pushed it (key « pushed ») but no MR followed, in unpushed
+    ({"name", "iid"}) when the key took over an open MR whose new commits stayed local, in
+    branches when it stayed local; with the texts of its fix. Otherwise not_done gives the
+    reason and group its group of GROUPS. Every row of a key left to the lead
+    (fix_state.is_left) is « clé laissée au lead (<raison>) ». A row of several keys is fixed
+    when one of them fixed it. Branches are named « <branche> du repo <repo> » when several
+    unpublished keys keep a branch with a fix.
     """
     keys = state.get("keys") or {}
     unpublished = [key for key in keys.values() if _branch_with_fixes(key)]
     found = {}
     for name, key in keys.items():
         rows = key.get("rows") or {}
+        left = key["left"]["reason"] if fix_state.is_left(key) else None
         mr = key["mr"]["url"] if published(key) else None
-        branch = None
+        earlier = mr is not None and key.get("reused") != "mr"
+        branch, unpushed = None, None
         if mr is None and key.get("branch") and not key.get("branch_deleted"):
             branch = key["branch"]
             if len(unpublished) > 1:
                 branch = f"{branch} du repo {key['repo']}"
+            open_mr = key.get("mr") if isinstance(key.get("mr"), dict) else {}
+            if isinstance(open_mr.get("iid"), int) and not key.get("pushed"):
+                branch, unpushed = None, {"name": branch, "iid": open_mr["iid"]}
         pushed = bool(key.get("pushed"))
         covered = fix_mr.covered_refs(rows)
         for ref_text, row in sorted(rows.items(), key=lambda item: int(item[0])):
-            if not isinstance(row, dict) or row.get("outcome") == "done_before":
+            if not isinstance(row, dict):
                 continue
             ref, outcome = int(ref_text), row.get("outcome")
+            if outcome == "done_before" and (left is not None or not earlier):
+                continue
             entry = found.setdefault(ref, _empty())
-            if outcome == "fixed" or ref in covered:
+            if left is not None:
+                entry["reasons"].append((LEFT_KEY.format(reason=left), "left"))
+            elif outcome == "done_before":
+                _add_earlier(entry, ref, row, reports.get(name) or [], mr)
+            elif outcome == "fixed" or ref in covered:
                 _add_fix(entry, ref, row, rows, covered, reports.get(name) or [], mr, branch,
-                         pushed)
+                         pushed, unpushed)
             else:
                 entry["reasons"].append(_not_done(row))
     for item in candidates.get("left") or []:
@@ -125,8 +145,21 @@ def not_done_groups(rows: dict) -> list:
 
 
 def _empty() -> dict:
-    return {"mrs": [], "pushed": [], "branches": [], "done": [], "remaining": [], "uat": [],
-            "commits": [], "reasons": [], "in_mr": False, "fixed": False}
+    return {"mrs": [], "pushed": [], "unpushed": [], "branches": [], "done": [], "remaining": [],
+            "uat": [], "commits": [], "reasons": [], "in_mr": False, "fixed": False}
+
+
+def _add_earlier(entry, ref, row, reports, mr) -> None:
+    """A row fixed before the pass, shipped by the merge request the pass created: its link,
+    the texts of its fix when a report of the key has them, else EARLIER_FIX."""
+    texts = fix_mr.fixed_texts(ref, row, reports)
+    entry["fixed"] = True
+    entry["in_mr"] = True
+    _extend(entry["mrs"], [mr])
+    _extend(entry["done"], [texts["change"] or EARLIER_FIX])
+    _extend(entry["uat"], [texts["uat"]])
+    _extend(entry["commits"], [sha[:_SHORT_SHA] for sha in row.get("commits") or []
+                               if isinstance(sha, str)])
 
 
 def _branch_with_fixes(key: dict) -> bool:
@@ -137,7 +170,8 @@ def _branch_with_fixes(key: dict) -> bool:
             and (fixed or bool(fix_mr.covered_refs(rows))))
 
 
-def _add_fix(entry, ref, row, rows, covered, reports, mr, branch, pushed=False) -> None:
+def _add_fix(entry, ref, row, rows, covered, reports, mr, branch, pushed=False,
+             unpushed=None) -> None:
     by = covered.get(ref)
     source = row if by is None else (rows.get(str(by)) or {})
     texts = fix_mr.fixed_texts(ref if by is None else by, source, reports)
@@ -150,6 +184,9 @@ def _add_fix(entry, ref, row, rows, covered, reports, mr, branch, pushed=False) 
     if mr:
         entry["in_mr"] = True
         _extend(entry["mrs"], [mr])
+    elif unpushed:
+        if unpushed not in entry["unpushed"]:
+            entry["unpushed"].append(unpushed)
     elif branch:
         _extend(entry["pushed" if pushed else "branches"], [branch])
     _extend(entry["done"], [done])
@@ -190,8 +227,8 @@ def _settled(entry: dict) -> dict:
         return ("\n".join(entry[name]) or None) if fixed else None
 
     return {
-        "mrs": entry["mrs"], "pushed": entry["pushed"], "branches": entry["branches"],
-        "done": joined("done"),
+        "mrs": entry["mrs"], "pushed": entry["pushed"], "unpushed": entry["unpushed"],
+        "branches": entry["branches"], "done": joined("done"),
         "remaining": joined("remaining"), "uat": joined("uat"),
         "commits": entry["commits"] if fixed else [], "not_done": reason, "group": group,
         "in_mr": entry["in_mr"], "fixed": fixed, "partial": fixed and bool(entry["remaining"]),

@@ -2700,6 +2700,18 @@ class FixPassOrchestrationTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, gitlab)
 
+    def test_readme_documents_the_v2_retroactive_write(self):
+        """Ruling P20 (final wave F5): a finished v2 pass is written to Notion by hand."""
+        readme = _text(ROOT / "README.md")
+        fix = readme[readme.index("### Corriger : `fix`"):readme.index("## Structure")]
+        line = next(item for item in fix.splitlines() if "**Passe v2 terminée**" in item)
+        for needle in ("`cqa_notion.py fix-plan <run_dir>`",
+                       "`cqa_notion.py apply <run_dir> --plan fix/notion-plan.json`",
+                       "« En review »", "statut n'a pas changé", "reprise de la passe du",
+                       "inachevée"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, line)
+
     def test_readme_documents_the_0_15_fix_mode(self):
         """Carried item 13."""
         readme = _text(ROOT / "README.md")
