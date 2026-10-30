@@ -48,6 +48,7 @@ STALE_BODY = "Description de MR périmée : relancez mr-body."
 NOTHING_PUSHED = "Rien n'a été poussé."
 UNREPORTED = "commit non rapporté par le fixer : {sha} {subject}"
 LINKS_FILE = "fix/mr-links.json"
+STACK_CORE_FILE = "fix/stack-core.json"
 KEY_HELP = "clé de la passe : le nom du repo (fix/candidates.json)"
 SECTION_HELP = "alias de la section (securite, qualite...)"
 # Push settings of the dev's config that could send more than the branch, trigger GitLab
@@ -298,6 +299,15 @@ def _cmd_merged(args, services: Services) -> int:
     return EXIT_OK
 
 
+def _stack_records(run_dir: Path) -> dict:
+    """Return the stack core chosen per repo (fix/stack-core.json), {} when none."""
+    try:
+        document = json.loads((run_dir / STACK_CORE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
 def _cmd_stack_core(args, services: Services) -> int:
     run_dir = Path(args.run_dir)
     repos = [repo for repo in _load_context(run_dir).get("repos") or []
@@ -314,9 +324,6 @@ def _cmd_stack_core(args, services: Services) -> int:
     else:
         core = fix_stack.find_core(stack, repo_path)
         source = "repo" if core else None
-        if core is None:
-            core = fix_stack.find_beside(stack, repo_path)
-            source = "dev" if core else None
     version = fix_stack.read_version(stack, repo_path, core)
     cache = None
     if args.download:
@@ -332,23 +339,23 @@ def _cmd_stack_core(args, services: Services) -> int:
         if cache:
             core, source = cache, "cache"
     if core is None:
-        note = ("Cœur introuvable dans le repo ni dans le dossier du dev."
+        note = ("Cœur introuvable dans le repo."
                 + (" Pas de téléchargement pour Drupal : indiquez un dossier (--path)."
                    if stack != "wordpress" else ""))
     result = {"stack": stack, "version": version, "found": core is not None,
               "path": str(core) if core else None, "source": source,
               "cache": str(cache) if cache else None, "note": note}
-    record = ({"stack": stack, "version": version, "path": result["path"], "source": source}
-              if core else None)
-    (run_dir / "fix").mkdir(exist_ok=True)
-    write_json(run_dir / "fix" / "stack-core.json", record or {})
-    state = _read_state(run_dir, required=False)
-    if state is not None and not state.get("finished_at") and not fix_state.is_v2(state):
-        if record:
-            state["stack_core"] = record
-        else:
-            state.pop("stack_core", None)
-        fix_state.save(run_dir, state)
+    if core:
+        record = {"stack": stack, "version": version, "path": result["path"], "source": source}
+        name = repos[0].get("name")
+        (run_dir / "fix").mkdir(exist_ok=True)
+        records = _stack_records(run_dir)
+        records[name] = record
+        write_json(run_dir / STACK_CORE_FILE, records)
+        state = _read_state(run_dir, required=False)
+        if state is not None and not state.get("finished_at") and not fix_state.is_v2(state):
+            state.setdefault("stack_core", {})[name] = record
+            fix_state.save(run_dir, state)
     _emit(result)
     return EXIT_OK
 
@@ -572,6 +579,9 @@ def _cmd_open(args, services: Services) -> int:
         )
     except (KeyError, TypeError, AttributeError, ValueError):
         raise UsageError("fix/candidates.json : clés invalides, relancez cqa_fix.py candidates.")
+    records = _stack_records(run_dir)
+    if records:
+        state["stack_core"] = records
     removed, archived = _archive(run_dir, old, services.run) if old is not None else ([], None)
     fix_state.save(run_dir, state)
     _emit({

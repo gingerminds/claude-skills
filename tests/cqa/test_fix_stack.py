@@ -97,9 +97,9 @@ class StackCoreTest(StackCase):
         self.assertEqual(code, 0)
         self.assertEqual((result["stack"], result["version"], result["found"]),
                          ("wordpress", "6.5.2", True))
-        self.assertEqual(Path(result["path"]), (self.repo / "web" / "wp").resolve())
+        self.assertEqual(result["path"], str((self.repo / "web" / "wp").resolve()))
         state_file = json.loads((run / "fix" / "stack-core.json").read_text(encoding="utf-8"))
-        self.assertEqual(state_file["path"], result["path"])
+        self.assertEqual(state_file["site"]["path"], result["path"])
 
     def test_core_is_recorded_in_the_pass_state(self):
         run = self.run_dir()
@@ -112,7 +112,7 @@ class StackCoreTest(StackCase):
         code, result, _ = self.stack_core(run)
         self.assertEqual(code, 0, result)
         state = json.loads((run / "fix" / "state.json").read_text(encoding="utf-8"))
-        self.assertEqual(state["stack_core"]["path"], result["path"])
+        self.assertEqual(state["stack_core"]["site"]["path"], result["path"])
 
     def test_version_from_composer_and_dockerfile(self):
         run = self.run_dir()
@@ -160,7 +160,7 @@ class StackCoreTest(StackCase):
         self.assertEqual(list(self.cache.rglob("*")), [])
 
     def test_malicious_archives_are_refused(self):
-        outside = self.root / "evil"
+        outside = self.cache / "wordpress" / "evil"
         cases = {
             "parent": [("../evil", "file", "x")],
             "nested parent": [("wordpress/../../evil", "file", "x")],
@@ -168,6 +168,12 @@ class StackCoreTest(StackCase):
             "symlink out": [("wordpress/link", "symlink", "/etc")],
             "symlink dotdot": [("wordpress/link", "symlink", "../../..")],
             "hardlink out": [("wordpress/h", "hardlink", "/etc/passwd")],
+            "hardlink missing": [("wordpress/h", "hardlink", "wordpress/nothing")],
+            "link inside": [("wordpress", "dir", None), ("wordpress/a", "file", "x"),
+                            ("wordpress/l", "symlink", "a")],
+            "symlink chain": [("wordpress", "dir", None), ("wordpress/a", "symlink", "b"),
+                              ("wordpress/b", "symlink", "../.."),
+                              ("wordpress/a/evil", "file", "x")],
         }
         for label, members in cases.items():
             with self.subTest(label):
@@ -179,6 +185,75 @@ class StackCoreTest(StackCase):
                 self.assertFalse(outside.exists())
                 self.assertFalse(Path("/tmp/evil-absolute").exists())
                 self.assertEqual(list(self.cache.rglob("*")), [])
+
+    def test_top_level_wordpress_symlink_is_refused(self):
+        run = self.run_dir()
+        (self.repo / "Dockerfile").write_text("FROM wordpress:6.5.2\n", encoding="utf-8")
+        members = [("wordpress", "symlink", "/etc")]
+        network = network_for("6.5.2", make_tar(members))
+        code, _, err = self.stack_core(run, "--download", network=network)
+        self.assertEqual(code, 5, err)
+        self.assertEqual(list(self.cache.rglob("*")), [])
+
+    def test_missing_data_filter_refuses_cleanly(self):
+        run = self.run_dir()
+        (self.repo / "Dockerfile").write_text("FROM wordpress:6.5.2\n", encoding="utf-8")
+        network = network_for("6.5.2", wordpress_tar("6.5.2"))
+        with mock.patch.object(fix_stack, "has_data_filter", return_value=False):
+            code, _, err = self.stack_core(run, "--download", network=network)
+        self.assertEqual(code, 2)
+        self.assertIn("Python", err)
+        self.assertEqual(network.calls, [])
+
+    def test_http_exception_is_a_clean_failure(self):
+        import http.client
+
+        opener = mock.Mock()
+        opener.open.side_effect = http.client.BadStatusLine("x")
+        with mock.patch("urllib.request.build_opener", return_value=opener):
+            with self.assertRaises(OSError):
+                fix_stack.fetch("https://wordpress.org/wordpress-6.5.2.tar.gz")
+
+    def test_full_width_digits_are_not_a_version(self):
+        self.assertFalse(fix_stack.valid_version("\uff16.\uff15.\uff12"))
+        run = self.run_dir()
+        (self.repo / "Dockerfile").write_text("FROM wordpress:\uff16.\uff15\n", encoding="utf-8")
+        code, result, _ = self.stack_core(run)
+        self.assertIsNone(result["version"])
+
+    def test_existing_target_with_the_marker_is_never_replaced(self):
+        run = self.run_dir()
+        (self.repo / "Dockerfile").write_text("FROM wordpress:6.5.2\n", encoding="utf-8")
+        network = network_for("6.5.2", wordpress_tar("6.5.2"))
+        target = self.cache / "wordpress" / "6.5.2"
+        real = fix_stack._safe_members
+
+        def appear(tar):
+            (target / "wp-includes").mkdir(parents=True)
+            (target / "wp-includes" / "version.php").write_text("mine", encoding="utf-8")
+            return real(tar)
+
+        with mock.patch.object(fix_stack, "_safe_members", side_effect=appear):
+            code, result, err = self.stack_core(run, "--download", network=network)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((target / "wp-includes" / "version.php").read_text(), "mine")
+        self.assertEqual(sorted(p.name for p in (self.cache / "wordpress").iterdir()), ["6.5.2"])
+
+    def test_stale_work_dirs_are_cleaned(self):
+        import os
+        import time
+        run = self.run_dir()
+        (self.repo / "Dockerfile").write_text("FROM wordpress:6.5.2\n", encoding="utf-8")
+        parent = self.cache / "wordpress"
+        old, fresh = parent / ".tmp-old", parent / ".tmp-fresh"
+        old.mkdir(parents=True)
+        fresh.mkdir()
+        past = time.time() - 3 * 86400
+        os.utime(old, (past, past))
+        network = network_for("6.5.2", wordpress_tar("6.5.2"))
+        self.stack_core(run, "--download", network=network)
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists())
 
     def test_bad_version_is_refused_before_any_download(self):
         for version in ("6.5.2/../../x", "6.5.2-rc1", "latest", "6", "6.5.2" + ".1", ""):
@@ -219,6 +294,45 @@ class StackCoreTest(StackCase):
         self.assertEqual(Path(result["path"]), core.resolve())
         self.assertEqual(result["version"], "6.3.1")
         self.assertTrue(result["found"])
+
+    def test_core_beside_the_repo_is_ignored(self):
+        run = self.run_dir()
+        (self.repo / "Dockerfile").write_text("FROM wordpress:6.5.2\n", encoding="utf-8")
+        other = self.repo.parent / "other-project" / "wp-includes"
+        other.mkdir(parents=True)
+        (other / "version.php").write_text(VERSION_PHP.format(v="5.9.3"), encoding="utf-8")
+        code, result, _ = self.stack_core(run)
+        self.assertEqual((result["found"], result["version"]), (False, "6.5.2"))
+        self.assertNotIn("dev", json.dumps(result))
+
+    def test_a_later_call_keeps_the_earlier_choice_of_the_repo(self):
+        run = self.run_dir()
+        core = self.root / "chosen"
+        (core / "wp-includes").mkdir(parents=True)
+        (core / "wp-includes" / "version.php").write_text(
+            VERSION_PHP.format(v="6.3.1"), encoding="utf-8")
+        self.stack_core(run, "--path", core)
+        code, result, _ = self.stack_core(run)
+        self.assertFalse(result["found"])
+        record = json.loads((run / "fix" / "stack-core.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["site"]["path"], str(core.resolve()))
+
+    def test_open_carries_the_choice_into_the_new_state(self):
+        run = self.run_dir()
+        core = self.root / "chosen"
+        (core / "wp-includes").mkdir(parents=True)
+        (core / "wp-includes" / "version.php").write_text(
+            VERSION_PHP.format(v="6.3.1"), encoding="utf-8")
+        self.stack_core(run, "--path", core)
+        (run / "fix" / "candidates.json").write_text(json.dumps({"keys": [{
+            "key": "site", "repo": "site", "push_ready": True,
+            "sections": [{"alias": "securite", "category": "SÉCURITÉ",
+                          "rows": [{"ref": 1}]}]}]}), encoding="utf-8")
+        code, _, err = self.run_main(["open", run, "--mode", "present", "--push", "dry_run",
+                                      "--notion", "no"])
+        self.assertEqual(code, 0, err)
+        state = json.loads((run / "fix" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["stack_core"]["site"]["path"], str(core.resolve()))
 
     def test_drupal_is_never_downloaded(self):
         run = self.run_dir("drupal")

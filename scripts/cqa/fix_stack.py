@@ -7,6 +7,7 @@ the dev's folders.
 
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import os
@@ -14,6 +15,7 @@ import re
 import shutil
 import tarfile
 import tempfile
+import time
 import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
@@ -25,7 +27,7 @@ MAX_UNPACKED = 600 * 1024 * 1024
 MAX_MEMBERS = 20000
 TIMEOUT = 30
 MARKERS = {"wordpress": "wp-includes/version.php", "drupal": "core/lib/Drupal.php"}
-_VERSION = re.compile(r"\d+\.\d+(\.\d+)?")
+_VERSION = re.compile(r"\d+\.\d+(\.\d+)?", re.ASCII)
 _SKIPPED = {".git", "node_modules", "uploads", "cache", "tests"}
 _SEARCH_DEPTH = 4
 _COMPOSER_PACKAGES = {"wordpress": ("johnpbloch/wordpress", "roots/wordpress"),
@@ -33,7 +35,7 @@ _COMPOSER_PACKAGES = {"wordpress": ("johnpbloch/wordpress", "roots/wordpress"),
 _WP_VERSION = re.compile(r"\$wp_version\s*=\s*'([^']+)'")
 _DRUPAL_VERSION = re.compile(r"const\s+VERSION\s*=\s*'([^']+)'")
 _FROM = re.compile(r"^\s*FROM\s+(?:--platform=\S+\s+)?wordpress:(\d+\.\d+(?:\.\d+)?)(?![\d.])",
-                   re.IGNORECASE | re.MULTILINE)
+                   re.IGNORECASE | re.MULTILINE | re.ASCII)
 
 
 class StackError(ValueError):
@@ -72,8 +74,11 @@ def fetch(url: str, limit: int = MAX_ARCHIVE) -> bytes:
     if parts.scheme != "https" or parts.hostname != HOST:
         raise StackRefused(f"Téléchargement refusé : seul https://{HOST} est autorisé.")
     opener = urllib.request.build_opener(_SameHost)
-    with opener.open(url, timeout=TIMEOUT) as response:
-        data = response.read(limit + 1)
+    try:
+        with opener.open(url, timeout=TIMEOUT) as response:
+            data = response.read(limit + 1)
+    except http.client.HTTPException as error:
+        raise OSError(f"Téléchargement interrompu : {error!r}")
     if len(data) > limit:
         raise StackRefused(f"Téléchargement refusé : plus de {limit} octets.")
     return data
@@ -93,7 +98,7 @@ def find_core(stack: str, base: Path) -> Optional[Path]:
         following = []
         for folder in level:
             if marker_in(stack, folder):
-                return folder
+                return folder.resolve()
             try:
                 children = sorted((entry for entry in folder.iterdir()
                                    if entry.is_dir() and not entry.is_symlink()
@@ -103,30 +108,8 @@ def find_core(stack: str, base: Path) -> Optional[Path]:
                 continue
             following.extend(children)
         level = following
-    return next((folder for folder in level if marker_in(stack, folder)), None)
-
-
-def find_beside(stack: str, repo: Path) -> Optional[Path]:
-    """Look in the folders next to the repo, one level deep."""
-    parent = Path(repo).parent
-    try:
-        siblings = sorted(entry for entry in parent.iterdir()
-                          if entry.is_dir() and not entry.is_symlink() and entry != Path(repo))
-    except OSError:
-        return None
-    for sibling in siblings:
-        for folder in [sibling, *sorted(child for child in _dirs(sibling))]:
-            if marker_in(stack, folder):
-                return folder
-    return None
-
-
-def _dirs(folder: Path):
-    try:
-        return [entry for entry in folder.iterdir()
-                if entry.is_dir() and not entry.is_symlink() and entry.name not in _SKIPPED]
-    except OSError:
-        return []
+    found = next((folder for folder in level if marker_in(stack, folder)), None)
+    return found.resolve() if found else None
 
 
 def _read(path: Path) -> Optional[str]:
@@ -211,6 +194,22 @@ def cached(stack: str, version: str, root: Optional[Path] = None) -> Optional[Pa
     return target.resolve() if marker_in(stack, target) else None
 
 
+def has_data_filter() -> bool:
+    return hasattr(tarfile, "data_filter")
+
+
+def _clean_stale(parent: Path) -> None:
+    if not parent.is_dir() or parent.is_symlink():
+        return
+    limit = time.time() - 86400
+    for entry in parent.glob(".tmp-*"):
+        try:
+            if entry.is_dir() and not entry.is_symlink() and entry.stat().st_mtime < limit:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
+
+
 def download(version: str, root: Path, fetcher: Optional[Callable] = None) -> Path:
     """Return the cache folder of a WordPress release, downloading it when missing."""
     fetcher = fetcher or fetch
@@ -219,6 +218,12 @@ def download(version: str, root: Path, fetcher: Optional[Callable] = None) -> Pa
     target = root / "wordpress" / version
     if marker_in("wordpress", target):
         return target.resolve()
+    if not has_data_filter():
+        raise StackError(
+            "Cette version de Python ne sait pas extraire une archive en sécurité "
+            "(tarfile.data_filter) : indiquez un dossier (--path)."
+        )
+    _clean_stale(root / "wordpress")
     archive = fetcher(url, MAX_ARCHIVE)
     expected = _expected_sha1(fetcher(url + ".sha1", 1024))
     if not hmac.compare_digest(hashlib.sha1(archive).hexdigest(), expected):
@@ -238,14 +243,20 @@ def download(version: str, root: Path, fetcher: Optional[Callable] = None) -> Pa
         try:
             try:
                 tar.extractall(work, members=members, filter="data")
-            except (tarfile.TarError, OSError, EOFError) as error:
+            except (tarfile.TarError, OSError, EOFError, KeyError) as error:
                 raise StackRefused(f"Extraction refusée : {error}")
             core = work / "wordpress"
-            if not marker_in("wordpress", core):
-                raise StackRefused("L'archive ne contient pas wp-includes/version.php.")
-            if target.exists():
-                shutil.rmtree(target)
-            os.rename(core, target)
+            if core.is_symlink() or not core.is_dir() or not marker_in("wordpress", core):
+                raise StackRefused("L'archive ne contient pas wordpress/wp-includes/version.php.")
+            if not marker_in("wordpress", target):
+                if target.exists() or target.is_symlink():
+                    shutil.rmtree(target) if target.is_dir() and not target.is_symlink() \
+                        else target.unlink()
+                try:
+                    os.rename(core, target)
+                except OSError:
+                    if not marker_in("wordpress", target):
+                        raise
         finally:
             shutil.rmtree(work, ignore_errors=True)
             if parent.is_dir() and not any(parent.iterdir()):
@@ -278,14 +289,11 @@ def _safe_members(tar: tarfile.TarFile) -> list:
             total += member.size
             if total > MAX_UNPACKED:
                 raise StackRefused("Archive refusée : contenu trop volumineux.")
-        elif member.issym():
-            link = PurePosixPath(member.linkname)
-            if link.is_absolute() or not _inside(PurePosixPath(os.path.normpath(name.parent / link))):
-                raise StackRefused(f"Archive refusée : lien « {member.name} » hors du dossier.")
-        elif member.islnk():
-            link = PurePosixPath(member.linkname)
-            if not _inside(PurePosixPath(os.path.normpath(link))):
-                raise StackRefused(f"Archive refusée : lien « {member.name} » hors du dossier.")
+        elif member.issym() or member.islnk():
+            raise StackRefused(
+                "Archive refusée : elle contient des liens (symboliques ou durs). "
+                "Indiquez un dossier (--path)."
+            )
         elif not member.isdir():
             raise StackRefused(f"Archive refusée : « {member.name} » n'est pas un fichier.")
     return members
