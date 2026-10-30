@@ -516,12 +516,178 @@ class PassTest(FixCase):
         self.assertEqual(fix_state.load(self.run_dir)["stage"], "notion")
 
 
+class MergedTest(FixCase):
+    """merged: which rows « En review » have their MR merged and deployed in preprod."""
+
+    DEPLOYED = {}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        origin = self.root / "shop.git"
+        self.repo = self.root / "shop"
+        real_git(self.root, "init", "-q", "--bare", str(origin))
+        real_git(self.root, "clone", "-q", str(origin), str(self.repo))
+        real_git(self.repo, "symbolic-ref", "HEAD", "refs/heads/develop")
+        self.base = commit(self.repo, "a.txt", "base")
+        self.merge = commit(self.repo, "b.txt", "merged fix")
+        self.later = commit(self.repo, "c.txt", "later")
+        real_git(self.repo, "push", "-q", "origin", "develop")
+        project = self.root / "proj"
+        self.run_dir = project / "20261030-run"
+        (self.run_dir / "fix").mkdir(parents=True)
+        self.write_run(self.run_dir, [
+            {"ref": 7, "status": "En review"}, {"ref": 8, "status": "Fait"}], {})
+
+    def write_run(self, run_dir, rows, links):
+        (run_dir / "rows.json").write_text(json.dumps({"rows": rows}), encoding="utf-8")
+        (run_dir / "context.json").write_text(json.dumps({"repos": [
+            {"name": "shop", "path": str(self.repo), "remote": REMOTE,
+             "preprod_branch": "develop"}]}), encoding="utf-8")
+        (run_dir / "fix" / "mr-links.json").write_text(
+            json.dumps({"links": links}), encoding="utf-8")
+
+    def link(self, ref, iid, repo="shop"):
+        url = f"https://gitlab.example.org/acme/{repo}/-/merge_requests/{iid}"
+        return {str(ref): [{"repo": repo, "url": url, "iid": iid}]}
+
+    def glab(self, mrs, deployed):
+        def run(command, **kwargs):
+            if command[0] == "git":
+                return subprocess.run(command, **kwargs)
+            if command[0] != "glab":
+                raise AssertionError(command)
+            api = command[2]
+            if "merge_requests/" in api:
+                iid = int(api.rsplit("/", 1)[1])
+                if iid not in mrs:
+                    return subprocess.CompletedProcess(command, 1, "", "404")
+                return subprocess.CompletedProcess(command, 0, json.dumps(mrs[iid]), "")
+            if api.endswith("/environments"):
+                return subprocess.CompletedProcess(
+                    command, 0, json.dumps([{"name": "preprod"}]), "")
+            if "/deployments" in api and deployed:
+                return subprocess.CompletedProcess(
+                    command, 0, json.dumps([{"sha": deployed}]), "")
+            return subprocess.CompletedProcess(command, 1, "", "")
+        return run
+
+    def merged(self, run):
+        code, out, err = self.run_main(["merged", self.run_dir], run=run)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_merged_and_deployed_rows_are_candidates(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}}, self.later)
+        result = self.merged(run)
+        self.assertEqual(result["merged_deployed"], [7])
+        self.assertEqual((result["merged_waiting"], result["closed"], result["open"]), ([], [], []))
+
+    def test_merged_not_deployed_waits(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}}, self.base)
+        result = self.merged(run)
+        self.assertEqual(result["merged_deployed"], [])
+        self.assertEqual([item["ref"] for item in result["merged_waiting"]], [7])
+        self.assertIn("préprod", result["merged_waiting"][0]["why"])
+
+    def test_closed_mr_is_listed(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        result = self.merged(self.glab({5: {"state": "closed", "sha": self.merge}}, self.later))
+        self.assertEqual(result["closed"], [7])
+        self.assertEqual(result["merged_deployed"], [])
+
+    def test_open_mr_is_ignored(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"},
+                                      {"ref": 8, "status": "Fait"}],
+                       {**self.link(7, 5), **self.link(8, 6)})
+        mrs = {5: {"state": "opened", "sha": self.merge},
+               6: {"state": "merged", "merge_commit_sha": self.merge}}
+        result = self.merged(self.glab(mrs, self.later))
+        self.assertEqual(result["open"], [7])
+        self.assertEqual((result["merged_deployed"], result["merged_waiting"], result["closed"]),
+                         ([], [], []))
+
+    def test_fast_forward_merge_uses_the_head_sha(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": None,
+                             "squash_commit_sha": None, "sha": self.merge}}, self.later)
+        self.assertEqual(self.merged(run)["merged_deployed"], [7])
+
+    def test_row_with_two_mrs_needs_every_one_deployed(self):
+        links = {"7": [
+            {"repo": "shop", "url": "https://gitlab.example.org/acme/shop/-/merge_requests/5",
+             "iid": 5},
+            {"repo": "other", "url": "https://gitlab.example.org/acme/other/-/merge_requests/9",
+             "iid": 9},
+        ]}
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], links)
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge},
+                         9: {"state": "merged", "merge_commit_sha": self.merge}}, self.later)
+        result = self.merged(run)
+        self.assertEqual(result["merged_deployed"], [])
+        self.assertEqual([item["ref"] for item in result["merged_waiting"]], [7])
+        self.assertIn("other", result["merged_waiting"][0]["why"])
+
+    def test_row_with_mrs_in_two_repos(self):
+        links = {"7": [
+            {"repo": "shop", "url": "https://gitlab.example.org/acme/shop/-/merge_requests/5",
+             "iid": 5},
+            {"repo": "other", "url": "https://gitlab.example.org/acme/other/-/merge_requests/9",
+             "iid": 9},
+        ]}
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], links)
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge},
+                         9: {"state": "closed"}}, self.later)
+        result = self.merged(run)
+        self.assertEqual(result["closed"], [7])
+        self.assertEqual(result["merged_deployed"], [])
+
+    def test_newest_run_links_the_ref(self):
+        older = self.run_dir.parent / "20260101-run"
+        (older / "fix").mkdir(parents=True)
+        self.write_run(older, [], self.link(7, 1))
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge},
+                         1: {"state": "closed"}}, self.later)
+        self.assertEqual(self.merged(run)["merged_deployed"], [7])
+
+    def test_glab_unavailable_never_deploys(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+
+        def run(command, **kwargs):
+            if command[0] == "glab":
+                raise FileNotFoundError("glab")
+            return subprocess.run(command, **kwargs)
+
+        result = self.merged(run)
+        self.assertEqual(result["merged_deployed"], [])
+        self.assertEqual([item["ref"] for item in result["merged_waiting"]], [7])
+        self.assertTrue(any("glab" in note for note in result["notes"]))
+
+    def test_v2_links_file_reads(self):
+        (self.run_dir / "fix" / "mr-links.json").write_text(json.dumps(
+            {"links": {"7": [{"url": "https://gitlab.example.org/acme/shop/-/merge_requests/5"}]}}),
+            encoding="utf-8")
+        run = self.glab({5: {"state": "merged", "merge_commit_sha": self.merge}}, self.later)
+        self.assertEqual(self.merged(run)["merged_deployed"], [7])
+
+    def test_unknown_merge_commit_waits(self):
+        self.write_run(self.run_dir, [{"ref": 7, "status": "En review"}], self.link(7, 5))
+        unknown = "0123456789abcdef0123456789abcdef01234567"
+        result = self.merged(self.glab({5: {"state": "merged", "merge_commit_sha": unknown}},
+                                       self.later))
+        self.assertEqual([item["ref"] for item in result["merged_waiting"]], [7])
+
+
 class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
         for name in ("doctor", "candidates", "open", "stage", "start", "section-start",
                      "section-end", "pass-start", "validate", "guard", "review-scope", "waive-secret", "drop",
                      "reorder", "reword",
-                     "check", "mr-body", "publish", "finish", "summary", "abandon"):
+                     "check", "mr-body", "publish", "finish", "summary", "abandon", "merged"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)
 

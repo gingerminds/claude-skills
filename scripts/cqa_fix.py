@@ -7,6 +7,7 @@ Exit codes: 0 success, 2 environment or usage, 5 refused by a guard, 6 invalid c
 report, review or state, 7 secret found.
 """
 import argparse
+import functools
 import json
 import os
 import re
@@ -18,8 +19,8 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import quote
 
-from cqa import deferred, fix_checks, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_state, fix_summary
-from cqa.checklist import parse_refs, ref_label
+from cqa import deferred, git_tools, fix_checks, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_state, fix_summary
+from cqa.checklist import STATUS_REVIEW, parse_refs, ref_label
 from cqa.notion_read import write_json, write_text
 from cqa.project import project_name
 from cqa.report import run_start
@@ -210,6 +211,9 @@ def _build_parser() -> argparse.ArgumentParser:
                           "(\"\" pour aucune) ; sans l'option, la synthèse n'en parle pas")
     sub = _command(commands, "abandon", "abandonne la passe en cours", _cmd_abandon)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub = _command(commands, "merged", "lignes « En review » dont la MR est fusionnée et déployée",
+                   _cmd_merged)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
     return parser
 
 
@@ -247,6 +251,161 @@ def _cmd_doctor(args, services: Services) -> int:
     write_json(args.run_dir / "fix" / "doctor.json", report)
     _emit(report)
     return EXIT_OK
+
+
+def _cmd_merged(args, services: Services) -> int:
+    run_dir = Path(args.run_dir)
+    context = _load_context(run_dir)
+    repos = {repo.get("name"): repo for repo in context.get("repos") or []
+             if isinstance(repo, dict)}
+    document = _read_json_file(run_dir / "rows.json", "lancer d'abord cqa_notion.py rows")
+    rows = document.get("rows") if isinstance(document, dict) else None
+    if not isinstance(rows, list):
+        raise ContextError("rows.json : la liste « rows » est absente.")
+    refs = sorted({row["ref"] for row in rows if isinstance(row, dict)
+                   and row.get("status") == STATUS_REVIEW and isinstance(row.get("ref"), int)})
+    notes = []
+    links = _newest_links(run_dir, refs, notes)
+    checker = _MergeChecker(services.run, repos, notes)
+    result = {"merged_deployed": [], "merged_waiting": [], "closed": [], "open": []}
+    for ref in refs:
+        if ref not in links:
+            continue
+        verdicts = [checker.verdict(entry) for entry in links[ref]]
+        states = [state for state, _ in verdicts]
+        if "closed" in states:
+            result["closed"].append(ref)
+        elif "open" in states:
+            result["open"].append(ref)
+        elif "waiting" in states:
+            why = " ; ".join(why for state, why in verdicts if state == "waiting")
+            result["merged_waiting"].append({"ref": ref, "why": why})
+        else:
+            result["merged_deployed"].append(ref)
+    result["notes"] = notes
+    _emit(result)
+    return EXIT_OK
+
+
+def _read_json_file(path: Path, hint: str):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ContextError(f"{path.name} est introuvable dans {path.parent} : {hint}.")
+    except (OSError, ValueError) as error:
+        raise ContextError(f"{path.name} est illisible : {error}")
+
+
+def _newest_links(run_dir: Path, refs: list, notes: list) -> dict:
+    """Return {ref: [entry, ...]}, one entry per repo (the newest), read in the newest run of
+    the project (run_dir and its siblings, newest first) whose fix/mr-links.json links the ref."""
+    project = run_dir.resolve().parent
+    folders = sorted((path for path in project.iterdir() if path.is_dir()),
+                     key=lambda path: path.name, reverse=True)
+    read = {}
+    found = {}
+    for folder in folders:
+        try:
+            read[folder.name] = fix_state.read_mr_link_entries(folder)
+        except ValueError as error:
+            read[folder.name] = {}
+            notes.append(f"Run {folder.name} : {error} Fichier ignoré.")
+    for ref in refs:
+        for folder in folders:
+            entries = read[folder.name].get(ref)
+            if entries:
+                per_repo = {}
+                for entry in entries:
+                    per_repo[entry.get("repo") or entry["url"]] = entry
+                found[ref] = list(per_repo.values())
+                break
+    return found
+
+
+class _MergeChecker:
+    """State and preprod deployment of merge requests, repo by repo (read-only)."""
+
+    def __init__(self, run, repos: dict, notes: list):
+        self.run, self.repos, self.notes = run, repos, notes
+        self._deployed = {}
+        self._glab_down = False
+
+    def verdict(self, entry: dict) -> tuple:
+        """Return (state, why): state is open, closed, waiting (why set) or deployed."""
+        repo = self.repos.get(entry.get("repo")) or self._repo_of_url(entry["url"])
+        name = entry.get("repo") or (repo or {}).get("name") or "repo inconnu"
+        iid = entry.get("iid") if isinstance(entry.get("iid"), int) else _iid_of(entry["url"])
+        if iid is None:
+            self._note(f"{name} : numéro de MR illisible, MR non vérifiée.")
+            return "waiting", f"{name} : MR non vérifiable"
+        try:
+            host, project = (fix_gitlab.host_and_path(repo.get("remote") or "") if repo
+                             else _host_and_project_of_url(entry["url"]))
+        except ValueError:
+            self._note(f"{name} : chemin du projet GitLab inconnu (remote illisible).")
+            return "waiting", f"{name} : projet GitLab inconnu"
+        try:
+            info = fix_gitlab.merge_request(self.run, host, project, iid)
+        except OSError:
+            self._glab_down = True
+            self._note("glab est indisponible : aucune MR n'a pu être lue.")
+            return "waiting", f"{name} : glab indisponible"
+        if info is None:
+            return "waiting", f"{name} : MR !{iid} illisible sur GitLab"
+        if info["state"] != "merged":
+            return ("closed" if info["state"] == "closed" else "open"), ""
+        if not info["sha"]:
+            return "waiting", f"{name} : commit de fusion de la MR !{iid} inconnu"
+        if repo is None or not isinstance(repo.get("path"), str):
+            self._note(f"{name} : repo absent de context.json, déploiement non vérifié.")
+            return "waiting", f"{name} : repo local inconnu"
+        return self._deployment(name, repo, host, project, info["sha"])
+
+    def _repo_of_url(self, url: str) -> Optional[dict]:
+        for repo in self.repos.values():
+            try:
+                project = fix_gitlab.host_and_path(repo.get("remote") or "")[1]
+            except ValueError:
+                continue
+            if f"/{project}/-/merge_requests/" in url:
+                return repo
+        return None
+
+    def _deployment(self, name: str, repo: dict, host: str, project: str, sha: str) -> tuple:
+        path = repo["path"]
+        if name not in self._deployed:
+            fix_git.fetch(path, self.run)
+            env = dict(os.environ)
+            env["GITLAB_HOST"] = host
+            run = functools.partial(self.run, cwd=path, env=env)
+            found = git_tools.deployed_from_gitlab(project, repo.get("preprod_branch"), run)
+            self._deployed[name] = found["sha"]
+        deployed = self._deployed[name]
+        if not deployed:
+            return "waiting", f"{name} : commit déployé en préprod inconnu"
+        if not fix_git.rev(path, self.run, sha):
+            return "waiting", f"{name} : commit de fusion {sha[:8]} absent du repo local"
+        if not fix_git.rev(path, self.run, deployed):
+            return "waiting", f"{name} : commit déployé {deployed[:8]} absent du repo local"
+        if fix_git.is_ancestor(path, self.run, sha, deployed):
+            return "deployed", ""
+        return "waiting", f"{name} : fusionnée, pas encore déployée en préprod"
+
+    def _note(self, text: str) -> None:
+        if text not in self.notes:
+            self.notes.append(text)
+
+
+def _host_and_project_of_url(url: str) -> tuple:
+    found = re.fullmatch(r"https?://([^/]+)/(.+?)/-/merge_requests/[0-9]+.*", url.strip())
+    if not found:
+        raise ValueError(f"URL de MR non reconnue : {url!r}")
+    return found.group(1), found.group(2)
+
+
+def _iid_of(url: str) -> Optional[int]:
+    found = re.search(r"/merge_requests/([0-9]+)", url)
+    return int(found.group(1)) if found else None
 
 
 def _diagnose(repo: dict, run) -> dict:

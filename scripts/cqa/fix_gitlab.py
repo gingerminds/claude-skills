@@ -47,6 +47,25 @@ def glab_json(run, host: str, api_path: str, paginate: bool = False) -> Optional
     return _parse_pages(result.stdout, paginate)
 
 
+def merge_request(run, host: str, project: str, iid: int) -> Optional[dict]:
+    """Return {"state", "sha"} of a merge request, None when GitLab does not answer.
+
+    state is merged, closed or opened (anything else counts as opened). sha is the merge
+    commit, else the squash commit, else the head of the MR (fast-forward merge). Raises
+    OSError when glab is absent.
+    """
+    result = glab(run, host, "api", f"projects/{quote(project, safe='')}/merge_requests/{iid}")
+    if result.returncode != 0:
+        return None
+    info = _parse_pages(result.stdout, False)
+    if not isinstance(info, dict):
+        return None
+    state = info.get("state")
+    sha = next((info[key] for key in ("merge_commit_sha", "squash_commit_sha", "sha")
+                if isinstance(info.get(key), str) and info[key]), None)
+    return {"state": state if state in ("merged", "closed") else "opened", "sha": sha}
+
+
 def _parse_pages(text: str, paginate: bool):
     decoder = json.JSONDecoder()
     values, index, text = [], 0, text or ""

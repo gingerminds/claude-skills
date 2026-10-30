@@ -1087,6 +1087,16 @@ bash "$S/cqa-keepawake.sh" stop "$RUN"
 
 End, in French: show `text`, then the keys left (step 5) with their branch and worktree, the rows `also_dropped` with the row they depended on, and the message for the team, ready to paste (`team_message`).
 
+**9. Recette of merged fixes (on request).** To know which rows put in a merge request are ready for the recette:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" merged "$RUN"
+```
+
+It is read-only toward GitLab and the repos (one `git fetch` per repo) and prints `{"merged_deployed", "merged_waiting", "closed", "open", "notes"}` for the rows « En review » linked to a merge request: `merged_deployed` are the recette candidates (the merge commit is in the commit deployed in preprod), `merged_waiting` carry a French `why`, `closed` are the refs of merge requests closed without merge. Give `notes` to the lead.
+
 ## Exit codes
 
 | Script | Codes |
