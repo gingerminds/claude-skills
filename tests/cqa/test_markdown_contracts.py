@@ -2468,6 +2468,26 @@ class FixPassOrchestrationTest(unittest.TestCase):
         self.assertIn("leaves the key", no_row)
         self.assertNotIn("ends the section as failed", no_row)
 
+    def test_a_left_key_is_never_published_nor_finished(self):
+        """Task 13 round 2: a key left on a history problem stays as it is for the lead; it is
+        checked again before it goes on after « C'est réglé, reprendre »."""
+        left = next(item for item in self.keys.splitlines() if item.startswith("A key is left when"))
+        for needle in ("skipped by every publication and by `finish`",
+                       "its branch and worktree stay as they are", "only the summary names it",
+                       "run `check` and `guard` on the key first (5.d)"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, left)
+        end = _between(self.section, "**6. ", "**7. ")
+        for needle in ("run `check` and `guard` on the key first (5.d)",
+                       "`finish --keep-local` for every key at `reviewed` but a key left",
+                       "publish every key still at `reviewed` but a key left",
+                       "at least one key at `reviewed`, other than a key left, would be pushed"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, end)
+        closing = self.section[self.section.index("End, in French"):]
+        self.assertIn("the keys left (step 5) with their reason, their branch and their worktree",
+                      closing)
+
     def test_an_answer_pass_without_a_valid_report_is_closed(self):
         """Task 13 round 1, item 2: the empty report closes a pass of a settled section."""
         end = _between(self.section, "**6. ", "**7. ")
