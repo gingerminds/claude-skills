@@ -294,6 +294,7 @@ def _register_audit(commands) -> None:
         commands, "deferred", "décisions mises de côté encore ouvertes", _cmd_deferred
     )
     sub.add_argument("--resolve", type=int, metavar="ID", help="ferme la décision ID")
+    sub.add_argument("--answer", help="avec --resolve : réponse du lead, gardée dans l'entrée")
     sub.add_argument(
         "--fix", action="store_true", help="liste les décisions du mode fix (fix_*) au lieu de celles de l'audit"
     )
@@ -1073,8 +1074,10 @@ def _cmd_defer(args, services) -> int:
 
 def _cmd_deferred(args, services) -> int:
     run_dir = args.run_dir.resolve()
+    if args.answer is not None and args.resolve is None:
+        raise UsageError("--answer va avec --resolve : la réponse du lead à la décision qu'il ferme.")
     if args.resolve is not None:
-        deferred.resolve(run_dir, args.resolve)
+        deferred.resolve(run_dir, args.resolve, answer=args.answer)
     _emit({"items": deferred.open_items(run_dir, fix=args.fix)})
     return EXIT_OK
 

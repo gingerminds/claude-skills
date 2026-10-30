@@ -2488,6 +2488,26 @@ class FixPassOrchestrationTest(unittest.TestCase):
         self.assertIn("the keys left (step 5) with their reason, their branch and their worktree",
                       closing)
 
+    def test_a_left_key_stays_left_across_a_resume(self):
+        """Task 13 round 3: the left state lives in deferred.json, resolved with the lead's
+        answer and never deleted, and the resume rule reads it."""
+        resume = _between(self.section, "« Reprendre les correctifs »", "**2. ")
+        for needle in ("`deferred.json`", "« <repo> : clé laissée", "open or resolved",
+                       "`answer`", "« C'est réglé, reprendre »",
+                       "skipped by `reorder`, every publication and `finish`",
+                       "`check` and `guard` first (5.d)"):
+            with self.subTest(part="resume", needle=needle):
+                self.assertIn(needle, resume)
+        left = next(item for item in self.keys.splitlines() if item.startswith("A key is left when"))
+        for needle in ("In both modes, first record it",
+                       'deferred "$RUN" --resolve <id> --fix --answer "Laisser cette clé"',
+                       'deferred "$RUN" --resolve <id> --fix --answer "C\'est réglé, reprendre"',
+                       "never deleted"):
+            with self.subTest(part="key left", needle=needle):
+                self.assertIn(needle, left)
+        end = _between(self.section, "**6. ", "**7. ")
+        self.assertIn("`--answer`", end)
+
     def test_an_answer_pass_without_a_valid_report_is_closed(self):
         """Task 13 round 1, item 2: the empty report closes a pass of a settled section."""
         end = _between(self.section, "**6. ", "**7. ")
