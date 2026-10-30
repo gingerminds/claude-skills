@@ -2469,44 +2469,75 @@ class FixPassOrchestrationTest(unittest.TestCase):
         self.assertNotIn("ends the section as failed", no_row)
 
     def test_a_left_key_is_never_published_nor_finished(self):
-        """Task 13 round 2: a key left on a history problem stays as it is for the lead; it is
-        checked again before it goes on after « C'est réglé, reprendre »."""
-        left = next(item for item in self.keys.splitlines() if item.startswith("A key is left when"))
-        for needle in ("skipped by every publication and by `finish`",
-                       "its branch and worktree stay as they are", "only the summary names it",
-                       "run `check` and `guard` on the key first (5.d)"):
-            with self.subTest(needle=needle):
+        """Task 13 rounds 2 and 4 (ruling P19): a key left on a history problem is recorded by
+        `leave`, refused by the publication commands, and checked again before it goes on
+        after « C'est réglé, reprendre » (`leave --clear`)."""
+        left = _between(self.keys, "A key is left when", "g. Publication")
+        for needle in ('cqa_fix.py" leave "$RUN" "<repo>" --reason "<raison en français>"',
+                       '`{"key", "left", "changed", "branch", "worktree"}`',
+                       "`reorder`, `reword`, `mr-body`, `publish` and `finish` (with or without "
+                       "`--keep-local`) refuse the key (exit 2",
+                       "its branch and worktree stay as they are", "only the summary names the key",
+                       "« C'est réglé, reprendre »", '`leave "$RUN" "<repo>" --clear`',
+                       "run `check` and `guard` on the key first (5.d)", "« Laisser cette clé »",
+                       "Never « Abandonner la section » for a key left"):
+            with self.subTest(part="5.f", needle=needle):
                 self.assertIn(needle, left)
         end = _between(self.section, "**6. ", "**7. ")
-        for needle in ("run `check` and `guard` on the key first (5.d)",
+        for needle in ('`leave "$RUN" "<repo>" --clear`',
+                       "run `check` and `guard` on the key first (5.d)",
+                       "never « Abandonner la section » for a key left",
                        "`finish --keep-local` for every key at `reviewed` but a key left",
                        "publish every key still at `reviewed` but a key left",
-                       "at least one key at `reviewed`, other than a key left, would be pushed"):
-            with self.subTest(needle=needle):
+                       "other than a key left (`left` not null in `fix/state.json`)"):
+            with self.subTest(part="step 6", needle=needle):
                 self.assertIn(needle, end)
-        closing = self.section[self.section.index("End, in French"):]
-        self.assertIn("the keys left (step 5) with their reason, their branch and their worktree",
-                      closing)
+        dirty = _between(end, "Uncommitted changes (", "A key left (")
+        self.assertIn("« Abandonner la section »", dirty)
+        key_left = _between(end, "A key left (", "Any other entry")
+        self.assertNotIn("(`section-end --failed`", key_left)
+        closing = self.section[self.section.index("**8. Summary.**"):]
+        for needle in ('`{"text", "team_message", "left_keys"}`', "« Clés laissées au lead »",
+                       "its reason, its branch and its worktree"):
+            with self.subTest(part="step 8", needle=needle):
+                self.assertIn(needle, closing)
+        self.assertNotIn("the keys left (step 5) with their reason", closing)
 
-    def test_a_left_key_stays_left_across_a_resume(self):
-        """Task 13 round 3: the left state lives in deferred.json, resolved with the lead's
-        answer and never deleted, and the resume rule reads it."""
+    def test_a_left_key_lives_in_the_state(self):
+        """Task 13 round 4 (ruling P19): key["left"] of fix/state.json is the only left state,
+        read by the resume rule; a deferred entry only asks the lead in autonomous mode."""
         resume = _between(self.section, "« Reprendre les correctifs »", "**2. ")
-        for needle in ("`deferred.json`", "« <repo> : clé laissée", "open or resolved",
-                       "`answer`", "« C'est réglé, reprendre »",
+        rule = _between(resume, "Keys left (5.f)", "Before the step")
+        for needle in ("`left` in `fix/state.json` is not null", '`{"reason", "at"}`',
+                       "written by `leave`", "whatever its `step`",
                        "skipped by `reorder`, every publication and `finish`",
-                       "`check` and `guard` first (5.d)"):
+                       "never an entry of `deferred.json`", "« C'est réglé, reprendre »",
+                       "`leave --clear`", "`check` and `guard` first (5.d)"):
             with self.subTest(part="resume", needle=needle):
-                self.assertIn(needle, resume)
-        left = next(item for item in self.keys.splitlines() if item.startswith("A key is left when"))
-        for needle in ("In both modes, first record it",
-                       'deferred "$RUN" --resolve <id> --fix --answer "Laisser cette clé"',
-                       'deferred "$RUN" --resolve <id> --fix --answer "C\'est réglé, reprendre"',
-                       "never deleted"):
+                self.assertIn(needle, rule)
+        for absent in ("clé laissée", "open or resolved", "`answer`", "marks that key as left",
+                       "the latest entry of a key decides", "Read"):
+            with self.subTest(part="resume", absent=absent):
+                self.assertNotIn(absent, rule)
+        self.assertIn("« <repo> : clé laissée : ... » (closed without asking when its key's "
+                      "`left` is already null)", resume)
+        left = _between(self.keys, "A key is left when", "g. Publication")
+        for needle in ("In both modes, first record it in the state",
+                       "the resume rule (step 1) reads it",
+                       'cqa_plan.py defer "$RUN" --kind fix_question --detail "<repo> : clé '
+                       'laissée : <raison>"',
+                       "only so that step 6 asks the same question",
+                       "the entry never decides whether a key is left"):
             with self.subTest(part="key left", needle=needle):
                 self.assertIn(needle, left)
+        for absent in ("the only trace", "never deleted", 'deferred "$RUN" --resolve'):
+            with self.subTest(part="key left", absent=absent):
+                self.assertNotIn(absent, left)
         end = _between(self.section, "**6. ", "**7. ")
-        self.assertIn("`--answer`", end)
+        self.assertIn('python3 "$S/cqa_plan.py" deferred "$RUN" --resolve <id> --fix --answer '
+                      '"<réponse du lead>"', end)
+        self.assertNotIn('--resolve <id> --fix\n', end)
+        self.assertIn("the lead's answer", end)
 
     def test_an_answer_pass_without_a_valid_report_is_closed(self):
         """Task 13 round 1, item 2: the empty report closes a pass of a settled section."""
@@ -2584,7 +2615,7 @@ class FixPassOrchestrationTest(unittest.TestCase):
         for pair in (("section-end", "--failed"), ("pass-start", "--section"),
                      ("guard", "--staged"), ("fix-plan", "--closed-only"),
                      ("stack-core", "--download"), ("stack-core", "--path"),
-                     ("finish", "--keep-local")):
+                     ("finish", "--keep-local"), ("leave", "--clear")):
             with self.subTest(pair=pair):
                 self.assertIn(pair, seen)
 
@@ -2592,7 +2623,7 @@ class FixPassOrchestrationTest(unittest.TestCase):
         table = self.skill[self.skill.index("## Exit codes"):]
         row = next(line for line in table.splitlines() if line.startswith("| `cqa_fix.py` |"))
         for needle in ("a commit already pushed", "the ref of its row", "a stack core download",
-                       "a section not settled"):
+                       "a section not settled", "a key left to the lead (`leave`"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, row)
 
@@ -2607,9 +2638,15 @@ class FixPassOrchestrationTest(unittest.TestCase):
         correction = _section(_text(FIX_MD), "6. Correction pass")
         no_row = next(line for line in correction.splitlines() if "**No row**" in line)
         for needle in ("no `path` and no `label`", "a merge commit, a rewritten history",
-                       "`cqa_fix.py section-end --failed`", "has a `label`"):
+                       "`cqa_fix.py section-end --failed`", "has a `label`",
+                       "`cqa_fix.py leave --reason`", "`cqa_fix.py leave --clear`"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, no_row)
+        keys = _section(_text(FIX_MD), "1. Keys, sections, passes and files")
+        line = next(item for item in keys.splitlines() if "`keys[<key>].left`" in item)
+        for needle in ('`{"reason", "at"}`', "`cqa_fix.py leave`", "`reorder`", "`finish`"):
+            with self.subTest(part="fix.md section 1", needle=needle):
+                self.assertIn(needle, line)
 
     def test_fix_reference_keeps_glab_whatever_the_workstation(self):
         """Design 4.5.6: glab stays the tool of the skill, written in the reference."""

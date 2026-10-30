@@ -328,7 +328,7 @@ class PassTest(FixCase):
             "bases": {}, "reviews": {}, "reports": [],
             "sections": [{"category": "SÉCURITÉ", "alias": "securite", "refs": [3, 12],
                           "state": "pending", "reason": None}],
-            "pass_sections": {}, "rows": {"3": row, "12": row},
+            "pass_sections": {}, "rows": {"3": row, "12": row}, "left": None,
         }})
         result = json.loads(out)
         self.assertEqual(result["keys"], ["front"])
@@ -472,6 +472,25 @@ class PassTest(FixCase):
         (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
         self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 6)
 
+    def test_an_invalid_left_record_exits_6(self):
+        """A key left to the lead is key["left"] = {"reason", "at"} (cqa_fix.py leave), or null."""
+        self.assertEqual(self.open()[0], 0)
+        state = self.state()
+        for left in ({"reason": ""}, {"reason": "x"}, {"at": "2026-10-30T10:00:00Z"}, "x", [],
+                     {"reason": "x", "at": 3}):
+            with self.subTest(left=left):
+                state["keys"]["front"]["left"] = left
+                (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+                code, out, err = self.run_main(["stage", self.run_dir, "notion"])
+                self.assertEqual(code, 6)
+                self.assertIn("« left »", err)
+        state["keys"]["front"]["left"] = {"reason": "commit de fusion", "at": "2026-10-30T10:00:00Z"}
+        (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 0)
+        del state["keys"]["front"]["left"]
+        (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.run_main(["stage", self.run_dir, "notion"])[0], 0)
+
     def test_key_commands_need_a_started_key(self):
         self.assertEqual(self.open()[0], 0)
         key = "front"
@@ -487,6 +506,8 @@ class PassTest(FixCase):
             ["mr-body", self.run_dir, key],
             ["publish", self.run_dir, key],
             ["finish", self.run_dir, key],
+            ["leave", self.run_dir, key, "--reason", "commit de fusion"],
+            ["leave", self.run_dir, key, "--clear"],
         ):
             with self.subTest(command=argv[0]):
                 code, out, err = self.run_main(argv)
@@ -686,7 +707,7 @@ class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
         for name in ("doctor", "candidates", "open", "stage", "start", "section-start",
                      "section-end", "pass-start", "validate", "guard", "review-scope", "waive-secret", "drop",
-                     "reorder", "reword",
+                     "reorder", "reword", "leave",
                      "check", "mr-body", "publish", "finish", "summary", "abandon", "merged", "stack-core"):
             code, out, err = self.run_main([name, "--help"])
             self.assertEqual(code, 0, name)

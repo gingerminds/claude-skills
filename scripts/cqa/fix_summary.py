@@ -14,6 +14,9 @@ NO_MR = "Aucune MR créée."
 NO_CHECK = "Aucune vérification en attente."
 NOTHING_PREPARED = "Aucun correctif préparé."
 EMPTY_BRANCH = " (aucun commit)"
+LEFT_KEY = "- {repo} : {reason} (branche {branch}, worktree {worktree})."
+NO_BRANCH = "aucune"
+NO_WORKTREE = "aucun"
 PARTIAL = "partielle, reste à faire : {remaining}"
 SUITE = ("Relire et ajuster les MR, les fusionner et déployer en préprod, puis lancer "
          "`/gm:checklist-quality-audit recette` : elle reprend d'elle-même les lignes « En review ». "
@@ -38,6 +41,13 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
     notes = _attention_lines(keys)
     if notes:
         parts.append(("Points d'attention", "\n".join(notes)))
+    left_keys = _left_keys(keys)
+    if left_keys:
+        parts.append(("Clés laissées au lead", "\n".join(
+            LEFT_KEY.format(repo=item["key"], reason=item["reason"],
+                            branch=item["branch"] or NO_BRANCH,
+                            worktree=item["worktree"] or NO_WORKTREE)
+            for item in left_keys)))
     left = _left(keys, candidates, info)
     if left:
         parts.append(("Laissées aux devs", left))
@@ -51,7 +61,23 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
     parts.append(("Suite", SUITE))
     text = f"# {project} : synthèse de la passe de correction\n\n" + "\n\n".join(
         f"## {name}\n\n{body}" for name, body in parts) + "\n"
-    return {"text": _clean(text), "team_message": _clean(_team_message(project, state))}
+    return {"text": _clean(text), "team_message": _clean(_team_message(project, state)),
+            "left_keys": left_keys}
+
+
+def _is_left(key: dict) -> bool:
+    """True for a key left to the lead (cqa_fix.py leave: key["left"] = {"reason", "at"})."""
+    return isinstance(key.get("left"), dict)
+
+
+def _left_keys(keys: dict) -> list:
+    """Return the keys left to the lead, in the order of the pass, each with its reason, the
+    time it was left, its branch and its worktree."""
+    return [
+        {"key": name, "reason": (key["left"].get("reason") or "").strip() or NO_REASON,
+         "at": key["left"].get("at"), "branch": key.get("branch"), "worktree": key.get("worktree")}
+        for name, key in keys.items() if _is_left(key)
+    ]
 
 
 def _clean(text: str) -> str:
@@ -189,11 +215,12 @@ def _checks_section(keys: dict, checks: dict) -> str:
 
 def _local_keys(state: dict) -> list:
     """Return [(key, empty)] for the branches left in the dev's repo; empty marks a branch
-    that publish found without any commit (« Aucun commit sur la branche »)."""
+    that publish found without any commit (« Aucun commit sur la branche »). A key left to
+    the lead is not a prepared fix: its own section names its branch."""
     everything = state.get("push") in ("local", "dry_run")
     found = []
     for key in state["keys"].values():
-        if not key.get("branch") or key.get("branch_deleted"):
+        if not key.get("branch") or key.get("branch_deleted") or _is_left(key):
             continue
         empty = bool(key.get("empty_branch")) and not key.get("mr")
         if everything or key.get("kept_local") or not key.get("push_ready") or empty:

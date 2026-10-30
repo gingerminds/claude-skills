@@ -117,7 +117,29 @@ def load(run_dir: Path) -> dict:
                 "(blob : SHA du contenu du fichier ; line : entier à partir de 1 ; label : "
                 f"{' ou '.join(sorted(WAIVABLE_LABELS))})."
             )
+        if not _left_ok(key.get("left")):
+            raise StateError(
+                f"{STATE_FILE} : « left » de la clé « {name} » est invalide : null, ou un objet "
+                "{\"reason\", \"at\"} écrit par cqa_fix.py leave, est attendu."
+            )
     return state
+
+
+def _left_ok(value) -> bool:
+    """True for a key not left (None), or left to the lead ({"reason", "at"}, cqa_fix.py leave)."""
+    if value is None:
+        return True
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("reason"), str) and value["reason"].strip() != ""
+        and isinstance(value.get("at"), str)
+    )
+
+
+def is_left(key: dict) -> bool:
+    """True for a key left to the lead: its branch and worktree stay as they are, and reorder,
+    reword, mr-body, publish and finish refuse it until leave --clear."""
+    return isinstance(key.get("left"), dict)
 
 
 def _waivers_ok(value) -> bool:
@@ -226,6 +248,7 @@ def new_state(candidates: dict, *, mode: str, push: str, notion: bool,
             "sections": sections,
             "pass_sections": {},
             "rows": rows,
+            "left": None,
         }
     return {
         "started_at": now(),

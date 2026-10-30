@@ -47,6 +47,8 @@ AUTONOMOUS_KEYS = ("Mode autonome : publication seulement à la fin de la passe 
 STALE_BODY = "Description de MR périmée : relancez mr-body."
 NOTHING_PUSHED = "Rien n'a été poussé."
 UNREPORTED = "commit non rapporté par le fixer : {sha} {subject}"
+LEFT_KEY = ("La clé {name} est laissée au lead ({reason}) : {command} ne la touche pas. Une fois le "
+            "problème réglé : cqa_fix.py leave <run_dir> {name} --clear. Rien n'a changé.")
 LINKS_FILE = "fix/mr-links.json"
 STACK_CORE_FILE = "fix/stack-core.json"
 KEY_HELP = "clé de la passe : le nom du repo (fix/candidates.json)"
@@ -189,6 +191,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--commit", required=True, help="SHA du commit dont le message change")
     sub.add_argument("--message-file", type=Path, required=True,
                      help="fichier du nouveau message (sujet, puis corps éventuel)")
+    sub = _command(commands, "leave",
+                   "laisse une clé au lead : ni rangement, ni publication, ni finish, jusqu'à --clear",
+                   _cmd_leave)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help=KEY_HELP)
+    choice = sub.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--reason", help="raison, en français, donnée dans la synthèse")
+    choice.add_argument("--clear", action="store_true",
+                        help="reprend la clé : le lead a réglé le problème de la branche")
     sub = _command(commands, "check", "contrôles de syntaxe et stylelint des fichiers corrigés", _cmd_check)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help=KEY_HELP)
@@ -1396,6 +1407,7 @@ def _cmd_reorder(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
+    _not_left(key, args.key, "reorder")
     _no_pass_in_progress(key, "ranger les commits")
     worktree = _key_worktree(run_dir, key, services.run)
     commits = fix_git.commits_in_range(worktree, services.run, key["start_sha"])
@@ -1474,6 +1486,7 @@ def _cmd_reword(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
+    _not_left(key, args.key, "reword")
     _no_pass_in_progress(key, "réécrire un message")
     run = services.run
     worktree = _key_worktree(run_dir, key, run)
@@ -1648,6 +1661,7 @@ def _cmd_mr_body(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
+    _not_left(key, args.key, "mr-body")
     _need_reviewed(key, args.key, "mr-body")
     _need_settled(key, args.key, "mr-body")
     context = _load_context(run_dir)
@@ -1714,6 +1728,7 @@ def _cmd_publish(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
+    _not_left(key, args.key, "publish")
     branch = key["branch"]
     _refuse_local(state, key)
     if state.get("mode") == "autonomous" and state["stage"] == "keys":
@@ -1825,6 +1840,7 @@ def _cmd_finish(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
     key = _started_key(state, args.key)
+    _not_left(key, args.key, "finish --keep-local" if args.keep_local else "finish")
     step = key.get("step")
     if args.keep_local and step == "published":
         raise UsageError(f"La clé {args.key} est déjà publiée : lancez finish sans --keep-local.")
@@ -1897,6 +1913,44 @@ def _delete_empty_branch(path, run, key: dict) -> Optional[str]:
     if deleted.returncode != 0:
         return f"git update-ref a échoué : {deleted.stderr.strip()}"
     return None
+
+
+def _cmd_leave(args, services: Services) -> int:
+    """Leave the key to the lead (--reason), or take it back (--clear).
+
+    A left key (a merge commit or a rewritten history in its branch, a failed section that
+    could not be rebuilt) keeps its branch and its worktree as they are: reorder, reword,
+    mr-body, publish and finish refuse it (exit 2) until --clear, and the summary names it
+    with its reason. The record is key["left"] = {"reason", "at"} in fix/state.json, so it
+    lives and dies with the pass. Both forms are idempotent: changed says whether the state
+    moved; the same reason again keeps the first record.
+    """
+    run_dir = args.run_dir.resolve()
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    current = key.get("left") if fix_state.is_left(key) else None
+    if args.clear:
+        changed = current is not None
+        key["left"] = None
+    else:
+        reason = _reason(args.reason)
+        if key.get("step") == "done":
+            raise UsageError(f"La clé {args.key} est terminée (étape « done ») : plus rien à "
+                             "laisser au lead.")
+        changed = current is None or current.get("reason") != reason
+        if changed:
+            key["left"] = {"reason": reason, "at": fix_state.now()}
+    if changed:
+        fix_state.save(run_dir, state)
+    _emit({"key": args.key, "left": key.get("left"), "changed": changed,
+           "branch": key.get("branch"), "worktree": key.get("worktree")})
+    return EXIT_OK
+
+
+def _not_left(key: dict, name: str, command: str) -> None:
+    """Exit 2 for a key left to the lead (cqa_fix.py leave): nothing of it moves until --clear."""
+    if fix_state.is_left(key):
+        raise UsageError(LEFT_KEY.format(name=name, reason=key["left"]["reason"], command=command))
 
 
 def _need_reviewed(key: dict, name: str, command: str) -> None:

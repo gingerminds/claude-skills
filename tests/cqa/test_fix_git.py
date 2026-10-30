@@ -1471,3 +1471,110 @@ class AbandonTest(GitCase):
         self.assertFalse((self.run_dir / "fix" / "front").exists())
         again = self.start_ok()
         self.assertEqual(again["branch"], BASE + "-2")
+
+
+class LeftKeyTest(ReplayCase):
+    """A key left to the lead (a merge commit or a rewritten history in its branch) is recorded
+    in fix/state.json by leave: reorder, reword, mr-body, publish and finish refuse it until
+    leave --clear, and a new pass starts without it (ruling P19)."""
+
+    REASON = "commit de fusion dans la branche"
+
+    def leave(self, *argv):
+        return self.main_json("leave", *argv)
+
+    def reviewed(self):
+        """Bring the key to reviewed with its sections settled: CQ-3 fixed in pass 1 with one
+        commit, reviewed without a blocking verdict, CQ-5 and CQ-12 skipped."""
+        sha = self.commit_files("fix(securite CQ-3): add a", {"a3.txt": "a\n"})
+        state = self.state()
+        key = state["keys"][KEY]
+        for section in key["sections"]:
+            section["state"] = "settled"
+        key["rows"]["3"].update(outcome="fixed", commits=[sha], **{"pass": 1})
+        for ref in ("5", "12"):
+            key["rows"][ref].update(outcome="skipped", reason="Hors-scope.")
+        key.update(step="reviewed", bases={"1": self.start_sha}, reviews={"1": {"blocking": []}},
+                   pass_sections={"1": "securite"}, **{"pass": 1})
+        fix_state.save(self.run_dir, state)
+        return sha
+
+    def test_leave_records_the_reason_and_clear_takes_the_key_back(self):
+        code, result, err = self.leave("--reason", f"  {self.REASON}  ")
+        self.assertEqual(code, 0, err)
+        left = self.key()["left"]
+        self.assertEqual(left["reason"], self.REASON)
+        self.assertRegex(left["at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertEqual(result, {"key": KEY, "left": left, "changed": True, "branch": self.branch,
+                                  "worktree": str(self.worktree)})
+        code, result, err = self.leave("--reason", self.REASON)
+        self.assertEqual((code, result["changed"], result["left"]), (0, False, left), err)
+        self.assertEqual(self.key()["left"], left)
+        code, result, err = self.leave("--reason", "historique réécrit")
+        self.assertEqual((code, result["changed"], result["left"]["reason"]),
+                         (0, True, "historique réécrit"), err)
+        code, result, err = self.leave("--clear")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((result["left"], result["changed"]), (None, True))
+        self.assertIsNone(self.key()["left"])
+        code, result, err = self.leave("--clear")
+        self.assertEqual((code, result["left"], result["changed"]), (0, None, False), err)
+        for argv in (["--reason", "x", "--clear"], [], ["--reason", "   "],
+                     ["--reason", "x" * 301]):
+            with self.subTest(argv=argv):
+                code, result, err = self.leave(*argv)
+                self.assertEqual((code, result), (2, None), err)
+        code, out, err = self.run_main(["leave", self.run_dir, "back", "--reason", "x"])
+        self.assertEqual(code, 2)
+        self.assertIn("Clé inconnue : back", err)
+        self.assertIsNone(self.key()["left"])
+        self.assert_clean_on_branch()
+
+    def test_a_left_key_is_refused_by_reorder_reword_mr_body_publish_and_finish(self):
+        sha = self.reviewed()
+        code, result, err = self.leave("--reason", self.REASON)
+        self.assertEqual(code, 0, err)
+        message = self.root / "message.txt"
+        message.write_text("fix(securite CQ-3): add the a file\n", encoding="utf-8")
+        before = self.key()
+        for argv in (["reorder"], ["reword", "--commit", sha, "--message-file", str(message)],
+                     ["mr-body"], ["publish"], ["finish"], ["finish", "--keep-local"]):
+            with self.subTest(command=" ".join(argv)):
+                code, result, err = self.main_json(*argv)
+                self.assertEqual((code, result), (2, None), err)
+                self.assertIn(self.REASON, err)
+                self.assertIn(f"La clé {KEY} est laissée au lead", err)
+                self.assertIn("leave", err)
+        self.assertEqual(self.key(), before)
+        self.assertEqual(self.head(self.worktree), sha)
+        self.assertEqual(real_git(self.worktree, "log", "-1", "--format=%s"), "fix(securite CQ-3): add a")
+        self.assert_clean_on_branch()
+        self.assertFalse((self.run_dir / "fix" / "front" / "mr.md").exists())
+        self.assertFalse((self.run_dir / "fix" / "front" / "mr-title.txt").exists())
+        self.assertEqual(real_git(self.other, "ls-remote", "--heads", "origin", self.branch), "")
+        self.assertEqual(self.leave("--clear")[0], 0)
+        code, result, err = self.main_json("reorder")
+        self.assertEqual((code, result["reordered"]), (0, False), err)
+        code, result, err = self.main_json("finish", "--keep-local")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((self.key()["step"], self.key()["left"]), ("done", None))
+        self.assertFalse(self.worktree.exists())
+        code, result, err = self.leave("--reason", self.REASON)
+        self.assertEqual((code, result), (2, None), err)
+        self.assertIn("« done »", err)
+        self.assertIsNone(self.key()["left"])
+
+    def test_a_new_open_starts_without_left(self):
+        self.assertEqual(self.leave("--reason", self.REASON)[0], 0)
+        code, out, err = self.run_main(["abandon", self.run_dir])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.key()["left"]["reason"], self.REASON)
+        archived = self.run_dir / self.open_pass()["archived"]
+        old = json.loads((archived / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(old["keys"][KEY]["left"]["reason"], self.REASON)
+        key = self.key()
+        self.assertIn("left", key)
+        self.assertIsNone(key["left"])
+        self.start_ok()
+        code, result, err = self.main_json("reorder")
+        self.assertEqual(code, 0, err)

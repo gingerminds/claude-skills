@@ -231,6 +231,37 @@ class SummaryTest(SummaryCase):
         self.assertIn("Lignes passées « En review » : 2 (CQ-3, CQ-12).", section(text, "Notion"))
         self.assertNotIn(LONG_DASH, text)
 
+    def test_summary_lists_the_keys_left_to_the_lead(self):
+        """Ruling P19: a key left (key["left"] of the state) is named with its reason, its
+        branch and its worktree, and its branch is not counted as a prepared fix."""
+        state = fix_state.load(self.run_dir)
+        back = state["keys"]["back"]
+        back.update(step="reviewed", worktree="/srv/run/fix/back/wt",
+                    left={"reason": "commit de fusion dans la branche", "at": "2026-10-29T10:00:00Z"})
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        text = result["text"]
+        self.assertEqual(section(text, "Clés laissées au lead").strip(), (
+            "- back : commit de fusion dans la branche (branche feature/checklist-qa-fix-2, "
+            "worktree /srv/run/fix/back/wt)."))
+        self.assertLess(text.index("## Clés laissées au lead"), text.index("## Laissées aux devs"))
+        self.assertEqual(result["left_keys"], [{
+            "key": "back", "reason": "commit de fusion dans la branche", "at": "2026-10-29T10:00:00Z",
+            "branch": "feature/checklist-qa-fix-2", "worktree": "/srv/run/fix/back/wt"}])
+        self.assertNotIn("## Branches restées en local", text)
+        self.assertNotIn(LONG_DASH, text)
+        state = fix_state.load(self.run_dir)
+        state["finished_at"] = None
+        state["keys"]["back"]["left"] = None
+        fix_state.save(self.run_dir, state)
+        result = json.loads(self.summary()[1])
+        self.assertNotIn("## Clés laissées au lead", result["text"])
+        self.assertEqual(result["left_keys"], [])
+        self.assertIn("- back : feature/checklist-qa-fix-2",
+                      section(result["text"], "Branches restées en local"))
+
     def test_review_status_count_needs_the_option(self):
         """The count of rows moved to « En review » is printed only when --in-review gives it."""
         self.assertEqual(self.summary("--in-review", "oops")[0], 2)
