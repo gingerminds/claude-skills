@@ -15,8 +15,9 @@ NO_CHECK = "Aucune vérification en attente."
 NOTHING_PREPARED = "Aucun correctif préparé."
 EMPTY_BRANCH = " (aucun commit)"
 PARTIAL = "partielle, reste à faire : {remaining}"
-SUITE = ("Relire et ajuster les MR, les fusionner, déployer en préprod, passer les lignes en "
-         "« Mis en place » dans Notion, puis lancer `/gm:checklist-quality-audit recette`.")
+SUITE = ("Relire et ajuster les MR, les fusionner et déployer en préprod, puis lancer "
+         "`/gm:checklist-quality-audit recette` : elle reprend d'elle-même les lignes « En review ». "
+         "Une ligne restée à un autre statut dans Notion est à passer d'abord en « Mis en place ».")
 _LEFT_OUTCOMES = ("skipped", "dropped", "question")
 _RAN = ("passed", "failed")
 

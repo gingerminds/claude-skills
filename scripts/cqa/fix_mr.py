@@ -12,8 +12,9 @@ from cqa.checklist import ref_label
 from cqa.report import run_start
 
 NOTION = "https://www.notion.so/"
-SUITE = ("Après fusion et déploiement en préprod : passer les lignes en « Mis en place » dans "
-         "Notion, puis lancer `/gm:checklist-quality-audit recette`.")
+SUITE = ("Après fusion et déploiement en préprod, lancer `/gm:checklist-quality-audit recette` : "
+         "elle reprend d'elle-même les lignes « En review » de cette MR. Une ligne restée à un "
+         "autre statut dans Notion est à passer d'abord en « Mis en place ».")
 CI = "Pipeline CI de la MR : lint et tests du projet, s'il les lance."
 SEMI_AUTO = "**Semi-auto : à valider avec soin.**"
 NO_CHECKS = "Non lancé : contrôles de syntaxe et stylelint : aucun résultat pour cette branche"

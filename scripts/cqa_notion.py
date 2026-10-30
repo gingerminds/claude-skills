@@ -436,6 +436,8 @@ def _cmd_fix_plan(args, client) -> int:
         "ops": ops,
     }
     plan["plan_id"] = plan_digest(plan)
+    # A recette may revert closed merge requests (--closed-only) in a run without a fix pass.
+    (run_dir / "fix").mkdir(exist_ok=True)
     write_json(run_dir / "fix" / "notion-plan.json", plan)
     counts = {}
     for kind in ("status", "comment", "fix_comment", "page_comment"):

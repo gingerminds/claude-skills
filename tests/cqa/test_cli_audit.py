@@ -3127,6 +3127,17 @@ class FixPlanCommandTest(FixPlanCase):
         self.assertEqual(moved.statuses, {"page-107": "Mis en place"})
         self.assertEqual(moved.texts("page-107"), [fix["text"]])
 
+    def test_closed_only_plan_in_a_run_without_a_fix_pass(self):
+        """A recette on a run where no fix pass ran: the plan creates fix/ itself."""
+        self.write(self.run_dir.parent / "2026-10-10-0900", "fix/mr-links.json", {"links": {
+            "107": [{"repo": "laravel", "url": CLOSED_URL, "iid": 9, "status_before": "À traiter"}],
+        }})
+        shutil.rmtree(self.run_dir / "fix")
+        code, out, err = self.run_fix_plan(FixNotion(), "--closed-only", "--closed", "CQ-107")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["reverted"], [107])
+        self.assertEqual(set(self.ops("status")), {107})
+
     def test_closed_mrs_during_a_pass_and_the_option_checks(self):
         self.write(self.run_dir.parent / "2026-10-10-0900", "fix/mr-links.json", {"links": {
             "107": [{"repo": "laravel", "url": CLOSED_URL, "iid": 9, "status_before": "À traiter"}],

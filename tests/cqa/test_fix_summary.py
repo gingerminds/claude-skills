@@ -113,6 +113,8 @@ class SummaryTest(SummaryCase):
         self.assertIn("Commentaire du skill non remplacé, un second a été créé : CQ-3, CQ-12",
                       section(text, "Notion"))
         self.assertIn("recette", section(text, "Suite"))
+        self.assertIn("reprend d'elle-même les lignes « En review »", section(text, "Suite"))
+        self.assertNotIn("passer les lignes en « Mis en place »", section(text, "Suite"))
         self.assertNotIn(LONG_DASH, text)
 
     def test_optional_sections_are_left_out(self):
@@ -235,7 +237,7 @@ class SummaryTest(SummaryCase):
         state = fix_state.load(self.run_dir)
         self.assertTrue(state["notion"])
         text = json.loads(self.summary()[1])["text"]
-        self.assertNotIn("En review", text)
+        self.assertNotIn("Lignes passées « En review »", text)
         state["finished_at"] = None
         fix_state.save(self.run_dir, state)
         text = json.loads(self.summary("--in-review", "")[1])["text"]

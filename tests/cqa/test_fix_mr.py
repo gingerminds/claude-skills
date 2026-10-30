@@ -26,8 +26,9 @@ COPY_URL = "https://www.notion.so/fedcba9876543210fedcba9876543210"
 MR_URL = f"https://{HOST}/acme/shop/-/merge_requests/12"
 HEADINGS = ["## Contexte", "## Correctifs", "## Vérification", "## Points d'attention",
             "## En attente d'une décision", "## Hors-scope", "## Suite"]
-SUITE = ("Après fusion et déploiement en préprod : passer les lignes en « Mis en place » dans "
-         "Notion, puis lancer `/gm:checklist-quality-audit recette`.")
+SUITE = ("Après fusion et déploiement en préprod, lancer `/gm:checklist-quality-audit recette` : "
+         "elle reprend d'elle-même les lignes « En review » de cette MR. Une ligne restée à un "
+         "autre statut dans Notion est à passer d'abord en « Mis en place ».")
 CI = "- Pipeline CI de la MR : lint et tests du projet, s'il les lance."
 SEMI = "**Semi-auto : à valider avec soin.**"
 DIVERGED = "La branche distante a divergé : intégrez ses commits à la main, rien n'a été poussé."

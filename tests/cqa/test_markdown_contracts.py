@@ -132,9 +132,19 @@ FIX_LABELS = (
     "« Pousser les branches et créer les MR en brouillon ? »",
     "« Pousser et créer les MR en brouillon »",
     "« Garder les branches en local »",
-    "« Ajouter le lien des MR dans Notion ? »",
+    "« Écrire le résultat de la passe dans Notion ? »",
     "« Ne rien écrire »",
 )
+# The question of design 4.3.6, asked at the diagnostic of a fix pass.
+STACK_CORE_LABELS = (
+    "« Cœur WordPress pour les sous-agents ? »",
+    "« Cœur Drupal pour les sous-agents ? »",
+    "« Télécharger la version <x> »",
+    "« Indiquer un dossier »",
+    "« Continuer sans »",
+)
+# A backticked command cited inline, without its script: `section-end --failed`.
+_INLINE_COMMAND = re.compile(r"`([a-z][a-z-]*)((?: [^`\s]+)+)`")
 
 
 def _text(path: Path) -> str:
@@ -1855,7 +1865,8 @@ class FixAgentsTest(unittest.TestCase):
         content problem without a row ends the section as failed."""
         correction = _section(_text(FIX_MD), "6. Correction pass")
         for needle in ("`path` null and a `label`, whatever its `kind`",
-                       "names no row (`ref` null: a merge commit, a rewritten history)",
+                       "no `path` and no `label` (a merge commit, a rewritten history: its "
+                       "`ref` is null",
                        "changed outside the pass",
                        "`cqa_fix.py section-end --failed`"):
             with self.subTest(needle=needle):
@@ -1892,12 +1903,13 @@ class FixSectionTest(unittest.TestCase):
             rule,
         )
         for needle in ("`fix`", "section 12", "its own worktrees, under the run directory",
-                       f"`{fix_names.BRANCH_PREFIX}*`", "after the lead's consent",
+                       "`fix/<repo>/wt`", f"`{fix_names.BRANCH_BASE}`", "after the lead's consent",
                        "through `cqa_fix.py`"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, rule)
+        self.assertNotIn("<slug>", rule)
         notion = next(line for line in rules.splitlines() if line.startswith("- **Notion.**"))
-        self.assertIn("« Ajouter le lien des MR dans Notion ? »", notion)
+        self.assertIn("« Écrire le résultat de la passe dans Notion ? »", notion)
 
     def test_resume_signals_an_unfinished_fix_pass(self):
         resume = _section(self.skill, "3. Resume")
@@ -1925,10 +1937,10 @@ class FixSectionTest(unittest.TestCase):
             'cqa_plan.py" deferred "$RUN" --fix',
             'cqa_plan.py" defer "$RUN" --kind fix_question',
             'cqa_notion.py" apply "$RUN" --plan fix/notion-plan.json',
-            'cqa_fix.py" validate "$RUN" "<repo>/<slug>" report --pass <N>',
-            'cqa_fix.py" validate "$RUN" "<repo>/<slug>" review --pass <N>',
-            'cqa_fix.py" pass-start "$RUN" "<repo>/<slug>" --pass <N>',
-            'cqa_fix.py" finish "$RUN" "<repo>/<slug>" --keep-local',
+            'cqa_fix.py" validate "$RUN" "<repo>" report --pass <N>',
+            'cqa_fix.py" validate "$RUN" "<repo>" review --pass <N>',
+            'cqa_fix.py" pass-start "$RUN" "<repo>" --pass <N> --section <alias>',
+            'cqa_fix.py" finish "$RUN" "<repo>" --keep-local',
             'cqa_fix.py" summary "$RUN" --replace-failed',
             'cqa_plan.py" deferred "$RUN" --resolve <id> --fix',
             "commit.gpgSign",
@@ -1974,6 +1986,8 @@ class FixSectionTest(unittest.TestCase):
             'cqa_fix.py" abandon',
             'cqa_notion.py" rows',
             'cqa_fix.py" doctor',
+            'cqa_fix.py" stack-core "$RUN" --repo <repo>',
+            "« Cœur WordPress pour les sous-agents ? »",
             "commit.gpgSign",
             'cqa-toolbox.sh" doctor',
             "« Télécharger l'image de la boîte à outils ? »",
@@ -1984,19 +1998,24 @@ class FixSectionTest(unittest.TestCase):
             "« Lancer ces correctifs ? »",
             "« Mode 100 % autonome ? »",
             "« Pousser les branches et créer les MR en brouillon ? »",
-            "« Ajouter le lien des MR dans Notion ? »",
+            "« Écrire le résultat de la passe dans Notion ? »",
             'cqa_fix.py" open',
             'cqa-keepawake.sh" start "$RUN"',
             'cqa_fix.py" start',
+            'cqa_fix.py" section-start',
             'cqa_fix.py" pass-start',
             FIXER_DISPATCH,
             "report --pass <N>",
             "--kind fix_question",
             'cqa_fix.py" check',
             'cqa_fix.py" guard',
+            'cqa_fix.py" review-scope',
             REVIEWER_DISPATCH,
             "review --pass <N>",
-            'drop "$RUN" "<repo>/<slug>" --refs CQ-12 --reason "<raison en français>"',
+            'drop "$RUN" "<repo>" --refs CQ-12 --reason "<raison en français>"',
+            'section-end "$RUN" "<repo>" --section <alias>',
+            'cqa_fix.py" reorder',
+            'cqa_fix.py" reword',
             'cqa_fix.py" mr-body',
             'cqa_fix.py" publish',
             'cqa_fix.py" finish',
@@ -2004,6 +2023,7 @@ class FixSectionTest(unittest.TestCase):
             'deferred "$RUN" --fix',
             "« Publier les branches maintenant ? »",
             'stage "$RUN" notion',
+            'cqa_fix.py" merged',
             'cqa_notion.py" fix-plan',
             'cqa_notion.py" apply',
             'stage "$RUN" summary',
@@ -2049,7 +2069,7 @@ class FixSectionTest(unittest.TestCase):
 
     def test_a_row_left_to_the_devs_is_dropped_without_a_fixer_pass(self):
         """R18: « Laisser aux devs » is applied by drop, a row without commits is just marked."""
-        command = ('cqa_fix.py" drop "$RUN" "<repo>/<slug>" --refs CQ-12 '
+        command = ('cqa_fix.py" drop "$RUN" "<repo>" --refs CQ-12 '
                    '--reason "laissée aux devs par le lead"')
         self.assertIn(command, self.section)
         questions = self.section[self.section.index("c. Questions"):self.section.index("d. Checks")]
@@ -2071,7 +2091,7 @@ class FixSectionTest(unittest.TestCase):
     def test_correction_attempts_are_counted_per_row(self):
         """R22: 5.f repeats while a row with a problem has not had its correction attempt."""
         problems = self.section[self.section.index("f. Problems"):self.section.index("g. Publication")]
-        for needle in ("Repeat until no row of the key has a problem",
+        for needle in ("Repeat until no row of the section has a problem",
                        "each row enters the `problems` of a notes file once",
                        "then `check` and `guard` again"):
             with self.subTest(needle=needle):
@@ -2080,7 +2100,7 @@ class FixSectionTest(unittest.TestCase):
     def test_a_key_already_done_needs_no_fixer(self):
         """Minor 7: rows all `done_before` after start: an empty report validated as pass 1."""
         for needle in ("all `done_before`", "no fixer dispatch",
-                       '{"key": "<repo>/<slug>", "pass": 1, "rows": []}'):
+                       '{"key": "<repo>", "pass": 1, "rows": []}'):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
 
@@ -2136,10 +2156,10 @@ class FixSectionTest(unittest.TestCase):
                 self.assertIn(needle, self.section)
 
     def test_notion_link_needs_the_consent_and_skips_dry_runs(self):
-        self.assertLess(self.section.index("« Ajouter le lien des MR dans Notion ? »"),
+        self.assertLess(self.section.index("« Écrire le résultat de la passe dans Notion ? »"),
                         self.section.index('cqa_notion.py" apply'))
         self.assertIn("only when the pass has `notion` true", self.section)
-        self.assertIn(f"`{fix_names.DRY_RUN_PREFIX}<slug>`", self.section)
+        self.assertIn(f"`{fix_names.DRY_RUN_BASE}`", self.section)
         self.assertIn("`--phase` does not apply", self.section)
 
     def test_first_try_advice(self):
@@ -2180,7 +2200,7 @@ class FixSectionTest(unittest.TestCase):
 
     def test_a_question_left_without_answer_is_dropped(self):
         """M2: a deferred question without answer lands in « Hors-scope » through drop."""
-        command = ('cqa_fix.py" drop "$RUN" "<repo>/<slug>" --refs CQ-12 '
+        command = ('cqa_fix.py" drop "$RUN" "<repo>" --refs CQ-12 '
                    '--reason "sans réponse du lead"')
         end = self.section[self.section.index('deferred "$RUN" --fix'):
                            self.section.index("« Publier les branches maintenant ? »")]
@@ -2227,6 +2247,276 @@ class FixSectionTest(unittest.TestCase):
                        "credential helper"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, readme)
+
+
+
+def _between(text: str, start: str, end: str) -> str:
+    """Return text from the first start up to the next end after it."""
+    first = text.index(start)
+    return text[first:text.index(end, first + len(start))]
+
+
+class FixPassOrchestrationTest(unittest.TestCase):
+    """Section 12 for the 0.15 fix pass, section 11 for the automatic recette (design 4.1 to
+    4.6), and the README, version and reference items carried to Task 13."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.skill = _text(SKILL)
+        cls.section = _section(cls.skill, "12. Fix")
+        cls.recette = _section(cls.skill, "11. Recette")
+        cls.keys = _between(cls.section, "**5. ", "**6. ")
+        cls.problems = _between(cls.section, "f. Problems", "g. Publication")
+        cls.publication = _between(cls.section, "g. Publication", "**6. ")
+
+    def test_the_key_is_the_repo_everywhere(self):
+        """Carried item 1: the 0.15 key is the repo, its folder fix/<repo>/."""
+        for path in _skill_files():
+            with self.subTest(file=path.name):
+                self.assertNotIn("<repo>/<slug>", _text(path))
+        for needle in ('cqa_fix.py" start "$RUN" "<repo>"',
+                       'cqa_fix.py" check "$RUN" "<repo>"',
+                       'cqa_fix.py" guard "$RUN" "<repo>"',
+                       'cqa_fix.py" waive-secret "$RUN" "<repo>" --sha <sha> --path <path> '
+                       '--line <line> --label <label>',
+                       'cqa_fix.py" review-scope "$RUN" "<repo>" --pass <N>',
+                       'cqa_fix.py" reorder "$RUN" "<repo>"',
+                       'cqa_fix.py" reword "$RUN" "<repo>" --commit <sha> --message-file',
+                       'cqa_fix.py" mr-body "$RUN" "<repo>"',
+                       'cqa_fix.py" publish "$RUN" "<repo>"',
+                       "`Notes: fix/<repo>/notes-<N>.json`",
+                       '`{"key": "<repo>", "pass": 1, "rows": []}`'):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.section)
+
+    def test_sections_run_one_after_the_other(self):
+        """Design 4.1.2 and 4.1.5: section-start, passes, checks, guard, review (light when
+        review-scope says so), one correction attempt, drops, then section-end or --failed."""
+        for needle in (
+            'cqa_fix.py" section-start "$RUN" "<repo>" --section <alias>',
+            'cqa_fix.py" section-end "$RUN" "<repo>" --section <alias>',
+            'cqa_fix.py" section-end "$RUN" "<repo>" --section <alias> --failed --reason '
+            '"<raison en français>"',
+            'cqa_fix.py" pass-start "$RUN" "<repo>" --pass <N> --section <alias>',
+            "`light` is true",
+            "the rows of the section still `pending` in `fix/state.json`",
+            "Repeat until no row of the section has a problem",
+            "`section-end`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.keys)
+        order = ('section-start "$RUN"', 'pass-start "$RUN"', FIXER_DISPATCH, 'check "$RUN"',
+                 'guard "$RUN"', 'review-scope "$RUN"', REVIEWER_DISPATCH,
+                 '--reason "<raison en français>"', 'section-end "$RUN"', 'reorder "$RUN"',
+                 'reword "$RUN"', 'mr-body "$RUN"')
+        positions = [self.keys.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_guard_problems_follow_the_reference(self):
+        """Carried items 2 and 15 (fix.md section 6, rulings P10 and P17)."""
+        for needle in (
+            "`references/fix.md`, section 6",
+            "`path` null",
+            "a `label`",
+            "`reword`",
+            "`content` with a `path`",
+            "the guard `reason` as reason, without a correction pass",
+            "`suspect` with `waivable` true",
+            "`waive-secret`",
+            "« Cette ligne contient-elle un vrai secret ? »",
+            "`content` with no `path` and no `label`",
+            "`section-end --failed`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.problems)
+        for absent in ("`source` `guard`", "`source` `guard`, `check` or `review`"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, self.skill)
+        self.assertIn("`source` `check` or `review`", self.problems)
+
+    def test_fixer_skips_and_alerts_reach_the_lead(self):
+        """Carried item 3: the fixer's guard skip reasons and the P16 notice in attention."""
+        fixer_pass = _between(self.keys, "b. Fixer pass", "c. Questions")
+        for needle in ("« garde indisponible : <cause> »", "« refusé par la garde : <raison> »",
+                       "« commit refusé par git : <cause> »",
+                       "« Alerte de secret à confirmer par le lead : <chemin>, ligne <n> »"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, fixer_pass)
+        self.assertIn("never the line itself", self.keys)
+
+    def test_retried_and_failed_rows_leave_for_good(self):
+        """Carried items 4 and 5: a retry gets no correction pass; a failed section asks
+        none of its deferred questions and its rows go to « Hors-scope »."""
+        for needle in ("`retry` true", "left for good, without a correction pass"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.problems)
+        failed = self.keys[self.keys.index("--failed --reason"):]
+        for needle in ('deferred "$RUN" --resolve <id> --fix', "never ask them",
+                       "« Hors-scope »", "leftover-<N>.patch`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, failed)
+
+    def test_messages_are_reworded_after_the_reorder(self):
+        """Carried item 6 (ruling P9) and design 4.1.4."""
+        for needle in ("the ref of the row the report attributes the commit to",
+                       "`guard` again after `reorder` and after each `reword`",
+                       "`rewritten`", "`conflicts`", "`fix/<repo>/reword.txt`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.publication)
+        self.assertLess(self.publication.index('reorder "$RUN"'),
+                        self.publication.index('reword "$RUN"'))
+        self.assertLess(self.publication.index('reword "$RUN"'),
+                        self.publication.index('mr-body "$RUN"'))
+        self.assertIn("once per repo", self.publication)
+
+    def test_questions_are_grouped_by_file_and_element(self):
+        """Design 4.1.7: one question for the rows on the same file and element."""
+        questions = _between(self.keys, "c. Questions", "d. Checks")
+        self.assertIn("the same file and the same element", questions)
+        end = _between(self.section, "**6. ", "**7. ")
+        self.assertIn("the same file and the same element", end)
+
+    def test_the_stack_core_is_chosen_at_the_diagnostic(self):
+        """Carried items 7 and 8 (design 4.3.6)."""
+        diagnostic = _between(self.section, "**2. Diagnostic.**", "**3. ")
+        for needle in (*STACK_CORE_LABELS,
+                       'cqa_fix.py" stack-core "$RUN" --repo <repo>',
+                       '`stack-core "$RUN" --repo <repo> --download`',
+                       '`stack-core "$RUN" --repo <repo> --path <dossier>`',
+                       "only for WordPress", "`open` carries", "read-only",
+                       "`images.nginx`", "`images.varnish`", "`images.gitleaks`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, diagnostic)
+        self.assertIn(FIXER_DISPATCH, self.keys)
+        self.assertIn('`stack_core["<repo>"]`', self.keys)
+        self.assertIn("reads it in `fix/state.json`", self.keys)
+
+    def test_notion_stage_writes_the_pass_with_the_consent(self):
+        """Carried item 9 (design 4.6.2 and 4.6.7)."""
+        launch = _between(self.section, "**3. ", "**4. ")
+        question = next(line for line in launch.splitlines()
+                        if "« Écrire le résultat de la passe dans Notion ? »" in line)
+        for needle in ("`mr` and `local`", "not with `--dry-run`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, question)
+        notion = _between(self.section, "**7. Notion.**", "**8. Summary.**")
+        for needle in ('cqa_notion.py" fix-plan "$RUN"',
+                       'cqa_notion.py" fix-plan "$RUN" --closed CQ-3 CQ-12',
+                       'cqa_notion.py" apply "$RUN" --plan fix/notion-plan.json',
+                       'cqa_fix.py" merged "$RUN"',
+                       "`status_changed`", "`replace_failed`", "`in_review`", "`reverted`",
+                       "« option En review absente de la copie »"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, notion)
+        summary = _between(self.section, "**8. Summary.**", "End, in French")
+        for needle in ('summary "$RUN" --replace-failed CQ-3,CQ-12 --in-review CQ-5,CQ-7',
+                       "minus those of `status_changed`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, summary)
+        intro = self.section[:self.section.index("**1. Run.**")]
+        for needle in ("« Correctif automatique »", "« En review »", "never creates an option"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, intro)
+        for absent in ("« MR : » block to the skill's comments", "no status, no assignment",
+                       "« Ajouter le lien des MR dans Notion ? »", "one draft merge request per key",
+                       "per category and repo", "`feature/checklist-qa-fix-*`"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, self.skill)
+
+    def test_recette_takes_the_merged_fixes(self):
+        """Carried items 11 and 12 (design 4.6.3 and 4.6.4)."""
+        step = self.recette.split("\n2. ")[1].split("\n3. ")[0]
+        for needle in ('cqa_notion.py" rows "$RUN"', 'cqa_fix.py" merged "$RUN"',
+                       "`merged_deployed`", "`merged_waiting`", "`why`", "`closed`", "`notes`",
+                       'cqa_notion.py" recette "$RUN" --refs CQ-5,CQ-7', "« En review »"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, step)
+        self.assertLess(step.index('cqa_fix.py" merged'), step.index('recette "$RUN" --refs'))
+        for needle in ('cqa_notion.py" fix-plan "$RUN" --closed-only --closed CQ-3 CQ-12',
+                       'cqa_notion.py" apply "$RUN" --plan fix/notion-plan.json',
+                       "`status_changed`", "`reverted`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.recette)
+        self.assertNotIn("Recette of merged fixes", self.section)
+        arguments = _section(self.skill, "2. Arguments")
+        recette = next(line for line in arguments.splitlines() if line.startswith("- `recette`:"))
+        self.assertIn("« En review »", recette)
+
+    def test_commands_cited_inline_exist(self):
+        """Every backticked subcommand with options (`section-end --failed`) exists with
+        those options in cqa_plan.py, cqa_notion.py or cqa_fix.py."""
+        known = {}
+        for module in (cqa_plan, cqa_notion, cqa_fix):
+            for name, flags in _python_commands(module).items():
+                known.setdefault(name, set()).update(flags)
+        seen = set()
+        for path in _skill_files():
+            for command, rest in _INLINE_COMMAND.findall(_text(path)):
+                flags = set(_FLAG.findall(rest))
+                if command not in known or not flags:
+                    continue
+                with self.subTest(file=path.name, command=command, flags=sorted(flags)):
+                    self.assertLessEqual(flags, known[command])
+                seen.update((command, flag) for flag in flags)
+        for pair in (("section-end", "--failed"), ("pass-start", "--section"),
+                     ("guard", "--staged"), ("fix-plan", "--closed-only"),
+                     ("stack-core", "--download"), ("stack-core", "--path"),
+                     ("finish", "--keep-local")):
+            with self.subTest(pair=pair):
+                self.assertIn(pair, seen)
+
+    def test_exit_codes_name_the_new_refusals(self):
+        table = self.skill[self.skill.index("## Exit codes"):]
+        row = next(line for line in table.splitlines() if line.startswith("| `cqa_fix.py` |"))
+        for needle in ("a commit already pushed", "the ref of its row", "a stack core download",
+                       "a section not settled"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, row)
+
+    def test_description_and_arguments_say_one_merge_request_per_repo(self):
+        self.assertIn("one draft merge request per repo", _frontmatter(SKILL)["description"])
+        arguments = _section(self.skill, "2. Arguments")
+        fix = next(line for line in arguments.splitlines() if line.startswith("- `fix`:"))
+        self.assertIn("one draft merge request per repo", fix)
+
+    def test_fix_reference_no_row_case_needs_no_label(self):
+        """Carried item 15: a secret in a message without a ref has a label: reworded."""
+        correction = _section(_text(FIX_MD), "6. Correction pass")
+        no_row = next(line for line in correction.splitlines() if "**No row**" in line)
+        for needle in ("no `path` and no `label`", "a merge commit, a rewritten history",
+                       "`cqa_fix.py section-end --failed`", "has a `label`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, no_row)
+
+    def test_fix_reference_keeps_glab_whatever_the_workstation(self):
+        """Design 4.5.6: glab stays the tool of the skill, written in the reference."""
+        gitlab = next(line for line in _section(_text(FIX_MD), "7. Guard rails").splitlines()
+                      if line.startswith("- **GitLab**"))
+        for needle in ("`glab`", "`gm:merge-request`", "another merge request tool"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, gitlab)
+
+    def test_readme_documents_the_0_15_fix_mode(self):
+        """Carried item 13."""
+        readme = _text(ROOT / "README.md")
+        fix = readme[readme.index("### Corriger : `fix`"):readme.index("## Structure")]
+        for needle in ("une MR en brouillon par passe et par repo", "par section",
+                       "`feature/checklist-qa-fix`", "`fix(securite CQ-107): ...`",
+                       "« Écrire le résultat de la passe dans Notion ? »",
+                       "« Correctif automatique »", "« En review »", "à la main",
+                       "ne crée jamais", "GitKraken", "`glab`", "1.3.0", "`nginx`", "`varnish`",
+                       "`gitleaks`", "`~/.cache/gm-audit/stacks/`", "Cœur WordPress",
+                       "« Laisser aux devs »"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, fix)
+        for absent in ("par catégorie et par repo", "`fix(CQ-107): ...`", "reçoit un bloc « MR : »",
+                       "« Ajouter le lien des MR dans Notion ? »", "changer un statut Notion",
+                       "feature/checklist-qa-fix-<catégorie>"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, readme)
+        recette = readme[readme.index("- **`/gm:cqa recette`**"):]
+        recette = recette[:recette.index("\n- ")]
+        self.assertIn("« En review »", recette)
 
 
 class VerdictsReferenceTest(unittest.TestCase):
