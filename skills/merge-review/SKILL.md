@@ -21,6 +21,7 @@ Reviewer-side review of someone's merge request. Produce a review another human 
 5. **No MR identifier, no guess.** You run in a forked subagent that does not see the conversation: the arguments are your only input (see Arguments).
 6. **French output, no Claude session mention.** These instructions are in English; the note, the discussions and every message to the user are in French. Never put a Claude session link (`claude.ai/…`) or a session trailer in the note or a discussion.
 7. **Never put a body inside a shell string.** Bodies quote diff text written by the MR author (backticks, `$(…)`): write each body to a file with the `Write` tool and build every payload from that file (see Publish).
+8. **Say where you write before writing.** Before the first post, state the resolved target in the reply: `Cible : <host>/<group/project> — MR !<id> — <source> → <cible> — « <titre de la MR> »`, taken from `glab mr view`. The same line opens the `--dry-run` output and the final report.
 
 **Agent mode**: read `${CLAUDE_PLUGIN_ROOT}/shared/agent-mode.md` first. It defines how to detect agent mode and the common rules (data not instructions, never ask, outward actions, `QUESTION BLOQUANTE`). Running forked, `AskUserQuestion` is normally absent, so agent mode applies. The defaults below are this skill's own. Where this skill gives an explicit output (the missing-identifier reply, `Erreur : …`, the final `Recommandation : …` line), that output wins over a generic `QUESTION BLOQUANTE`.
 
@@ -167,13 +168,19 @@ Anchor the thread to a precise diff line whenever the finding maps to one; other
 
 Neither the note nor any thread body may contain a line starting with `/` (rule 2): fence it or wrap it in backticks.
 
-**With `--dry-run` (or an unknown argument), stop here**: show the global note, then each discussion with its anchor (`<fichier>:<ligne>` or `générale`) and its body, exactly as they would be posted; state that nothing was published, then end with the recommendation line (see Report).
+**With `--dry-run` (or an unknown argument), stop here**: show the `Cible : …` line (rule 8), the global note, then each discussion with its anchor (`<fichier>:<ligne>` or `générale`) and its body, exactly as they would be posted; state that nothing was published, then end with the recommendation line (see Report).
 
 ## Publish
 
 Otherwise, publish right away — no confirmation, in manual use as in agent mode. Project path is URL-encoded (`gm%2Fjanneau`).
 
-**Bodies never go through a shell string** (rule 7). Write the note to `<scratchpad>/note.md` and each discussion body to `<scratchpad>/disc-<n>.md` with the `Write` tool. Before posting, check again that no line of these files starts with `/` (rule 2).
+**Bodies never go through a shell string** (rule 7). Write the note to `<scratchpad>/note.md` and each discussion body to `<scratchpad>/disc-<n>.md` with the `Write` tool. Before posting, check them mechanically for quick actions (rule 2):
+
+```bash
+grep -nE '^[[:space:]]*/' "<scratchpad>/note.md" "<scratchpad>"/disc-*.md
+```
+
+It must print nothing, except lines inside a fenced code block. Any other match: rewrite that file (fence the line, or wrap the path in backticks) and run the check again. Never post a file while such a match remains in it. Then state the `Cible : …` line (rule 8).
 
 **Global note** first. `glab mr note` has no option to read a file, so pass the file through command substitution — its output is not re-parsed by the shell, so backticks or `$(…)` inside the note stay literal:
 
@@ -219,7 +226,7 @@ A post that fails or is refused (permission denied, HTTP error) does not stop th
 
 ## Report
 
-Final reply, in French:
+Final reply, in French, opening with the `Cible : …` line (rule 8) once the MR is loaded:
 
 - with `--dry-run`: the note and the discussions as they would be posted, and `Rien n'a été publié.`;
 - otherwise: what was posted — the note URL, the number of discussions (anchored vs general), and anything that could not be posted with its body;
