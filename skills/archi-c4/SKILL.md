@@ -1,6 +1,7 @@
 ---
 name: archi-c4
-description: Prepare, generate and maintain interactive C4 architecture documentation (self-contained HTML) under .archi/. Traces only custom code (contrib/core/vendor shown as black boxes); project-level C1/C2 in index.html plus one page per custom unit for C3 (C4 UML on request). Stack-agnostic via shared/stack-detect.md; loads a stack archi resource when the detected stack provides one. All generated output is written in French. Use when the user asks to set up / generate / update an architecture diagram or C4 model, "documenter l'archi", "à quoi ressemble le projet", or invokes /gm:archi-c4.
+description: Prepare, generate and maintain interactive C4 architecture documentation (self-contained HTML) under .archi/. Traces only custom code (contrib/core/vendor shown as black boxes); project-level C1/C2 in index.html plus one page per custom unit for C3 (C4 UML on request). Stack-agnostic via shared/stack-detect.md; loads a stack archi resource when the detected stack provides one. All generated output is written in French.
+when_to_use: "Use when the user asks to set up, generate or update an architecture diagram or C4 model of the project — « génère le diagramme C4 de l'architecture », « documenter l'archi », « à quoi ressemble le projet », « mets à jour .archi/ » — or invokes /gm:archi-c4. Not for a one-off question about a folder, a file or a class (« quel est le rôle du dossier web/modules/custom ? »): answer it directly."
 ---
 
 # Interactive C4 architecture (`.archi/`)

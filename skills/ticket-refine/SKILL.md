@@ -1,6 +1,7 @@
 ---
 name: ticket-refine
-description: Rewrites a Mantis ticket (or a GitLab / GitHub issue given by URL) into a private internal note for devs and project managers — plain-language goal, out of scope, open questions ready to forward to the client, how to test, reproduction, testable acceptance criteria — with a readiness verdict (prêt / prêt avec hypothèses / pas prêt), saved to .gm/handoff/<id>/refine.md and posted as a private Mantis note. Use to qualify a ticket before assigning or developing it, or when asked to « reformuler / qualifier ce ticket ». Not for preparing a dev session: use /gm:ticket.
+description: Rewrites a Mantis ticket (or a GitLab / GitHub issue given by URL) into a private internal note for devs and project managers — plain-language goal, out of scope, open questions ready to forward to the client, how to test, reproduction, testable acceptance criteria — with a readiness verdict (prêt / prêt avec hypothèses / pas prêt), saved to .gm/handoff/<id>/refine.md and posted as a private Mantis note.
+when_to_use: "Use to qualify a ticket before assigning or developing it, or when asked to « reformuler / qualifier ce ticket », « le ticket 51234 est-il prêt ? », « rédige la note de qualification » — or when the user invokes /gm:ticket-refine. Not for preparing a dev session: use /gm:ticket."
 argument-hint: "<mantis-id | issue-url> [--publish|--dry-run]"
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh *), Bash(${CLAUDE_PLUGIN_ROOT}/scripts/mantis-note.sh *), Bash(glab issue view *), Bash(gh issue view *)
 ---
