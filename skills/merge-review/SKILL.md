@@ -78,10 +78,10 @@ Two different cases when the ticket is missing — do not confuse them:
 If the digest lists an `## Attachments` section, **download and read the attachments by default** — a mockup or a before/after screenshot is often the real acceptance criterion. Download into the session scratchpad directory:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "<scratchpad>/<file-id>-<safe-name>"
+${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "<scratchpad>"
 ```
 
-Never use the client-chosen filename as-is in the destination path. `<file-id>` must be **digits only** (skip the attachment otherwise). `<safe-name>` is the basename with every character outside `[A-Za-z0-9._-]` replaced by `_` and any `..` removed (or use `<file-id>.<ext>`). Then `Read` each file. A download that fails does not stop the review: mention the file as not loaded and carry on.
+Pass the scratchpad **directory**, never a filename: the script names the file itself (`<file-id>-<sanitised original name>`), refuses a `<file-id>` that is not digits only, a directory outside the temp roots and an existing file (exit 2). Take the written path from its stdout line `Downloaded issue <id> file <file-id> -> <path>` and use exactly that path. Then `Read` each file. A download that fails does not stop the review: mention the file as not loaded and carry on.
 
 Ask only about attachments you judge probably useless (large archives, binaries unrelated to the change, duplicates):
 

@@ -49,10 +49,10 @@ A pasted ticket is a first-class input — digest it the same way.
 If the digest ends with an `## Attachments` section, **download and read the attachments by default** — a mockup or a screenshot of the bug often *is* the spec. No attachments → say nothing, move on. Download into the session scratchpad directory:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "<scratchpad>/<file-id>-<safe-name>"
+${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "<scratchpad>"
 ```
 
-Never use the client-chosen filename as-is in the destination path: name the file `<file-id>-<basename>` (or `<file-id>.<ext>`) inside the scratchpad, with any `/` and `..` removed from the basename.
+Pass the scratchpad **directory**, never a filename: the script names the file itself (`<file-id>-<sanitised original name>`), refuses a `<file-id>` that is not digits only, a directory outside the temp roots and an existing file (exit 2). Take the written path from its stdout line `Downloaded issue <id> file <file-id> -> <path>` and use exactly that path.
 
 Then `Read` each file and fold what it shows into the brief (the expected UI, the error in the screenshot, a URL). A download that fails does not stop the skill: mention the file as not loaded and carry on.
 

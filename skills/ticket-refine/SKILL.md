@@ -90,10 +90,10 @@ gh issue view <url> --comments      # GitHub
 If the digest ends with an `## Attachments` section, **download and read the attachments by default** — screenshots, mockups and logs often are the spec or the proof of the bug. Download into the session scratchpad directory, as `/gm:ticket` does:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "<scratchpad>/<file-id>-<safe-name>"
+${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "<scratchpad>"
 ```
 
-Never use the client-chosen filename as-is in the destination path: name the file `<file-id>-<basename>` (or `<file-id>.<ext>`) inside the scratchpad, with any `/` and `..` removed from the basename.
+Pass the scratchpad **directory**, never a filename: the script names the file itself (`<file-id>-<sanitised original name>`), refuses a `<file-id>` that is not digits only, a directory outside the temp roots and an existing file (exit 2). Take the written path from its stdout line `Downloaded issue <id> file <file-id> -> <path>` and use exactly that path.
 
 Then `Read` each file and use what it shows (observed behaviour, expected UI, error message, URL in a screenshot).
 
