@@ -1,6 +1,6 @@
 # Ticket qualification note — format
 
-Template of the note produced by `/gm:ticket-refine` and posted on the Mantis ticket. Later consumers (`/gm:ticket`, the orchestrator) parse the first two lines: they are a hard contract.
+Template of the note produced by `/gm:ticket-refine` and posted on the Mantis ticket. Later consumers (`/gm:ticket`, `/gm:merge-request`, the orchestrator) parse the first two lines: they are a hard contract.
 
 ## Rendering
 
@@ -93,7 +93,7 @@ Verdict : <prêt | prêt avec hypothèses | pas prêt — ce qui manque, sans ti
 
 ## For consumers
 
-Rules for skills that read the note (`/gm:ticket`, the orchestrator). The producer guarantees them; rely on them, do not guess beyond them.
+Rules for skills that read the note (`/gm:ticket`, `/gm:merge-request`, the orchestrator). The producer guarantees them; rely on them, do not guess beyond them.
 
 - **Finding the note.** A qualification note is identified by the prefix of its line 1: `[gm:ticket-refine] Note de qualification du `, followed by the date `JJ/MM/AAAA`. It lives in `.gm/handoff/<id>/refine.md` (line 1 of the file) and in the private Mantis notes. In the `mantis-issue.sh` digest each note is printed as `- [<reporter>] <text>`, so the prefix appears right after that `- [<reporter>] `; the note runs until the next `- [` note line or the next `## ` section.
 - **No wrapping.** The note is never wrapped in a code fence and never preceded by a preamble: the marker is the very first line and the verdict the second. A text whose line 1 does not start with the prefix is not a qualification note.
@@ -102,5 +102,6 @@ Rules for skills that read the note (`/gm:ticket`, the orchestrator). The produc
   - `Verdict : prêt avec hypothèses`
   - `Verdict : pas prêt — <ce qui manque>`
 
-  `<ce qui manque>` never contains ` — `, so a line that appends more ` — ` fields after the verdict can be split from the right. Any other line 2 means the note is malformed: treat its verdict as unknown.
-- **Several notes.** Keep the most recent one, by the date of line 1. On equal dates, prefer the local `refine.md` (it is rewritten at every run, published or not), then the Mantis note that comes last in the digest (notes are listed oldest first). An optional line 3 `Remplace la note de qualification du <JJ/MM/AAAA>.` only records history; it never changes which note to keep.
+  `<ce qui manque>` never contains ` — `, so a line that appends more ` — ` fields after the verdict can be split from the right.
+- **Malformed note.** A text whose first two lines break this contract (line 1 without the prefix and a `JJ/MM/AAAA` date, or line 2 other than one of the three labels above) is **not a usable qualification note**: ignore it entirely, fall back to the most recent valid note, else to the raw ticket, and say so in the output.
+- **Several notes.** Among the valid notes only, keep the most recent one, by the date of line 1. On equal dates, prefer the local `refine.md` (it is rewritten at every run, published or not), then the Mantis note that comes last in the digest (notes are listed oldest first). An optional line 3 `Remplace la note de qualification du <JJ/MM/AAAA>.` only records history; it never changes which note to keep.

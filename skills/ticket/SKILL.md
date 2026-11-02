@@ -70,9 +70,9 @@ Before analysing the raw ticket, look for a `/gm:ticket-refine` qualification no
 - `<root>/.gm/handoff/<id>/refine.md`, where `<root>` is `git rev-parse --show-toplevel` (the current directory outside a git repository);
 - the Mantis notes of the digest that carry the marker `[gm:ticket-refine] Note de qualification du <JJ/MM/AAAA>` (printed right after the `- [<reporter>] ` prefix).
 
-Read and apply the **For consumers** section of `${CLAUDE_PLUGIN_ROOT}/shared/ticket-format.md`: how to recognise a note and read its verdict. A text whose first two lines do not follow that contract is not a usable note: ignore it, analyse the raw ticket, and say so in the brief.
+Read and apply the **For consumers** section of `${CLAUDE_PLUGIN_ROOT}/shared/ticket-format.md`: how to recognise a note and read its verdict. A text whose first two lines do not follow that contract is not a usable note: ignore it, fall back to the most recent valid note (else analyse the raw ticket), and say so in the brief.
 
-When there are several notes, keep **exactly one**: the most recent by the date of its line 1. On equal dates, keep the local `refine.md`; between Mantis notes of the same date, the last one in the digest. Never merge two notes: the brief uses the kept note only, and the **Source** line names that one note and its single origin.
+When there are several valid notes, keep **exactly one**: the most recent by the date of its line 1. On equal dates, keep the local `refine.md`; between Mantis notes of the same date, the last one in the digest. Never merge two notes: the brief uses the kept note only, and the **Source** line names that one note and its single origin.
 
 **No note** → analyse the raw ticket (step 6) as usual.
 
