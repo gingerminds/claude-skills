@@ -76,7 +76,7 @@ _ALIAS_TARGET = re.compile(r"Read `\$\{CLAUDE_SKILL_DIR\}/([^`]+)` and follow it
 _BASH_BLOCK = re.compile(r"```bash\n(.*?)\n```", re.DOTALL)
 _TOOLBOX_MAIN = re.compile(r"^main\(\) \{\n(.*?)^\}", re.DOTALL | re.MULTILINE)
 _TOOLBOX_USAGE = re.compile(r"^usage\(\) \{\n(.*?)^\}", re.DOTALL | re.MULTILINE)
-_CASE_LABEL = re.compile(r"^\s+([a-z]+)\)", re.MULTILINE)
+_CASE_LABEL = re.compile(r"^\s+([a-z][a-z-]*)\)", re.MULTILINE)
 _SCRIPT_NAME = re.compile(r"cqa_notion\.py|cqa_plan\.py|cqa_fix\.py|cqa-toolbox\.sh|cqa_ssh_ro\.py")
 _NOTION_WRITE = re.compile(r"cqa_notion\.py\" (?:apply|comment-page)\b")
 _CHAINING = re.compile(r"&&|\|\||;|\|")
@@ -270,7 +270,7 @@ class SkillTest(unittest.TestCase):
             "cqa-toolbox.sh": _toolbox_commands(),
         }
         self.assertEqual(set(known["cqa-toolbox.sh"]),
-                         {"doctor", "pull", "run", "all", "check", "secrets"})
+                         {"doctor", "pull", "run", "all", "check", "secrets", "ci-json", "exec", "pull-image"})
         found = set()
         for path in _skill_files():
             for cli, command, rest in _CLI_CALL.findall(_text(path)):

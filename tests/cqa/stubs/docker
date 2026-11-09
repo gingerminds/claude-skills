@@ -8,10 +8,17 @@ CQA_STUB_NO_DAEMON  "version" fails, as when the daemon is down
 CQA_STUB_NO_LOGIN   "manifest inspect" fails, as without a registry login
 CQA_STUB_MISSING    comma-separated image names that "image inspect" does not find
 CQA_STUB_VERSION    version label given by "image inspect" (default 1.2.3)
+CQA_STUB_OUT        text a named container ("run --name ...") prints on stdout
+CQA_STUB_ERR        text a named container prints on stderr
+CQA_STUB_RUN_CODE   exit code of a named container (default 0)
+CQA_STUB_HANG       a named container never ends by itself: "kill <name>" ends it (as SIGKILL)
+CQA_STUB_CI_JSON    JSON printed by the container that reads /repo/.gitlab-ci.yml
 """
 import json
 import os
+import signal
 import sys
+import time
 
 args = sys.argv[1:]
 log = os.environ.get("CQA_STUB_LOG")
@@ -53,6 +60,27 @@ elif args[:2] == ["network", "create"]:
     print("0123456789ab")
 elif args[:1] == ["ps"]:
     print("CONTAINER ID   NAMES")
+elif args[:1] == ["kill"]:
+    pidfile = f"{log}.{args[1]}.pid" if log and len(args) > 1 else ""
+    if not pidfile or not os.path.exists(pidfile):
+        sys.stderr.write("Error response from daemon: No such container\n")
+        sys.exit(1)
+    with open(pidfile, encoding="utf-8") as handle:
+        os.kill(int(handle.read()), signal.SIGKILL)
+    print(args[1])
+elif args[:1] == ["run"] and "--name" in args:
+    name = args[args.index("--name") + 1]
+    sys.stdout.write(os.environ.get("CQA_STUB_OUT", ""))
+    sys.stderr.write(os.environ.get("CQA_STUB_ERR", ""))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if os.environ.get("CQA_STUB_HANG") and log:
+        with open(f"{log}.{name}.pid", "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+        time.sleep(60)
+    sys.exit(int(os.environ.get("CQA_STUB_RUN_CODE", "0")))
+elif args[:1] == ["run"] and "/repo/.gitlab-ci.yml" in args:
+    print(os.environ.get("CQA_STUB_CI_JSON", '{"stages":["build"]}'), end="")
 elif args[:1] == ["run"] and "lint" in args:
     print('{"problems": []}')
 elif args[:1] == ["run"] and any("gitleaks stdin" in arg for arg in args):

@@ -7,6 +7,9 @@
 #   cqa-toolbox.sh all <run_dir>
 #   cqa-toolbox.sh check <check_dir> <worktree> <repo_name>
 #   cqa-toolbox.sh secrets <in_file> <out_dir>
+#   cqa-toolbox.sh ci-json <repo_dir> <out_file>
+#   cqa-toolbox.sh exec <worktree> <log_file> <image> <workdir> <on|off> <timeout_s> -- <command>
+#   cqa-toolbox.sh pull-image <image>
 #
 # Exit codes: 0 success, 1 tool failure, 2 usage or environment; "run" passes through the
 # exit code of the tool container. Secret values never appear on a command line: they are
@@ -18,6 +21,7 @@ unset CDPATH
 S="$(cd "$(dirname "$0")" && pwd)"
 
 DEFAULT_REGISTRY="registry.gitlab.gingerminds.fr/gm/tools/checklist-qualite-outillage-audit"
+AGENCY_IMAGES="registry.gitlab.gingerminds.fr/gm/docker-images"
 IMAGES=(agence nu testssl gitleaks redocly schemathesis nginx varnish)
 ALL_TOOLS=(http gitleaks assets stylelint deps lighthouse lighthouse-desktop a11y viewport nu yellowlab yellowlab-desktop testssl redocly schemathesis crawl)
 NEEDS_1_2_REASON="boîte à outils 1.2 requise : lancez cqa-toolbox.sh pull"
@@ -55,6 +59,9 @@ usage() {
   say "  cqa-toolbox.sh all <dossier_du_run>"
   say "  cqa-toolbox.sh check <dossier_de_controle> <worktree> <nom_du_repo>"
   say "  cqa-toolbox.sh secrets <fichier_d_entree> <dossier_de_sortie>"
+  say "  cqa-toolbox.sh ci-json <dossier_du_repo> <fichier_de_sortie>"
+  say "  cqa-toolbox.sh exec <worktree> <journal> <image> <dossier> <on|off> <delai_s> -- <commande>"
+  say "  cqa-toolbox.sh pull-image <image>"
   say "Outils : ${ALL_TOOLS[*]}"
   exit 2
 }
@@ -915,6 +922,211 @@ cmd_secrets() {
   fi
 }
 
+# .gitlab-ci.yml converted to JSON by the yaml module of the agence image (merge keys resolved).
+# Exits 3 when no module is found, 1 on invalid YAML or when the file is not a mapping.
+IFS= read -r -d '' CI_JSON_JS <<'SCRIPT' || true
+const {createRequire}=require("module");
+const r=createRequire("/opt/gm-audit/package.json");
+let y,legacy=false;
+try{y=r("yaml")}catch(e){try{y=r("js-yaml");legacy=true}catch(f){process.exit(3)}}
+try{
+  const t=require("fs").readFileSync(process.argv[1],"utf8");
+  const d=legacy?y.load(t):y.parse(t,{merge:true,logLevel:"error"});
+  if(d===null||typeof d!=="object"||Array.isArray(d)){throw new Error("le fichier n'est pas un mapping YAML")}
+  process.stdout.write(JSON.stringify(d))
+}catch(e){console.error(e.message);process.exit(1)}
+SCRIPT
+
+# ci-json <repo_dir> <out_file>: .gitlab-ci.yml of <repo_dir> converted to JSON in <out_file>,
+# offline, on a read-only mount, with the yaml module of the agence image. Exit 0 and the file
+# written, 3 without a CI file, 2 without Docker or the agence image, 1 on invalid YAML (message
+# on stderr). A stale <out_file> is always removed first.
+cmd_ci_json() {
+  local repo out_file out_dir uid_gid ref err rc=0
+  [ "$#" -eq 2 ] || usage
+  [ -d "$1" ] || die "Le dossier du repo est introuvable : $1"
+  out_dir="$(dirname "$2")"
+  [ -d "$out_dir" ] || die "Le dossier de sortie est introuvable : $out_dir"
+  repo="$(cd "$1" && pwd)"
+  out_file="$(cd "$out_dir" && pwd)/$(basename "$2")"
+  case "$repo$out_file" in
+    *:*) die "Les chemins de la conversion ne doivent pas contenir « : » (montage Docker)." ;;
+  esac
+  rm -f -- "$out_file" || return 1
+  if [ ! -f "$repo/.gitlab-ci.yml" ]; then
+    say "ci-json : .gitlab-ci.yml est introuvable dans $repo."
+    return 3
+  fi
+  require_docker
+  ref="$(image_ref agence)"
+  docker image inspect "$ref" >/dev/null 2>&1 </dev/null \
+    || die "L'image agence de la boîte à outils est absente ($ref) : lancez cqa-toolbox.sh pull."
+  uid_gid="$(id -u):$(id -g)"
+  err="$(docker run --rm --pull never --network none --cap-drop ALL --security-opt no-new-privileges \
+    --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp -v "$repo:/repo:ro" \
+    --entrypoint node "$ref" -e "$CI_JSON_JS" /repo/.gitlab-ci.yml 2>&1 >"$out_file" </dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  rm -f -- "$out_file"
+  case "$rc" in
+    1)
+      say "ci-json : .gitlab-ci.yml est invalide : $(printf '%s\n' "$err" | head -n 1 | cut -c1-300)"
+      return 1
+      ;;
+    3) die "ci-json : module YAML absent de l'image agence : lancez cqa-toolbox.sh pull." ;;
+    *) die "ci-json : le conteneur a échoué (code $rc)." ;;
+  esac
+}
+
+# Container of "exec" in flight, stopped when the launcher is interrupted.
+EXEC_NAME=""
+
+exec_abort() {
+  if [ -n "$EXEC_NAME" ]; then
+    docker kill "$EXEC_NAME" >/dev/null 2>&1 </dev/null || true
+  fi
+  exit "$1"
+}
+
+# A reference that cannot be read as a docker option or as several words.
+valid_image_ref() {
+  case "$1" in
+    "" | -* | *..* | *[!A-Za-z0-9._/:@-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# exec <worktree> <log_file> <image> <workdir> <on|off> <timeout_s> -- <command>: one project
+# command run by sh in a disposable container that sees only the worktree (read-write, as /work),
+# as the current user, without capabilities, without the Docker socket and without any variable
+# of the workstation. The network is open only for "on". The whole output goes to <log_file>.
+# Exit: the code of the command, 124 when <timeout_s> is exceeded (the container is killed),
+# 2 for a refused argument, without Docker or without the image (it is never pulled here).
+cmd_exec() {
+  local worktree log_file log_dir image workdir network timeout_s command dir uid_gid name pid
+  local rc=0 timed_out=0 start
+  local -a net
+  [ "$#" -eq 8 ] && [ "$7" = "--" ] || usage
+  [ -d "$1" ] || die "Le worktree est introuvable : $1"
+  log_dir="$(dirname "$2")"
+  [ -d "$log_dir" ] || die "Le dossier du journal est introuvable : $log_dir"
+  worktree="$(cd "$1" && pwd)"
+  log_file="$(cd "$log_dir" && pwd)/$(basename "$2")"
+  image="$3"
+  workdir="$4"
+  network="$5"
+  timeout_s="$6"
+  command="$8"
+  case "$worktree$log_file" in
+    *:*) die "Les chemins de l'exécution ne doivent pas contenir « : » (montage Docker)." ;;
+  esac
+  valid_image_ref "$image" || die "Le nom d'image « $image » ne convient pas."
+  case "$workdir" in
+    /* | .. | ../* | */.. | */../*) die "Le dossier de travail doit rester dans le worktree : $workdir" ;;
+  esac
+  while [ "${workdir#./}" != "$workdir" ]; do
+    workdir="${workdir#./}"
+  done
+  while [ "${workdir%/}" != "$workdir" ]; do
+    workdir="${workdir%/}"
+  done
+  case "$workdir" in
+    "" | .) dir=/work ;;
+    *)
+      [ -d "$worktree/$workdir" ] || die "Le dossier de travail est absent du worktree : $workdir"
+      dir="/work/$workdir"
+      ;;
+  esac
+  case "$network" in
+    on) net=() ;;
+    off) net=(--network none) ;;
+    *) die "Le réseau doit valoir « on » ou « off » : $network" ;;
+  esac
+  case "$timeout_s" in
+    "" | *[!0-9]*) die "Le délai doit être un nombre entier de secondes : $timeout_s" ;;
+  esac
+  if [ "${#timeout_s}" -gt 6 ] || [ "$((10#$timeout_s))" -le 0 ]; then
+    die "Le délai doit être compris entre 1 et 999999 secondes : $timeout_s"
+  fi
+  timeout_s="$((10#$timeout_s))"
+  [ -n "$command" ] || die "La commande à exécuter est vide."
+  require_docker
+  if ! docker image inspect "$image" >/dev/null 2>&1 </dev/null; then
+    if docker version >/dev/null 2>&1 </dev/null; then
+      die "image absente : $image"
+    fi
+    die "Docker ne répond pas : démarrez Docker Desktop ou le service Docker."
+  fi
+  uid_gid="$(id -u):$(id -g)"
+  name="cqa-exec-$$-$RANDOM$RANDOM"
+  : >"$log_file" || die "Le journal n'est pas inscriptible : $log_file"
+  docker run --rm --pull never --name "$name" ${net[@]+"${net[@]}"} \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+    -v "$worktree:/work" -w "$dir" \
+    --entrypoint sh "$image" -c "$command" >"$log_file" 2>&1 </dev/null &
+  pid=$!
+  EXEC_NAME="$name"
+  trap 'exec_abort 130' INT
+  trap 'exec_abort 143' TERM
+  start=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$((SECONDS - start))" -ge "$timeout_s" ]; then
+      timed_out=1
+      docker kill "$name" >/dev/null 2>&1 </dev/null || true
+      break
+    fi
+    sleep 0.2 2>/dev/null || sleep 1
+  done
+  wait "$pid" || rc=$?
+  EXEC_NAME=""
+  trap - INT TERM
+  if [ "$timed_out" -eq 1 ]; then
+    say "exec : délai de $timeout_s s dépassé, le conteneur $name a été arrêté."
+    return 124
+  fi
+  return "$rc"
+}
+
+# Docker Hub, the toolbox registry and the agence docker-images only.
+image_source_allowed() {
+  local ref="$1" toolbox first
+  valid_image_ref "$ref" || return 1
+  toolbox="${GM_CQA_REGISTRY:-$DEFAULT_REGISTRY}"
+  toolbox="${toolbox%/}"
+  case "$ref" in
+    "$toolbox"/?* | "$AGENCY_IMAGES"/?*) return 0 ;;
+    */*) first="${ref%%/*}" ;;
+    *) return 0 ;;
+  esac
+  case "$first" in
+    docker.io | index.docker.io) return 0 ;;
+    *.* | *:* | localhost) return 1 ;;
+  esac
+  return 0
+}
+
+# pull-image <image>: docker pull of an image of Docker Hub, of the toolbox registry or of
+# registry.gitlab.gingerminds.fr/gm/docker-images/; any other registry is refused (exit 2).
+cmd_pull_image() {
+  local image toolbox
+  [ "$#" -eq 1 ] || usage
+  image="$1"
+  image_source_allowed "$image" \
+    || die "Image refusée : « $image ». Seules les images de Docker Hub, de la boîte à outils et de $AGENCY_IMAGES/ sont téléchargées."
+  require_docker
+  say "Téléchargement de $image"
+  if ! docker pull "$image" </dev/null; then
+    say "Échec du téléchargement de $image"
+    toolbox="${GM_CQA_REGISTRY:-$DEFAULT_REGISTRY}"
+    case "$image" in
+      "${toolbox%/}"/?* | "$AGENCY_IMAGES"/?*) say "Connexion au registre requise ? Lancez : docker login ${image%%/*}" ;;
+    esac
+    return 1
+  fi
+}
+
 main() {
   [ "$#" -ge 1 ] || usage
   local sub="$1"
@@ -932,6 +1144,9 @@ main() {
     all) cmd_all "$@" ;;
     check) cmd_check "$@" ;;
     secrets) cmd_secrets "$@" ;;
+    ci-json) cmd_ci_json "$@" ;;
+    exec) cmd_exec "$@" ;;
+    pull-image) cmd_pull_image "$@" ;;
     *) usage ;;
   esac
 }

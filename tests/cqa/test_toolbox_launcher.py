@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -797,6 +798,416 @@ class SecretsTest(LauncherCase):
         self.assertFalse((self.out_dir / "gitleaks.json").exists())
 
 
+class ExecTest(LauncherCase):
+    """exec <worktree> <log> <image> <workdir> <on|off> <timeout_s> -- <command>: one project
+    command in a disposable container that sees only the worktree."""
+
+    def setUp(self):
+        super().setUp()
+        self.worktree = self.tmp / "work tree"
+        (self.worktree / "src" / "theme").mkdir(parents=True)
+        self.logs = self.tmp / "logs"
+        self.logs.mkdir()
+        self.log_file = self.logs / "install.log"
+
+    def exec_(self, *, image="node:18-alpine", workdir="src/theme", network="off", timeout="600",
+              command="npm ci", worktree=None, log_file=None, path=None, **extra):
+        return self.launch("exec", str(worktree or self.worktree), str(log_file or self.log_file),
+                           image, workdir, network, timeout, "--", command, path=path, **extra)
+
+    def docker_runs(self):
+        return [call for call in self.calls() if call[:1] == ["run"]]
+
+    def only_run(self):
+        runs = self.docker_runs()
+        self.assertEqual(1, len(runs), runs)
+        return runs[0]
+
+    def test_exec_mounts_only_the_worktree_without_network(self):
+        result = self.exec_(**SECRETS)
+        self.assertEqual(0, result.returncode, result.stderr)
+        call = self.only_run()
+        self.assertTrue(has_pair(call, "--network", "none"))
+        self.assertTrue(has_pair(call, "--pull", "never"))
+        self.assertTrue(has_pair(call, "--cap-drop", "ALL"))
+        self.assertTrue(has_pair(call, "--security-opt", "no-new-privileges"))
+        self.assertIn("--rm", call)
+        self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
+        self.assertTrue(has_pair(call, "--env", "HOME=/tmp"))
+        self.assertTrue(has_pair(call, "--tmpfs", "/tmp"))
+        self.assertTrue(has_pair(call, "-w", "/work/src/theme"))
+        self.assertTrue(has_pair(call, "--entrypoint", "sh"))
+        self.assertRegex(call[call.index("--name") + 1], r"^cqa-exec-[A-Za-z0-9-]+$")
+        mounts = [call[i + 1] for i in range(len(call) - 1) if call[i] == "-v"]
+        self.assertEqual([f"{self.worktree}:/work"], mounts)
+        self.assertEqual(["HOME=/tmp"], env_args(call))
+        self.assertEqual(["node:18-alpine", "-c", "npm ci"], call[-3:])
+        text = " ".join(call)
+        for forbidden in ("docker.sock", "--privileged", "--volumes-from", "--env-file",
+                          "GM_AUDIT_AUTH_USER", "GM_AUDIT_AUTH_PASS", "cqa-user", "pass-xyz-123"):
+            self.assertNotIn(forbidden, text)
+        self.assertEqual([["image", "inspect", "node:18-alpine"]],
+                         [c for c in self.calls() if c[:2] == ["image", "inspect"]])
+        self.assertEqual(["src"], [path.name for path in self.worktree.iterdir()])
+
+    def test_exec_opens_the_network_only_for_on(self):
+        self.assertEqual(0, self.exec_(network="on").returncode)
+        self.assertNotIn("--network", self.only_run())
+        self.assertNotIn("none", self.only_run())
+        self.log.unlink()
+        self.assertEqual(0, self.exec_(network="off").returncode)
+        self.assertTrue(has_pair(self.only_run(), "--network", "none"))
+
+    def test_exec_runs_in_the_worktree_root_for_an_empty_or_dot_workdir(self):
+        for workdir in ("", ".", "./"):
+            with self.subTest(workdir=workdir):
+                self.log.unlink(missing_ok=True)
+                self.assertEqual(0, self.exec_(workdir=workdir).returncode)
+                self.assertTrue(has_pair(self.only_run(), "-w", "/work"))
+        self.log.unlink()
+        self.assertEqual(0, self.exec_(workdir="src/theme/").returncode)
+        self.assertTrue(has_pair(self.only_run(), "-w", "/work/src/theme"))
+
+    def test_exec_passes_the_command_exit_code_and_keeps_the_whole_output(self):
+        self.log_file.write_text("stale\n", encoding="utf-8")
+        result = self.exec_(CQA_STUB_OUT="installing\n", CQA_STUB_ERR="warning\n", CQA_STUB_RUN_CODE="7")
+        self.assertEqual(7, result.returncode, result.stderr)
+        content = self.log_file.read_text(encoding="utf-8")
+        self.assertIn("installing", content)
+        self.assertIn("warning", content)
+        self.assertNotIn("stale", content)
+        self.assertNotIn("installing", result.stdout)
+        self.assertNotIn(["kill"], [call[:1] for call in self.calls()])
+
+    def test_exec_timeout_kills_the_named_container_and_exits_124(self):
+        started = time.monotonic()
+        result = self.exec_(timeout="1", CQA_STUB_HANG="1", CQA_STUB_OUT="partial\n")
+        self.assertEqual(124, result.returncode, result.stderr)
+        self.assertLess(time.monotonic() - started, 30)
+        name = self.only_run()[self.only_run().index("--name") + 1]
+        self.assertIn(["kill", name], self.calls())
+        self.assertIn("1 s", result.stderr)
+        self.assertIn("partial", self.log_file.read_text(encoding="utf-8"))
+
+    def test_exec_stops_the_container_when_the_launcher_is_terminated(self):
+        process = subprocess.Popen(
+            [shutil.which("bash"), str(SCRIPT), "exec", str(self.worktree), str(self.log_file),
+             "node:18-alpine", "src/theme", "off", "600", "--", "npm ci"],
+            env=self.environment(CQA_STUB_HANG="1"), cwd=self.tmp,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(process.kill)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not list(self.tmp.glob("docker.log.cqa-exec-*.pid")):
+            time.sleep(0.05)
+        self.assertTrue(list(self.tmp.glob("docker.log.cqa-exec-*.pid")))
+        process.terminate()
+        self.assertEqual(143, process.wait(timeout=20))
+        name = self.only_run()[self.only_run().index("--name") + 1]
+        self.assertIn(["kill", name], self.calls())
+
+    def test_exec_refuses_a_workdir_outside_the_worktree(self):
+        for workdir in ("/etc", "../x", "src/../../x", "src/..", "..", "/work/src"):
+            with self.subTest(workdir=workdir):
+                result = self.exec_(workdir=workdir)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn("dossier", result.stderr)
+        self.assertEqual([], self.calls())
+
+    def test_exec_refuses_a_workdir_missing_from_the_worktree(self):
+        result = self.exec_(workdir="src/absent")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("src/absent", result.stderr)
+        self.assertEqual([], self.docker_runs())
+        self.assertEqual(["src"], [path.name for path in self.worktree.iterdir()])
+
+    def test_exec_refuses_malformed_arguments(self):
+        colon = self.tmp / "a:b"
+        colon.mkdir()
+        cases = {
+            "colon in the worktree": dict(worktree=colon, workdir="."),
+            "colon in the log path": dict(log_file=self.logs / "a:b.log"),
+            "missing worktree": dict(worktree=self.tmp / "absent"),
+            "missing log folder": dict(log_file=self.tmp / "absent" / "x.log"),
+            "network other than on/off": dict(network="maybe"),
+            "empty network": dict(network=""),
+            "timeout not numeric": dict(timeout="abc"),
+            "timeout with a unit": dict(timeout="10s"),
+            "timeout negative": dict(timeout="-5"),
+            "timeout zero": dict(timeout="0"),
+            "timeout empty": dict(timeout=""),
+            "timeout too long a number": dict(timeout="9999999"),
+            "image as an option": dict(image="--privileged"),
+            "image with a space": dict(image="node 18"),
+            "empty image": dict(image=""),
+            "empty command": dict(command=""),
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(label):
+                result = self.exec_(**kwargs)
+                self.assertEqual(2, result.returncode, (label, result.stderr))
+        self.assertEqual([], self.calls())
+
+    def test_exec_usage_errors(self):
+        base = [str(self.worktree), str(self.log_file), "node:18-alpine", "src/theme", "off", "600"]
+        for args in (
+            [],
+            base,
+            base + ["--"],
+            base + ["npm ci"],
+            base + ["-x", "npm ci"],
+            base + ["--", "npm", "ci"],
+            base[:-1] + ["--", "npm ci"],
+        ):
+            with self.subTest(args=args):
+                self.assertEqual(2, self.launch("exec", *args).returncode)
+        self.assertEqual([], self.calls())
+
+    def test_exec_with_an_absent_image_exits_2_without_running(self):
+        result = self.exec_(CQA_STUB_MISSING="node")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("image absente : node:18-alpine", result.stderr)
+        self.assertEqual([], self.docker_runs())
+        self.assertFalse(self.log_file.exists())
+
+    def test_exec_with_the_daemon_down_says_so(self):
+        result = self.exec_(CQA_STUB_NO_DAEMON="1", CQA_STUB_FAIL="image inspect")
+        self.assertEqual(2, result.returncode)
+        self.assertNotIn("image absente", result.stderr)
+        self.assertIn("Docker", result.stderr)
+        self.assertEqual([], self.docker_runs())
+
+    def test_exec_without_docker_exits_2(self):
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name in ("python3", "uname", "dirname", "basename", "id", "sleep"):
+            (bin_dir / name).symlink_to(shutil.which(name))
+        result = self.exec_(path=str(bin_dir))
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Docker", result.stderr)
+
+
+class CiJsonTest(LauncherCase):
+    """ci-json <repo_dir> <out_file>: .gitlab-ci.yml converted to JSON by the yaml module of the
+    agence image, offline, on a read-only mount."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.tmp / "Acme - Shop"
+        self.repo.mkdir()
+        (self.repo / ".gitlab-ci.yml").write_text("stages: [build]\n", encoding="utf-8")
+        self.out_file = self.tmp / "ci.json"
+
+    def ci_json(self, *args, **extra):
+        return self.launch("ci-json", *(args or (str(self.repo), str(self.out_file))), **extra)
+
+    def docker_runs(self):
+        return [call for call in self.calls() if call[:1] == ["run"]]
+
+    def test_ci_json_mounts_the_repo_read_only_offline(self):
+        result = self.ci_json(CQA_STUB_CI_JSON='{"build:npm": {"script": ["npm ci"]}}', **SECRETS)
+        self.assertEqual(0, result.returncode, result.stderr)
+        runs = self.docker_runs()
+        self.assertEqual(1, len(runs))
+        call = runs[0]
+        self.assertTrue(has_pair(call, "--network", "none"))
+        self.assertTrue(has_pair(call, "--pull", "never"))
+        self.assertTrue(has_pair(call, "--cap-drop", "ALL"))
+        self.assertTrue(has_pair(call, "--security-opt", "no-new-privileges"))
+        self.assertIn("--rm", call)
+        self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
+        self.assertTrue(has_pair(call, "--env", "HOME=/tmp"))
+        self.assertTrue(has_pair(call, "--tmpfs", "/tmp"))
+        mounts = [call[i + 1] for i in range(len(call) - 1) if call[i] == "-v"]
+        self.assertEqual([f"{self.repo}:/repo:ro"], mounts)
+        self.assertEqual(["HOME=/tmp"], env_args(call))
+        for secret in ("GM_AUDIT_AUTH_USER", "GM_AUDIT_AUTH_PASS", "cqa-user", "pass-xyz-123"):
+            self.assertNotIn(secret, " ".join(call))
+        options, image, arguments = split_run(call)
+        self.assertEqual("agence", image)
+        self.assertTrue(has_pair(options, "--entrypoint", "node"))
+        self.assertEqual(["-e"], arguments[:1])
+        self.assertIn("merge", arguments[1])
+        self.assertEqual("/repo/.gitlab-ci.yml", arguments[2])
+        self.assertEqual({"build:npm": {"script": ["npm ci"]}},
+                         json.loads(self.out_file.read_text(encoding="utf-8")))
+        self.assertEqual([".gitlab-ci.yml"], [path.name for path in self.repo.iterdir()])
+
+    def test_ci_json_without_a_ci_file_exits_3_and_needs_no_docker(self):
+        (self.repo / ".gitlab-ci.yml").unlink()
+        self.out_file.write_text("stale", encoding="utf-8")
+        result = self.ci_json()
+        self.assertEqual(3, result.returncode, result.stderr)
+        self.assertIn(".gitlab-ci.yml", result.stderr)
+        self.assertEqual([], self.calls())
+        self.assertFalse(self.out_file.exists())
+
+    def test_ci_json_invalid_yaml_exits_1_with_the_message_and_no_file(self):
+        self.out_file.write_text("stale", encoding="utf-8")
+        result = self.ci_json(CQA_STUB_FAIL="/repo/.gitlab-ci.yml")
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertIn(".gitlab-ci.yml", result.stderr)
+        self.assertIn("stub: forced failure", result.stderr)
+        self.assertFalse(self.out_file.exists())
+
+    def test_ci_json_without_the_yaml_module_is_an_environment_error(self):
+        result = self.ci_json(CQA_STUB_FAIL="/repo/.gitlab-ci.yml", CQA_STUB_FAIL_CODE="3")
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("pull", result.stderr)
+        self.assertFalse(self.out_file.exists())
+
+    def test_ci_json_without_docker_or_image_exits_2(self):
+        result = self.ci_json(CQA_STUB_MISSING="agence")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("cqa-toolbox.sh pull", result.stderr)
+        self.assertEqual([], self.docker_runs())
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name in ("python3", "uname", "dirname", "basename", "id", "rm"):
+            (bin_dir / name).symlink_to(shutil.which(name))
+        result = self.ci_json(path=str(bin_dir))
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Docker", result.stderr)
+
+    def test_ci_json_usage_and_path_errors(self):
+        colon = self.tmp / "a:b"
+        colon.mkdir()
+        (colon / ".gitlab-ci.yml").write_text("a: 1\n", encoding="utf-8")
+        for args in (
+            [],
+            [str(self.repo)],
+            [str(self.repo), str(self.out_file), "extra"],
+            [str(self.tmp / "absent"), str(self.out_file)],
+            [str(self.repo), str(self.tmp / "absent" / "ci.json")],
+            [str(colon), str(self.out_file)],
+            [str(self.repo), str(self.tmp / "a:b.json")],
+        ):
+            with self.subTest(args=args):
+                result = self.launch("ci-json", *args)
+                self.assertEqual(2, result.returncode, (args, result.stderr))
+        self.assertEqual([], self.calls())
+
+    def node_script(self, folder):
+        script = embedded_script("CI_JSON_JS")
+        return script.replace("/opt/gm-audit/package.json", str(folder / "package.json"))
+
+    def run_script(self, folder, text):
+        source = self.tmp / "source.yml"
+        source.write_text(text, encoding="utf-8")
+        return subprocess.run(["node", "-e", self.node_script(folder), str(source)],
+                              capture_output=True, text=True)
+
+    def fake_modules(self, **modules):
+        folder = self.tmp / "gm-audit"
+        folder.mkdir(exist_ok=True)
+        (folder / "package.json").write_text("{}", encoding="utf-8")
+        for name, code in modules.items():
+            module = folder / "node_modules" / name
+            module.mkdir(parents=True)
+            (module / "package.json").write_text(json.dumps({"name": name, "main": "index.js"}),
+                                                 encoding="utf-8")
+            (module / "index.js").write_text(code, encoding="utf-8")
+        return folder
+
+    def test_script_converts_with_the_yaml_module_and_merge_keys(self):
+        if shutil.which("node") is None:
+            self.skipTest("node absent")
+        folder = self.fake_modules(yaml=(
+            "exports.parse = (text, options) => { if (text.includes('BAD')) { throw new Error('bad "
+            "indentation at line 2'); } if (text.includes('NULL')) { return null; } if "
+            "(text.includes('LIST')) { return ['a']; } return {stages: ['build'], options, text}; };\n"))
+        result = self.run_script(folder, "stages: [build]\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        document = json.loads(result.stdout)
+        self.assertEqual(["build"], document["stages"])
+        self.assertTrue(document["options"]["merge"])
+        self.assertEqual("stages: [build]\n", document["text"])
+        for text in ("BAD", "NULL", "LIST"):
+            with self.subTest(text=text):
+                result = self.run_script(folder, text)
+                self.assertEqual(1, result.returncode)
+                self.assertEqual("", result.stdout)
+                self.assertNotEqual("", result.stderr.strip())
+        self.assertIn("bad indentation at line 2", self.run_script(folder, "BAD").stderr)
+
+    def test_script_falls_back_to_js_yaml_then_exits_3_without_a_module(self):
+        if shutil.which("node") is None:
+            self.skipTest("node absent")
+        folder = self.fake_modules(**{"js-yaml": "exports.load = (text) => ({stages: ['test'], kind: 'js-yaml'});\n"})
+        result = self.run_script(folder, "x: 1\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("js-yaml", json.loads(result.stdout)["kind"])
+        shutil.rmtree(folder / "node_modules")
+        result = self.run_script(folder, "x: 1\n")
+        self.assertEqual(3, result.returncode)
+        self.assertEqual("", result.stdout)
+
+
+class PullImageTest(LauncherCase):
+    """pull-image <image>: Docker Hub, the toolbox registry and the agence docker-images only."""
+
+    AGENCE = "registry.gitlab.gingerminds.fr/gm/docker-images/php-8.2-node-16-composer-2:latest"
+
+    def test_pull_image_accepts_the_three_sources(self):
+        for image in ("node:18-alpine", "node", "library/node:18", "docker.io/library/node:18",
+                      "node@sha256:" + "a" * 64, self.AGENCE, f"{REGISTRY}/agence:1"):
+            with self.subTest(image=image):
+                self.log.unlink(missing_ok=True)
+                result = self.launch("pull-image", image)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual([["pull", image]], self.calls())
+
+    def test_pull_image_follows_the_registry_override(self):
+        result = self.launch("pull-image", "registry.example.org/tools/agence:1",
+                             GM_CQA_REGISTRY="registry.example.org/tools/")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([["pull", "registry.example.org/tools/agence:1"]], self.calls())
+        self.log.unlink()
+        self.assertEqual(2, self.launch("pull-image", f"{REGISTRY}/agence:1",
+                                        GM_CQA_REGISTRY="registry.example.org/tools").returncode)
+        self.assertEqual([], self.calls())
+
+    def test_pull_image_refuses_another_registry(self):
+        for image in (
+            "evil.example.org/x",
+            "evil.example.org/x:1",
+            "localhost:5000/x",
+            "ghcr.io/org/image:1",
+            "registry.gitlab.gingerminds.fr/other/image:1",
+            "registry.gitlab.gingerminds.fr/gm/docker-images",
+            "registry.gitlab.gingerminds.fr/gm/docker-images/../../other/x",
+            "registry.gitlab.gingerminds.fr.evil.example.org/gm/docker-images/x",
+            "evil.example.org/registry.gitlab.gingerminds.fr/gm/docker-images/x",
+            "-x",
+            "--all-tags",
+            "node:18 --all-tags",
+            "node;id",
+            "",
+        ):
+            with self.subTest(image=image):
+                result = self.launch("pull-image", image)
+                self.assertEqual(2, result.returncode, (image, result.stderr))
+        self.assertEqual([], self.calls())
+
+    def test_pull_image_usage_without_docker_and_failure(self):
+        self.assertEqual(2, self.launch("pull-image").returncode)
+        self.assertEqual(2, self.launch("pull-image", "node", "alpine").returncode)
+        self.assertEqual([], self.calls())
+        result = self.launch("pull-image", self.AGENCE, CQA_STUB_FAIL="pull")
+        self.assertEqual(1, result.returncode)
+        self.assertIn(self.AGENCE, result.stderr)
+        self.assertIn("docker login", result.stderr)
+        result = self.launch("pull-image", "node:18-alpine", CQA_STUB_FAIL="pull")
+        self.assertEqual(1, result.returncode)
+        self.assertNotIn("docker login", result.stderr)
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name in ("python3", "uname", "dirname", "basename", "id"):
+            (bin_dir / name).symlink_to(shutil.which(name))
+        result = self.launch("pull-image", "node:18-alpine", path=str(bin_dir))
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Docker", result.stderr)
+
+
 class RefusalsTest(LauncherCase):
     def test_usage_errors(self):
         for args in (
@@ -813,6 +1224,9 @@ class RefusalsTest(LauncherCase):
             ["run", str(self.run_dir), "http", "--followup", "x"],
             ["run", str(self.tmp / "missing"), "http"],
             ["all", str(self.tmp / "missing")],
+            ["ci-json"],
+            ["exec"],
+            ["pull-image"],
         ):
             result = self.launch(*args)
             self.assertEqual(2, result.returncode, (args, result.stderr))
