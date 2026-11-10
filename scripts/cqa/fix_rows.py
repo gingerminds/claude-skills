@@ -1,13 +1,15 @@
 """Selection of the checklist rows the fix mode may correct: one key per repo, in sections."""
+import copy
 from pathlib import Path
 from typing import Optional
 
 from cqa import fix_names
 from cqa.checklist import fiche_filename, ref_label
+from cqa.docs_link import priority_rank
 
 OPEN_STATUSES = ("À traiter", "Mise en place partielle")
 FIXABLE = {"Auto : détection + MR": False, "Semi-auto : MR à valider": True}
-SILENT_EXCLUSIONS = ("phase", "standby", "techno")
+SILENT_EXCLUSIONS = ("phase", "standby", "techno", "category")
 UNEVALUATED_EXCLUSIONS = ("no_tools", "no_fiche")
 UNEVALUATED = "non évaluée par l'audit : lancer d'abord une relance"
 NOTHING_TO_FIX = "rien à corriger selon l'audit"
@@ -31,6 +33,8 @@ def select(
     refs=(),
     without=(),
     run_dir: Optional[Path] = None,
+    categories: Optional[frozenset] = None,
+    points: Optional[dict] = None,
 ) -> dict:
     """Return the candidate keys, the rows left out with the reason, and a time estimate.
 
@@ -41,10 +45,16 @@ def select(
     findings is {ref: latest finding}; excluded the entries of lots.json; repos the repos of
     context.json; access the entries of doctor.json; flights {repo: in_flight}. refs are rows
     the lead adds (they skip the automation, outside-the-repo and closed MR checks), without
-    rows the lead removes. A finding with in_repo false leaves its row to the devs. run_dir,
+    rows the lead removes. A finding with in_repo false leaves its row to the devs. categories,
+    when given, are the Notion names of the only categories to take: any other row is dropped
+    without an entry in left (the category scope of the run is already in excluded). run_dir,
     when given, tells whether fiches/CQ-xxx.md exists. A row left carries "repos", the repos its
     evidence names ([] when none or without a finding), so that the MR of another repo leaves
     it out; a candidate row keeps the status of the copy (status_before of fix/mr-links.json).
+    points is {ref: [point]}, the report points the fixer is given (docs_link.fixer_points): a
+    candidate row that has some carries them in "context_items" (the key is absent otherwise),
+    and inside a section the rows with points come first, by the best priority of the report
+    among their points (docs_link.priority_rank) then in their order, the others after.
     """
     repo_names = [repo["name"] for repo in repos]
     status_of = {entry["repo"]: entry["status"] for entry in access}
@@ -52,6 +62,7 @@ def select(
         if name not in status_of:
             raise ValueError(f"le repo « {name} » est absent de fix/doctor.json.")
     reasons = {entry["ref"]: entry["reason"] for entry in excluded}
+    points = points if isinstance(points, dict) else {}
     notes = _flight_notes(flights)
     by_ref = {row["ref"]: row for row in rows if isinstance(row.get("ref"), int)}
     forced = set()
@@ -62,6 +73,8 @@ def select(
             notes.append(f"{ref_label(ref)} a le statut « {by_ref[ref].get('status')} » : ignorée.")
         elif reasons.get(ref) in SILENT_EXCLUSIONS:
             notes.append(f"{ref_label(ref)} exclue de ce run ({reasons[ref]}) : ignorée.")
+        elif not _requested(by_ref[ref], categories):
+            notes.append(f"{ref_label(ref)} hors des catégories demandées : ignorée.")
         else:
             forced.add(ref)
     keys, left = {}, []
@@ -70,6 +83,8 @@ def select(
         if not isinstance(ref, int) or row.get("status") not in OPEN_STATUSES:
             continue
         if reasons.get(ref) in SILENT_EXCLUSIONS or ref in without:
+            continue
+        if not _requested(row, categories):
             continue
         lead = ref in forced
         cited = _cited(findings.get(ref), repo_names)
@@ -98,13 +113,15 @@ def select(
             if section is None:
                 section = {"category": category, "alias": alias, "rows": []}
                 key["sections"].append(section)
-            section["rows"].append(_row(row, finding, lead, every_repo, run_dir))
+            section["rows"].append(_row(row, finding, lead, every_repo, run_dir, points.get(ref)))
             placed = True
         if first_cause and not placed:
             left.append(_left(row, first_cause[0], first_cause[1], cited))
     ordered = [keys[name] for name in repo_names if name in keys]
     for key in ordered:
         key["sections"].sort(key=lambda section: section["alias"] != FIRST_SECTION)
+        for section in key["sections"]:
+            section["rows"].sort(key=_report_order)
     sections = [section for key in ordered for section in key["sections"]]
     count = sum(len(section["rows"]) for section in sections)
     return {
@@ -134,6 +151,11 @@ def _flight_notes(flights: dict) -> list:
             if note not in notes:
                 notes.append(note)
     return notes
+
+
+def _requested(row: dict, categories: Optional[frozenset]) -> bool:
+    """True when no category was requested or the row is in one of them."""
+    return categories is None or row.get("category") in categories
 
 
 def _verdict(row: dict, finding, exclusion, lead: bool):
@@ -210,10 +232,20 @@ def _may_carry(branch: str, slug: str) -> bool:
             or fix_names.branch_matches(branch, fix_names.BRANCH_PREFIX, slug))
 
 
-def _row(row: dict, finding: dict, lead: bool, every_repo: bool, run_dir) -> dict:
+def _report_order(item: dict) -> tuple:
+    """Sort key of a row of a section: the rows with report points first, by their best priority."""
+    items = item.get("context_items")
+    if not items:
+        return (1, 0)
+    return (0, min(priority_rank(point.get("priority") if isinstance(point, dict) else None)
+                   for point in items))
+
+
+def _row(row: dict, finding: dict, lead: bool, every_repo: bool, run_dir,
+         points: Optional[list] = None) -> dict:
     ref = row["ref"]
     fiche = f"fiches/{fiche_filename(ref)}"
-    return {
+    candidate = {
         "ref": ref,
         "page_id": row.get("page_id"),
         "title": row.get("title"),
@@ -232,3 +264,6 @@ def _row(row: dict, finding: dict, lead: bool, every_repo: bool, run_dir) -> dic
         "every_repo": every_repo,
         "lead": lead,
     }
+    if points:
+        candidate["context_items"] = copy.deepcopy(list(points))
+    return candidate

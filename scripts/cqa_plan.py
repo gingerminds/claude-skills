@@ -23,9 +23,19 @@ from typing import Callable, NamedTuple, Optional
 from html.parser import HTMLParser
 from urllib.parse import urldefrag, urljoin, urlsplit
 
-from cqa import deferred, fix_state, probes, report
+from cqa import (
+    categories,
+    context_docs,
+    deferred,
+    docs_link,
+    docs_read,
+    docs_verdicts,
+    fix_state,
+    probes,
+    report,
+)
 from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
-from cqa.findings import apply_guardrails, validate_document
+from cqa.findings import VERDICTS, apply_guardrails, validate_document
 from cqa.git_tools import (
     alignment,
     deployed_from_gitlab,
@@ -33,7 +43,7 @@ from cqa.git_tools import (
     repo_state,
     same_gitlab_group,
 )
-from cqa.lots import TOOLS, build_lots, coverage, select_rows
+from cqa.lots import TOOLS, build_lots, coverage, lot_document_refs, select_rows
 from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
 from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_digest
@@ -77,6 +87,11 @@ _MISSING_ROW = "constat manquant : "
 _RERUN_FILE = re.compile(r"(.+)-rerun-([0-9]{2})\.json")
 _MAX_COMMENT = 1500
 _EM_DASH = chr(0x2014)
+_CONTEXT_DOC_ACTIONS = ("add", "read", "merge", "ignore", "link", "verdicts")
+_PROPOSED_BYTES = 1000000
+_CONTEXT_DOC_NUMBER = re.compile(r"d([0-9]+)")
+_ROW_RANGE = re.compile(r"([0-9]+)-([0-9]*)")
+_READ_CHARS = 20000
 _RUN_FILES = {
     "context": "context.json",
     "lots": "lots.json",
@@ -131,6 +146,7 @@ def _build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True, metavar="commande")
     _register_preparation(commands)
     _register_audit(commands)
+    _register_context_docs(commands)
     return parser
 
 
@@ -201,6 +217,19 @@ def _run_command(commands, name: str, help_text: str, handler) -> argparse.Argum
 def _register_audit(commands) -> None:
     _run_command(commands, "coverage", "couverture des lignes selon les outils", _cmd_coverage)
     _run_command(commands, "lots", "répartit les lignes en lots (lots.json)", _cmd_lots)
+    sub = _run_command(
+        commands, "categories", "catégories de la copie et périmètre du run", _cmd_categories
+    )
+    sub.add_argument(
+        "--category",
+        action="append",
+        default=[],
+        metavar="NOM",
+        help="catégorie du périmètre (nom Notion ou alias, sans accent ni casse), répétable",
+    )
+    sub.add_argument(
+        "--write", action="store_true", help="range le périmètre dans context.json (category_filter)"
+    )
     sub = _run_command(commands, "probes", "sondes HTTP de la boîte à outils", _cmd_probes)
     sub.add_argument(
         "--followup",
@@ -297,6 +326,58 @@ def _register_audit(commands) -> None:
     sub.add_argument("--answer", help="avec --resolve : réponse du lead, gardée dans l'entrée")
     sub.add_argument(
         "--fix", action="store_true", help="liste les décisions du mode fix (fix_*) au lieu de celles de l'audit"
+    )
+
+
+def _register_context_docs(commands) -> None:
+    sub = _run_command(
+        commands,
+        "context-docs",
+        "documents de contexte : copie, lecture, fusion, rattachement et contrôle",
+        _cmd_context_docs,
+    )
+    sub.add_argument(
+        "action",
+        nargs="?",
+        choices=_CONTEXT_DOC_ACTIONS,
+        help="add : copie les fichiers dans le run ; read : lit une plage d'un document ; "
+        "merge : fusionne le layout et les parties de l'importeur (items.json) ; "
+        "ignore : écarte le document ; "
+        "link : rattache les points des documents importés aux lignes de la checklist ; "
+        "verdicts : écrit les verdicts de document (constats synthétiques) des lignes rattachées",
+    )
+    sub.add_argument(
+        "targets",
+        nargs="*",
+        metavar="cible",
+        help="add : les fichiers à copier ; read, merge, ignore : l'identifiant du document (d1) ; "
+        "link, verdicts : aucune cible",
+    )
+    sub.add_argument("--sheet", default=None, metavar="NOM", help="read : feuille du classeur")
+    sub.add_argument(
+        "--rows", default=None, metavar="A-B", help="read : plage de lignes (1-150, ou 151- jusqu'à la fin)"
+    )
+    sub.add_argument(
+        "--proposed",
+        type=Path,
+        default=None,
+        metavar="FICHIER",
+        help="link : JSON {point: [Réf]} des rattachements proposés pour les points sans critère",
+    )
+    sub.add_argument(
+        "--detail",
+        action="store_true",
+        help="link : écrit context-docs/links.md (une ligne par point, à corriger puis valider)",
+    )
+    sub.add_argument(
+        "--accept",
+        action="store_true",
+        help="link : relit links.md s'il existe, valide les catégories et marque les liens validés",
+    )
+    sub.add_argument(
+        "--check",
+        action="store_true",
+        help="valide les items.json importés (exit 6 : schéma, exit 7 : secret, document ignoré)",
     )
 
 
@@ -920,26 +1001,53 @@ def _cmd_crawl_estimate(args, services) -> int:
 
 
 def _cmd_coverage(args, services) -> int:
-    context, kept, excluded = _selection(args.run_dir)
-    _emit(coverage(kept, excluded, context["available_tools"]))
+    refs = docs_verdicts.document_refs(args.run_dir)
+    context, kept, excluded = _selection(args.run_dir, refs)
+    _emit(coverage(kept, excluded, context["available_tools"], document_refs=refs))
     return EXIT_OK
 
 
 def _cmd_lots(args, services) -> int:
-    context, kept, excluded = _selection(args.run_dir)
-    lots = build_lots(kept)
-    counts = coverage(kept, excluded, context["available_tools"])
-    write_json(args.run_dir / "lots.json", {"lots": lots, "excluded": excluded, "coverage": counts})
+    run_dir = args.run_dir
+    refs = docs_verdicts.document_refs(run_dir)
+    context, kept, excluded = _selection(run_dir, refs)
+    lots = build_lots(kept, document_refs=refs)
+    counts = coverage(kept, excluded, context["available_tools"], document_refs=refs)
+    docs_verdicts.write_findings(run_dir, {row["ref"] for row in kept if row["ref"] in refs})
+    docs_verdicts.write_hints(run_dir, lots)
+    write_json(run_dir / "lots.json", {"lots": lots, "excluded": excluded, "coverage": counts})
     _emit(
         {
             "lots": [
-                {**{key: lot[key] for key in lot if key != "refs"}, "rows": len(lot["refs"])}
+                {
+                    **{key: lot[key] for key in lot if key not in ("refs", "document_refs")},
+                    "rows": len(lot["refs"]),
+                    "documents": len(lot["document_refs"]),
+                }
                 for lot in lots
             ],
             "excluded": dict(Counter(entry["reason"] for entry in excluded)),
             "coverage": counts,
         }
     )
+    return EXIT_OK
+
+
+def _cmd_categories(args, services) -> int:
+    run_dir = args.run_dir
+    context = _load_context(run_dir)
+    rows, _ = _read_rows(run_dir)
+    listed = categories.available(rows)
+    names, unknown = categories.resolve(args.category, rows)
+    if unknown:
+        raise UsageError(categories.unknown_message(unknown, rows))
+    chosen = names or None
+    stored = context.get("category_filter")
+    same = set(chosen or ()) == set(stored if isinstance(stored, list) else ())
+    if args.write:
+        context["category_filter"] = chosen
+        write_json(run_dir / "context.json", context)
+    _emit({"available": listed, "category_filter": chosen, "same": same, "unknown": unknown})
     return EXIT_OK
 
 
@@ -1164,6 +1272,9 @@ def _cmd_validate(args, services) -> int:
     if lot is None:
         known = ", ".join(item["id"] for item in lots) or "aucun"
         raise UsageError(f"Le lot « {args.lot_id} » est absent de lots.json (lots : {known}).")
+    if args.rerun is None and lot["refs"] and set(lot["refs"]) <= set(lot_document_refs(lot)):
+        _emit({"ok": True, "errors": [], "skipped": "lot couvert par un document"})
+        return EXIT_OK
     if args.rerun is not None:
         name = f"{lot['id']}-rerun-{args.rerun:02d}.json"
         rows = _parse_rows(args.rows) if args.rows is not None else None
@@ -1338,12 +1449,417 @@ def _cmd_scan(args, services) -> int:
     found = [
         {"path": path, "label": label}
         for path, label in scan_tree(
-            args.run_dir, known_values_from_env(), exclude=("fiches",),
+            args.run_dir, known_values_from_env(), exclude=("fiches", context_docs.FOLDER),
             skip_dirs=fix_state.WORKTREE_DIRS,
         )
     ]
     _emit({"ok": not found, "found": found})
     return EXIT_SECRET if found else EXIT_OK
+
+
+def _cmd_context_docs(args, services) -> int:
+    run_dir = args.run_dir
+    if not run_dir.is_dir():
+        raise UsageError(f"Le dossier du run {run_dir} est introuvable.")
+    link_options = args.proposed is not None or args.detail or args.accept
+    if args.check:
+        if (
+            args.action
+            or args.targets
+            or args.sheet is not None
+            or args.rows is not None
+            or link_options
+        ):
+            raise UsageError("--check s'utilise seul : cqa_plan.py context-docs <run_dir> --check.")
+        return _context_docs_check(run_dir)
+    if not args.action:
+        raise UsageError(
+            f"Indiquer une action ({', '.join(_CONTEXT_DOC_ACTIONS)}) ou --check."
+        )
+    if args.action != "read" and (args.sheet is not None or args.rows is not None):
+        raise UsageError("--sheet et --rows ne s'utilisent qu'avec read.")
+    if args.action != "link" and link_options:
+        raise UsageError("--proposed, --detail et --accept ne s'utilisent qu'avec link.")
+    if args.action == "add":
+        return _context_docs_add(run_dir, args.targets)
+    if args.action == "link":
+        return _context_docs_link(run_dir, args)
+    if args.action == "verdicts":
+        return _context_docs_verdicts(run_dir, args)
+    if len(args.targets) != 1:
+        raise UsageError(f"{args.action} : indiquer un seul identifiant de document (d1).")
+    entry = _context_doc_entry(run_dir, args.targets[0])
+    if args.action == "ignore":
+        _set_context_doc(run_dir, entry["id"], "ignored", "Document ignoré à la demande du lead.")
+        _emit({"id": entry["id"], "status": "ignored"})
+        return EXIT_OK
+    if entry.get("status") == "ignored":
+        raise UsageError(f"Le document {entry['id']} est ignoré : {entry.get('note') or 'sans note'}")
+    if args.action == "read":
+        return _context_docs_read(run_dir, entry, args)
+    return _context_docs_merge(run_dir, entry["id"])
+
+
+def _context_doc_entry(run_dir: Path, doc_id: str) -> dict:
+    for entry in context_docs.read_index(run_dir)["docs"]:
+        if entry.get("id") == doc_id:
+            return entry
+    shown = context_docs.clean_text(doc_id)[:30]
+    raise UsageError(f"Document inconnu : {shown} (voir cqa_plan.py context-docs add).")
+
+
+def _set_context_doc(run_dir: Path, doc_id: str, status: str, note: str) -> None:
+    index = context_docs.read_index(run_dir)
+    for entry in index["docs"]:
+        if entry.get("id") == doc_id:
+            entry["status"] = status
+            entry["note"] = note
+    write_json(run_dir / context_docs.FOLDER / context_docs.INDEX_FILE, index)
+
+
+def _next_context_doc_number(docs: list) -> int:
+    numbers = [
+        int(match.group(1))
+        for match in (_CONTEXT_DOC_NUMBER.fullmatch(str(entry.get("id"))) for entry in docs)
+        if match
+    ]
+    return max(numbers, default=0) + 1
+
+
+def _context_docs_add(run_dir: Path, targets: list) -> int:
+    if not targets:
+        raise UsageError("add : indiquer au moins un fichier à copier.")
+    base = run_dir / context_docs.FOLDER
+    base.mkdir(parents=True, exist_ok=True)
+    index = context_docs.read_index(run_dir)
+    number = _next_context_doc_number(index["docs"])
+    added = []
+    for target in targets:
+        entry, sheets = _add_context_doc(base, f"d{number}", _user_path(target))
+        number += 1
+        entry["sheets"] = sheets
+        index["docs"].append(entry)
+        write_json(base / context_docs.INDEX_FILE, index)
+        shown = {key: entry[key] for key in ("id", "format", "status", "note")}
+        added.append({**shown, "sheets": sheets})
+    _emit({"docs": added})
+    return EXIT_OK
+
+
+def _user_path(text: str) -> Path:
+    try:
+        return Path(text).expanduser()
+    except RuntimeError:
+        return Path(text)
+
+
+def _add_context_doc(base: Path, doc_id: str, path: Path) -> tuple:
+    """Copy one file as base/<id>/source.<ext>; return (index entry, sheets). Never raises."""
+    name = context_docs.clean_text(path.name)[:60]
+    format_name = docs_read.format_of(path)
+    extension = path.suffix.lower().lstrip(".")
+    entry = {
+        "id": doc_id,
+        "ext": extension if re.fullmatch(r"[a-z0-9]{1,10}", extension) else "",
+        "format": format_name,
+        "modified": None,
+        "status": "ignored",
+        "note": "",
+    }
+    try:
+        info = path.stat()
+    except OSError:
+        entry["note"] = f"Fichier introuvable ou illisible : {name}"
+        return entry, []
+    if not path.is_file():
+        entry["note"] = f"Ce chemin n'est pas un fichier : {name}"
+    elif format_name == "unknown":
+        entry["note"] = (
+            f"Format non pris en charge : {name} (xlsx, csv, docx, md, txt, pdf, png ou jpg attendus)"
+        )
+    elif info.st_size > docs_read.MAX_BYTES:
+        entry["note"] = (
+            f"Document trop volumineux : {name} (limite : {docs_read.MAX_BYTES / 1048576:g} Mo)"
+        )
+    if entry["note"]:
+        return entry, []
+    folder = base / doc_id
+    stored = folder / f"source.{entry['ext']}"
+    sheets: list = []
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, stored)
+        if format_name != "agent":
+            sheets = docs_read.list_sheets(stored)
+    except OSError:
+        entry["note"] = f"Copie impossible : {name}"
+    except docs_read.DocumentError as error:
+        entry["note"] = f"{name} : {error}"
+    if entry["note"]:
+        shutil.rmtree(folder, ignore_errors=True)
+        return entry, []
+    entry["modified"] = _file_date(info.st_mtime)
+    entry["status"] = "added"
+    return entry, sheets
+
+
+def _file_date(timestamp: float) -> Optional[str]:
+    try:
+        return datetime.fromtimestamp(timestamp).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _row_range(text: Optional[str]) -> tuple:
+    if text is None:
+        return 1, None
+    match = _ROW_RANGE.fullmatch(text)
+    first = int(match.group(1)) if match else 0
+    last = int(match.group(2)) if match and match.group(2) else None
+    if first < 1 or (last is not None and last < first):
+        raise UsageError(f"--rows : plage attendue sous la forme 1-150 (ou 151-), reçu « {text} ».")
+    return first, last
+
+
+def _context_docs_read(run_dir: Path, entry: dict, args) -> int:
+    folder = run_dir / context_docs.FOLDER / entry["id"]
+    sources = sorted(path for path in folder.glob("source.*") if path.is_file())
+    if not sources:
+        raise UsageError(f"Source du document {entry['id']} introuvable (source.<extension>).")
+    first, last = _row_range(args.rows)
+    try:
+        result = docs_read.read_rows(sources[0], args.sheet, first, last, max_chars=_READ_CHARS)
+    except docs_read.DocumentError as error:
+        raise UsageError(str(error)) from None
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return EXIT_OK
+
+
+def _document_problems(doc_id: str, document: dict) -> list:
+    problems = context_docs.validate_items(document)
+    declared = document["document"].get("id")
+    if declared != doc_id:
+        problems.append(
+            "l'identifiant du document dans items.json "
+            f"({context_docs.clean_text(declared)[:30]}) ne correspond pas à {doc_id}"
+        )
+    return problems
+
+
+def _drop_secret_document(run_dir: Path, doc_id: str) -> None:
+    (run_dir / context_docs.FOLDER / doc_id / context_docs.ITEMS_FILE).unlink(missing_ok=True)
+    _set_context_doc(
+        run_dir, doc_id, "ignored", "Secret détecté dans le document importé : document ignoré."
+    )
+
+
+def _context_docs_merge(run_dir: Path, doc_id: str) -> int:
+    try:
+        result = context_docs.merge(run_dir, doc_id)
+        document = context_docs.read_items(run_dir, doc_id)
+        if document is None:
+            raise context_docs.ContextDocsError("items.json est illisible après la fusion.")
+    except (context_docs.ContextDocsError, docs_read.DocumentError) as error:
+        _set_context_doc(run_dir, doc_id, "added", "")
+        _emit({"ok": False, "id": doc_id, "errors": [str(error)], "secrets": []})
+        return EXIT_CONTEXT
+    labels = context_docs.scan_document(document, known_values_from_env())
+    if labels:
+        _drop_secret_document(run_dir, doc_id)
+        _emit(
+            {"ok": False, "id": doc_id, "errors": [], "secrets": [{"doc": doc_id, "labels": labels}]}
+        )
+        return EXIT_SECRET
+    problems = _document_problems(doc_id, document)
+    if problems:
+        _set_context_doc(run_dir, doc_id, "added", "")
+        _emit({"ok": False, "id": doc_id, "errors": problems, "secrets": []})
+        return EXIT_CONTEXT
+    _set_context_doc(run_dir, doc_id, "imported", "")
+    _emit({"ok": True, "errors": [], "secrets": [], **result})
+    return EXIT_OK
+
+
+def _context_docs_check(run_dir: Path) -> int:
+    known = known_values_from_env()
+    errors: list = []
+    secrets: list = []
+    for entry in context_docs.read_index(run_dir)["docs"]:
+        doc_id = entry.get("id")
+        if entry.get("status") != "imported":
+            continue
+        document = context_docs.read_items(run_dir, doc_id)
+        if document is None:
+            errors.append(f"{doc_id} : items.json est absent ou illisible (relancer merge).")
+            continue
+        labels = context_docs.scan_document(document, known)
+        if labels:
+            _drop_secret_document(run_dir, doc_id)
+            secrets.append({"doc": doc_id, "labels": labels})
+            continue
+        errors.extend(f"{doc_id} : {problem}" for problem in _document_problems(doc_id, document))
+    _emit({"ok": not errors and not secrets, "errors": errors, "secrets": secrets})
+    if secrets:
+        return EXIT_SECRET
+    return EXIT_CONTEXT if errors else EXIT_OK
+
+
+def _context_docs_link(run_dir: Path, args) -> int:
+    if args.targets:
+        raise UsageError("link : aucune cible (cqa_plan.py context-docs <run_dir> link).")
+    if args.accept and (args.proposed is not None or args.detail):
+        raise UsageError("--accept s'utilise seul : cqa_plan.py context-docs <run_dir> link --accept.")
+    scope = _category_scope(run_dir)
+    rows, _ = _read_rows(run_dir)
+    if args.accept:
+        return _context_docs_accept(run_dir, rows, scope)
+    if args.detail and args.proposed is None:
+        links = docs_link.read_links(run_dir, validated_only=False)
+        if not links:
+            raise UsageError(
+                "Aucun rattachement à détailler : lancer d'abord cqa_plan.py context-docs <run_dir> link."
+            )
+        links = _links_of_imported(run_dir, links)
+        _write_links_markdown(run_dir, links)
+        _emit(_link_summary(run_dir, links, rows, scope))
+        return EXIT_OK
+    proposed = _read_proposed(args.proposed) if args.proposed is not None else None
+    links = docs_link.link(run_dir, rows, scope, proposed)
+    docs_link.write_links(run_dir, links)
+    (run_dir / context_docs.FOLDER / docs_link.MARKDOWN_FILE).unlink(missing_ok=True)
+    if args.detail:
+        _write_links_markdown(run_dir, links)
+    _emit(_link_summary(run_dir, links, rows, scope))
+    return EXIT_OK
+
+
+def _write_links_markdown(run_dir: Path, links: dict) -> None:
+    points = docs_link.imported_points(run_dir)
+    shown = {doc_id: points.get(doc_id, []) for doc_id in links["categories"]}
+    docs_link.write_markdown(run_dir, docs_link.render_markdown(links, shown))
+
+
+def _links_of_imported(run_dir: Path, links: dict) -> dict:
+    """Return the stored links without the documents that are no longer imported."""
+    imported = set(docs_link.imported_points(run_dir))
+    links["categories"] = {
+        doc_id: names for doc_id, names in links["categories"].items() if doc_id in imported
+    }
+    for key in ("unlinked", "to_propose"):
+        links[key] = [point for point in links[key] if point.split("-", 1)[0] in imported]
+    links["links"] = {
+        point: entry
+        for point, entry in links["links"].items()
+        if point.split("-", 1)[0] in imported
+    }
+    return links
+
+
+def _category_scope(run_dir: Path) -> Optional[list]:
+    """Return the category_filter of context.json as a list of names, None without a filter."""
+    scope = _load_context(run_dir).get("category_filter")
+    scope = [name for name in scope if isinstance(name, str)] if isinstance(scope, list) else []
+    return scope or None
+
+
+def _context_docs_verdicts(run_dir: Path, args) -> int:
+    if args.targets:
+        raise UsageError("verdicts : aucune cible (cqa_plan.py context-docs <run_dir> verdicts).")
+    scope = _category_scope(run_dir)
+    rows, _ = _read_rows(run_dir)
+    verdicts = docs_verdicts.document_verdicts(run_dir, rows, scope)
+    docs_verdicts.write_verdicts(run_dir, verdicts)
+    by_verdict = Counter(entry["verdict"] for entry in verdicts.values())
+    per_document = Counter(
+        evidence["doc"] for entry in verdicts.values() for evidence in entry["finding"]["evidence"]
+    )
+    _emit(
+        {
+            "rows": len(verdicts),
+            "by_verdict": {verdict: by_verdict[verdict] for verdict in VERDICTS if by_verdict[verdict]},
+            "documents": [{"id": doc_id, "rows": per_document[doc_id]} for doc_id in sorted(per_document)],
+        }
+    )
+    return EXIT_OK
+
+
+def _read_proposed(path: Path) -> dict:
+    try:
+        if path.stat().st_size > _PROPOSED_BYTES:
+            raise UsageError(f"{path} : fichier de propositions trop volumineux.")
+        proposed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise UsageError(f"Propositions illisibles ({path}) : {error}") from None
+    if not isinstance(proposed, dict):
+        raise UsageError(f"{path} : un objet JSON {{point: [Réf]}} est attendu.")
+    return proposed
+
+
+def _link_summary(run_dir: Path, links: dict, rows: list, scope: Optional[list]) -> dict:
+    """Return the counts of the links, the points left to propose and the candidate rows."""
+    summary = docs_link.counts(links)
+    summaries = {
+        point["id"]: context_docs.clean_text(point.get("summary"))[: context_docs.LIMITS["summary"]]
+        for points in docs_link.imported_points(run_dir).values()
+        for point in points
+    }
+    summary["to_propose"] = [
+        {"id": point_id, "summary": summaries.get(point_id, "")} for point_id in links["to_propose"]
+    ]
+    pending = {point_id.split("-", 1)[0] for point_id in links["to_propose"]}
+    if pending:
+        candidates: dict = {}
+        for doc_id in sorted(pending):
+            for row in docs_link.candidate_rows(rows, links["categories"].get(doc_id, []), scope):
+                candidates[row["ref"]] = row
+        summary["candidates"] = [
+            {"ref": ref, "title": context_docs.clean_text(row.get("title"))[:120]}
+            for ref, row in sorted(candidates.items())
+        ]
+    return summary
+
+
+def _context_docs_accept(run_dir: Path, rows: list, scope: Optional[list]) -> int:
+    links = docs_link.read_links(run_dir, validated_only=False)
+    if not links:
+        raise UsageError(
+            "Aucun rattachement à valider : lancer d'abord cqa_plan.py context-docs <run_dir> link."
+        )
+    links = _links_of_imported(run_dir, links)
+    markdown = run_dir / context_docs.FOLDER / docs_link.MARKDOWN_FILE
+    if markdown.is_file():
+        try:
+            text = markdown.read_text(encoding="utf-8")
+        except (OSError, ValueError) as error:
+            raise UsageError(f"links.md est illisible : {error}") from None
+        links = _apply_links_markdown(text, links, rows, scope)
+    links["unlinked"] = links["unlinked"] + [
+        point for point in links["to_propose"] if point not in links["unlinked"]
+    ]
+    links["to_propose"] = []
+    links["validated"] = True
+    docs_link.write_links(run_dir, links)
+    _emit({**docs_link.counts(links), "to_propose": []})
+    return EXIT_OK
+
+
+def _apply_links_markdown(text: str, links: dict, rows: list, scope: Optional[list]) -> dict:
+    """Return the links with the edits of links.md; its categories must be those of the copy."""
+    resolved: dict = {}
+    for doc_id, names in docs_link.markdown_categories(text).items():
+        found, unknown = categories.resolve(names, rows)
+        if unknown:
+            raise UsageError(f"links.md : {categories.unknown_message(unknown, rows)}")
+        resolved[doc_id] = found
+    wanted = {**links["categories"], **resolved}
+    names = sorted({name for listed in wanted.values() for name in listed})
+    candidates = {row["ref"] for row in docs_link.candidate_rows(rows, names, scope)}
+    try:
+        edited = docs_link.parse_markdown(text, links, candidates)
+    except ValueError as error:
+        raise UsageError(f"links.md : {error}") from None
+    edited["categories"].update(resolved)
+    return edited
 
 
 def _cmd_openapi_specs(args, services) -> int:
@@ -1394,7 +1910,12 @@ def _cmd_assign(args, services) -> int:
     lead = _lead_option(context)
     rows, _ = _read_rows(run_dir)
     verdicts = _verdicts(run_dir, context, rows) if args.include_unknown else {}
-    annotated = [{**row, "verdict": verdicts.get(row.get("ref"))} for row in rows]
+    scope = context.get("category_filter")
+    annotated = [
+        {**row, "verdict": verdicts.get(row.get("ref"))}
+        for row in rows
+        if categories.in_scope(row, scope)
+    ]
     team = [member for member in context["team"] if member.get("option")]
     without_option = [member["name"] for member in context["team"] if not member.get("option")]
     document = {
@@ -1967,6 +2488,19 @@ def _path(value) -> Optional[str]:
     return "doit être un chemin non vide, sans tabulation ni retour à la ligne"
 
 
+MAX_CATEGORY_FILTER = 10
+
+
+def _category_filter(value) -> Optional[str]:
+    """Check category_filter: null, or 1 to MAX_CATEGORY_FILTER non-empty texts."""
+    if value is None:
+        return None
+    filled = isinstance(value, list) and all(_text(item) is None for item in value)
+    if filled and 1 <= len(value) <= MAX_CATEGORY_FILTER:
+        return None
+    return f"doit être une liste de 1 à {MAX_CATEGORY_FILTER} textes non vides ou null"
+
+
 _TOP_FIELDS = {
     "schema": _schema,
     "run_id": _text,
@@ -1980,6 +2514,7 @@ _OPTIONAL_TOP_FIELDS = {
     "mode": _choice("autonome", "interactif"),
     "notion_write": _choice_or_null("all", "keep_human", "none"),
     "crawl_minutes": _crawl_minutes_value,
+    "category_filter": _category_filter,
 }
 _SECTIONS = {
     "project": {"slug": _text, "name": _text, "protection": _text_or_null},
@@ -2122,12 +2657,21 @@ def _read_lots(run_dir: Path) -> dict:
     return document
 
 
-def _selection(run_dir: Path) -> tuple:
-    """Return (context, kept rows, excluded entries) for the rows of the run."""
+def _selection(run_dir: Path, document_refs: Optional[frozenset] = None) -> tuple:
+    """Return (context, kept rows, excluded entries) for the rows of the run.
+
+    document_refs are the refs of the rows judged from a context document (read from
+    context-docs/verdicts.json when not given; absent or unreadable, none).
+    """
     context = _checked_context(run_dir)
     rows, _ = _read_rows(run_dir)
     kept, excluded = select_rows(
-        rows, context["technos"], context["available_tools"], context["phase_filter"]
+        rows,
+        context["technos"],
+        context["available_tools"],
+        context["phase_filter"],
+        context.get("category_filter"),
+        document_refs=docs_verdicts.document_refs(run_dir) if document_refs is None else document_refs,
     )
     for row in kept:
         if not _is_ref(row.get("ref")):

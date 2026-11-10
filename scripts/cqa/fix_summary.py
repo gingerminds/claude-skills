@@ -5,7 +5,7 @@ French and never hold a long dash.
 """
 from typing import Optional
 
-from cqa import fix_mr, fix_rows, fix_state
+from cqa import context_docs, fix_mr, fix_rows, fix_state
 from cqa.checklist import ref_label
 
 NO_REASON = "Raison non précisée"
@@ -32,11 +32,17 @@ ROW_STATES = {
     "dropped": "retirée", "question": "question sans réponse", "done_before": "déjà sur la branche",
 }
 _LEFT_OUTCOMES = ("skipped", "dropped", "question")
+CONTEXT_TITLE = "Rapports de contexte"
+CONTEXT_LINE = "- Rapport {name} : {points}, {linked} à la checklist, {unlinked}."
+CONTEXT_POINT = "  - {id} ({source}){summary} ({owner})"
+DISAGREEMENTS = ("Désaccords entre le rapport et le code : {count} (voir les points d'attention "
+                 "des MR).")
 _RAN = ("passed", "failed")
 
 
 def summary(*, project: str, state: dict, candidates: dict, checks: dict,
-            replace_failed: list = (), in_review: Optional[list] = None) -> dict:
+            replace_failed: list = (), in_review: Optional[list] = None,
+            context: Optional[dict] = None) -> dict:
     """Return {"text", "team_message"}, both headed by the project name.
 
     state: fix/state.json; candidates: fix/candidates.json; checks: {key name: checks.json
@@ -46,6 +52,12 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
     failed section (with its reason and its leftover patch) and a reorder conflict are named.
     A key left to the lead (fix_state.is_left) has its own section, with every row of the key
     and its state: no MR block, no branch line and no row of it anywhere else.
+
+    context, when given, is {"documents": [{"label", "date", "points", "linked", "unlinked":
+    [{"id", "source", "owner", "summary"}]}], "disagreements": n}: the context documents (third
+    party reports) with their counts and the points no row holds, then the number of
+    disagreements between a report and the code. Only the name and the date of a document, the
+    counts, the source and the summary of a point are written: never a longer extract.
     """
     info = _titles(candidates)
     keys = state["keys"]
@@ -62,6 +74,9 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
     left = _left(keys, candidates, info)
     if left:
         parts.append(("Laissées aux devs", left))
+    reports = _context_section(context)
+    if reports:
+        parts.append((CONTEXT_TITLE, reports))
     broken = _broken_lines(keys, checks)
     if broken:
         parts.append(("Erreurs déjà présentes avant les correctifs",
@@ -250,6 +265,51 @@ def _left(keys: dict, candidates: dict, info: dict) -> str:
             reason = key["rows"][str(ref)].get("reason") or NO_REASON
             groups.setdefault(reason, []).append(_line(ref, info))
     return "\n\n".join(f"{reason} :\n" + "\n".join(lines) for reason, lines in groups.items())
+
+
+def _context_section(context) -> str:
+    """Return the body of « Rapports de contexte », empty without document nor disagreement."""
+    if not isinstance(context, dict):
+        return ""
+    lines = []
+    documents = context.get("documents")
+    for document in documents if isinstance(documents, list) else []:
+        if isinstance(document, dict):
+            lines += _document_lines(document)
+    count = context.get("disagreements")
+    count = count if isinstance(count, int) and not isinstance(count, bool) else 0
+    if not lines and count <= 0:
+        return ""
+    text = "\n".join(lines)
+    if count > 0:
+        text += ("\n\n" if text else "") + DISAGREEMENTS.format(count=count)
+    return text
+
+
+def _document_lines(document: dict) -> list:
+    limits = context_docs.LIMITS
+    label = fix_mr.field_text(document.get("label"), limits["label"]) or fix_mr.field_text(
+        document.get("id"), limits["label"]) or NO_TITLE
+    date = fix_mr.field_text(document.get("date"), 10)
+    unlinked = [item for item in document.get("unlinked") or [] if isinstance(item, dict)]
+    points, linked = _number(document.get("points")), _number(document.get("linked"))
+    lines = [CONTEXT_LINE.format(
+        name=f"{label} ({date})" if date else label,
+        points=f"{points} {'point non conforme' if points <= 1 else 'points non conformes'}",
+        linked=f"{linked} {'rattaché' if linked <= 1 else 'rattachés'}",
+        unlinked=f"{len(unlinked)} sans ligne")]
+    for item in unlinked:
+        summary = fix_mr.field_text(item.get("summary"), limits["summary"])
+        owner = fix_mr.field_text(item.get("owner"), limits["priority"]) or "inconnu"
+        lines.append(CONTEXT_POINT.format(
+            id=fix_mr.field_text(item.get("id"), 40),
+            source=fix_mr.field_text(item.get("source"), limits["source"]) or "sans source",
+            summary=f" : {summary}" if summary else "", owner=owner))
+    return lines
+
+
+def _number(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
 def _checks_section(keys: dict, checks: dict) -> str:

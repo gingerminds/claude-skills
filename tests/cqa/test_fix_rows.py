@@ -96,6 +96,49 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(kept_refs(result), [1])
         self.assertEqual(result["left"], [])
 
+    def test_category_exclusion_is_silent(self):
+        rows = [row(1), row(2, category="QUALITÉ")]
+        findings = {1: finding(1), 2: finding(2)}
+        excluded = [{"ref": 2, "reason": "category"}]
+        result = select(rows, findings, excluded)
+        self.assertEqual(kept_refs(result), [1])
+        self.assertEqual(left_reasons(result), {})
+        result = select(rows, findings, excluded, refs=(2,))
+        self.assertEqual(kept_refs(result), [1])
+        self.assertIn("CQ-2 exclue de ce run (category) : ignorée.", result["notes"])
+
+    def test_categories_argument_restricts_without_leaving_rows(self):
+        rows = [row(1), row(2, category="QUALITÉ"), row(3, category="QUALITÉ", automation="Manuel"),
+                row(4, category=None)]
+        findings = {n: finding(n) for n in (1, 2, 3, 4)}
+        result = select(rows, findings, categories=frozenset({"SÉCURITÉ"}))
+        self.assertEqual(kept_refs(result), [1])
+        self.assertEqual(result["left"], [])
+        result = select(rows, findings, categories=frozenset({"SÉCURITÉ", "QUALITÉ"}))
+        self.assertEqual(kept_refs(result), [1, 2])
+        self.assertEqual(left_reasons(result), {3: "Manuel"})
+
+    def test_categories_argument_none_keeps_every_category(self):
+        rows = [row(1), row(2, category="QUALITÉ"), row(3, category="QUALITÉ", automation="Manuel")]
+        findings = {n: finding(n) for n in (1, 2, 3)}
+        result = select(rows, findings, categories=None)
+        self.assertEqual(kept_refs(result), [1, 2])
+        self.assertEqual(left_reasons(result), {3: "Manuel"})
+
+    def test_lead_ref_outside_the_requested_categories_is_noted(self):
+        rows = [row(1), row(2, category="QUALITÉ")]
+        findings = {1: finding(1), 2: finding(2)}
+        result = select(rows, findings, refs=(2,), categories=frozenset({"SÉCURITÉ"}))
+        self.assertEqual(kept_refs(result), [1])
+        self.assertIn("CQ-2 hors des catégories demandées : ignorée.", result["notes"])
+        result = select(rows, findings, refs=(1,), categories=frozenset({"SÉCURITÉ"}))
+        self.assertEqual(kept_refs(result), [1])
+        self.assertTrue([item for item in key_rows(result["keys"][0]) if item["ref"] == 1][0]["lead"])
+        self.assertEqual(result["notes"], [])
+
+    def test_silent_exclusions_include_the_category(self):
+        self.assertEqual(fix_rows.SILENT_EXCLUSIONS, ("phase", "standby", "techno", "category"))
+
     def test_candidates_skip_rows_in_open_mrs(self):
         url = "https://gitlab.example.org/acme/shop/-/merge_requests/12"
         flights = {"front": flight(
@@ -314,6 +357,94 @@ class SelectTest(unittest.TestCase):
             result = select([row(1), row(2)], {1: finding(1), 2: finding(2)}, run_dir=Path(tmp))
         paths = [r["fiche_path"] for r in key_rows(result["keys"][0])]
         self.assertEqual(paths, ["fiches/CQ-001.md", None])
+
+
+def point(number, priority="Moyen", doc="d1", **extra):
+    base = {"id": f"{doc}-{number:03d}", "doc": doc, "label": "Audit example", "date": "2026-10-01",
+            "source": "Transverses", "criteria": ["7.3"], "scopes": ["transverse"],
+            "priority": priority, "summary": f"Résumé {number}", "fix_hint": "Corriger le gabarit",
+            "owner": "dev", "elements": ["header"]}
+    base.update(extra)
+    return base
+
+
+class ReportPointsTest(unittest.TestCase):
+    def test_row_with_points_carries_context_items(self):
+        points = {1: [point(1), point(2, "Majeur")]}
+        result = select([row(1), row(2)], {1: finding(1), 2: finding(2)}, points=points)
+        first, second = key_rows(result["keys"][0])
+        self.assertEqual(first["context_items"], points[1])
+        self.assertNotIn("context_items", second)
+
+    def test_without_points_the_rows_are_the_same(self):
+        rows = [row(1), row(2, category="SEO / GEO")]
+        findings = {1: finding(1), 2: finding(2)}
+        plain = select(rows, findings)
+        for points in (None, {}, {1: []}, {9: [point(9)]}):
+            with self.subTest(points=points):
+                self.assertEqual(select(rows, findings, points=points), plain)
+        self.assertNotIn("context_items", key_rows(plain["keys"][0])[0])
+
+    def test_points_never_make_a_row_a_candidate(self):
+        rows = [row(1), row(2), row(3, automation="Manuel"), row(4)]
+        findings = {1: finding(1, "ok"), 2: finding(2, in_repo=False), 3: finding(3), 4: finding(4)}
+        points = {number: [point(number)] for number in (1, 2, 3, 4)}
+        result = select(rows, findings, points=points)
+        self.assertEqual(kept_refs(result), [4])
+        self.assertEqual(sorted(left_reasons(result)), [1, 2, 3])
+        self.assertTrue(all("context_items" not in entry for entry in result["left"]))
+
+    def test_rows_follow_the_report_priority_inside_a_section(self):
+        rows = [row(5), row(6), row(7), row(8)]
+        findings = {number: finding(number) for number in (5, 6, 7, 8)}
+        points = {5: [point(1, "Faible")], 6: [point(2, "Critique")], 8: [point(3, "Moyen")]}
+        result = select(rows, findings, points=points)
+        self.assertEqual(kept_refs(result), [6, 8, 5, 7])
+        self.assertEqual(sections(result), {"front": [("securite", [6, 8, 5, 7])]})
+
+    def test_the_best_point_of_a_row_sets_its_rank_and_ties_keep_the_order(self):
+        rows = [row(number) for number in (1, 2, 3, 4, 5)]
+        findings = {number: finding(number) for number in (1, 2, 3, 4, 5)}
+        points = {
+            1: [point(1, "Faible"), point(2, "Bloquant")],
+            2: [point(3, "Majeur")],
+            3: [point(4, "Faible")],
+            4: [point(5, "Autre")],
+        }
+        result = select(rows, findings, points=points)
+        self.assertEqual(kept_refs(result), [1, 2, 4, 3, 5])
+
+    def test_the_report_priority_orders_each_section_and_leaves_the_sections_in_place(self):
+        rows = [row(1, category="SEO / GEO"), row(2, category="SEO / GEO"), row(3, category="QUALITÉ"),
+                row(4, category="SÉCURITÉ"), row(5, category="SÉCURITÉ"), row(6, category="QUALITÉ")]
+        findings = {number: finding(number) for number in range(1, 7)}
+        points = {2: [point(1, "Critique")], 6: [point(2, "Critique")], 5: [point(3, "Critique")]}
+        result = select(rows, findings, points=points)
+        self.assertEqual(sections(result), {"front": [
+            ("securite", [5, 4]), ("seo", [2, 1]), ("qualite", [6, 3])]})
+
+    def test_each_repo_gets_its_own_copy_of_the_points(self):
+        repos = [{"name": "back"}, {"name": "front"}]
+        access = [{"repo": "back", "status": "ok"}, {"repo": "front", "status": "ok"}]
+        flights = {"back": flight(), "front": flight()}
+        result = select([row(2)], {2: finding(2, repo=None)}, repos=repos, access=access,
+                        flights=flights, points={2: [point(1)]})
+        back, front = (key_rows(key)[0] for key in result["keys"])
+        self.assertEqual(back["context_items"], front["context_items"])
+        back["context_items"][0]["summary"] = "changed"
+        self.assertEqual(front["context_items"][0]["summary"], "Résumé 1")
+
+    def test_row_left_to_other_owners_keeps_the_document_reason(self):
+        todo = "À traiter par contenu : reformuler le texte du lien"
+        result = select([row(1)], {1: finding(1, in_repo=False, todo=todo)},
+                        points={1: [point(1)]})
+        self.assertEqual(kept_refs(result), [])
+        self.assertEqual(left_reasons(result), {1: f"hors du dépôt : {todo}"})
+
+    def test_a_lead_ref_keeps_its_points(self):
+        result = select([row(1, automation="Manuel")], {1: finding(1)}, refs=(1,),
+                        points={1: [point(1)]})
+        self.assertEqual(key_rows(result["keys"][0])[0]["context_items"], [point(1)])
 
 
 if __name__ == "__main__":

@@ -83,6 +83,9 @@ SUBMODULE_FILES = ("**/.gitmodules",)
 MINIFIED_FILES = ("**/*.min.*",)
 
 REPORT_OUTCOMES = ("fixed", "skipped", "question", "needs_command")
+# What a fixed row says of each report point it was given (context_items); the note of the
+# last three says why, and is capped like a reason.
+CONTEXT_OUTCOMES = ("fixed", "already_ok", "not_found", "left")
 VERDICTS = ("ok", "blocking")
 MAX_TEXT = 600
 MAX_REASON = 300
@@ -101,6 +104,10 @@ CORRECTION_LIMITS = {"change": MAX_TEXT, "uat": MAX_TEXT, "attention": MAX_NOTE,
 LIGHT_REVIEW_LINES = 40
 
 _GITLINK = "160000"
+_NOTE_REQUIRED = ("already_ok", "not_found", "left")
+_CONTEXT_KEYS = ("id", "outcome", "note")
+_CONTEXT_SHAPE = '{"id", "outcome", "note"}'
+_SHOWN_ID = 40
 # Rows a report may no longer change: their state outcome and the error that names them.
 _SETTLED = {
     "done_before": "déjà faite sur la branche avant cette passe (done_before), hors du rapport",
@@ -299,7 +306,8 @@ def review_scope(worktree: Path, run, base: str) -> dict:
 
 def validate_report(document, *, key: str, number: int, rows: dict, commits: list,
                     pass_commits: Optional[set] = None, reviewed: Optional[set] = None,
-                    sections: Optional[dict] = None) -> tuple:
+                    sections: Optional[dict] = None,
+                    context_ids: Optional[dict] = None) -> tuple:
     """Return (rows for the state, errors in French) for fix/<repo>/report-<number>.json.
 
     rows are the state rows of the pass's section ({"3": {...}}); sections, when given, maps
@@ -317,6 +325,10 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
     is left to do after a partial fix) is None but for a fixed row. A needs_command row (a dev
     dependency the fix needs; no commit of the row on the branch) keeps its request {"command",
     "dir", "reason"} under "needs_command" and its reason in reason; the shape only is checked here.
+    context_ids, when given, maps a ref to the ids of the report points the fixer was given for
+    that row ({3: ["d1-004"]}): a fixed row that has some must report the outcome of each in
+    "context_items" (see _context_items), and its entry carries them; any other outcome must
+    leave "context_items" out. The report is the fixer's own text, so every part of it is checked.
     """
     if not isinstance(document, dict):
         return [], ['le rapport doit être un objet JSON {"key", "pass", "rows"}']
@@ -337,7 +349,8 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
         if settled:
             errors.append(f"ligne {ref_label(ref)} : {settled}")
             continue
-        problems, entry = _report_row(item, ref, known, subjects)
+        problems, entry = _report_row(item, ref, known, subjects,
+                                      _expected_points(context_ids, ref))
         if entry is not None and pass_commits is not None:
             recorded = set(current.get("commits") or [])
             problems += [
@@ -684,11 +697,13 @@ def _row_ref(item, index: int, known: set, errors: list,
     return ref
 
 
-def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
+def _report_row(item: dict, ref: int, known: set, subjects: dict,
+                expected: Optional[list] = None) -> tuple:
     """Return (problems, state entry) for one row of a report.
 
     The entry is None only when the outcome is unknown: with any other problem it still
     comes back, so that the caller checks its commits too and reports everything at once.
+    expected holds the ids of the report points the row was given (none by default).
     """
     outcome = item.get("outcome")
     if outcome not in REPORT_OUTCOMES:
@@ -729,11 +744,94 @@ def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
         reason = question.get("text") if isinstance(question, dict) else None
     if outcome != "fixed" and ref in subjects.values():
         problems.append("commit sur la branche pour une ligne non corrigée")
+    found, points = _context_items(item.get("context_items"), outcome, expected or [])
+    problems += found
     entry = {"ref": ref, "outcome": outcome, "reason": reason, "commits": shas,
              "attention": attention, "remaining": remaining}
     if outcome == "needs_command":
         entry["needs_command"] = request
+    if points:
+        entry["context_items"] = points
     return problems, entry
+
+
+def _expected_points(context_ids, ref: int) -> list:
+    """Return the ids of the report points the row was given (context_ids keyed by ref or by its text)."""
+    if not isinstance(context_ids, dict):
+        return []
+    value = context_ids.get(ref, context_ids.get(str(ref)))
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
+def _context_items(value, outcome: str, expected: list) -> tuple:
+    """Return (problems, [{"id", "outcome", "note"}]) for the context_items of a row.
+
+    Only a fixed row has them: one object per expected point, each once and no other, with its
+    outcome (CONTEXT_OUTCOMES) and a note (MAX_REASON at most) that already_ok, not_found and
+    left must give. The points come back in the order of expected. Another outcome must have
+    the key absent or null. A row without expected points may leave the key out.
+    """
+    if outcome != "fixed":
+        if value is None:
+            return [], []
+        return ["« context_items » ne sert qu'à une ligne corrigée (fixed)"], []
+    if value is None:
+        if expected:
+            return [f"« context_items » est obligatoire pour une ligne corrigée qui a des points "
+                    f"de rapport ({', '.join(expected)})"], []
+        return [], []
+    if not isinstance(value, list):
+        return [f"« context_items » doit être une liste d'objets {_CONTEXT_SHAPE}"], []
+    problems, kept, seen = [], {}, set()
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            problems.append(f"« context_items » : l'élément n° {index} doit être un objet "
+                            f"{_CONTEXT_SHAPE}")
+            continue
+        problems += [
+            f"« context_items » : champ inconnu « {_cut(name)} » (attendu : "
+            f"{', '.join(_CONTEXT_KEYS)})" for name in item if name not in _CONTEXT_KEYS
+        ]
+        point = item.get("id")
+        if not isinstance(point, str):
+            problems.append(f"« context_items » : « id » de l'élément n° {index} doit être un texte")
+            continue
+        if point not in expected:
+            problems.append(f"« context_items » : point {_cut(point)} inconnu pour cette ligne")
+            continue
+        if point in seen:
+            problems.append(f"« context_items » : le point {point} est en double")
+            continue
+        seen.add(point)
+        found, result = _point_outcome(item, point)
+        problems += found
+        if result is not None:
+            kept[point] = result
+    problems += [f"« context_items » : le point {point} manque" for point in expected
+                 if point not in seen]
+    return problems, [kept[point] for point in expected if point in kept]
+
+
+def _point_outcome(item: dict, point: str) -> tuple:
+    """Return (problems, {"id", "outcome", "note"}) for one context item of a known point."""
+    result, note = item.get("outcome"), item.get("note")
+    if result not in CONTEXT_OUTCOMES:
+        return [f"« context_items » : « outcome » de {point} inconnu : {_cut(_shown(result))} "
+                "(attendu : fixed, already_ok, not_found ou left)"], None
+    if result in _NOTE_REQUIRED and not (isinstance(note, str) and note.strip()):
+        return [f"« context_items » : note obligatoire pour {point} ({result})"], None
+    if note is not None and not isinstance(note, str):
+        return [f"« context_items » : « note » de {point} doit être un texte"], None
+    if isinstance(note, str) and len(note) > MAX_REASON:
+        return [f"« context_items » : « note » de {point} dépasse {MAX_REASON} caractères "
+                f"({len(note)})"], None
+    return [], {"id": point, "outcome": result, "note": note if note and note.strip() else None}
+
+
+def _cut(value) -> str:
+    """Return a value of the report for an error message: cleaned, on one line, cut short."""
+    text = " ".join(str(value).split()) if isinstance(value, str) else _shown(value)
+    return text if len(text) <= _SHOWN_ID else text[:_SHOWN_ID].rstrip() + "…"
 
 
 def _commits(value, refs: set, subjects: dict) -> tuple:

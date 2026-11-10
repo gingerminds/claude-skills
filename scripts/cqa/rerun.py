@@ -8,7 +8,7 @@ from typing import Callable, Optional
 
 from cqa.checklist import STATUS_IMPLEMENTED, ref_label
 from cqa.findings import validate_document
-from cqa.lots import build_lots
+from cqa.lots import DOCUMENT_LOT_ID, build_lots, lot_document_refs
 from cqa.probes import app_path
 
 _HUMAN = "Intervention humaine"
@@ -27,7 +27,23 @@ def _default_reader(run_dir: Path, lot: dict, name: str) -> Optional[tuple]:
         return None
     except (OSError, ValueError) as error:
         return [], [f"findings/{name} est illisible : {error}"]
-    return validate_document(document, set(lot["refs"]))
+    return validate_document(
+        document,
+        set(lot["refs"]),
+        optional_refs=frozenset(lot_document_refs(lot)),
+        forbidden_refs=_document_refs_of_round(lot, name),
+    )
+
+
+def _document_refs_of_round(lot: dict, name: str) -> frozenset:
+    """Return the rows of the lot judged from a document that the file name must not give.
+
+    A first-round or follow-up file never judges them (the report of the document does); a
+    rerun file may.
+    """
+    if _RERUN_NAME.fullmatch(name):
+        return frozenset()
+    return frozenset(lot_document_refs(lot))
 
 
 def read_grounded_findings(run_dir: Path, context: dict, lot: dict, name: str) -> Optional[tuple]:
@@ -44,7 +60,13 @@ def read_grounded_findings(run_dir: Path, context: dict, lot: dict, name: str) -
         return None
     except (OSError, ValueError) as error:
         return [], [f"findings/{name} est illisible : {error}"]
-    valid, errors = validate_document(document, set(lot["refs"]), app_path=app_path(context))
+    valid, errors = validate_document(
+        document,
+        set(lot["refs"]),
+        app_path=app_path(context),
+        optional_refs=frozenset(lot_document_refs(lot)),
+        forbidden_refs=_document_refs_of_round(lot, name),
+    )
     repos = context.get("repos") if isinstance(context.get("repos"), list) else []
     roots = {
         repo["name"]: Path(repo["path"])
@@ -126,6 +148,18 @@ def finding_files(run_dir: Path, lot_id: str) -> list[str]:
     return [f"{lot_id}.json", f"{lot_id}-followup.json"] + [name for _, name in sorted(numbered)]
 
 
+def document_lot(lots: list) -> Optional[dict]:
+    """Return the virtual lot of the rows judged from context documents, None without any.
+
+    It is {"id": "context-docs", "kind": "documents", "refs": [...]}: the document_refs of every
+    lot, sorted. Its findings file is findings/context-docs.json (written by cqa_plan.py lots).
+    """
+    refs = sorted({ref for lot in lots for ref in lot_document_refs(lot)})
+    if not refs:
+        return None
+    return {"id": DOCUMENT_LOT_ID, "kind": "documents", "refs": refs}
+
+
 def latest_findings(
     run_dir: Path, lots: list[dict], read: Optional[Callable] = None
 ) -> dict[int, dict]:
@@ -133,15 +167,21 @@ def latest_findings(
 
     read(lot, name) gives (valid findings, errors) of a findings file, or None when it does
     not exist; it defaults to the structural validation of the document. A row a later file
-    does not give, or gives invalid, keeps its previous finding.
+    does not give, or gives invalid, keeps its previous finding. The virtual lot of the context
+    documents (document_lot) is read before the others: a rerun file of the lot of the row
+    prevails over the finding of its document. A first-round or follow-up file never does,
+    whatever read gives: its findings for the document_refs of the lot are ignored.
     """
     reader = read or (lambda lot, name: _default_reader(run_dir, lot, name))
     latest = {}
-    for lot in lots:
+    documents = document_lot(lots)
+    for lot in ([documents] if documents else []) + list(lots):
         for name in finding_files(run_dir, lot["id"]):
             found = reader(lot, name)
+            skipped = _document_refs_of_round(lot, name)
             for item in found[0] if found else []:
-                latest[item["ref"]] = item
+                if item["ref"] not in skipped:
+                    latest[item["ref"]] = item
     return latest
 
 

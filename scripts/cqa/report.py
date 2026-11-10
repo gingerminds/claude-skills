@@ -15,7 +15,8 @@ from cqa.checklist import (
     STATUS_TODO,
     ref_label,
 )
-from cqa import deferred
+from cqa import context_docs, deferred, docs_link, docs_verdicts
+from cqa.lots import lot_document_refs
 from cqa.comments import format_page_summary
 from cqa.secrets import known_values_from_env, redact
 
@@ -41,6 +42,8 @@ _UNKNOWN_STATUS = "statut inconnu"
 _UNKNOWN_WITHOUT_TEXT = "voir le commentaire déjà présent dans Notion"
 _CONSTAT = "Constat :"
 _HUMAN_SECTION = "Statuts posés par un humain et contredits par l'audit"
+_DOCUMENTS_SECTION = "Documents de contexte"
+_MAX_UNLINKED = 30
 _IDLE_LIMIT = timedelta(minutes=30)
 _DEFERRED_KINDS = {
     "login": "connexion",
@@ -123,7 +126,8 @@ def _synthesis(context, plan, lots, rows, tools, now, run_dir) -> str:
         _duration_line(run_dir, start, now),
     ]
     sections = [
-        ("Couverture", _coverage_lines(lots["coverage"])),
+        ("Couverture", _coverage_lines(lots["coverage"], context.get("category_filter"))),
+        ("Documents de contexte", _document_lines(run_dir, context, lots)),
         ("Décompte par statut", _status_lines(summary["by_status_after"])),
         ("Décompte par catégorie", _category_lines(plan["rows"], row_list)),
         (
@@ -164,10 +168,117 @@ def _synthesis(context, plan, lots, rows, tools, now, run_dir) -> str:
         )
     lines = ["# Synthèse de l'audit PRE-MEL", "", *header, ""]
     for title, body in sections:
+        if title == _DOCUMENTS_SECTION and not body:
+            continue
         lines += [f"## {title}", ""]
         lines += body or [_EMPTY.get(title, "Aucune.")]
         lines.append("")
     return "\n".join(lines)
+
+
+def _document_lines(run_dir: Path, context: dict, lots: dict) -> list:
+    """Lines of the context documents section: what each holds and what became of its points.
+
+    Empty without any document. Everything is read from the files of the run and tolerated
+    when damaged: a document the lead never validated, or whose items are gone, is said so.
+    """
+    entries = context_docs.read_index(run_dir)["docs"]
+    if not entries:
+        return []
+    links = docs_link.read_links(run_dir)
+    verdicts = docs_verdicts.read_verdicts(run_dir)
+    listed = lots.get("lots") if isinstance(lots, dict) else None
+    judged = set()
+    for lot in listed if isinstance(listed, list) else []:
+        judged.update(lot_document_refs(lot))
+    autonomous = context.get("mode") == "autonome"
+    lines: list = []
+    for entry in entries:
+        lines += _document_entry(run_dir, entry, links, verdicts, judged, autonomous)
+    return lines
+
+
+def _document_entry(
+    run_dir, entry: dict, links: dict, verdicts: dict, judged: set, autonomous: bool
+) -> list:
+    doc_id = _plain(entry.get("id")) or "?"
+    if entry.get("status") != "imported":
+        state = "ignoré" if entry.get("status") == "ignored" else "non importé"
+        note = _plain(entry.get("note"))
+        return [f"- {doc_id} : {state}" + (f" ({note})" if note else "")]
+    items = context_docs.read_items(run_dir, doc_id)
+    if items is None:
+        return [f"- {doc_id} : importé, mais ses points sont illisibles"]
+    meta = items["document"]
+    label = _plain(meta.get("label")) or doc_id
+    date = _plain(meta.get("date")) or "date inconnue"
+    kind = _plain(meta.get("kind"))
+    lines = [f"- {doc_id} : « {label} » ({date})" + (f", {kind}" if kind else "")]
+    points = [
+        point for point in items["items"] if isinstance(point, dict) and isinstance(point.get("id"), str)
+    ]
+    ko = sum(1 for point in points if point.get("verdict") == "ko")
+    info = sum(1 for point in points if point.get("verdict") == "info")
+    found = [
+        f"{ko} non conforme{'s' if ko > 1 else ''}" if ko else "",
+        f"{info} remarque{'s' if info > 1 else ''}" if info else "",
+    ]
+    names = links.get("categories", {}).get(doc_id) if links else None
+    if names is not None:
+        lines.append(f"  - Catégories : {', '.join(_plain(name) for name in names) or 'aucune'}")
+    lines.append(f"  - Points du document : {', '.join(item for item in found if item) or 'aucun'}")
+    if names is None:
+        lines.append("  - Rattachement non validé : aucun verdict repris de ce document")
+        return lines
+    attached = {
+        point["id"]: links["links"][point["id"]]
+        for point in points
+        if links["links"].get(point["id"], {}).get("refs")
+    }
+    proposed = [point_id for point_id, link in attached.items() if link["how"] == "proposed"]
+    lines.append(
+        f"  - Rattachés à une ligne : {len(attached)} "
+        f"(dont {len(proposed)} proposé{'s' if len(proposed) > 1 else ''} par le skill)"
+    )
+    loose = [point for point in points if point["id"] not in attached]
+    lines.append(f"  - Sans ligne : {len(loose)}")
+    for point in loose[:_MAX_UNLINKED]:
+        source = _plain(point.get("source"))
+        lines.append(
+            f"    - {_plain(point['id'])} : {_plain(point.get('summary'))}"
+            + (f" ({source})" if source else "")
+        )
+    if len(loose) > _MAX_UNLINKED:
+        lines.append(f"    - et {len(loose) - _MAX_UNLINKED} autres")
+    rows = [
+        f"{ref_label(ref)} : {verdicts[ref]['verdict']}"
+        for ref in sorted(judged)
+        if ref in verdicts and doc_id in _evidence_docs(verdicts[ref]["finding"])
+    ]
+    lines.append(
+        "  - Lignes jugées d'après le document : "
+        + (f"{len(rows)} ({', '.join(rows)})" if rows else "aucune")
+    )
+    if autonomous and proposed:
+        lines.append("  - Rattachements proposés par le skill, acceptés en mode autonome :")
+        for point_id in proposed:
+            refs = ", ".join(ref_label(ref) for ref in attached[point_id]["refs"])
+            lines.append(f"    - {_plain(point_id)} : {refs}")
+    return lines
+
+
+def _evidence_docs(finding: dict) -> set:
+    evidence = finding.get("evidence") if isinstance(finding, dict) else None
+    return {
+        item.get("doc")
+        for item in (evidence if isinstance(evidence, list) else [])
+        if isinstance(item, dict)
+    }
+
+
+def _plain(value) -> str:
+    """A text of a document on one line, with the secrets of the environment redacted."""
+    return redact(context_docs.clean_text(value), known_values_from_env())
 
 
 def _recette_lines(recette: dict, summary: dict, titles: dict, after: dict) -> list:
@@ -300,7 +411,9 @@ def _duration_text(minutes: int) -> str:
     return f"{minutes} min" if not hours else f"{hours} h {rest:02d} min"
 
 
-def _coverage_lines(coverage: dict) -> list:
+def _coverage_lines(coverage: dict, categories: Optional[list] = None) -> list:
+    """Lines of the coverage section; the last one names the rows left out of the scope."""
+
     def count(key):
         return coverage.get(key, 0)
 
@@ -314,12 +427,23 @@ def _coverage_lines(coverage: dict) -> list:
         f"- Non applicables (techno) : {count('na')}",
         f"- En standby : {count('standby')}",
     ]
+    if count("documents") > 0:
+        lines.append(
+            f"- Jugées d'après un document de contexte : {count('documents')} "
+            "(comptées dans les évaluables)"
+        )
     gains = coverage.get("gains") or []
     if gains:
         lines.append("- Outils à ajouter pour couvrir plus de lignes :")
         for gain in gains:
             noun = "ligne" if gain["rows"] == 1 else "lignes"
             lines.append(f"  - {gain['tool']} : {gain['rows']} {noun} ({gain['action']})")
+    outside = count("out_of_scope")
+    if outside > 0:
+        names = ", ".join(_line(name) for name in categories or [])
+        noun = "ligne" if outside == 1 else "lignes"
+        detail = f" (catégories : {names})" if names else ""
+        lines.append(f"- Hors périmètre : {outside} {noun}{detail}")
     return lines
 
 

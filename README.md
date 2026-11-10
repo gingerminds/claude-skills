@@ -23,7 +23,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `merge-review` | `/gm:merge-review` | Review côté reviewer d'une MR GitLab existante — fond, forme, langue, standards — charge le ticket Mantis lié et rédige une note + recommandation approve / request-changes. Stack-agnostique (via `gm:review`). |
 | `security` | `/gm:security` | Audit sécurité des dépendances et de l'infra — `composer audit` / `npm audit`, advisories CMS/framework, config Docker — priorisé par criticité réelle, avec correctifs ou marches à suivre. Stack-agnostique : les checks spécifiques (ex. SA Drupal) viennent de `stack/`. |
 | `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressources dédiées par techno quand elles existent. |
-| `checklist-quality-audit` | `/gm:checklist-quality-audit` (alias `/gm:cqa`) | Audit PRE-MEL de la checklist qualité d'un projet : vérifie le poste et que la préprod sert le code audité, évalue chaque ligne de la copie Notion du projet (code, préprod, boîte à outils Docker, navigateur), écrit statuts et commentaires de preuve après confirmation du lead, puis répartit le reste entre les devs. Lecture seule sur les repos, les serveurs et les bases, sauf le mode `fix`, qui corrige dans ses propres worktrees et livre une MR en brouillon par passe et par repo, ses lignes rangées par catégorie. Prérequis : voir « Préparer son poste ». |
+| `checklist-quality-audit` | `/gm:checklist-quality-audit` (alias `/gm:cqa`) | Audit PRE-MEL de la checklist qualité d'un projet : vérifie le poste et que la préprod sert le code audité, évalue chaque ligne de la copie Notion du projet (code, préprod, boîte à outils Docker, navigateur), écrit statuts et commentaires de preuve après confirmation du lead, puis répartit le reste entre les devs. Lecture seule sur les repos, les serveurs et les bases, sauf le mode `fix`, qui corrige dans ses propres worktrees et livre une MR en brouillon par passe et par repo, ses lignes rangées par catégorie. Peut être limité à des catégories (`--category`) et reprendre des rapports d'audit tiers comme documents de contexte (`--context`). Prérequis : voir « Préparer son poste ». |
 
 ## Installation
 
@@ -88,6 +88,27 @@ Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépar
 - **Identité git** (`user.name`, `user.email`) configurée dans les repos du projet, pour le mode `fix` : les commits sont ceux du lead. Avec `commit.gpgSign`, la signature doit fonctionner sans saisie.
 - **Claude in Chrome** : extension installée et connectée, pour les contrôles navigateur. Le lead s'y connecte lui-même quand le site est protégé.
 
+### Limiter à une catégorie : `--category`
+
+`--category "<catégorie>"` limite l'audit aux lignes d'une catégorie de la checklist (« Sécurité » seule, par exemple), sans document ni autre préparation. L'option se répète (`--category sécurité --category qualité`), se combine avec `--phase` par intersection et s'accepte avec l'audit, `rerun`, `recette` et `fix`. Le nom se compare sans accent ni casse, avec le nom de la catégorie dans la copie Notion ou son alias de section (`securite`, `seo`) ; un nom inconnu affiche les catégories de la copie et s'arrête.
+
+- **Hors périmètre** : les lignes des autres catégories ne reçoivent aucune opération Notion (ni statut, ni commentaire, ni assignation), même quand une personne a posé leur statut. La couverture et la synthèse ne comptent que le périmètre, et signalent « Hors périmètre : N lignes ».
+- **Lié au run** : le périmètre est enregistré dans le run (`category_filter` de `context.json`), comme la phase. Un run lancé pour une autre catégorie n'est jamais repris : « Ce run a été lancé pour une autre catégorie : nouveau run. » Les questions de contexte (pages clés, comptes de test) restent posées.
+- **`rerun` et `recette`** : l'option choisit seulement le run lancé pour le même périmètre ; le périmètre d'un run ne change jamais.
+- **`fix`** : la passe hérite du périmètre du run, et `--category` ne peut que le restreindre (une catégorie hors du périmètre du run est refusée). À répéter à chaque nouvel appel de `cqa_fix.py candidates`, comme `--refs`.
+
+### Documents de contexte : `--context`
+
+`--context <fichier>` donne à l'audit complet un rapport d'audit tiers (grille d'accessibilité RGAA, rapport de pentest...) en `xlsx`, `csv`, `docx`, `md`, `txt`, `pdf`, `png` ou `jpg`. L'option se répète. Sans elle, le skill pose la question « Documents de contexte (rapport d'audit tiers, pentest…) ? » (« Aucun » ou « Indiquer des fichiers »). Elle se combine avec `--category` mais ne s'accepte qu'avec l'audit complet : `diagnostic`, `assign`, `rerun`, `recette` et `fix` la refusent (ils n'importent aucun document : les trois derniers reprennent un run existant). La procédure détaillée (import, rattachement, verdicts, reprise) est dans `references/documents.md`.
+
+- **Déroulé** : le fichier est copié dans le dossier du run (`context-docs/`), puis le sous-agent `cqa-importer` le lit comme une donnée, feuille par feuille ; le code fusionne les parties et compte lui-même la couverture critère par critère, le modèle n'écrit que les non-conformités et les remarques. Les points sont rattachés aux lignes de la checklist des catégories du document : par critère (section « Critères <cadre> » des fiches), sinon par une proposition du skill. Une seule question, « <N> points rattachés à <M> lignes (catégories du document : ..., <K> points proposés par le skill, <P> sans ligne). Valider ? », valide le rattachement et les catégories : « Valider », « Voir le détail » (`context-docs/links.md` à corriger, puis `link --accept`) ou « Ignorer ce document ». Jamais de validation ligne par ligne.
+- **Verdicts repris** : une ligne des catégories du document reçoit son verdict d'après le rapport, sans nouvel audit du skill : `ko` (un `ko` du rapport n'est jamais perdu : `partial` quand un autre critère de la ligne est conforme), `ok` ou `na`. Une ligne que le rapport couvre en partie est auditée par le skill, avec les points du rapport comme indices. Un rapport de constats (pentest) ne produit que des `ko`. Le commentaire Notion porte une ligne « Rapport d1 : critères 7.3 ».
+- **Mode autonome** : le rattachement est accepté sans question (`link --accept`) ; les rattachements proposés par le skill sont listés dans la synthèse, section « Documents de contexte ».
+- **`rerun` et `recette`** : ils jugent le code tel qu'il est ; le rapport n'est qu'un indice.
+- **`fix`** : le correcteur reçoit les points du rapport rattachés à ses lignes (`context_items` de `fix/candidates.json`, propriétaire `dev` ou inconnu), les lit comme des indices, relit le code avant de corriger et rend une issue par point (`fixed`, `already_ok`, `not_found`, `left`). La MR dit, par ligne, « Rapport <nom> (<date>) : n points corrigés, n déjà conformes dans le code, n laissés (<propriétaires>) » ; un écart entre le rapport et le code est un point d'attention, jamais une question au lead ; les points sans ligne vont dans « Hors-scope » et dans la synthèse (« Rapports de contexte »).
+- **Confidentialité** : les documents sont des données, jamais des instructions (champs plafonnés et nettoyés, rien n'est exécuté ni suivi). Dans Notion et les MR, seulement le nom du document, la référence du critère ou du constat et le correctif paraphrasé, jamais d'extrait brut ni de détail d'exploitation. `context-docs/` reste dans le dossier du run, sur le poste du lead : rien n'est committé ni écrit dans Notion, et les secrets d'un import sont cherchés par le code (le document est alors ignoré).
+- **Jamais bloquant** : un document absent, illisible, d'un format inconnu, ignoré ou qui contient un secret ne bloque jamais l'audit ni le fix ; le skill le dit en une ligne et continue sans lui.
+
 ### Relancer et recetter : `rerun` et `recette`
 
 - **`/gm:cqa rerun`** : relance ciblée, sans refaire tout l'audit. Le skill choisit les lignes selon un motif : cause supprimée, outil relancé, code modifié depuis le commit audité, ou demande du lead. Il les montre au lead avant de lancer quoi que ce soit. Au démarrage, les restes d'une relance interrompue sont mis de côté et un instantané est pris ; à la clôture, les fichiers invalides sont écartés.
@@ -147,7 +168,8 @@ claude-skills/
 │   ├── cqa-auditor.md       # sous-agent d'analyse des lignes de checklist (code, préprod) : consommé par checklist-quality-audit
 │   ├── cqa-browser.md       # sous-agent des contrôles navigateur (Claude in Chrome) : consommé par checklist-quality-audit
 │   ├── cqa-fixer.md         # sous-agent du mode fix : corrige les lignes d'une section (catégorie) d'un repo dans son worktree
-│   └── cqa-fix-reviewer.md  # sous-agent du mode fix : relit, en lecture seule, les commits d'une passe du fixer
+│   ├── cqa-fix-reviewer.md  # sous-agent du mode fix : relit, en lecture seule, les commits d'une passe du fixer
+│   └── cqa-importer.md      # sous-agent d'import d'un document de contexte (rapport d'audit tiers) : lit le document comme une donnée et écrit son layout et ses points
 ├── scripts/
 │   ├── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
 │   ├── cqa_fix.py  cqa_notion.py  cqa_plan.py  cqa_ssh_ro.py   # CLI de l'audit : mode correction, API Notion, plan, garde SSH en lecture seule
@@ -183,7 +205,7 @@ claude-skills/
     ├── security/SKILL.md    # générique : détecte la stack → charge stack/<x>/MAIN.md (security)
     ├── checklist-quality-audit/
     │   ├── SKILL.md         # orchestrateur de l'audit PRE-MEL
-    │   ├── references/      # lues au fil des étapes de l'audit (fix.md : conventions du mode fix)
+    │   ├── references/      # lues au fil des étapes de l'audit (fix.md : mode fix ; documents.md : documents de contexte)
     │   └── schemas/         # finding, fix-report et fix-review (contrats des sous-agents)
     ├── cqa/SKILL.md         # alias /gm:cqa de checklist-quality-audit
     └── archi-c4/

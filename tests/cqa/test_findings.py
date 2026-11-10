@@ -228,6 +228,55 @@ class ValidateDocumentTest(unittest.TestCase):
         self.assertEqual(errors, ["constat manquant : CQ-3", "constat manquant : CQ-12"])
         self.assertEqual([item["ref"] for item in valid], [79])
 
+    def test_optional_refs_are_not_reported_missing(self):
+        document = make_document(make_finding(ref=79))
+        valid, errors = validate_document(document, {79, 80}, optional_refs=frozenset({80}))
+        self.assertEqual((errors, [item["ref"] for item in valid]), ([], [79]))
+        valid, errors = validate_document(document, {79, 80, 81}, optional_refs=frozenset({80}))
+        self.assertEqual(errors, ["constat manquant : CQ-81"])
+
+    def test_an_optional_ref_given_by_the_file_is_validated_like_any_other(self):
+        document = make_document(make_finding(ref=79), make_finding(ref=80, confidence="sure"))
+        valid, errors = validate_document(document, {79, 80}, optional_refs=frozenset({80}))
+        self.assertEqual([item["ref"] for item in valid], [79])
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("constat CQ-80 : confiance"))
+
+    def test_optional_refs_do_not_widen_the_lot(self):
+        document = make_document(make_finding(ref=79), make_finding(ref=999))
+        valid, errors = validate_document(document, {79}, optional_refs=frozenset({999}))
+        self.assertEqual([item["ref"] for item in valid], [79])
+        self.assertEqual(errors, ["constat CQ-999 : Réf hors du lot"])
+
+    def test_a_forbidden_ref_is_an_error_and_never_valid(self):
+        document = make_document(make_finding(ref=79), make_finding(ref=80))
+        valid, errors = validate_document(
+            document, {79, 80}, optional_refs=frozenset({80}), forbidden_refs=frozenset({80})
+        )
+        self.assertEqual([item["ref"] for item in valid], [79])
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("constat CQ-80 : ligne jugée d'après un document"))
+        self.assertNotIn(EM_DASH, errors[0])
+
+    def test_a_forbidden_ref_the_file_does_not_give_is_no_error(self):
+        valid, errors = validate_document(
+            make_document(make_finding(ref=79)),
+            {79, 80},
+            optional_refs=frozenset({80}),
+            forbidden_refs=frozenset({80}),
+        )
+        self.assertEqual((errors, [item["ref"] for item in valid]), ([], [79]))
+
+    def test_no_forbidden_ref_by_default(self):
+        valid, errors = validate_document(
+            make_document(make_finding(ref=79), make_finding(ref=80)), {79, 80}
+        )
+        self.assertEqual((errors, len(valid)), ([], 2))
+
+    def test_optional_refs_default_to_none(self):
+        valid, errors = validate_document(make_document(make_finding(ref=79)), {79, 80})
+        self.assertEqual(errors, ["constat manquant : CQ-80"])
+
     def test_empty_findings_report_every_row(self):
         valid, errors = validate(lot_refs={80, 79})
         self.assertEqual(valid, [])
@@ -348,12 +397,12 @@ class ValidateDocumentTest(unittest.TestCase):
         _, errors = validate(make_finding(evidence=[{"type": "log"}]), make_finding(ref=80))
         self.assertEqual(
             errors,
-            ["constat CQ-79 : preuve n° 1 : type « log » inconnu (file, page, tool, http)"],
+            ["constat CQ-79 : preuve n° 1 : type « log » inconnu (file, page, tool, http, document)"],
         )
         _, errors = validate(make_finding(evidence=[{"path": "a"}]), make_finding(ref=80))
         self.assertEqual(
             errors,
-            ["constat CQ-79 : preuve n° 1 : type manquant (file, page, tool, http)"],
+            ["constat CQ-79 : preuve n° 1 : type manquant (file, page, tool, http, document)"],
         )
 
     def test_evidence_required_keys_per_type(self):
@@ -364,6 +413,7 @@ class ValidateDocumentTest(unittest.TestCase):
                 "page": ("url",),
                 "tool": ("tool", "ref"),
                 "http": ("url", "detail"),
+                "document": ("doc", "ref"),
             },
         )
         full = {
@@ -371,6 +421,7 @@ class ValidateDocumentTest(unittest.TestCase):
             "page": {"type": "page", "url": "https://preprod.example.org/"},
             "tool": {"type": "tool", "tool": "a11y", "ref": "summary.json#1"},
             "http": {"type": "http", "url": "https://preprod.example.org/", "detail": "200"},
+            "document": {"type": "document", "doc": "d1", "ref": "critères 7.3"},
         }
         for kind, keys in EVIDENCE_REQUIRED.items():
             self.assertEqual(validate(make_finding(evidence=[full[kind]]), make_finding(ref=80))[1], [])
@@ -390,6 +441,35 @@ class ValidateDocumentTest(unittest.TestCase):
                         errors,
                         [f"constat CQ-79 : preuve n° 1 ({kind}) : « {key} » doit être un texte non vide"],
                     )
+
+    def test_document_evidence_requires_doc_and_ref(self):
+        full = {"type": "document", "doc": "d1", "ref": "critères 7.3"}
+        valid, errors = validate(make_finding(evidence=[full]), make_finding(ref=80))
+        self.assertEqual((errors, [entry["ref"] for entry in valid]), ([], [79, 80]))
+        for key in ("doc", "ref"):
+            with self.subTest(key=key):
+                item = {name: value for name, value in full.items() if name != key}
+                _, errors = validate(make_finding(evidence=[item]), make_finding(ref=80))
+                self.assertEqual(
+                    errors, [f"constat CQ-79 : preuve n° 1 (document) : « {key} » manquant"]
+                )
+                _, errors = validate(
+                    make_finding(evidence=[{**full, key: ""}]), make_finding(ref=80)
+                )
+                self.assertEqual(
+                    errors,
+                    [f"constat CQ-79 : preuve n° 1 (document) : « {key} » doit être un texte non vide"],
+                )
+
+    def test_a_finding_marked_as_taken_from_a_document_is_valid(self):
+        finding = make_finding(
+            evidence=[{"type": "document", "doc": "d1", "ref": "critères 7.3"}],
+            source="context_doc",
+            in_repo=False,
+        )
+        valid, errors = validate(finding, make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(valid[0]["source"], "context_doc")
 
     def test_file_line_is_an_optional_positive_integer(self):
         base = {"type": "file", "repo": "nuxt", "path": "a.vue"}
@@ -923,7 +1003,7 @@ class SchemaTest(unittest.TestCase):
     def test_every_property_of_the_finding_is_described(self):
         self.assertEqual(
             set(self.finding["properties"]),
-            set(REQUIRED_FINDING_KEYS) | {"tool_dates", "in_repo"},
+            set(REQUIRED_FINDING_KEYS) | {"tool_dates", "in_repo", "source"},
         )
         for name, definition in self.finding["properties"].items():
             with self.subTest(name=name):

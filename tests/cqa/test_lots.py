@@ -3,7 +3,15 @@ import unicodedata
 import unittest
 
 from cqa import checklist
-from cqa.lots import TOOL_ACTIONS, TOOLS, build_lots, coverage, lot_needs_session, select_rows
+from cqa.lots import (
+    TOOL_ACTIONS,
+    TOOLS,
+    build_lots,
+    coverage,
+    lot_document_refs,
+    lot_needs_session,
+    select_rows,
+)
 from cqa.probes import _lot_entries
 
 PROJECT = ["Laravel", "Nuxt"]
@@ -35,8 +43,17 @@ def make_row(ref=1, **overrides):
     return row
 
 
-def select(rows, technos=PROJECT, available=CODE_TOOLS, phase_filter=None):
-    return select_rows(rows, technos, available, phase_filter)
+def select(
+    rows,
+    technos=PROJECT,
+    available=CODE_TOOLS,
+    phase_filter=None,
+    category_filter=None,
+    document_refs=frozenset(),
+):
+    return select_rows(
+        rows, technos, available, phase_filter, category_filter, document_refs=document_refs
+    )
 
 
 def lot_ids(built):
@@ -187,6 +204,47 @@ class SelectRowsTest(unittest.TestCase):
         self.assertEqual(excluded[0]["detail"], "outils indisponibles : SSH serveur, BDD")
         self.assertEqual(excluded[0]["tools"], ["SSH serveur", "BDD"])
 
+    def test_document_row_is_never_excluded_for_missing_tools(self):
+        row = make_row(4, tools=["Navigateur"])
+        kept, excluded = select([row], available=["Code"])
+        self.assertEqual(kept, [])
+        self.assertEqual(excluded[0]["reason"], "no_tools")
+        kept, excluded = select([row], available=["Code"], document_refs=frozenset({4}))
+        self.assertEqual(kept, [row])
+        self.assertEqual(excluded, [])
+
+    def test_a_document_verdict_only_spares_the_rows_that_have_one(self):
+        rows = [make_row(4, tools=["Navigateur"]), make_row(5, tools=["Navigateur"])]
+        kept, excluded = select(rows, available=["Code"], document_refs=frozenset({4}))
+        self.assertEqual([row["ref"] for row in kept], [4])
+        self.assertEqual([(entry["ref"], entry["reason"]) for entry in excluded], [(5, "no_tools")])
+
+    def test_document_rule_comes_after_standby_techno_and_phase(self):
+        refs = frozenset({1})
+        cases = (
+            ("standby", {"status": checklist.STATUS_STANDBY}),
+            ("no_fiche", {"fiche_path": None}),
+            ("techno", {"technos": ["Wordpress"]}),
+            ("phase", {"phases": ["MEL J0"]}),
+            ("category", {"category": "QUALITÉ"}),
+        )
+        for reason, changes in cases:
+            with self.subTest(reason=reason):
+                row = make_row(1, tools=["Navigateur"], **changes)
+                kept, excluded = select(
+                    [row],
+                    available=["Code"],
+                    document_refs=refs,
+                    category_filter=["SÉCURITÉ"] if reason == "category" else None,
+                )
+                self.assertEqual(kept, [])
+                self.assertEqual(excluded[0]["reason"], reason)
+
+    def test_document_rule_keeps_the_row_through_a_phase_filter_it_passes(self):
+        row = make_row(1, tools=["Navigateur"], phases=["Build"])
+        kept, _ = select([row], available=["Code"], phase_filter="Build", document_refs=frozenset({1}))
+        self.assertEqual(kept, [row])
+
     def test_some_available_tool_keeps_row(self):
         kept, excluded = select([make_row(4, tools=["Code", "BDD"])], available=["Code"])
         self.assertEqual(len(kept), 1)
@@ -219,6 +277,61 @@ class SelectRowsTest(unittest.TestCase):
         self.assertEqual(select([make_row(1, **base)])[1][0]["reason"], "phase")
         base["phases"] = ["Build"]
         self.assertEqual(select([make_row(1, **base)])[1][0]["reason"], "no_tools")
+
+    def test_category_filter_is_the_first_rule(self):
+        row = make_row(1, category="QUALITÉ", status=checklist.STATUS_STANDBY)
+        kept, excluded = select([row], category_filter=["SÉCURITÉ"])
+        self.assertEqual(kept, [])
+        self.assertEqual(
+            (excluded[0]["reason"], excluded[0]["verdict"]), ("category", "skip")
+        )
+        self.assertEqual(excluded[0]["detail"], "catégorie hors du périmètre (SÉCURITÉ)")
+        self.assertEqual(excluded[0]["ref"], 1)
+        self.assertEqual(excluded[0]["page_id"], row["page_id"])
+
+    def test_category_detail_lists_every_name_of_the_filter(self):
+        _, excluded = select([make_row(1)], category_filter=["SÉCURITÉ", "SEO / GEO"])
+        self.assertEqual(excluded[0]["detail"], "catégorie hors du périmètre (SÉCURITÉ, SEO / GEO)")
+
+    def test_category_filter_keeps_the_rows_of_its_categories(self):
+        rows = [
+            make_row(1, category="SÉCURITÉ"),
+            make_row(2, category="QUALITÉ"),
+            make_row(3, category="SEO / GEO"),
+            make_row(4, category=None),
+        ]
+        kept, excluded = select(rows, category_filter=["SÉCURITÉ", "SEO / GEO"])
+        self.assertEqual([row["ref"] for row in kept], [1, 3])
+        self.assertEqual([entry["ref"] for entry in excluded], [2, 4])
+        self.assertEqual({entry["reason"] for entry in excluded}, {"category"})
+
+    def test_no_filter_and_an_empty_filter_keep_every_category(self):
+        rows = [make_row(1, category="SÉCURITÉ"), make_row(2, category=None)]
+        for category_filter in (None, []):
+            with self.subTest(category_filter=category_filter):
+                kept, excluded = select(rows, category_filter=category_filter)
+                self.assertEqual(len(kept), 2)
+                self.assertEqual(excluded, [])
+
+    def test_a_row_out_of_scope_is_silent_whatever_else_applies(self):
+        row = make_row(1, category="QUALITÉ", technos=["Wordpress"], tools=["BDD"], fiche_path=None)
+        _, excluded = select([row], category_filter=["SÉCURITÉ"])
+        self.assertEqual(excluded[0]["reason"], "category")
+
+    def test_category_and_phase_filters_intersect(self):
+        rows = [
+            make_row(1, category="ACCESSIBILITÉ", phases=["Build"]),
+            make_row(2, category="ACCESSIBILITÉ", phases=["MEL J0"]),
+            make_row(3, category="QUALITÉ", phases=["Build"]),
+        ]
+        kept, excluded = select(
+            rows, phase_filter="Build", category_filter=["ACCESSIBILITÉ"]
+        )
+        self.assertEqual([row["ref"] for row in kept], [1])
+        self.assertEqual(
+            [(entry["ref"], entry["reason"]) for entry in excluded],
+            [(2, "phase"), (3, "category")],
+        )
 
     def test_order_is_preserved_in_both_lists(self):
         rows = [
@@ -269,12 +382,41 @@ class CoverageTest(unittest.TestCase):
                     "deferred",
                     "na",
                     "standby",
+                    "out_of_scope",
                     "gains",
                 ]
             ),
         )
         self.assertEqual(result["total"], 0)
         self.assertEqual(result["gains"], [])
+
+    def test_coverage_counts_out_of_scope_apart(self):
+        rows = [
+            make_row(1, category="SÉCURITÉ"),
+            make_row(2, category="SÉCURITÉ", tools=["BDD"]),
+            make_row(3, category="QUALITÉ"),
+            make_row(4, category="QUALITÉ", status=checklist.STATUS_STANDBY),
+        ]
+        kept, excluded = select(rows, category_filter=["SÉCURITÉ"])
+        result = coverage(kept, excluded, CODE_TOOLS)
+        self.assertEqual((result["total"], result["out_of_scope"]), (2, 2))
+        self.assertEqual((result["evaluable"], result["not_evaluable"], result["standby"]), (1, 1, 0))
+        parts = ("evaluable", "partial", "not_evaluable", "deferred", "na", "standby")
+        self.assertEqual(sum(result[key] for key in parts), result["total"])
+
+    def test_out_of_scope_rows_bring_no_gain(self):
+        rows = [
+            make_row(1, category="SÉCURITÉ", tools=["Code", "BDD"]),
+            make_row(2, category="QUALITÉ", tools=["BDD"]),
+            make_row(3, category="QUALITÉ", tools=["Code", "Audit web"]),
+        ]
+        kept, excluded = select(rows, category_filter=["SÉCURITÉ"])
+        gains = coverage(kept, excluded, CODE_TOOLS)["gains"]
+        self.assertEqual(gains, [{"tool": "BDD", "action": TOOL_ACTIONS["BDD"], "rows": 1}])
+
+    def test_coverage_without_filter_has_no_out_of_scope_row(self):
+        result = self.run_coverage([make_row(1), make_row(2)])
+        self.assertEqual((result["total"], result["out_of_scope"]), (2, 0))
 
     def test_each_bucket(self):
         rows = [
@@ -363,6 +505,49 @@ class CoverageTest(unittest.TestCase):
         )
         self.assertEqual(gains[0]["action"], TOOL_ACTIONS["Crawler"])
 
+    def run_documents(self, rows, document_refs, available=CODE_TOOLS):
+        kept, excluded = select(rows, PROJECT, available, None, None, document_refs)
+        return coverage(kept, excluded, available, document_refs)
+
+    def test_documents_count_the_kept_rows_judged_from_a_document(self):
+        rows = [make_row(1), make_row(2), make_row(3, tools=["Navigateur"])]
+        result = self.run_documents(rows, frozenset({1, 3, 99}))
+        self.assertEqual(result["documents"], 2)
+
+    def test_documents_is_absent_without_a_document_row(self):
+        for refs in (frozenset(), frozenset({99})):
+            with self.subTest(refs=refs):
+                self.assertNotIn("documents", self.run_documents([make_row(1)], refs))
+        self.assertNotIn("documents", self.run_coverage([make_row(1)]))
+
+    def test_a_document_row_lacks_no_tool(self):
+        rows = [
+            make_row(1, tools=["Code", "BDD"]),
+            make_row(2, tools=["Navigateur"]),
+            make_row(3, tools=["Code", "BDD"]),
+        ]
+        result = self.run_documents(rows, frozenset({1, 2}))
+        self.assertEqual((result["evaluable"], result["partial"]), (2, 1))
+        self.assertEqual(result["gains"], [{"tool": "BDD", "action": TOOL_ACTIONS["BDD"], "rows": 1}])
+        self.assertEqual(result["total"], 3)
+
+    def test_the_buckets_still_add_up_with_document_rows(self):
+        rows = [
+            make_row(1),
+            make_row(2, tools=["BDD"]),
+            make_row(3, tools=["Navigateur"]),
+            make_row(4, technos=["Wordpress"]),
+            make_row(6, status=checklist.STATUS_STANDBY),
+        ]
+        result = self.run_documents(rows, frozenset({2, 3, 4, 6}))
+        parts = ("evaluable", "partial", "not_evaluable", "deferred", "na", "standby")
+        self.assertEqual(sum(result[key] for key in parts), result["total"])
+        self.assertEqual(result["documents"], 2)
+
+    def test_a_document_row_with_a_human_check_is_evaluable_with_a_human(self):
+        result = self.run_documents([make_row(1, tools=["Navigateur", HUMAN])], frozenset({1}))
+        self.assertEqual((result["evaluable"], result["evaluable_human"]), (1, 1))
+
     def test_gains_skip_available_tools_and_human(self):
         rows = [make_row(1, tools=["Code", "BDD", HUMAN])]
         gains = self.run_coverage(rows, available=["Code", "BDD"])["gains"]
@@ -379,6 +564,77 @@ class CoverageTest(unittest.TestCase):
         result = coverage([], excluded, [])
         self.assertEqual(result["not_evaluable"], 1)
         self.assertEqual(result["gains"], [])
+
+
+class DocumentRefsOfLotsTest(unittest.TestCase):
+    def test_lot_carries_its_document_refs(self):
+        rows = [make_row(ref, category="SÉCURITÉ") for ref in (1, 2, 3)]
+        rows += [make_row(ref, category="PERFORMANCE") for ref in (4, 5)]
+        built = build_lots(rows, document_refs=frozenset({2, 3, 5, 99}))
+        self.assertEqual(lot_ids(built), ["code-securite", "code-performance"])
+        self.assertEqual(lot_by_id(built, "code-securite")["document_refs"], [2, 3])
+        self.assertEqual(lot_by_id(built, "code-performance")["document_refs"], [5])
+        self.assertEqual(lot_by_id(built, "code-securite")["refs"], [1, 2, 3])
+
+    def test_a_lot_without_a_document_row_has_an_empty_list(self):
+        built = build_lots([make_row(1), make_row(2, tools=["Navigateur"])])
+        self.assertEqual([lot["document_refs"] for lot in built], [[], []])
+        self.assertEqual(
+            [lot["document_refs"] for lot in build_lots([make_row(1)], document_refs=frozenset({7}))],
+            [[]],
+        )
+
+    def test_document_refs_are_sorted_whatever_the_order_of_the_rows(self):
+        rows = [make_row(ref) for ref in (9, 3, 6, 1)]
+        built = build_lots(rows, document_refs=frozenset({9, 1, 6}))
+        self.assertEqual(built[0]["document_refs"], [1, 6, 9])
+
+    def test_the_toolbox_sibling_carries_its_own_document_rows(self):
+        rows = [
+            make_row(1, tools=["Code"]),
+            make_row(2, tools=["Code", "Audit web"]),
+            make_row(3, tools=["Code", "Audit web"]),
+        ]
+        built = build_lots(rows, document_refs=frozenset({1, 3}))
+        self.assertEqual(lot_by_id(built, "code-qualite")["document_refs"], [1])
+        self.assertEqual(lot_by_id(built, "code-qualite-outils")["document_refs"], [3])
+
+    def test_a_split_category_gives_each_chunk_its_document_rows(self):
+        rows = [make_row(ref, subcategory="Général") for ref in range(1, 31)]
+        built = build_lots(rows, max_size=20, document_refs=frozenset({1, 30}))
+        self.assertEqual(
+            [(lot["id"], lot["document_refs"]) for lot in built],
+            [("code-qualite-general-1", [1]), ("code-qualite-general-2", [30])],
+        )
+
+    def test_browser_and_server_lots_carry_them_too(self):
+        rows = [
+            make_row(1, tools=["Navigateur"], category="ACCESSIBILITÉ"),
+            make_row(2, tools=["SSH serveur"]),
+        ]
+        built = build_lots(rows, document_refs=frozenset({1, 2}))
+        self.assertEqual({lot["id"]: lot["document_refs"] for lot in built},
+                         {"server": [2], "browser-accessibilite": [1]})
+
+    def test_lot_document_refs_reads_the_list(self):
+        self.assertEqual(lot_document_refs({"id": "x", "refs": [1, 2], "document_refs": [2]}), [2])
+
+    def test_lot_document_refs_tolerates_an_older_lots_json(self):
+        for lot in ({"id": "x", "refs": [1]}, {"document_refs": None}, {"document_refs": "2"}, {}):
+            with self.subTest(lot=lot):
+                self.assertEqual(lot_document_refs(lot), [])
+
+    def test_lot_document_refs_keeps_only_whole_numbers(self):
+        self.assertEqual(
+            lot_document_refs({"document_refs": [3, True, "4", None, 1.5, 1]}), [1, 3]
+        )
+
+    def test_the_inputs_are_not_modified(self):
+        rows = [make_row(1), make_row(2)]
+        refs = frozenset({1})
+        build_lots(rows, document_refs=refs)
+        self.assertEqual([row["ref"] for row in rows], [1, 2])
+        self.assertEqual(refs, frozenset({1}))
 
 
 class BrowserLotsTest(unittest.TestCase):
@@ -399,7 +655,15 @@ class BrowserLotsTest(unittest.TestCase):
         built = build_lots([make_row(1, tools=["Navigateur"])])
         self.assertEqual(
             sorted(built[0]),
-            ["id", "kind", "needs_server_facts", "needs_session", "needs_toolbox", "refs"],
+            [
+                "document_refs",
+                "id",
+                "kind",
+                "needs_server_facts",
+                "needs_session",
+                "needs_toolbox",
+                "refs",
+            ],
         )
 
     def test_other_categories_share_one_lot_without_size_limit(self):

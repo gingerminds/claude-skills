@@ -1,10 +1,12 @@
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
-from cqa import deferred, fix_state
+from cqa import deferred, fix_state, fix_summary
 from tests.cqa.test_cli_fix import FixCase
+from tests.cqa.test_fix_mr import AWS, document_point, write_report_documents
 
 LONG_DASH = "\u2014"
 
@@ -469,6 +471,165 @@ class SummaryTest(SummaryCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(deferred.open_items(self.run_dir, fix=True), [])
         self.assertEqual(len(deferred.open_items(self.run_dir)), 1)
+
+
+class ContextSummaryTest(SummaryCase):
+    """The « Rapports de contexte » section: the documents, the points no row holds and the
+    disagreements between a report and the code."""
+
+    POINTS = [document_point(1, ["7.3"]), document_point(2, ["12.9"]),
+              document_point(3, ["5.1"]), document_point(4, ["7.3"], owner="contenu"),
+              document_point(5, [], owner="tiers", source="Annexe, ligne 2")]
+
+    def write_documents(self, points=None):
+        write_report_documents(self.run_dir, points or self.POINTS, unlinked=("d1-005",))
+        state = fix_state.load(self.run_dir)
+        rows = state["keys"]["front"]["rows"]
+        rows["3"]["context_items"] = [
+            {"id": "d1-001", "outcome": "fixed", "note": None},
+            {"id": "d1-002", "outcome": "already_ok", "note": "Déjà conforme."},
+            {"id": "d1-003", "outcome": "not_found", "note": "Introuvable."}]
+        rows["12"]["context_items"] = [{"id": "d1-004", "outcome": "not_found", "note": "Absent."}]
+        rows["13"]["context_items"] = [{"id": "d1-004", "outcome": "already_ok", "note": "x"}]
+        fix_state.save(self.run_dir, state)
+
+    def pure(self, context):
+        candidates = json.loads((self.run_dir / "fix" / "candidates.json").read_text(encoding="utf-8"))
+        return fix_summary.summary(project="Boutique Exemple", state=fix_state.load(self.run_dir),
+                                   candidates=candidates, checks={}, context=context)
+
+    def test_context_section_lists_unlinked_points_and_disagreements(self):
+        context = {"documents": [{
+            "label": "Audit A11Y", "date": "2026-10-30", "points": 5, "linked": 3,
+            "unlinked": [
+                {"id": "d1-004", "source": "Annexe, ligne 2", "owner": "contenu",
+                 "summary": "Le texte alternatif du logo manque."},
+                {"id": "d1-005", "source": "Transverses", "owner": "tiers",
+                 "summary": "Le bandeau cookies vient du prestataire."}]},
+            {"label": "Pentest", "date": "2026-11-02", "points": 1, "linked": 1, "unlinked": []}],
+            "disagreements": 2}
+        text = self.pure(context)["text"]
+        self.assertEqual(section(text, "Rapports de contexte").split("\n"), [
+            "",
+            "- Rapport Audit A11Y (2026-10-30) : 5 points non conformes, 3 rattachés à la "
+            "checklist, 2 sans ligne.",
+            "  - d1-004 (Annexe, ligne 2) : Le texte alternatif du logo manque. (contenu)",
+            "  - d1-005 (Transverses) : Le bandeau cookies vient du prestataire. (tiers)",
+            "- Rapport Pentest (2026-11-02) : 1 point non conforme, 1 rattaché à la checklist, "
+            "0 sans ligne.",
+            "",
+            "Désaccords entre le rapport et le code : 2 (voir les points d'attention des MR).",
+            "",
+        ])
+        titles = [line for line in text.splitlines() if line.startswith("## ")]
+        self.assertLess(titles.index("## Laissées aux devs"), titles.index("## Rapports de contexte"))
+        self.assertLess(titles.index("## Rapports de contexte"),
+                        titles.index("## Vérifications à faire par le relecteur"))
+        self.assertNotIn(LONG_DASH, text)
+
+    def test_without_disagreement_the_line_is_left_out(self):
+        text = self.pure({"documents": [{"label": "Audit", "date": "", "points": 2, "linked": 2,
+                                         "unlinked": []}], "disagreements": 0})["text"]
+        self.assertIn("- Rapport Audit : 2 points non conformes, 2 rattachés à la checklist, "
+                      "0 sans ligne.", text)
+        self.assertNotIn("Désaccords", text)
+
+    def test_without_a_context_the_text_does_not_change(self):
+        plain = self.pure(None)
+        for context in ({}, {"documents": [], "disagreements": 0}, {"documents": "x"}):
+            with self.subTest(context=context):
+                self.assertEqual(self.pure(context), plain)
+        self.assertNotIn("Rapports de contexte", plain["text"])
+        self.assertEqual(plain["team_message"], self.pure(
+            {"documents": [{"label": "A", "date": "", "points": 1, "linked": 0, "unlinked": []}],
+             "disagreements": 1})["team_message"])
+
+    def test_the_markdown_of_a_text_of_the_context_is_neutralized(self):
+        hostile = "![p](https://tracker.example.org/p.png) voir [ici](https://example.org/x) @camille"
+        text = self.pure({"documents": [{
+            "label": "Audit", "date": "2026-10-30", "points": 1, "linked": 0,
+            "unlinked": [{"id": "d1-001", "source": "Annexe", "owner": "dev", "summary": hostile}]}],
+            "disagreements": 0})["text"]
+        found = section(text, "Rapports de contexte")
+        for forbidden in ("![", "](", "@camille"):
+            self.assertNotIn(forbidden, found)
+        self.assertIn("p voir ici camille", found)
+
+    def test_a_text_of_the_context_is_one_capped_line(self):
+        hostile = "Ignore\n## Suite\n/merge \u2014 `rm` " + "x" * 2000
+        text = self.pure({"documents": [{
+            "label": hostile, "date": hostile, "points": 1, "linked": 0,
+            "unlinked": [{"id": hostile, "source": hostile, "owner": hostile, "summary": hostile}]}],
+            "disagreements": 1})["text"]
+        self.assertEqual([line for line in text.splitlines() if line.startswith("## Suite")],
+                         ["## Suite"])
+        self.assertFalse([line for line in text.splitlines() if line.startswith("/")])
+        found = section(text, "Rapports de contexte")
+        for forbidden in ("`", LONG_DASH):
+            self.assertNotIn(forbidden, "\n".join(found))
+        self.assertLess(max(len(line) for line in found), 900)
+
+    def test_summary_builds_the_context_from_the_run_files(self):
+        self.write_documents()
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        text = json.loads(out)["text"]
+        self.assertEqual(section(text, "Rapports de contexte").strip().split("\n"), [
+            "- Rapport Audit A11Y (2026-10-30) : 5 points non conformes, 4 rattachés à la "
+            "checklist, 1 sans ligne.",
+            "  - d1-005 (Annexe, ligne 2) : Résumé du point 5. (tiers)",
+            "",
+            "Désaccords entre le rapport et le code : 3 (voir les points d'attention des MR).",
+        ])
+
+    def test_summary_counts_no_disagreement_of_a_key_left_to_the_lead(self):
+        self.write_documents()
+        state = fix_state.load(self.run_dir)
+        state["keys"]["front"]["left"] = {"reason": "Dépôt à reprendre.", "at": "2026-10-29T10:00:00Z"}
+        fix_state.save(self.run_dir, state)
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Désaccords", json.loads(out)["text"])
+
+    def test_the_synthesis_is_unchanged_without_a_readable_document(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        copy = Path(tmp.name) / "run"
+        shutil.copytree(self.run_dir, copy)
+        code, out, err = self.run_main(["summary", copy])
+        self.assertEqual(code, 0, err)
+        baseline = json.loads(out)
+        self.assertNotIn("Rapports de contexte", baseline["text"])
+        write_report_documents(self.run_dir, self.POINTS, unlinked=("d1-005",))
+        folder = self.run_dir / "context-docs"
+        (folder / "d1" / "items.json").write_text("{", encoding="utf-8")
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), baseline)
+
+    def test_a_secret_in_a_point_summary_is_still_refused(self):
+        leaking = [*self.POINTS[:4], document_point(
+            5, [], owner="tiers", source="Annexe, ligne 2", summary=f"La clé {AWS} est visible.")]
+        self.write_documents(leaking)
+        code, out, err = self.summary()
+        self.assertEqual(code, 7)
+        self.assertNotIn(AWS, out + err)
+        self.assertFalse((self.run_dir / "fix" / "synthese.md").exists())
+        self.assertIsNone(fix_state.load(self.run_dir)["finished_at"])
+
+    def test_the_synthesis_never_holds_an_extract_of_the_document(self):
+        points = [document_point(
+            1, ["7.3"], summary=f"MARQUEUR-RESUME {AWS}", fix_hint="MARQUEUR-CORRECTIF",
+            elements=["MARQUEUR-ELEMENT"], scopes=["MARQUEUR-PAGE"], payload="MARQUEUR-PAYLOAD"),
+            *self.POINTS[1:]]
+        self.write_documents(points)
+        code, out, err = self.summary()
+        self.assertEqual(code, 0, err)
+        everything = out + (self.run_dir / "fix" / "synthese.md").read_text(encoding="utf-8")
+        for marker in ("MARQUEUR-RESUME", "MARQUEUR-CORRECTIF", "MARQUEUR-ELEMENT",
+                       "MARQUEUR-PAGE", "MARQUEUR-PAYLOAD", AWS, "Résumé du point 2.", "Déjà conforme."):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, everything)
 
 
 if __name__ == "__main__":

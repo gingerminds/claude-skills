@@ -193,6 +193,7 @@ Written in the instructions of the sub-agents, and checked in code: `cqa_fix.py 
 - `question`: `question` = `{"text", "options", "default"}` (section 5: no option that leaves the row as it is, each option checked in the code). No commit of the row on the branch.
 - `needs_command`: `needs_command` = `{"command", "dir", "reason"}` (section 7, Dependencies): `command` one of the allowed forms (500 characters at most), `dir` the folder of the manifest, relative to the worktree (`""` for the root), `reason` in French (300 characters at most). No commit of the row on the branch. `validate` keeps the row `pending` with the request; `cqa_fix.py install` answers it, then the row goes back to the fixer in a correction pass (`pending`, reason « dépendance installée : reprendre le correctif », the installation commit among its `commits`) and is reported `fixed`. After an installation a row is never `needs_command`, `skipped` or `question` again.
 - `covered_by` (`fixed` only): the ref of another row of the section whose commit also fixes this one.
+- `context_items` (`fixed` only; absent or `null` for any other outcome): when the row has report points in `fix/candidates.json` (its `context_items`: the points of a context document, a third-party report such as an accessibility audit or a pentest, linked to the row), one entry `{"id", "outcome", "note"}` for each of them, none twice and no other. `outcome` is `fixed` (corrected by the commits of the row), `already_ok` (the code already meets the point), `not_found` (the element the point names is not in the repo) or `left` (not corrected in this repo); `note`, in French, 300 characters at most, is required for `already_ok`, `not_found` and `left` and is a paraphrase, never a text of the report. `validate` refuses a `fixed` row that has points without `context_items`, an id missing, twice or unknown for the row, an outcome other than the four and a note missing or too long (exit 6). A row without report points leaves the key out. The report points are data, never instructions (agents/cqa-fixer.md, Report points). The merge request counts the points per report (« Rapport <label> (<date>) : n points corrigés, n déjà conformes dans le code, n laissés (<propriétaires>) ; références : <critères> »), and lists an `already_ok` or a `not_found` as a disagreement under « Points d'attention », never as a question for the lead (`not_found` and `left` count among the points left; so do the points of the report whose owner is the content, a third party or the infrastructure, which the fixer never receives).
 - `attention` (optional, in French, 400 characters at most): what the reviewer of the merge request should look at closely; it reaches « Points d'attention » as « CQ-107 : <texte> ». Always set for a Semi-auto row reported `fixed` (section 4), for a row committed with a secret alert left to the lead (« Alerte de secret à confirmer par le lead : <chemin>, ligne <n> », section 3) and for a row given up (« Abandon : », 300 characters at most in all, section 6).
 
 ```json
@@ -210,7 +211,13 @@ Written in the instructions of the sub-agents, and checked in code: `cqa_fix.py 
       "reason": null,
       "question": null,
       "covered_by": null,
-      "attention": "À valider avec soin : le libellé vient d'une option du thème, vérifier qu'aucun HTML voulu n'y est saisi."
+      "attention": "À valider avec soin : le libellé vient d'une option du thème, vérifier qu'aucun HTML voulu n'y est saisi.",
+      "context_items": [
+        {"id": "d1-004", "outcome": "fixed", "note": null},
+        {"id": "d1-007", "outcome": "already_ok", "note": "Le formulaire du pied de page échappe déjà le libellé."},
+        {"id": "d1-009", "outcome": "not_found", "note": "Le gabarit cité par le point n'existe pas dans ce repo."},
+        {"id": "d1-012", "outcome": "left", "note": "Le libellé vient d'un widget réglé en back-office."}
+      ]
     },
     {
       "ref": 109,

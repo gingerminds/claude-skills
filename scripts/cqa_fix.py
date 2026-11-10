@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import quote
 
-from cqa import deferred, git_tools, fix_checks, fix_commands, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_stack, fix_state, fix_summary
+from cqa import categories, deferred, docs_link, git_tools, fix_checks, fix_commands, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_stack, fix_state, fix_summary
 from cqa.checklist import STATUS_REVIEW, parse_refs, ref_label
 from cqa.notion_read import write_json, write_text
 from cqa.project import project_name
@@ -132,6 +132,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("--refs", default="", help="Réf à ajouter, séparées par des virgules (CQ-12)")
     sub.add_argument("--without", default="", help="Réf à retirer, séparées par des virgules")
+    sub.add_argument("--category", action="append", default=[], metavar="NOM",
+                     help="catégorie à traiter (répétable) : restreint le périmètre du run")
     sub = _command(commands, "commands",
                    "commandes de vérification du projet, détectées depuis sa CI et ses manifestes",
                    _cmd_commands)
@@ -585,6 +587,7 @@ def _cmd_candidates(args, services: Services) -> int:
     lots = _read_run_json(run_dir, "lots.json", "cqa_plan.py lots")
     if not isinstance(rows, list) or not isinstance(lots.get("lots"), list):
         raise UsageError("rows.json ou lots.json : listes « rows » et « lots » attendues.")
+    requested = _requested_categories(args.category, rows, context.get("category_filter"))
     excluded = [entry for entry in lots.get("excluded") or [] if isinstance(entry, dict)]
     findings = latest_findings(
         run_dir, lots["lots"], lambda lot, name: read_grounded_findings(run_dir, context, lot, name)
@@ -594,13 +597,44 @@ def _cmd_candidates(args, services: Services) -> int:
     try:
         result = fix_rows.select(
             rows, findings, excluded, repos, access, flights,
-            refs=refs, without=without, run_dir=run_dir,
+            refs=refs, without=without, run_dir=run_dir, categories=requested,
+            points=docs_link.fixer_points(run_dir),
         )
     except ValueError as error:
         raise UsageError(str(error))
     write_json(run_dir / "fix" / "candidates.json", result)
     _emit(result)
     return EXIT_OK
+
+
+def _requested_categories(names: list, rows: list, run_filter) -> Optional[frozenset]:
+    """Return the Notion names of the categories the fix may take (None without a limit).
+
+    The base is the category filter of the run, when it has one: a row of another category is
+    never a candidate, whatever lots.json says (a row added or moved in the copy since the
+    audit). --category narrows it: a name that is not in the copy is a usage error, and so is a
+    name outside the filter, since the fix may narrow the scope of the audit, never widen it. A
+    name that gives several categories (a shared alias) keeps those of the filter.
+    """
+    scope = [name for name in run_filter if isinstance(name, str)] if isinstance(
+        run_filter, list) else []
+    scope = scope or None
+    if not names:
+        return frozenset(scope) if scope else None
+    _, unknown = categories.resolve(names, rows)
+    if unknown:
+        raise UsageError(categories.unknown_message(unknown, rows))
+    kept = set()
+    for name in names:
+        found = categories.resolve([name], rows)[0]
+        if scope is not None:
+            found = [item for item in found if item in scope]
+            if not found:
+                raise UsageError(
+                    f"La catégorie {name} est hors du périmètre du run ({', '.join(map(str, scope))})."
+                )
+        kept.update(found)
+    return frozenset(kept)
 
 
 def _flights(repos: list, access: list, run) -> dict:
@@ -1215,6 +1249,7 @@ def _cmd_validate(args, services: Services) -> int:
             commits=commits, pass_commits=pass_commits,
             reviewed={int(number) for number in _recorded(key, "reviews")},
             sections={ref: row.get("section") for ref, row in key["rows"].items()},
+            context_ids=_context_ids(run_dir, args.key),
         )
     errors = closed + errors
     summary = {outcome: [] for outcome in fix_guard.REPORT_OUTCOMES}
@@ -1236,6 +1271,10 @@ def _cmd_validate(args, services: Services) -> int:
             )
             # The texts of a new report replace those an earlier review corrected.
             row.pop("corrections", None)
+            if entry.get("context_items"):
+                row["context_items"] = entry["context_items"]
+            else:
+                row.pop("context_items", None)
             if entry["outcome"] == "needs_command":
                 row["needs_command"] = entry["needs_command"]
             else:
@@ -1254,6 +1293,31 @@ def _cmd_validate(args, services: Services) -> int:
         "dev_checkout_changed": changed,
     })
     return EXIT_CONTEXT if errors else EXIT_OK
+
+
+def _context_ids(run_dir: Path, name: str) -> dict:
+    """Return {ref: [ids]} of the report points fix/candidates.json gave to the rows of a key.
+
+    A file that is absent or unreadable gives none: the report is then judged without points.
+    """
+    try:
+        candidates = json.loads((run_dir / "fix" / "candidates.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    entries = candidates.get("keys") if isinstance(candidates, dict) else None
+    found: dict = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if not (isinstance(entry, dict) and entry.get("key") == name):
+            continue
+        for row in fix_rows.key_rows(entry):
+            points = row.get("context_items")
+            ids = list(dict.fromkeys(
+                point["id"] for point in points if isinstance(point, dict)
+                and isinstance(point.get("id"), str)
+            )) if isinstance(points, list) else []
+            if ids and isinstance(row.get("ref"), int):
+                found[row["ref"]] = ids
+    return found
 
 
 def _pass_rows(key: dict, number: int) -> dict:
@@ -2177,7 +2241,10 @@ def _cmd_mr_body(args, services: Services) -> int:
     """Write mr-title.txt and mr.md, or mr-addition.md when the key already has an MR.
 
     One MR per pass and per repo: every section of the key must be settled or failed. The
-    description groups its rows by section, in the order of the commits (fix_mr.material).
+    description groups its rows by section, in the order of the commits (fix_mr.material). The
+    context documents add a « Rapport » line to each fixed row that has report points, their
+    disagreements to « Points d'attention » and the points no row holds to « Hors-scope »: only
+    names, dates, references and capped summaries, and the secret scan below covers them.
     """
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
@@ -2203,6 +2270,9 @@ def _cmd_mr_body(args, services: Services) -> int:
         key, candidates, _notion_rows(run_dir), _numbered(run_dir, key, "report"),
         _numbered(run_dir, key, "review"), _optional_key_json(run_dir, key, "checks.json"),
         changed, set(branch_refs), since=since, order=order,
+        linked=docs_link.report_points(run_dir),
+        unlinked=[point for item in docs_link.document_summaries(run_dir)
+                  for point in item["unlinked"]],
     )
     if key.get("mr"):
         text = fix_mr.addition(**found)
@@ -2875,6 +2945,7 @@ def _cmd_summary(args, services: Services) -> int:
     found = fix_summary.summary(
         project=_summary_project(state, context), state=state, candidates=candidates,
         checks=checks, replace_failed=failed, in_review=in_review,
+        context=_summary_context(run_dir, state),
     )
     labels = scan_text(f"{found['text']}\n{found['team_message']}", known_values_from_env())
     if labels:
@@ -2888,6 +2959,29 @@ def _cmd_summary(args, services: Services) -> int:
     fix_state.save(run_dir, state)
     _emit(found)
     return EXIT_OK
+
+
+def _summary_context(run_dir: Path, state: dict) -> Optional[dict]:
+    """Return what the synthesis says of the context documents, None when there is nothing.
+
+    The documents with ko points (docs_link.document_summaries, only capped fields) and the
+    disagreements between a report and the code in the keys the lead did not take over.
+    """
+    documents = docs_link.document_summaries(run_dir)
+    disagreements = sum(
+        fix_mr.count_disagreements(key["rows"])
+        for key in state["keys"].values() if not fix_state.is_left(key)
+    )
+    if not documents and not disagreements:
+        return None
+    return {
+        "documents": [
+            {"label": item["label"], "date": item["date"], "points": item["points"],
+             "linked": item["linked"], "unlinked": item["unlinked"]}
+            for item in documents
+        ],
+        "disagreements": disagreements,
+    }
 
 
 def _summary_project(state: dict, context: dict) -> str:

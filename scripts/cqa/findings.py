@@ -25,11 +25,16 @@ EVIDENCE_REQUIRED = {
     "page": ("url",),
     "tool": ("tool", "ref"),
     "http": ("url", "detail"),
+    "document": ("doc", "ref"),
 }
 PROBE_METHODS = ("GET", "HEAD")
 MAX_SUMMARY_LENGTH = 600
 MAX_FIELD_LENGTH = 400
 PHP_FILE_REASON = "fichier PHP hors des routes de l'application"
+DOCUMENT_ROW_PROBLEM = (
+    "ligne jugée d'après un document de contexte, à retirer du fichier "
+    "(seule une relance la juge à nouveau)"
+)
 
 # A PHP extension the server may run: not followed by a letter, digit, "_", "-" or "~", so
 # x.php.jpg, x.php%20 or x.php;.jpg count, unless a backup suffix ends the path (x.php.bak).
@@ -63,12 +68,21 @@ def worst(verdicts: Iterable[str]) -> str:
 
 
 def validate_document(
-    doc: dict, lot_refs: set[int], *, app_path: str = ""
+    doc: dict,
+    lot_refs: set[int],
+    *,
+    app_path: str = "",
+    optional_refs: frozenset = frozenset(),
+    forbidden_refs: frozenset = frozenset(),
 ) -> tuple[list[dict], list[str]]:
     """Return (valid findings, errors in French) for a findings/<lot>.json document.
 
     app_path is the path the application is served under, for the PHP rule of needs_probes
-    (see requests_php_file).
+    (see requests_php_file). optional_refs are rows of the lot that the file need not give (the
+    rows judged from a context document): one is never reported missing, but a finding the
+    file gives for it is validated like any other. forbidden_refs are rows of the lot that the
+    file must not give (the same rows, in a first-round or follow-up file: only a rerun judges
+    them again): a finding for one is an error and is never returned.
 
     Every problem of the document is reported in one pass, because the sub-agent gets to fix
     its file once. A finding is returned (as a deep copy) only when it has no problem. A ref
@@ -104,6 +118,8 @@ def validate_document(
         problems = _finding_problems(item, app_path)
         if _is_int(ref) and not in_lot:
             problems.insert(0, "Réf hors du lot")
+        elif in_lot and ref in forbidden_refs:
+            problems.append(DOCUMENT_ROW_PROBLEM)
         errors.extend(f"constat {label} : {problem}" for problem in problems)
         duplicate = in_lot and counts[ref] > 1
         if duplicate and ref not in reported:
@@ -113,7 +129,9 @@ def validate_document(
             seen.add(ref)
         if not problems and not duplicate:
             valid.append(copy.deepcopy(item))
-    errors.extend(f"constat manquant : {ref_label(ref)}" for ref in sorted(lot_refs - seen))
+    errors.extend(
+        f"constat manquant : {ref_label(ref)}" for ref in sorted(lot_refs - seen - optional_refs)
+    )
     return valid, errors
 
 

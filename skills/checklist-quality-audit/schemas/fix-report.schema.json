@@ -76,6 +76,13 @@
           "type": ["string", "null"],
           "maxLength": 400,
           "description": "Optional: what the reviewer should look at closely, in French (for a Semi-auto row, the À valider of the finding). A row given up after its commits starts with « Abandon : » and then holds 300 characters at most."
+        },
+        "context_items": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "array", "items": {"$ref": "#/$defs/context_item"}}
+          ],
+          "description": "fixed only: what became of each point of a context document (a third-party audit report) that the dispatch gave for the row, in the field context_items of the row. Required when the row has such points: one entry for each of them, none twice, none other. A row without such points leaves it out. Absent or null for any other outcome."
         }
       },
       "allOf": [
@@ -89,6 +96,10 @@
               "commits": {"minItems": 1}
             }
           }
+        },
+        {
+          "if": {"properties": {"outcome": {"enum": ["skipped", "question", "needs_command"]}}},
+          "then": {"properties": {"context_items": {"type": "null"}}}
         },
         {
           "if": {"properties": {"outcome": {"const": "skipped"}}},
@@ -109,6 +120,36 @@
           "then": {
             "required": ["needs_command"],
             "properties": {"needs_command": {"$ref": "#/$defs/needs_command"}}
+          }
+        }
+      ]
+    },
+    "context_item": {
+      "type": "object",
+      "required": ["id", "outcome"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Id of the point, as given in the context_items of the row (d1-004)."
+        },
+        "outcome": {
+          "enum": ["fixed", "already_ok", "not_found", "left"],
+          "description": "fixed: corrected by the commits of the row. already_ok: the code already meets the point, a disagreement with the report that the merge request mentions. not_found: the code the point names cannot be found, also a disagreement. left: not corrected in this repo, with the reason in the note."
+        },
+        "note": {
+          "type": ["string", "null"],
+          "maxLength": 300,
+          "description": "In French, 300 characters at most. Required for already_ok, not_found and left (what you saw in the code, or why the point is left); optional, or null, for fixed. A paraphrase: never a text of the report copied as it is."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"outcome": {"enum": ["already_ok", "not_found", "left"]}}},
+          "then": {
+            "required": ["note"],
+            "properties": {"note": {"type": "string", "minLength": 1}}
           }
         }
       ]

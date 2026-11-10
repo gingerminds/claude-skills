@@ -435,6 +435,44 @@ class ExcludedTest(unittest.TestCase):
         ]
         self.assertEqual(plan_for(rows, excluded=excluded)["ops"], [])
 
+    def test_out_of_scope_row_gets_no_operation_even_with_a_human_status(self):
+        human = make_row(ref=1, category="QUALITÉ", status="Mis en place", last_edited_by_bot=False)
+        todo = make_row(ref=2, category="QUALITÉ", technos=["Wordpress"])
+        kept = make_row(ref=3, category="SÉCURITÉ")
+        detail = "catégorie hors du périmètre (SÉCURITÉ)"
+        excluded = [make_excluded(row, "category", "skip", detail) for row in (human, todo)]
+        plan = plan_for(
+            [human, todo, kept],
+            [make_finding(ref=1), make_finding(ref=2), make_finding(ref=3)],
+            excluded=excluded,
+        )
+        self.assertEqual({op["ref"] for op in plan["ops"]}, {3})
+        self.assertEqual([state["ref"] for state in plan["rows"]], [3])
+        self.assertEqual(plan["summary"]["by_status_after"], {"À traiter": 1})
+        self.assertEqual(plan["summary"]["unknown"], [])
+        self.assertEqual(plan["summary"]["deferred"], [])
+        self.assertEqual(plan["summary"]["human_overrides"], [])
+
+    def test_out_of_scope_row_without_ref_is_left_out_of_the_states(self):
+        orphan = make_row(ref=None, page_id=f"{500:032x}", fiche_path=None, category="QUALITÉ")
+        excluded = {
+            "ref": None,
+            "page_id": orphan["page_id"],
+            "reason": "category",
+            "verdict": "skip",
+            "detail": "catégorie hors du périmètre (SÉCURITÉ)",
+            "tools": [],
+        }
+        plan = plan_for([orphan, make_row(ref=3)], excluded=[excluded])
+        self.assertEqual([state["ref"] for state in plan["rows"]], [3])
+
+    def test_out_of_scope_comes_with_the_plan_summary_of_the_scope_only(self):
+        inside = make_row(ref=1, category="SÉCURITÉ", status="À traiter")
+        outside = make_row(ref=2, category="QUALITÉ", status="En standby")
+        excluded = [make_excluded(outside, "category", "skip", "catégorie hors du périmètre (SÉCURITÉ)")]
+        plan = plan_for([inside, outside], [make_finding(ref=1)], excluded=excluded)
+        self.assertEqual(plan["summary"]["by_status_after"], {"À traiter": 1})
+
     def test_unmatched_row_exclusion_is_ignored(self):
         orphan = make_row(ref=None, page_id=f"{500:032x}", fiche_path=None)
         excluded = {

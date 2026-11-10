@@ -57,10 +57,11 @@
               {"$ref": "#/$defs/evidence_file"},
               {"$ref": "#/$defs/evidence_page"},
               {"$ref": "#/$defs/evidence_tool"},
-              {"$ref": "#/$defs/evidence_http"}
+              {"$ref": "#/$defs/evidence_http"},
+              {"$ref": "#/$defs/evidence_document"}
             ]
           },
-          "description": "What the verdict rests on. May be empty, but an ok without evidence is lowered to ok_human."
+          "description": "What the verdict rests on. May be empty, but an ok without evidence is lowered to ok_human. The sub-agents never write a document evidence: cqa_plan.py does, for the rows it judges from a context document."
         },
         "todo": {
           "type": ["string", "null"],
@@ -90,6 +91,10 @@
             "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
           },
           "description": "Optional. For each tool whose tools/<tool>/result.json or summary.json was read, the started_at of that result.json (ISO 8601 UTC, for example 2026-10-27T21:15:05Z or 2026-10-27T21:15:05.068Z). It lets a later run tell which rows rest on a tool that was rerun since."
+        },
+        "source": {
+          "const": "context_doc",
+          "description": "Optional. Set by cqa_plan.py only, on a finding it built from the verdict of a context document (findings/context-docs.json). The sub-agents never write it."
         },
         "in_repo": {
           "type": "boolean",
@@ -187,6 +192,24 @@
           "type": "string",
           "pattern": "\\S",
           "description": "What the response showed, in French (status, header, body excerpt without secrets)."
+        }
+      }
+    },
+    "evidence_document": {
+      "type": "object",
+      "required": ["type", "doc", "ref"],
+      "description": "Written by cqa_plan.py only, for a row judged from a context document (a third-party audit report, a pentest). Never write it.",
+      "properties": {
+        "type": {"const": "document"},
+        "doc": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Id of the context document in the run, for example d1."
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "What the verdict rests on in the document, paraphrased: the criteria (critères 7.3, 12.9) or the place of the finding. Never an excerpt of the document."
         }
       }
     },
