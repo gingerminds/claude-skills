@@ -23,7 +23,7 @@ from typing import Callable, NamedTuple, Optional
 from html.parser import HTMLParser
 from urllib.parse import urldefrag, urljoin, urlsplit
 
-from cqa import categories, context_docs, deferred, docs_read, fix_state, probes, report
+from cqa import categories, context_docs, deferred, docs_link, docs_read, fix_state, probes, report
 from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
 from cqa.findings import apply_guardrails, validate_document
 from cqa.git_tools import (
@@ -77,7 +77,8 @@ _MISSING_ROW = "constat manquant : "
 _RERUN_FILE = re.compile(r"(.+)-rerun-([0-9]{2})\.json")
 _MAX_COMMENT = 1500
 _EM_DASH = chr(0x2014)
-_CONTEXT_DOC_ACTIONS = ("add", "read", "merge", "ignore")
+_CONTEXT_DOC_ACTIONS = ("add", "read", "merge", "ignore", "link")
+_PROPOSED_BYTES = 1000000
 _CONTEXT_DOC_NUMBER = re.compile(r"d([0-9]+)")
 _ROW_RANGE = re.compile(r"([0-9]+)-([0-9]*)")
 _READ_CHARS = 20000
@@ -322,7 +323,7 @@ def _register_context_docs(commands) -> None:
     sub = _run_command(
         commands,
         "context-docs",
-        "documents de contexte : copie, lecture, fusion et contrôle",
+        "documents de contexte : copie, lecture, fusion, rattachement et contrôle",
         _cmd_context_docs,
     )
     sub.add_argument(
@@ -331,17 +332,36 @@ def _register_context_docs(commands) -> None:
         choices=_CONTEXT_DOC_ACTIONS,
         help="add : copie les fichiers dans le run ; read : lit une plage d'un document ; "
         "merge : fusionne le layout et les parties de l'importeur (items.json) ; "
-        "ignore : écarte le document",
+        "ignore : écarte le document ; "
+        "link : rattache les points des documents importés aux lignes de la checklist",
     )
     sub.add_argument(
         "targets",
         nargs="*",
         metavar="cible",
-        help="add : les fichiers à copier ; read, merge, ignore : l'identifiant du document (d1)",
+        help="add : les fichiers à copier ; read, merge, ignore : l'identifiant du document (d1) ; "
+        "link : aucune cible",
     )
     sub.add_argument("--sheet", default=None, metavar="NOM", help="read : feuille du classeur")
     sub.add_argument(
         "--rows", default=None, metavar="A-B", help="read : plage de lignes (1-150, ou 151- jusqu'à la fin)"
+    )
+    sub.add_argument(
+        "--proposed",
+        type=Path,
+        default=None,
+        metavar="FICHIER",
+        help="link : JSON {point: [Réf]} des rattachements proposés pour les points sans critère",
+    )
+    sub.add_argument(
+        "--detail",
+        action="store_true",
+        help="link : écrit context-docs/links.md (une ligne par point, à corriger puis valider)",
+    )
+    sub.add_argument(
+        "--accept",
+        action="store_true",
+        help="link : relit links.md s'il existe, valide les catégories et marque les liens validés",
     )
     sub.add_argument(
         "--check",
@@ -1418,8 +1438,15 @@ def _cmd_context_docs(args, services) -> int:
     run_dir = args.run_dir
     if not run_dir.is_dir():
         raise UsageError(f"Le dossier du run {run_dir} est introuvable.")
+    link_options = args.proposed is not None or args.detail or args.accept
     if args.check:
-        if args.action or args.targets or args.sheet is not None or args.rows is not None:
+        if (
+            args.action
+            or args.targets
+            or args.sheet is not None
+            or args.rows is not None
+            or link_options
+        ):
             raise UsageError("--check s'utilise seul : cqa_plan.py context-docs <run_dir> --check.")
         return _context_docs_check(run_dir)
     if not args.action:
@@ -1428,8 +1455,12 @@ def _cmd_context_docs(args, services) -> int:
         )
     if args.action != "read" and (args.sheet is not None or args.rows is not None):
         raise UsageError("--sheet et --rows ne s'utilisent qu'avec read.")
+    if args.action != "link" and link_options:
+        raise UsageError("--proposed, --detail et --accept ne s'utilisent qu'avec link.")
     if args.action == "add":
         return _context_docs_add(run_dir, args.targets)
+    if args.action == "link":
+        return _context_docs_link(run_dir, args)
     if len(args.targets) != 1:
         raise UsageError(f"{args.action} : indiquer un seul identifiant de document (d1).")
     entry = _context_doc_entry(run_dir, args.targets[0])
@@ -1646,6 +1677,117 @@ def _context_docs_check(run_dir: Path) -> int:
     if secrets:
         return EXIT_SECRET
     return EXIT_CONTEXT if errors else EXIT_OK
+
+
+def _context_docs_link(run_dir: Path, args) -> int:
+    if args.targets:
+        raise UsageError("link : aucune cible (cqa_plan.py context-docs <run_dir> link).")
+    if args.accept and (args.proposed is not None or args.detail):
+        raise UsageError("--accept s'utilise seul : cqa_plan.py context-docs <run_dir> link --accept.")
+    scope = _load_context(run_dir).get("category_filter")
+    scope = [name for name in scope if isinstance(name, str)] if isinstance(scope, list) else []
+    rows, _ = _read_rows(run_dir)
+    if args.accept:
+        return _context_docs_accept(run_dir, rows, scope or None)
+    proposed = _read_proposed(args.proposed) if args.proposed is not None else None
+    links = docs_link.link(run_dir, rows, scope or None, proposed)
+    docs_link.write_links(run_dir, links)
+    (run_dir / context_docs.FOLDER / docs_link.MARKDOWN_FILE).unlink(missing_ok=True)
+    if args.detail:
+        points = docs_link.imported_points(run_dir)
+        shown = {doc_id: points.get(doc_id, []) for doc_id in links["categories"]}
+        docs_link.write_markdown(run_dir, docs_link.render_markdown(links, shown))
+    _emit(_link_summary(run_dir, links, rows, scope or None))
+    return EXIT_OK
+
+
+def _read_proposed(path: Path) -> dict:
+    try:
+        if path.stat().st_size > _PROPOSED_BYTES:
+            raise UsageError(f"{path} : fichier de propositions trop volumineux.")
+        proposed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise UsageError(f"Propositions illisibles ({path}) : {error}") from None
+    if not isinstance(proposed, dict):
+        raise UsageError(f"{path} : un objet JSON {{point: [Réf]}} est attendu.")
+    return proposed
+
+
+def _link_summary(run_dir: Path, links: dict, rows: list, scope: Optional[list]) -> dict:
+    """Return the counts of the links, the points left to propose and the candidate rows."""
+    summary = docs_link.counts(links)
+    summaries = {
+        point["id"]: context_docs.clean_text(point.get("summary"))[: context_docs.LIMITS["summary"]]
+        for points in docs_link.imported_points(run_dir).values()
+        for point in points
+    }
+    summary["to_propose"] = [
+        {"id": point_id, "summary": summaries.get(point_id, "")} for point_id in links["to_propose"]
+    ]
+    pending = {point_id.split("-", 1)[0] for point_id in links["to_propose"]}
+    if pending:
+        candidates: dict = {}
+        for doc_id in sorted(pending):
+            for row in docs_link.candidate_rows(rows, links["categories"].get(doc_id, []), scope):
+                candidates[row["ref"]] = row
+        summary["candidates"] = [
+            {"ref": ref, "title": context_docs.clean_text(row.get("title"))[:120]}
+            for ref, row in sorted(candidates.items())
+        ]
+    return summary
+
+
+def _context_docs_accept(run_dir: Path, rows: list, scope: Optional[list]) -> int:
+    links = docs_link.read_links(run_dir, validated_only=False)
+    if not links:
+        raise UsageError(
+            "Aucun rattachement à valider : lancer d'abord cqa_plan.py context-docs <run_dir> link."
+        )
+    imported = set(docs_link.imported_points(run_dir))
+    links["categories"] = {
+        doc_id: names for doc_id, names in links["categories"].items() if doc_id in imported
+    }
+    for key in ("unlinked", "to_propose"):
+        links[key] = [point for point in links[key] if point.split("-", 1)[0] in imported]
+    links["links"] = {
+        point: entry
+        for point, entry in links["links"].items()
+        if point.split("-", 1)[0] in imported
+    }
+    markdown = run_dir / context_docs.FOLDER / docs_link.MARKDOWN_FILE
+    if markdown.is_file():
+        try:
+            text = markdown.read_text(encoding="utf-8")
+        except (OSError, ValueError) as error:
+            raise UsageError(f"links.md est illisible : {error}") from None
+        links = _apply_links_markdown(text, links, rows, scope)
+    links["unlinked"] = links["unlinked"] + [
+        point for point in links["to_propose"] if point not in links["unlinked"]
+    ]
+    links["to_propose"] = []
+    links["validated"] = True
+    docs_link.write_links(run_dir, links)
+    _emit({**docs_link.counts(links), "to_propose": []})
+    return EXIT_OK
+
+
+def _apply_links_markdown(text: str, links: dict, rows: list, scope: Optional[list]) -> dict:
+    """Return the links with the edits of links.md; its categories must be those of the copy."""
+    resolved: dict = {}
+    for doc_id, names in docs_link.markdown_categories(text).items():
+        found, unknown = categories.resolve(names, rows)
+        if unknown:
+            raise UsageError(f"links.md : {categories.unknown_message(unknown, rows)}")
+        resolved[doc_id] = found
+    wanted = {**links["categories"], **resolved}
+    names = sorted({name for listed in wanted.values() for name in listed})
+    candidates = {row["ref"] for row in docs_link.candidate_rows(rows, names, scope)}
+    try:
+        edited = docs_link.parse_markdown(text, links, candidates)
+    except ValueError as error:
+        raise UsageError(f"links.md : {error}") from None
+    edited["categories"].update(resolved)
+    return edited
 
 
 def _cmd_openapi_specs(args, services) -> int:

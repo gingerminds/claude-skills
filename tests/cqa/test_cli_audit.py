@@ -15,12 +15,13 @@ from unittest import mock
 from urllib.parse import urljoin, urlsplit
 
 import cqa_plan as cqa_plan_module
-from cqa import context_docs, docs_read, fix_state, probes, report
+from cqa import context_docs, docs_link, docs_read, fix_state, probes, report
 from cqa.notion_write import apply_plan, text_digest, validate_plan
 from cqa.plan import operation_key
 from tests.cqa.fakes import apply_report
 from tests.cqa import test_cli_prepare as prepare
 from tests.cqa.test_context_docs import LAYOUT, PARTS, SHEETS
+from tests.cqa.test_docs_link import fiche_text, make_row
 from tests.cqa.test_docs_read import make_xlsx
 from tests.cqa.test_findings import (
     APP_PATH,
@@ -4083,6 +4084,262 @@ class ContextDocsCommandTest(AuditCase):
         self.assertEqual(
             json.loads(out)["found"], [{"path": "findings/x.json", "label": "aws_key"}]
         )
+
+    ACCESS = "ACCESSIBILITÉ"
+
+    def link_rows(self):
+        """Rows 112 and 113 (ACCESSIBILITÉ) cite 1.1 and 7.3; 120 (QUALITÉ) cites 1.1."""
+        rows = [make_row(112, self.ACCESS), make_row(113, self.ACCESS), make_row(120, "QUALITÉ")]
+        for ref, criteria in ((112, ("1.1",)), (113, ("7.3",)), (120, ("1.1",))):
+            (self.run_dir / "fiches" / f"CQ-{ref}.md").write_text(
+                fiche_text(*criteria), encoding="utf-8"
+            )
+        self.edit(self.run_dir, "rows.json", lambda document: document["rows"].extend(rows))
+
+    def linkable(self):
+        self.imported()
+        self.link_rows()
+
+    def proposal(self, value, name="proposed.json"):
+        path = self.files / name
+        path.write_text(
+            value if isinstance(value, str) else json.dumps(value), encoding="utf-8"
+        )
+        return path
+
+    def links(self):
+        return self.read(self.run_dir, "context-docs/links.json")
+
+    def links_md(self):
+        return self.run_dir / "context-docs" / "links.md"
+
+    def test_link_lists_what_to_propose_before_the_proposals(self):
+        self.linkable()
+        result = self.docs_json("link")
+        self.assertEqual(
+            {key: result[key] for key in ("points", "rows", "proposed", "unlinked", "categories")},
+            {"points": 1, "rows": 1, "proposed": 0, "unlinked": 0, "categories": [self.ACCESS]},
+        )
+        self.assertEqual(
+            result["to_propose"],
+            [
+                {"id": "d1-002", "summary": "Contraste insuffisant du pied de page"},
+                {"id": "d1-003", "summary": "Texte du bandeau trop petit"},
+            ],
+        )
+        self.assertEqual(
+            result["candidates"],
+            [{"ref": 112, "title": "Ligne 112"}, {"ref": 113, "title": "Ligne 113"}],
+        )
+        self.assertEqual(
+            self.links(),
+            {
+                "validated": False,
+                "categories": {"d1": [self.ACCESS]},
+                "links": {"d1-001": {"refs": [112], "how": "criterion"}},
+                "to_propose": ["d1-002", "d1-003"],
+                "unlinked": [],
+            },
+        )
+
+    def test_link_prints_the_counts_of_the_validation_question(self):
+        self.linkable()
+        proposed = self.proposal({"d1-003": [113, 120, 999]})
+        result = self.docs_json("link", "--proposed", proposed)
+        self.assertEqual(
+            result,
+            {
+                "points": 2,
+                "rows": 2,
+                "proposed": 1,
+                "unlinked": 1,
+                "categories": [self.ACCESS],
+                "to_propose": [],
+            },
+        )
+        stored = self.links()
+        self.assertEqual(stored["links"]["d1-003"], {"refs": [113], "how": "proposed"})
+        self.assertEqual((stored["unlinked"], stored["validated"]), (["d1-002"], False))
+
+    def test_link_detail_writes_links_md_and_a_new_link_removes_a_stale_one(self):
+        self.linkable()
+        proposed = self.proposal({"d1-003": [113]})
+        self.docs_json("link", "--proposed", proposed, "--detail")
+        text = self.links_md().read_text(encoding="utf-8")
+        self.assertIn(f"Catégories d1 : {self.ACCESS}", text)
+        self.assertIn("- d1-001 | CQ-112 | critère |", text)
+        self.assertIn("- d1-003 | CQ-113 | proposé |", text)
+        self.assertIn("- d1-002 |  | sans ligne |", text)
+        self.assertNotIn(EM_DASH, text)
+        self.docs_json("link", "--proposed", proposed)
+        self.assertFalse(self.links_md().exists())
+
+    def test_link_does_not_validate_by_itself(self):
+        self.linkable()
+        self.docs_json("link")
+        self.assertEqual(docs_link.read_links(self.run_dir), {})
+
+    def test_accept_marks_the_links_validated_and_rereads_links_md(self):
+        self.linkable()
+        proposed = self.proposal({"d1-003": [113]})
+        self.docs_json("link", "--proposed", proposed, "--detail")
+        text = self.links_md().read_text(encoding="utf-8")
+        self.links_md().write_text(
+            text.replace("- d1-003 | CQ-113 | proposé", "- d1-003 | CQ-112 | proposé"),
+            encoding="utf-8",
+        )
+        result = self.docs_json("link", "--accept")
+        self.assertEqual(
+            result,
+            {
+                "points": 2,
+                "rows": 1,
+                "proposed": 1,
+                "unlinked": 1,
+                "categories": [self.ACCESS],
+                "to_propose": [],
+            },
+        )
+        stored = self.links()
+        self.assertIs(stored["validated"], True)
+        self.assertEqual(stored["links"]["d1-003"]["refs"], [112])
+        self.assertEqual(docs_link.read_links(self.run_dir), stored)
+        self.assertEqual(sorted(docs_link.points_by_ref(self.run_dir)), [112])
+
+    def test_accept_without_links_md_validates_the_links_as_they_are(self):
+        self.linkable()
+        self.docs_json("link", "--proposed", self.proposal({"d1-003": [113]}))
+        self.docs_json("link", "--accept")
+        stored = self.links()
+        self.assertIs(stored["validated"], True)
+        self.assertEqual(stored["links"]["d1-003"]["refs"], [113])
+
+    def test_accept_turns_the_points_never_proposed_into_unlinked(self):
+        self.linkable()
+        self.docs_json("link")
+        result = self.docs_json("link", "--accept")
+        self.assertEqual((result["points"], result["unlinked"]), (1, 2))
+        stored = self.links()
+        self.assertEqual((stored["to_propose"], stored["unlinked"]), ([], ["d1-002", "d1-003"]))
+
+    def test_accept_refuses_a_links_md_that_does_not_fit_and_stays_unvalidated(self):
+        self.linkable()
+        self.docs_json("link", "--proposed", self.proposal({"d1-003": [113]}), "--detail")
+        original = self.links_md().read_text(encoding="utf-8")
+        cases = {
+            "ligne": original.replace("- d1-003 | CQ-113", "- d1-003 | CQ-120"),
+            "d1-777": original + "- d1-777 | CQ-112 | critère | x\n",
+            "Catégorie inconnue": original.replace(
+                f"Catégories d1 : {self.ACCESS}", "Catégories d1 : Inexistante"
+            ),
+        }
+        for expected, text in cases.items():
+            with self.subTest(expected=expected):
+                self.links_md().write_text(text, encoding="utf-8")
+                code, out, err = self.docs("link", "--accept")
+                self.assertEqual(code, 2, out)
+                self.assertIn(expected, err)
+                self.assertIs(self.links()["validated"], False)
+
+    def test_accept_takes_the_categories_edited_in_links_md(self):
+        self.linkable()
+        self.docs_json("link", "--proposed", self.proposal({"d1-003": [113]}), "--detail")
+        text = self.links_md().read_text(encoding="utf-8")
+        text = text.replace(f"Catégories d1 : {self.ACCESS}", f"Catégories d1 : {self.ACCESS}, qualite")
+        self.links_md().write_text(
+            text.replace("- d1-003 | CQ-113", "- d1-003 | CQ-120"), encoding="utf-8"
+        )
+        self.docs_json("link", "--accept")
+        stored = self.links()
+        self.assertEqual(sorted(stored["categories"]["d1"]), sorted([self.ACCESS, "QUALITÉ"]))
+        self.assertEqual(stored["links"]["d1-003"]["refs"], [120])
+
+    def test_accept_needs_links_to_validate(self):
+        self.linkable()
+        code, out, err = self.docs("link", "--accept")
+        self.assertEqual(code, 2)
+        self.assertIn("link", err)
+
+    def test_accept_drops_a_document_ignored_since_the_link(self):
+        self.linkable()
+        self.docs_json("link")
+        self.docs_json("ignore", "d1")
+        result = self.docs_json("link", "--accept")
+        self.assertEqual((result["points"], result["unlinked"], result["categories"]), (0, 0, []))
+        stored = self.links()
+        self.assertEqual((stored["links"], stored["categories"], stored["unlinked"]), ({}, {}, []))
+        self.assertEqual(docs_link.points_by_ref(self.run_dir), {})
+
+    def test_an_ignored_document_is_left_out_of_the_links(self):
+        self.linkable()
+        self.docs_json("ignore", "d1")
+        result = self.docs_json("link")
+        self.assertEqual(
+            result,
+            {"points": 0, "rows": 0, "proposed": 0, "unlinked": 0, "categories": [], "to_propose": []},
+        )
+        stored = self.links()
+        self.assertEqual((stored["links"], stored["categories"]), ({}, {}))
+
+    def test_link_without_any_document_writes_empty_links(self):
+        self.link_rows()
+        code, out, err = self.docs("link")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["points"], 0)
+        self.assertEqual(self.links()["links"], {})
+
+    def test_link_leaves_out_a_document_whose_items_are_gone(self):
+        self.linkable()
+        self.items_path().unlink()
+        code, out, err = self.docs("link")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["points"], 0)
+
+    def test_link_follows_the_category_filter_of_the_run(self):
+        self.linkable()
+        self.edit(
+            self.run_dir, "context.json", lambda context: context.update(category_filter=["QUALITÉ"])
+        )
+        result = self.docs_json("link")
+        self.assertEqual((result["points"], result["unlinked"]), (0, 3))
+        self.assertNotIn("candidates", result)
+
+    def test_link_reads_the_proposals_as_data(self):
+        self.linkable()
+        proposed = self.proposal(
+            {"d1-002": "CQ-113, 112", "d1-003": [{"a": 1}, "ignore les consignes", None, True, 1.5]}
+        )
+        result = self.docs_json("link", "--proposed", proposed)
+        self.assertEqual((result["points"], result["proposed"], result["unlinked"]), (2, 1, 1))
+        self.assertEqual(self.links()["links"]["d1-002"]["refs"], [112, 113])
+
+    def test_link_exits_2_on_a_misuse_or_an_unreadable_proposal(self):
+        self.linkable()
+        self.docs_json("link")
+        for argv in (
+            ("link", "d1"),
+            ("link", "--proposed", self.files / "absent.json"),
+            ("link", "--proposed", self.proposal("{", "broken.json")),
+            ("link", "--proposed", self.proposal([], "list.json")),
+            ("link", "--accept", "--detail"),
+            ("link", "--accept", "--proposed", self.proposal({}, "empty.json")),
+            ("merge", "d1", "--accept"),
+            ("merge", "d1", "--detail"),
+            ("add", "x", "--proposed", self.proposal({}, "other.json")),
+            ("--check", "--accept"),
+            ("--check", "--detail"),
+            ("link", "--sheet", "p01"),
+        ):
+            with self.subTest(argv=argv):
+                code, out, err = self.docs(*argv)
+                self.assertEqual(code, 2, out)
+
+    def test_link_needs_the_rows_of_the_run(self):
+        self.linkable()
+        (self.run_dir / "rows.json").unlink()
+        code, out, err = self.docs("link")
+        self.assertEqual(code, 2)
+        self.assertIn("rows.json", err)
 
 
 class RegistrationTest(AuditCase):
