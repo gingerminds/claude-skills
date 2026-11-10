@@ -757,6 +757,16 @@ python3 "$S/cqa_fix.py" stack-core "$RUN" --repo <repo>
 
 `found` true: nothing to ask. `found` false: ask « Cœur WordPress pour les sous-agents ? » (« Cœur Drupal pour les sous-agents ? » for Drupal), saying that a folder is typed in « Autre », with « Télécharger la version <x> » (only for WordPress with a known `version`: `stack-core "$RUN" --repo <repo> --download`, the official release, its checksum checked, into the shared cache), « Indiquer un dossier » (the folder typed in « Autre », else asked next: `stack-core "$RUN" --repo <repo> --path <dossier>`) and « Continuer sans » (the sub-agents rely on how the repo calls the core). Exit 2 (a folder without the core, a version unknown) or 5 (a download refused, nothing kept): show the message and ask again. The chosen folder is recorded per repo in `fix/stack-core.json`, `open` carries into `fix/state.json` (`stack_core`) the records whose folder still exists (its `notes` name the others, gone since: run `stack-core` again for them before the pass), and both sub-agents only read it (read-only).
 
+Check commands of the project (install, build, lint, test), one call for all the repos. They are detected from the CI (`.gitlab-ci.yml`, read offline in the toolbox) then from the manifests; nothing is run here. It writes `fix/commands.json` and prints `{"repos": {"<repo>": {"commands", "notes"}}, "images": [<images the local Docker lacks>]}`; `open` carries the commands of each repo into `fix/state.json` (`check_commands`, an empty list without the file):
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" commands "$RUN"
+```
+
+Run it again with `--drop <name>` (a command to remove), `--add "<repo>|<dir>|<image>|<kind>|<command>"` or `--none` to apply the lead's choice, before `open`.
+
 Commit signing, one call per repo (`path` of `context.json`):
 
 ```bash

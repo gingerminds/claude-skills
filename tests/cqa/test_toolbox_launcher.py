@@ -1208,6 +1208,42 @@ class PullImageTest(LauncherCase):
         self.assertIn("Docker", result.stderr)
 
 
+class ImagePresentTest(LauncherCase):
+    """image-present <image>: exit 0 present, 1 absent, 2 refused name or no answer from Docker."""
+
+    def test_image_present_answers_by_the_exit_code(self):
+        result = self.launch("image-present", "node:18-alpine")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([["image", "inspect", "node:18-alpine"]], self.calls())
+        self.log.unlink()
+        result = self.launch("image-present", "node:18-alpine", CQA_STUB_MISSING="node")
+        self.assertEqual(1, result.returncode, result.stderr)
+        self.assertEqual([["image", "inspect", "node:18-alpine"], ["version"]], self.calls())
+
+    def test_image_present_refuses_names_and_usage_without_calling_docker(self):
+        for image in ("", "-x", "--all", "node:18 --all", "node;id", "a/../b", "$X"):
+            with self.subTest(image=image):
+                self.assertEqual(2, self.launch("image-present", image).returncode)
+        self.assertEqual(2, self.launch("image-present").returncode)
+        self.assertEqual(2, self.launch("image-present", "node", "alpine").returncode)
+        self.assertEqual([], self.calls())
+
+    def test_a_daemon_that_does_not_answer_is_not_an_absent_image(self):
+        result = self.launch("image-present", "node:18-alpine", CQA_STUB_FAIL="image inspect",
+                             CQA_STUB_NO_DAEMON="1")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Docker ne répond pas", result.stderr)
+
+    def test_image_present_without_docker_exits_2(self):
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        for name in ("python3", "uname", "dirname", "basename", "id"):
+            (bin_dir / name).symlink_to(shutil.which(name))
+        result = self.launch("image-present", "node:18-alpine", path=str(bin_dir))
+        self.assertEqual(2, result.returncode)
+        self.assertIn("Docker", result.stderr)
+
+
 class RefusalsTest(LauncherCase):
     def test_usage_errors(self):
         for args in (

@@ -10,6 +10,7 @@
 #   cqa-toolbox.sh ci-json <repo_dir> <out_file>
 #   cqa-toolbox.sh exec <worktree> <log_file> <image> <workdir> <on|off> <timeout_s> -- <command>
 #   cqa-toolbox.sh pull-image <image>
+#   cqa-toolbox.sh image-present <image>
 #
 # Exit codes: 0 success, 1 tool failure, 2 usage or environment; "run" passes through the
 # exit code of the tool container. Secret values never appear on a command line: they are
@@ -62,6 +63,7 @@ usage() {
   say "  cqa-toolbox.sh ci-json <dossier_du_repo> <fichier_de_sortie>"
   say "  cqa-toolbox.sh exec <worktree> <journal> <image> <dossier> <on|off> <delai_s> -- <commande>"
   say "  cqa-toolbox.sh pull-image <image>"
+  say "  cqa-toolbox.sh image-present <image>"
   say "Outils : ${ALL_TOOLS[*]}"
   exit 2
 }
@@ -1127,6 +1129,20 @@ cmd_pull_image() {
   fi
 }
 
+# image-present <image>: exit 0 when the image is in the local Docker store, 1 when it is absent,
+# 2 for a refused name or when Docker does not answer. Nothing is pulled.
+cmd_image_present() {
+  [ "$#" -eq 1 ] || usage
+  valid_image_ref "$1" || die "Le nom d'image « $1 » ne convient pas."
+  require_docker
+  if docker image inspect "$1" >/dev/null 2>&1 </dev/null; then
+    return 0
+  fi
+  docker version >/dev/null 2>&1 </dev/null \
+    || die "Docker ne répond pas : démarrez Docker Desktop ou le service Docker."
+  return 1
+}
+
 main() {
   [ "$#" -ge 1 ] || usage
   local sub="$1"
@@ -1147,6 +1163,7 @@ main() {
     ci-json) cmd_ci_json "$@" ;;
     exec) cmd_exec "$@" ;;
     pull-image) cmd_pull_image "$@" ;;
+    image-present) cmd_image_present "$@" ;;
     *) usage ;;
   esac
 }

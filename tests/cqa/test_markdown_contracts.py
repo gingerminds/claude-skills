@@ -270,7 +270,8 @@ class SkillTest(unittest.TestCase):
             "cqa-toolbox.sh": _toolbox_commands(),
         }
         self.assertEqual(set(known["cqa-toolbox.sh"]),
-                         {"doctor", "pull", "run", "all", "check", "secrets", "ci-json", "exec", "pull-image"})
+                         {"doctor", "pull", "run", "all", "check", "secrets", "ci-json", "exec", "pull-image",
+                          "image-present"})
         found = set()
         for path in _skill_files():
             for cli, command, rest in _CLI_CALL.findall(_text(path)):

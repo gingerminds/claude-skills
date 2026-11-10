@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import quote
 
-from cqa import deferred, git_tools, fix_checks, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_stack, fix_state, fix_summary
+from cqa import deferred, git_tools, fix_checks, fix_commands, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_stack, fix_state, fix_summary
 from cqa.checklist import STATUS_REVIEW, parse_refs, ref_label
 from cqa.notion_read import write_json, write_text
 from cqa.project import project_name
@@ -51,6 +51,9 @@ LEFT_KEY = ("La clé {name} est laissée au lead ({reason}) : {command} ne la to
             "problème réglé : cqa_fix.py leave <run_dir> {name} --clear. Rien n'a changé.")
 LINKS_FILE = "fix/mr-links.json"
 STACK_CORE_FILE = "fix/stack-core.json"
+COMMANDS_FILE = "fix/commands.json"
+ADD_FORMAT = "--add attend « <repo>|<dossier>|<image>|<type>|<commande> » (type : install, build, lint ou test)."
+DOCKER_UNCHECKED = "Docker ne répond pas : présence des images non vérifiée."
 KEY_HELP = "clé de la passe : le nom du repo (fix/candidates.json)"
 SECTION_HELP = "alias de la section (securite, qualite...)"
 # Push settings of the dev's config that could send more than the branch, trigger GitLab
@@ -115,6 +118,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("--refs", default="", help="Réf à ajouter, séparées par des virgules (CQ-12)")
     sub.add_argument("--without", default="", help="Réf à retirer, séparées par des virgules")
+    sub = _command(commands, "commands",
+                   "commandes de vérification du projet, détectées depuis sa CI et ses manifestes",
+                   _cmd_commands)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("--drop", action="append", default=[], metavar="NOM",
+                     help="nom d'une commande à retirer (répétable)")
+    sub.add_argument("--add", action="append", default=[], metavar="REPO|DOSSIER|IMAGE|TYPE|COMMANDE",
+                     help="commande à ajouter (répétable)")
+    sub.add_argument("--none", action="store_true", help="aucune commande de vérification")
     sub = _command(commands, "open", "ouvre une passe de correction", _cmd_open)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("--mode", required=True, choices=fix_state.MODES)
@@ -584,6 +596,152 @@ def _flights(repos: list, access: list, run) -> dict:
     return flights
 
 
+def _cmd_commands(args, services: Services) -> int:
+    run_dir = args.run_dir.resolve()
+    if args.none and (args.drop or args.add):
+        raise UsageError("--none ne se combine ni avec --drop ni avec --add.")
+    context = _load_context(run_dir)
+    repos = [repo for repo in context.get("repos") or [] if isinstance(repo, dict)]
+    if not repos:
+        raise ContextError("context.json : aucun repo à analyser.")
+    for repo in repos:
+        if not isinstance(repo.get("name"), str) or not repo["name"]:
+            raise ContextError("context.json : un repo n'a pas de nom (« name »).")
+        if not isinstance(repo.get("path"), str) or not repo["path"]:
+            raise ContextError(
+                f"context.json : le repo « {repo['name']} » n'a pas de chemin (« path »).")
+    additions = [_addition(text, repos) for text in args.add]
+    (run_dir / "fix").mkdir(exist_ok=True)
+    found = {}
+    for index, repo in enumerate(repos):
+        found[repo["name"]] = ({"commands": [], "notes": []} if args.none
+                               else _detect_repo(run_dir, index, repo, services.run))
+    _drop_commands(found, args.drop)
+    for name, command in additions:
+        taken = {item["name"] for item in found[name]["commands"]}
+        label, number = command["name"], 1
+        while command["name"] in taken:
+            number += 1
+            command["name"] = f"{label} ({number})"
+        found[name]["commands"].append(command)
+    images = list(dict.fromkeys(
+        item["image"] for entry in found.values() for item in entry["commands"]))
+    absent, answered = _absent_images(images, services.run)
+    if not answered:
+        for entry in found.values():
+            if entry["commands"]:
+                entry["notes"].append(DOCKER_UNCHECKED)
+    result = {"repos": found, "images": absent}
+    write_json(run_dir / COMMANDS_FILE, result)
+    _emit(result)
+    return EXIT_OK
+
+
+def _detect_repo(run_dir: Path, index: int, repo: dict, run) -> dict:
+    path = Path(repo["path"])
+    if not path.is_dir():
+        return {"commands": [], "notes": [f"Repo « {repo['name']} » : dossier introuvable ({path})."]}
+    ci, notes = None, []
+    if (path / fix_commands.CI_FILE).is_file():
+        ci, note = _read_ci(run_dir, index, path, run)
+        if note:
+            notes.append(note)
+    detected = fix_commands.detect(path, ci, skip=tuple(_third_party(repo)))
+    return {"commands": detected["commands"], "notes": notes + detected["notes"]}
+
+
+def _read_ci(run_dir: Path, index: int, path: Path, run) -> tuple:
+    """Return (the .gitlab-ci.yml of a repo as a dict, None), or (None, the note that says why it
+    was not read: ci-json of the launcher, offline in a read-only container)."""
+    out = run_dir / "fix" / f"ci-{index}.json"
+    unread = f"{fix_commands.CI_FILE} non lu"
+    try:
+        done = run(["bash", str(LAUNCHER), "ci-json", str(path), str(out)],
+                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except OSError as error:
+        return None, f"{unread} : {error}"
+    if done.returncode == 3:
+        return None, None
+    if done.returncode != 0:
+        lines = [line.strip() for line in (done.stderr or "").splitlines() if line.strip()]
+        return None, f"{unread} : {lines[0][:300] if lines else f'code {done.returncode}'}"
+    try:
+        return json.loads(out.read_text(encoding="utf-8")), None
+    except (OSError, ValueError):
+        return None, f"{unread} : conversion illisible."
+
+
+def _drop_commands(found: dict, dropped: list) -> None:
+    """Remove the commands named by --drop from every repo; an unknown name exits 2."""
+    known = [item["name"] for entry in found.values() for item in entry["commands"]]
+    unknown = [name for name in dropped if name not in known]
+    if unknown:
+        raise UsageError(
+            f"--drop : commande inconnue : {', '.join(unknown)} (commandes détectées : "
+            f"{', '.join(dict.fromkeys(known)) or 'aucune'}).")
+    for entry in found.values():
+        entry["commands"] = [item for item in entry["commands"] if item["name"] not in dropped]
+
+
+def _addition(text: str, repos: list) -> tuple:
+    """Return (repo name, command) of an --add value, or exit 2 with the reason."""
+    parts = [part.strip() for part in text.split("|", 4)]
+    if len(parts) != 5:
+        raise UsageError(f"--add « {text} » : {ADD_FORMAT}")
+    name, folder, image, kind, command = parts
+    if name not in [repo["name"] for repo in repos]:
+        raise UsageError(f"--add : repo inconnu « {name} » (repos : "
+                         f"{', '.join(repo['name'] for repo in repos)}).")
+    cleaned = fix_commands.clean_dir(folder)
+    if cleaned is None:
+        raise UsageError(f"--add : dossier « {folder} » : un chemin relatif au repo est attendu.")
+    if not fix_commands.valid_image(image):
+        raise UsageError(f"--add : image « {image} » invalide.")
+    if kind not in fix_commands.KINDS:
+        raise UsageError(f"--add : type « {kind} » inconnu ({', '.join(fix_commands.KINDS)}).")
+    if not command or "\0" in command:
+        raise UsageError("--add : la commande est vide.")
+    return name, {"name": f"ajout : {command[:60]}", "dir": cleaned, "image": image, "kind": kind,
+                  "command": command, "env": {}, "source": "ajouté par le lead", "private": False}
+
+
+def _absent_images(images: list, run) -> tuple:
+    """Return (the images the local Docker does not have, whether Docker could answer)."""
+    absent = []
+    for image in images:
+        try:
+            done = run(["bash", str(LAUNCHER), "image-present", image],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+        except OSError:
+            return [], False
+        if done.returncode == 1:
+            absent.append(image)
+        elif done.returncode != 0:
+            return [], False
+    return absent, True
+
+
+def _chosen_commands(run_dir: Path, repos: list) -> dict:
+    """Return {repo: [command, ...]} from fix/commands.json: the commands the lead validated, []
+    for a repo it does not list or without the file; exit 2 for a file that cannot be trusted."""
+    if not (run_dir / COMMANDS_FILE).is_file():
+        return {name: [] for name in repos}
+    document = _read_run_json(run_dir, COMMANDS_FILE, "cqa_fix.py commands")
+    listed = document.get("repos")
+    if not isinstance(listed, dict):
+        raise UsageError(f"{COMMANDS_FILE} : l'objet « repos » est attendu, relancez cqa_fix.py commands.")
+    chosen = {}
+    for name in repos:
+        entry = listed.get(name)
+        commands = entry.get("commands", []) if isinstance(entry, dict) else []
+        if not isinstance(commands, list) or not all(map(fix_commands.valid_command, commands)):
+            raise UsageError(
+                f"{COMMANDS_FILE} : les commandes du repo « {name} » sont invalides, relancez "
+                "cqa_fix.py commands.")
+        chosen[name] = commands
+    return chosen
+
+
 def _cmd_open(args, services: Services) -> int:
     run_dir = args.run_dir.resolve()
     old = _read_state(run_dir, required=False)
@@ -600,6 +758,7 @@ def _cmd_open(args, services: Services) -> int:
         )
     except (KeyError, TypeError, AttributeError, ValueError):
         raise UsageError("fix/candidates.json : clés invalides, relancez cqa_fix.py candidates.")
+    state["check_commands"] = _chosen_commands(run_dir, [key["repo"] for key in state["keys"].values()])
     records, notes = _present_stack_records(run_dir)
     if records:
         state["stack_core"] = records

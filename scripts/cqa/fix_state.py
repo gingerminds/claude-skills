@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from cqa import fix_names
+from cqa import fix_commands, fix_names
 from cqa.notion_read import write_json
 
 STATE_FILE = "fix/state.json"
@@ -103,6 +103,11 @@ def load(run_dir: Path) -> dict:
         raise StateError(f"{STATE_FILE} : un objet avec « keys » est attendu.")
     if state.get("stage") not in STAGES or state.get("push") not in PUSHES:
         raise StateError(f"{STATE_FILE} : « stage » ou « push » inconnu.")
+    if not _commands_ok(state.get("check_commands")):
+        raise StateError(
+            f"{STATE_FILE} : « check_commands » est invalide : null ou absent, ou un objet "
+            "{\"<repo>\": [commande, ...]} écrit par cqa_fix.py open est attendu."
+        )
     for name, key in state["keys"].items():
         if (
             not isinstance(key, dict)
@@ -124,6 +129,23 @@ def load(run_dir: Path) -> dict:
                 "{\"reason\", \"at\"} écrit par cqa_fix.py leave, est attendu."
             )
     return state
+
+
+def _commands_ok(value) -> bool:
+    """True for no check commands (an older state), or {repo: [command, ...]} with every command
+    of fix_commands.valid_command."""
+    if value is None:
+        return True
+    return isinstance(value, dict) and all(
+        isinstance(repo, str) and _REPO.fullmatch(repo) is not None and isinstance(items, list)
+        and all(fix_commands.valid_command(item) for item in items)
+        for repo, items in value.items()
+    )
+
+
+def check_commands(state: dict, repo: str) -> list:
+    """Return the check commands the lead validated for a repo ([] for a state without any)."""
+    return list((state.get("check_commands") or {}).get(repo) or [])
 
 
 def _left_ok(value) -> bool:

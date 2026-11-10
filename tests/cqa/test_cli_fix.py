@@ -786,6 +786,294 @@ class MergedTest(FixCase):
                       result["notes"])
 
 
+class LauncherFake:
+    """Answers the launcher calls of the commands command (ci-json, image-present) without
+    Docker. ci maps a repo path to the document ci-json writes (absent: exit 3)."""
+
+    def __init__(self, ci=None, missing=(), ci_code=0, ci_error="", image_code=None):
+        self.ci = ci or {}
+        self.missing = set(missing)
+        self.ci_code, self.ci_error, self.image_code = ci_code, ci_error, image_code
+        self.calls = []
+
+    def __call__(self, command, **kwargs):
+        self.calls.append(list(command))
+        if command[:2] != ["bash", str(cqa_fix.LAUNCHER)]:
+            raise AssertionError(f"unexpected call: {command}")
+        if command[2] == "ci-json":
+            if self.ci_code != 0:
+                return subprocess.CompletedProcess(command, self.ci_code, "", self.ci_error)
+            if command[3] not in self.ci:
+                return subprocess.CompletedProcess(command, 3, "", "ci-json : introuvable\n")
+            Path(command[4]).write_text(json.dumps(self.ci[command[3]]), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[2] == "image-present":
+            code = self.image_code if self.image_code is not None else (
+                1 if command[3] in self.missing else 0)
+            return subprocess.CompletedProcess(command, code, "", "")
+        raise AssertionError(f"unexpected launcher command: {command}")
+
+    def images(self):
+        return [call[3] for call in self.calls if call[2] == "image-present"]
+
+    def ci_calls(self):
+        return [call for call in self.calls if call[2] == "ci-json"]
+
+
+def write_file(root, path, content):
+    target = Path(root) / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content if isinstance(content, str) else json.dumps(content),
+                      encoding="utf-8")
+
+
+def tree(root):
+    return sorted(str(path.relative_to(root)) for path in Path(root).rglob("*"))
+
+
+class CommandsTest(FixCase):
+    PINNED = "node:18-alpine@sha256:" + "cd34" * 16
+    CI = {
+        "stages": ["build", "deploy"],
+        "build:npm": {"stage": "build", "image": PINNED, "variables": {"NPM_DIRECTORY": "web/assets"},
+                      "before_script": "cd $NPM_DIRECTORY",
+                      "script": ["npm ci", "npx gulp production", "cd $CI_PROJECT_DIR"]},
+        "deploy": {"stage": "deploy", "image": "node:18-alpine", "script": ["npm run deploy"]},
+    }
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.run_dir = root / "run"
+        (self.run_dir / "fix").mkdir(parents=True)
+        self.front, self.back = root / "front", root / "back"
+        write_file(self.front, ".gitlab-ci.yml", "stages: [build]\n")
+        write_file(self.front, ".nvmrc", "20\n")
+        write_file(self.front, "package.json", {"scripts": {"lint": "eslint ."}})
+        write_file(self.front, "package-lock.json", "{}")
+        write_file(self.back, "composer.json", {"scripts": {"test": "phpunit"}})
+        self.write_context()
+        rows = [{"ref": 3, "title": "Trois"}]
+        candidates = {"keys": [
+            {"key": name, "repo": name, "push_ready": False, "sections": [
+                {"category": "SÉCURITÉ", "alias": "securite", "rows": rows}]}
+            for name in ("front", "back")], "left": [], "flights": {}, "notes": [], "estimate_min": 1}
+        write_file(self.run_dir, "fix/candidates.json", candidates)
+
+    def write_context(self, **extra_back):
+        write_file(self.run_dir, "context.json", {
+            "project": {"slug": "boutique", "name": "Boutique Exemple", "protection": None},
+            "repos": [{"name": "front", "path": str(self.front)},
+                      {"name": "back", "path": str(self.back), **extra_back}]})
+
+    def commands(self, *options, launcher=None):
+        self.launcher = launcher or LauncherFake({str(self.front): self.CI}, missing={"composer:2"})
+        code, out, err = self.run_main(["commands", self.run_dir, *options], run=self.launcher)
+        return code, out, err
+
+    def listed(self):
+        return json.loads((self.run_dir / "fix" / "commands.json").read_text(encoding="utf-8"))
+
+    def open(self):
+        return self.run_main(["open", self.run_dir, "--mode", "present", "--push", "mr",
+                              "--notion", "no"])
+
+    def state(self):
+        return json.loads((self.run_dir / "fix" / "state.json").read_text(encoding="utf-8"))
+
+    def test_commands_writes_the_list_and_open_carries_it(self):
+        before = tree(self.front), tree(self.back)
+        code, out, err = self.commands(launcher=None)
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result, self.listed())
+        self.assertEqual(list(result), ["repos", "images"])
+        front, back = result["repos"]["front"], result["repos"]["back"]
+        self.assertEqual([(item["name"], item["kind"], item["dir"]) for item in front["commands"]], [
+            ("build:npm (install)", "install", ""), ("build:npm", "build", ""),
+            ("npm ci", "install", ""), ("npm run lint", "lint", "")])
+        self.assertEqual(front["commands"][1], {
+            "name": "build:npm", "dir": "", "image": self.PINNED, "kind": "build",
+            "command": "cd $NPM_DIRECTORY && npx gulp production && cd /work",
+            "env": {"NPM_DIRECTORY": "web/assets"}, "source": ".gitlab-ci.yml (build:npm)",
+            "private": False})
+        self.assertEqual(front["commands"][3]["image"], "node:20-alpine")
+        self.assertEqual(len(front["notes"]), 1)
+        self.assertIn("deploy", front["notes"][0])
+        self.assertEqual([(item["name"], item["image"], item["dir"]) for item in back["commands"]], [
+            ("composer install", "composer:2", ""), ("composer test", "composer:2", "")])
+        self.assertEqual(back["notes"], [])
+        self.assertEqual(result["images"], ["composer:2"])
+        self.assertEqual(sorted(self.launcher.images()),
+                         sorted(["composer:2", "node:20-alpine", self.PINNED]))
+        ci_calls = self.launcher.ci_calls()
+        self.assertEqual(len(ci_calls), 1)
+        self.assertEqual(ci_calls[0][3], str(self.front))
+        self.assertTrue(Path(ci_calls[0][4]).is_relative_to(self.run_dir))
+        self.assertEqual((tree(self.front), tree(self.back)), before)
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.state()["check_commands"],
+                         {"front": front["commands"], "back": back["commands"]})
+
+    def test_commands_drop_add_and_none(self):
+        code, out, err = self.commands(
+            "--drop", "npm run lint", "--drop", "build:npm (install)",
+            "--add", "front|web|node:20-alpine|test|npm test",
+            "--add", "back||composer:2|lint|composer cs | tee log")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result, self.listed())
+        front, back = result["repos"]["front"]["commands"], result["repos"]["back"]["commands"]
+        self.assertEqual([item["name"] for item in front],
+                         ["build:npm", "npm ci", "ajout : npm test"])
+        self.assertEqual(front[2], {
+            "name": "ajout : npm test", "dir": "web", "image": "node:20-alpine", "kind": "test",
+            "command": "npm test", "env": {}, "source": "ajouté par le lead", "private": False})
+        self.assertEqual((back[2]["kind"], back[2]["command"]), ("lint", "composer cs | tee log"))
+        self.assertEqual(result["images"], ["composer:2"])
+        code, out, err = self.commands("--none")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {
+            "repos": {"front": {"commands": [], "notes": []}, "back": {"commands": [], "notes": []}},
+            "images": []})
+        self.assertEqual(self.launcher.calls, [])
+        self.assertEqual(self.listed(), json.loads(out))
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.state()["check_commands"], {"front": [], "back": []})
+
+    def test_commands_refuses_unknown_drops_and_malformed_additions(self):
+        self.assertEqual(self.commands()[0], 0)
+        kept = self.listed()
+        code, out, err = self.commands("--drop", "npm run nothing")
+        self.assertEqual(code, 2)
+        self.assertIn("npm run nothing", err)
+        self.assertIn("npm ci", err)
+        for value in ("front|web|node:20-alpine|test", "nope||node:20-alpine|test|npm test",
+                      "front||node:20-alpine|deploy|npm test", "front|/abs|node:20-alpine|test|x",
+                      "front|../x|node:20-alpine|test|x", "front||-x|test|x",
+                      "front||node:20-alpine|test|   ", "front|a:b|node:20-alpine|test|x",
+                      "front||a b|test|x", ""):
+            with self.subTest(add=value):
+                code, out, err = self.commands("--add", value)
+                self.assertEqual(code, 2, (value, out))
+                self.assertTrue(err.strip())
+        code, out, err = self.commands("--none", "--add", "front||node:20-alpine|test|npm test")
+        self.assertEqual(code, 2)
+        code, out, err = self.commands("--none", "--drop", "npm ci")
+        self.assertEqual(code, 2)
+        self.assertEqual(self.listed(), kept)
+
+    def test_commands_notes_a_ci_that_cannot_be_read_and_goes_on_with_the_manifests(self):
+        for code_, error in ((1, "ci-json : .gitlab-ci.yml est invalide : bad indentation\n"),
+                             (2, "L'image agence de la boîte à outils est absente (x)\n")):
+            with self.subTest(code=code_):
+                code, out, err = self.commands(launcher=LauncherFake(ci_code=code_, ci_error=error))
+                self.assertEqual(code, 0, err)
+                front = json.loads(out)["repos"]["front"]
+                self.assertEqual([item["name"] for item in front["commands"]],
+                                 ["npm ci", "npm run lint"])
+                self.assertEqual(len(front["notes"]), 1)
+                self.assertIn(".gitlab-ci.yml non lu", front["notes"][0])
+                self.assertIn(error.splitlines()[0], front["notes"][0])
+
+    def test_commands_without_docker_lists_no_image_and_says_so(self):
+        code, out, err = self.commands(
+            launcher=LauncherFake({str(self.front): self.CI}, image_code=2))
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(result["images"], [])
+        for name in ("front", "back"):
+            self.assertIn("non vérifiée", " ".join(result["repos"][name]["notes"]))
+        self.assertEqual(len(self.launcher.images()), 1)
+
+    def test_commands_skips_third_party_paths_and_missing_folders(self):
+        write_file(self.back, "vendor-libs/composer.json", {"scripts": {"test": "x"}})
+        self.assertEqual(self.commands()[0], 0)
+        self.assertEqual({item["dir"] for item in self.listed()["repos"]["back"]["commands"]},
+                         {"", "vendor-libs"})
+        self.write_context(third_party_paths=["vendor-libs"])
+        self.assertEqual(self.commands()[0], 0)
+        self.assertEqual({item["dir"] for item in self.listed()["repos"]["back"]["commands"]}, {""})
+        write_file(self.run_dir, "context.json", {"repos": [
+            {"name": "back", "path": str(self.back), "third_party_paths": "vendor-libs"}]})
+        self.assertEqual(self.commands()[0], 6)
+        write_file(self.run_dir, "context.json", {"repos": [
+            {"name": "front", "path": str(self.front)},
+            {"name": "gone", "path": str(self.front.parent / "gone")}]})
+        code, out, err = self.commands()
+        self.assertEqual(code, 0, err)
+        gone = json.loads(out)["repos"]["gone"]
+        self.assertEqual(gone["commands"], [])
+        self.assertIn("introuvable", gone["notes"][0])
+
+    def test_commands_needs_a_valid_context(self):
+        (self.run_dir / "context.json").unlink()
+        self.assertEqual(self.commands()[0], 6)
+        write_file(self.run_dir, "context.json", {"repos": []})
+        self.assertEqual(self.commands()[0], 6)
+        write_file(self.run_dir, "context.json", {"repos": [{"name": "front"}]})
+        self.assertEqual(self.commands()[0], 6)
+        self.assertFalse((self.run_dir / "fix" / "commands.json").exists())
+
+    def test_open_without_commands_file_keeps_an_empty_list(self):
+        self.assertFalse((self.run_dir / "fix" / "commands.json").exists())
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.state()["check_commands"], {"front": [], "back": []})
+
+    def test_open_refuses_a_commands_file_it_cannot_trust_before_touching_anything(self):
+        path = self.run_dir / "fix" / "commands.json"
+        good = {"name": "npm ci", "dir": "", "image": "node:20-alpine", "kind": "install",
+                "command": "npm ci", "env": {}, "source": "package.json", "private": False}
+        for content in ("{broken", "[]", json.dumps({"repos": []}),
+                        json.dumps({"repos": {"front": {"commands": "npm ci"}}}),
+                        json.dumps({"repos": {"front": {"commands": [{**good, "kind": "deploy"}]}}}),
+                        json.dumps({"repos": {"front": {"commands": [{**good, "image": "-x"}]}}})):
+            with self.subTest(content=content):
+                path.write_text(content, encoding="utf-8")
+                code, out, err = self.open()
+                self.assertEqual(code, 2, out)
+                self.assertIn("commands.json", err)
+                self.assertFalse((self.run_dir / "fix" / "state.json").exists())
+        path.write_text(json.dumps({"repos": {"front": {"commands": [good], "notes": []}}}),
+                        encoding="utf-8")
+        code, out, err = self.open()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.state()["check_commands"], {"front": [good], "back": []})
+
+    def test_a_state_without_check_commands_is_still_read(self):
+        self.assertEqual(self.open()[0], 0)
+        state = self.state()
+        del state["check_commands"]
+        write_file(self.run_dir, "fix/state.json", state)
+        self.assertEqual(fix_state.check_commands(fix_state.load(self.run_dir), "front"), [])
+        code, out, err = self.run_main(["stage", self.run_dir, "questions"])
+        self.assertEqual(code, 0, err)
+
+    def test_an_invalid_check_commands_record_exits_6(self):
+        self.assertEqual(self.open()[0], 0)
+        good = {"name": "npm ci", "dir": "", "image": "node:20-alpine", "kind": "install",
+                "command": "npm ci", "env": {}, "source": "package.json", "private": False}
+        for value in ([], "x", {"front": "x"}, {"front": [{"name": 1}]}, {"front": [[]]},
+                      {"front": [{**good, "image": "a b"}]}, {"bad name": []},
+                      {"front": [{**good, "dir": ".."}]}):
+            with self.subTest(value=value):
+                state = self.state()
+                state["check_commands"] = value
+                (self.run_dir / "fix" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+                code, out, err = self.run_main(["stage", self.run_dir, "questions"])
+                self.assertEqual(code, 6, err)
+                self.assertIn("check_commands", err)
+        state = self.state()
+        state["check_commands"] = {"front": [good]}
+        write_file(self.run_dir, "fix/state.json", state)
+        self.assertEqual(fix_state.check_commands(fix_state.load(self.run_dir), "front"), [good])
+        self.assertEqual(fix_state.check_commands(fix_state.load(self.run_dir), "back"), [])
+
+
 class RegistrationTest(FixCase):
     def test_every_fix_command_is_registered(self):
         for name in ("doctor", "candidates", "open", "stage", "start", "section-start",
