@@ -2805,6 +2805,180 @@ class FixPassOrchestrationTest(unittest.TestCase):
         self.assertIn("« En review »", recette)
 
 
+class FixProjectCommandsTest(unittest.TestCase):
+    """0.16: the commands of the project run in disposable containers (`commands`, `check`,
+    `install`), and a fixer asks for a development dependency with `needs_command`."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.skill = _text(SKILL)
+        cls.section = _section(cls.skill, "12. Fix")
+        cls.diagnostic = _between(cls.section, "**2. Diagnostic.**", "**3. ")
+        cls.launch = _between(cls.section, "**3. ", "**4. ")
+        cls.keys = _between(cls.section, "**5. ", "**6. ")
+        cls.pass_step = _between(cls.keys, "b. Fixer pass", "c. Questions")
+        cls.checks = _between(cls.keys, "d. Checks", "e. Review")
+        cls.fixer = _text(FIXER)
+        cls.reference = _text(FIX_MD)
+        cls.readme = _text(ROOT / "README.md")
+
+    def test_the_diagnostic_detects_the_commands_and_offers_the_missing_images(self):
+        for needle in ('cqa_fix.py" commands "$RUN"', "`fix/commands.json`", "`images`", "`notes`",
+                       "`install`, `build`, `lint` or `test`", "`check_commands`",
+                       'cqa-toolbox.sh" pull-image "<image>"',
+                       "« Télécharger les images des commandes de vérification ? »",
+                       "« Télécharger »", "« Continuer sans »", "`run_in_background`", "`not_run`",
+                       "never a failure"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.diagnostic)
+        self.assertLess(self.diagnostic.index('cqa-toolbox.sh" pull'),
+                        self.diagnostic.index('cqa_fix.py" commands'))
+        self.assertLess(self.diagnostic.index('cqa_fix.py" commands'),
+                        self.diagnostic.index('cqa-toolbox.sh" pull-image'))
+        self.assertNotIn("(a command to remove)", self.diagnostic)
+        self.assertEqual(self.diagnostic.count('cqa_fix.py" commands'), 1)
+
+    def test_the_launch_asks_the_check_commands_and_runs_commands_again_before_open(self):
+        for needle in ("« Commandes de vérification de la passe ? »", "« Utiliser ces commandes »",
+                       "« Modifier la liste »", "« Aucune »", "`--drop", "`--add",
+                       "`--none`", "before the lead leaves", "right before `open`",
+                       "without checking that it is recent"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.launch)
+        question = self.launch.index("« Commandes de vérification de la passe ? »")
+        again = self.launch.index('cqa_fix.py" commands "$RUN"')
+        self.assertLess(question, again)
+        self.assertLess(again, self.launch.index('cqa_fix.py" open'))
+        self.assertLess(self.launch.index("« Mode 100 % autonome ? »"),
+                        self.launch.index("« Pousser les branches"))
+
+    def test_the_pass_step_answers_needs_command_with_install(self):
+        for needle in ('cqa_fix.py" install "$RUN" "<repo>" --ref CQ-<n>', "`needs_command`",
+                       "`rows.needs_command`", "`npm install --save-dev`",
+                       "`composer require --dev`", "`yarn add --dev`", "`pnpm add -D`",
+                       "`npm install --save-exact`", "`npm install --package-lock-only`",
+                       "`composer update --lock`",
+                       "chore(<alias> CQ-n): add <packages> as a dev dependency",
+                       "`pending` again", cqa_fix.INSTALLED, "`Notes: none`",
+                       "Exit 5", "Exit 2", "`kind`", "`form`", "`config`", "`private`",
+                       "`failed`", "`files`", "`unchanged`", "`guard`",
+                       "« Laisser aux devs »", "« Corriger sans la dépendance »",
+                       "dépendance à installer par un dev", "Autonomous mode",
+                       "`drop`", "fix/<repo>/install/CQ-<n>.log"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.pass_step)
+        for stale in ("A fixer never runs anything: a row it reports",):
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, self.checks)
+        self.assertEqual(self.section.count('cqa_fix.py" install'), 1)
+
+    def test_check_runs_the_commands_and_reads_their_results(self):
+        for needle in ("the commands the lead validated", "several minutes", "`run_in_background`",
+                       "`kind`", "`command`", "`log`", "`already_broken`",
+                       "fix/<repo>/check/", "`check/baseline.json`", "`not_run`",
+                       "disposable containers", "modifications non commitées dans le worktree",
+                       "Exit 2", "never clean", "900 s", "600 s",
+                       "erreur déjà présente avant le correctif", "never attributed to a row"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.checks)
+
+    def test_the_run_rules_allow_the_containers_and_only_them(self):
+        intro = self.section[:self.section.index("**1. Run.**")]
+        for needle in ("never contacts the preprod", "disposable container",
+                       "no secret", "no Docker socket", "network only for an install",
+                       "never a failure"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, intro)
+        self.assertNotIn("It never runs a command of the project (`docker compose`", intro)
+        rule = next(line for line in _section(self.skill, "1. Imperative rules").splitlines()
+                    if line.startswith("- **Read-only (v1).**"))
+        self.assertIn("disposable containers", rule)
+
+    def test_the_end_of_the_pass_reports_the_commands_that_were_already_broken(self):
+        end = self.section[self.section.index("End, in French"):]
+        self.assertIn("« Erreurs déjà présentes avant les correctifs »", end)
+        self.assertIn("« Déjà en échec avant les correctifs »",
+                      _between(self.section, "g. Publication", "**6. "))
+
+    def test_exit_codes_document_the_new_refusals(self):
+        table = self.skill[self.skill.index("## Exit codes"):]
+        row = next(line for line in table.splitlines() if line.startswith("| `cqa_fix.py` |"))
+        for needle in ("`check` on a worktree with uncommitted changes", "`install`",
+                       "a form not allowed", "private dependencies", "without Docker or its image"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, row)
+        toolbox = next(line for line in table.splitlines() if line.startswith("| `cqa-toolbox.sh` |"))
+        for needle in ("`exec`", "124", "`ci-json`", "`pull-image`", "`image-present`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, toolbox)
+
+    def test_the_fixer_asks_for_a_dependency_and_never_installs_it(self):
+        dependencies = _section(self.fixer, "Dependencies")
+        for needle in ("`needs_command`", "`command`", "`dir`", "`reason`", "300 characters",
+                       "npm install --save-dev", "npm install --save-exact",
+                       "npm install --package-lock-only", "composer require --dev",
+                       "composer update --lock", "yarn add --dev", "pnpm add -D",
+                       "500 characters", "no version for these two", "You run nothing",
+                       "the orchestrator installs it", cqa_fix.INSTALLED,
+                       "report it `fixed`", "never `needs_command`, `skipped` or `question` again",
+                       "undo your change first"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, dependencies)
+        rules = _section(self.fixer, "Hard rules")
+        for needle in ("Never install a dependency", "never edit a manifest or a lock file",
+                       "`needs_command`"):
+            with self.subTest(rule=needle):
+                self.assertIn(needle, rules)
+        report = _section(self.fixer, "Report")
+        self.assertIn("`skipped`, `question` or `needs_command`", report)
+        self.assertNotIn("cqa_fix.py install", self.fixer)
+
+    def test_the_reference_describes_the_dependency_and_the_command_checks(self):
+        text = self.reference
+        dependencies = next(line for line in _section(text, "7. Guard rails").splitlines()
+                            if line.startswith("- **Dependencies**"))
+        for needle in ("`needs_command`", "`cqa_fix.py install`", "`installs`", "manifest",
+                       "lock file", "no package script"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, dependencies)
+        project = next(line for line in _section(text, "7. Guard rails").splitlines()
+                       if line.startswith("- **No server, no project command**"))
+        for needle in ("disposable container", "no secret", "`.env`", "`auth.json`",
+                       "`--network none`", "only for `install`", "the prod", "no sub-agent"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, project)
+        checks = _section(text, "9. Checks before the merge request")
+        for needle in ("« Commandes de vérification de la passe ? »", "`fix/commands.json`",
+                       "`cqa-toolbox.sh exec`", "`--network none`", "900 s", "600 s", "`kind`",
+                       "`command`", "`log`", "`already_broken`", "fix/<repo>/check/",
+                       "`check/baseline.json`", "erreur déjà présente avant le correctif",
+                       "« Déjà en échec avant les correctifs »", "restored",
+                       "dépendances privées : non transmises", "never `failed`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, checks)
+        report = _section(text, "8. Report and review files")
+        for needle in ("`needs_command`", '`{"command", "dir", "reason"}`', "300 characters"):
+            with self.subTest(report=needle):
+                self.assertIn(needle, report)
+        evaluation = _section(text, "4. Self-evaluation")
+        self.assertIn("`needs_command`", evaluation)
+        self.assertIn("`install/`", _section(text, "1. Keys, sections, passes and files"))
+
+    def test_the_readme_documents_the_project_commands(self):
+        fix = self.readme[self.readme.index("### Corriger : `fix`"):self.readme.index("## Structure")]
+        for needle in ("« Commandes de vérification de la passe ? »", "« Utiliser ces commandes »",
+                       "« Modifier la liste »", "« Aucune »", "conteneurs jetables",
+                       "`cqa-toolbox.sh pull-image`", "`needs_command`", "`npm install --save-dev`",
+                       "`composer require --dev`", "déjà présent", "non lancée", "aucun secret"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, fix)
+        for stale in ("lancer une commande du projet (conteneurs, `make`, `composer`, `npm`, tests)",
+                      "Le lint et les tests du projet restent au relecteur de la MR, avec leur "
+                      "commande, et au pipeline GitLab."):
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, fix)
+
+
 class VerdictsReferenceTest(unittest.TestCase):
     def test_cites_the_schema(self):
         self.assertIn(SCHEMA, _text(VERDICTS_MD))

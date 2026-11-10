@@ -7,7 +7,7 @@ import re
 from datetime import date
 from typing import Optional
 
-from cqa import fix_names, fix_rows
+from cqa import fix_checks, fix_names, fix_rows
 from cqa.checklist import ref_label
 from cqa.report import run_start
 
@@ -18,6 +18,8 @@ SUITE = ("Après fusion et déploiement en préprod, lancer `/gm:checklist-quali
 CI = "Pipeline CI de la MR : lint et tests du projet, s'il les lance."
 SEMI_AUTO = "**Semi-auto : à valider avec soin.**"
 NO_CHECKS = "Non lancé : contrôles de syntaxe et stylelint : aucun résultat pour cette branche"
+# A command of the project that also fails on the start of the branch (checks.json already_broken).
+ALREADY_FAILING = "Déjà en échec avant les correctifs"
 PREPARED = ("MR préparée par le skill gm:checklist-quality-audit, en brouillon : à relire et "
             "ajuster avant fusion.")
 HORS_SCOPE = "Hors-scope"
@@ -424,16 +426,49 @@ def _verification(checks, not_run: list) -> list:
         lines.append(NO_CHECKS)
     for check in checks or []:
         files = f" ({', '.join(check['files'])})" if check.get("files") else ""
-        detail = f" : {check['detail']}" if check.get("detail") else ""
+        command = check.get("command")
+        command = f" : `{_inline(command)}`" if isinstance(command, str) and command.strip() else ""
+        detail = _one_line(check.get("detail"))
         if check.get("status") == "passed":
-            lines.append(f"✅ {check['name']}{files}")
+            lines.append(f"✅ {check['name']}{files}{command}")
         elif check.get("status") == "failed":
-            lines.append(f"❌ Échec : {check['name']}{files}{detail}")
+            lines.append(f"❌ Échec : {check['name']}{files}{command}{_after(detail)}")
+        elif check.get("already_broken"):
+            lines.append(f"{ALREADY_FAILING} : {check['name']}{files}{command}"
+                         f"{_after(_one_line(_known_failure(check.get('detail'))))}")
         else:
-            lines.append(f"Non lancé : {check['name']}{files}{detail}")
+            lines.append(f"Non lancé : {check['name']}{files}{command}{_after(detail)}")
     lines.extend(f"Non lancé : {item['name']} : `{item['command']}`" for item in not_run)
     lines.append(CI)
     return lines
+
+
+def _inline(text) -> str:
+    """Return text on one line with no backtick: it can sit in a code span, and never opens one."""
+    return " ".join(str(text or "").split()).replace("`", "'")
+
+
+def _one_line(text) -> str:
+    """Return a multi-line detail (the tail of a log) as the lines joined with " ; ", without
+    backtick: the bullet it ends never breaks and a code fence never opens in the description."""
+    lines = (" ".join(line.split()) for line in str(text or "").splitlines())
+    return " ; ".join(line for line in lines if line).replace("`", "'")
+
+
+def _after(detail: str) -> str:
+    return f" : {detail}" if detail else ""
+
+
+def _known_failure(detail) -> str:
+    """Return what the detail of an already broken command says beyond fix_checks.ALREADY_BROKEN,
+    which the label of its bullet already says: « erreur déjà présente avant le correctif (<fin
+    du journal>) » gives the end of the log."""
+    rest = str(detail or "").strip()
+    if rest.startswith(fix_checks.ALREADY_BROKEN):
+        rest = rest[len(fix_checks.ALREADY_BROKEN):].strip()
+        if rest.startswith("(") and rest.endswith(")"):
+            rest = rest[1:-1].strip()
+    return rest
 
 
 def _listed(item: dict, text) -> str:

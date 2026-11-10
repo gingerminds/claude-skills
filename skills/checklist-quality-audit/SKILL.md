@@ -15,7 +15,7 @@ Load each reference with Read when its section starts, not before.
 
 ## 1. Imperative rules
 
-- **Read-only (v1).** Never modify a project repo: no checkout, switch, stash, pull, commit, install, file edit, runner start. Never write on a server or in a database, never submit a form, never deploy. When something needs one of these, give the lead the exact command and let them run it. Exception, the `fix` mode only (section 12): it writes only in its own worktrees, under the run directory (`fix/<repo>/wt`, on a branch of its own), and pushes only its pass branches (`feature/checklist-qa-fix`, `feature/checklist-qa-fix-<n>`), after the lead's consent, always through `cqa_fix.py` and its sub-agents; the dev's checkout (working files, current branch, local `develop`, stash) never changes.
+- **Read-only (v1).** Never modify a project repo: no checkout, switch, stash, pull, commit, install, file edit, runner start. Never write on a server or in a database, never submit a form, never deploy. When something needs one of these, give the lead the exact command and let them run it. Exception, the `fix` mode only (section 12): it writes only in its own worktrees, under the run directory (`fix/<repo>/wt`, on a branch of its own), and pushes only its pass branches (`feature/checklist-qa-fix`, `feature/checklist-qa-fix-<n>`), after the lead's consent, always through `cqa_fix.py` and its sub-agents; it runs the project's commands (install, build, lint, test) only in disposable containers that see the worktree alone; the dev's checkout (working files, current branch, local `develop`, stash) never changes.
 - **Notion.** Write only through `cqa_notion.py apply` and `cqa_notion.py comment-page`, after the lead's consent: the answer to the question of section 4, or the confirmation of section 7 when that answer is missing; in the fix mode, the answer to « Écrire le résultat de la passe dans Notion ? » (section 12). Never through another tool, never on the reference template (exit 8). Never create an option, a row or a page; never delete anything.
 - **Secrets (spec § 10).** Never print, write or hand to a sub-agent the value of `NOTION_TOKEN` or the preprod Basic Auth credentials. Never run `env`, `printenv` or `set`, never `echo` these variables: test their presence only, as in `references/context.md`.
 - **Basic Auth credentials.** Asked only after a 401, kept in this session, never stored. They go only as inline environment variables (`GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>'`) to `cqa_plan.py probe-target --auth-env` and `cqa-toolbox.sh`, and only when the session holds the Basic Auth credentials (accepted by `probe-target --auth-env`). `GM_AUDIT_AUTH_PASS` alone also goes, the same way, to the secret checks of `cqa_notion.py apply`, `cqa_notion.py comment-page` and `cqa_plan.py scan`. Never in a file, a URL, Notion, a sub-agent prompt or Chrome (the lead types it there).
@@ -674,7 +674,7 @@ The verdicts give: `ok` becomes « Ok / Recetté »; `ok_human` leaves the row �
 
 Corrects the open rows of an audited run that the skill knows how to fix, in git worktrees of the run directory, and delivers one draft merge request per repo for the whole pass. The key is the repo: one branch, one worktree and one merge request, whose rows are grouped in sections (one per checklist category, SÉCURITÉ first, then the order of the copy) that run one after the other. Read `references/fix.md` first: its conventions (keys and sections, passes, branches, commits, questions, correction pass, guard rails, report and review files) hold for every step below, which never repeats them. The imperative rules of section 1 hold, with the `fix` exception of the read-only rule. One Bash call per step.
 
-- The fix mode never contacts the preprod, the prod or a server: no SSH, no Chrome, and it never asks the Basic Auth credentials. It never runs a command of the project (`docker compose`, `make`, `composer`, `npm`, its tests, a build).
+- The fix mode never contacts the preprod, the prod or a server: no SSH, no Chrome, and it never asks the Basic Auth credentials. It never runs a command of the project on the workstation (`docker compose`, `make`, `composer`, `npm`, its tests, a build), and no sub-agent runs anything. Only `cqa_fix.py check` and `cqa_fix.py install` run commands of the project: those the lead validated at step 3, and the allowed forms of a dependency (5.b). Each runs in a disposable container that sees only the worktree: no secret (no `.env`, no `auth.json`, no CI variable, nothing of the workstation's environment), no Docker socket, network only for an install, and an error of the environment (Docker stopped, image absent, delay exceeded, private dependencies) is `not_run`, never a failure.
 - On GitLab it only pushes its pass branches as fast-forwards (never `--force`), creates draft merge requests assigned to the lead through `glab` and adds to their description: it never marks a merge request Ready, never approves, merges or closes one.
 - In Notion, with the consent of step 3 and only through `cqa_notion.py apply`: a « Correctif automatique » comment per row of the pass, the status « En review » of the rows of a published merge request (when the copy has that option and the row still has the status read at launch), the audit comment without its v2 « MR : » block, and one comment on the copy page per pass. It never creates an option and never assigns; the only other status it writes is, for a row whose merge request was closed without merge, the status the row had before its pass.
 - Sub-agents: `gm:cqa-fixer` and `gm:cqa-fix-reviewer`, one sub-agent at a time, one key at a time.
@@ -722,7 +722,7 @@ python3 "$S/cqa_fix.py" abandon "$RUN"
 
   Keys left (5.f): a key whose `left` in `fix/state.json` is not null (`{"reason", "at"}`, written by `leave` on a history problem, 5.f, or on a start that failed, 5.a) is left, whatever its `step`: it runs nothing of step 5 (no `start`, no section, no fixer pass, not even the answer passes of step 6), is skipped by `reorder`, every publication and `finish` (the commands refuse it, exit 2, until `leave --clear`), and is named at step 8. Only that field decides it, never an entry of `deferred.json`. The lead's « C'est réglé, reprendre » (5.f, or step 6) takes it back: `leave --clear`, then, for a key still at `selected` (its start failed, 5.a), 5.a and the rest of step 5; otherwise `check` and `guard` first (5.d), then the key goes on from its step. Nothing else ever runs `leave --clear`.
 
-  Before the step, a pass started without its report (a pass in `bases` above the key's `pass`) is run again from its `pass-start` (5.b), with its rows and its notes file; a row already sent in the `problems` of a `notes-<M>.json` has had its correction pass (5.f). At step 6, an open entry that asks the question of a row (its `detail` is « <repo> : » followed by the `text` of that row's `question`) whose row is no longer `question` in `fix/state.json` is settled: close it without asking. The other entries are still asked: « <repo> : Alerte de secret à confirmer par le lead : ... », « <repo> : modifications non commitées dans le worktree », « <repo> : clé laissée : ... » (closed without asking when its key's `left` is already null), a refusal.
+  Before the step, a pass started without its report (a pass in `bases` above the key's `pass`) is run again from its `pass-start` (5.b), with its rows and its notes file; a row already sent in the `problems` of a `notes-<M>.json` has had its correction pass (5.f); a row still `pending` that holds a `needs_command` request in `fix/state.json` is answered first, whatever the step (5.b, `install`). At step 6, an open entry that asks the question of a row (its `detail` is « <repo> : » followed by the `text` of that row's `question`) whose row is no longer `question` in `fix/state.json` is settled: close it without asking. The other entries are still asked: « <repo> : Alerte de secret à confirmer par le lead : ... », « <repo> : modifications non commitées dans le worktree », « <repo> : clé laissée : ... » (closed without asking when its key's `left` is already null), a refusal.
 
 **2. Diagnostic.** Read the copy again, as the devs left it:
 
@@ -757,16 +757,6 @@ python3 "$S/cqa_fix.py" stack-core "$RUN" --repo <repo>
 
 `found` true: nothing to ask. `found` false: ask « Cœur WordPress pour les sous-agents ? » (« Cœur Drupal pour les sous-agents ? » for Drupal), saying that a folder is typed in « Autre », with « Télécharger la version <x> » (only for WordPress with a known `version`: `stack-core "$RUN" --repo <repo> --download`, the official release, its checksum checked, into the shared cache), « Indiquer un dossier » (the folder typed in « Autre », else asked next: `stack-core "$RUN" --repo <repo> --path <dossier>`) and « Continuer sans » (the sub-agents rely on how the repo calls the core). Exit 2 (a folder without the core, a version unknown) or 5 (a download refused, nothing kept): show the message and ask again. The chosen folder is recorded per repo in `fix/stack-core.json`, `open` carries into `fix/state.json` (`stack_core`) the records whose folder still exists (its `notes` name the others, gone since: run `stack-core` again for them before the pass), and both sub-agents only read it (read-only).
 
-Check commands of the project (install, build, lint, test), one call for all the repos. They are detected from the CI (`.gitlab-ci.yml`, read offline in the toolbox) then from the manifests; nothing is run here. It writes `fix/commands.json` and prints `{"repos": {"<repo>": {"commands", "notes"}}, "images": [<images the local Docker lacks>]}`; `open` carries the commands of each repo into `fix/state.json` (`check_commands`, an empty list without the file):
-
-```bash
-S="${CLAUDE_SKILL_DIR}/../../scripts"
-RUN="<run_dir>"
-python3 "$S/cqa_fix.py" commands "$RUN"
-```
-
-Run it again with `--drop <name>` (a command to remove), `--add "<repo>|<dir>|<image>|<kind>|<command>"` or `--none` to apply the lead's choice, before `open`.
-
 Commit signing, one call per repo (`path` of `context.json`):
 
 ```bash
@@ -787,6 +777,21 @@ bash "$S/cqa-toolbox.sh" doctor
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 bash "$S/cqa-toolbox.sh" pull
+```
+
+Check commands of the project (install, build, lint, test), one call for all the repos, once the toolbox is settled. They are read from the CI (`.gitlab-ci.yml`, converted offline in the toolbox image), then from the manifests of the folders the CI does not cover. Nothing is run here, and a CI job that uses a secret, a service, Docker, a trigger or a deployment is never kept. It writes `fix/commands.json` and prints `{"repos": {"<repo>": {"commands", "notes"}}, "images": [<image>]}`: `commands` are `{"name", "dir", "image", "kind", "command", "env", "source", "private"}` (`kind` being `install`, `build`, `lint` or `test`), `notes` say in French what was left out or not read, and why, and `images` are the images of those commands that the local Docker lacks. `open` carries the commands of each repo into `fix/state.json` (`check_commands`, an empty list without the file).
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" commands "$RUN"
+```
+
+Keep `commands` and `notes` for step 3. Docker not answering (a `notes` line says so, `images` is empty): say it, every command will be `not_run`. `images` not empty: ask « Télécharger les images des commandes de vérification ? » with « Télécharger » and « Continuer sans ». « Télécharger »: one download per image, each with Bash `run_in_background`, waiting for its end before `open` (step 3); exit 1 (the download failed, usually the registry login: `docker login <registry>`) or 2 (an image refused: only the images of Docker Hub, of the toolbox and of the agency registry are downloaded): show the message and go on. « Continuer sans »: the commands whose image stays absent are `not_run` with that reason, never a failure, since neither `check` nor `install` downloads an image.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+bash "$S/cqa-toolbox.sh" pull-image "<image>"
 ```
 
 Third-party plugins, when a WordPress repo of the run (`stack` `wordpress`) has no `third_party_paths` in `context.json`: the guard refuses a commit in `third_party_paths` (`references/fix.md`, section 7), so they must be known before any fixer runs. List the plugin folders:
@@ -815,7 +820,7 @@ python3 "$S/cqa_fix.py" candidates "$RUN"
 
 It writes `fix/candidates.json` and prints `{"keys": [{"key", "repo", "push_ready", "sections": [{"category", "alias", "rows"}]}], "left": [{"ref", "title", "category", "reason", "url", "repos"}], "flights", "notes", "estimate_min"}`. A key is a repo, in the order of `context.json`; its `sections` come SÉCURITÉ first, then in the order of the copy. No key: show the rows left (`left`, by reason), say « Aucune ligne à corriger. » and stop.
 
-**3. Presentation and launch questions.** Present, in French, before anything is created: per repo then per section, the rows to fix (ref, title, « Auto » or « Semi-auto » from `semi_auto`, the assigned devs `assignees`, the « À faire » in short from `todo`); the rows left to the devs grouped by `reason`, with the link `url` of the merge request when there is one; the `notes`; the repos that will get local branches only (`push_ready` false) and why; the facts of step 2; the number of merge requests planned (one per repo); the estimated time (`estimate_min` minutes). When the project has no fix merge request or branch yet (in `flights`, every repo has `open`, `closed`, `merged` and `branches` empty), add: « Premier essai sur ce projet : je conseille le mode présent et une ou deux catégories seulement (« Modifier la liste »), pour juger la qualité des MR avant une passe complète. »
+**3. Presentation and launch questions.** Present, in French, before anything is created: per repo then per section, the rows to fix (ref, title, « Auto » or « Semi-auto » from `semi_auto`, the assigned devs `assignees`, the « À faire » in short from `todo`); the rows left to the devs grouped by `reason`, with the link `url` of the merge request when there is one; the `notes`; the repos that will get local branches only (`push_ready` false) and why; the facts of step 2; the check commands of each repo (folder, image, command, source) with the `notes` of `commands`; the number of merge requests planned (one per repo); the estimated time (`estimate_min` minutes). When the project has no fix merge request or branch yet (in `flights`, every repo has `open`, `closed`, `merged` and `branches` empty), add: « Premier essai sur ce projet : je conseille le mode présent et une ou deux catégories seulement (« Modifier la liste »), pour juger la qualité des MR avant une passe complète. »
 
 Ask « Lancer ces correctifs ? » with « Lancer », « Modifier la liste » and « Annuler ». « Modifier la liste »: the lead removes refs, or adds some in « Autre », a « Détection seule » or « Manuel » row they judge fixable included; run `candidates` again with `--without` (rows removed) and `--refs` (rows added), repeating every earlier one (the options are not cumulative between runs), then present again. « Annuler »: stop, nothing was created.
 
@@ -827,9 +832,18 @@ python3 "$S/cqa_fix.py" candidates "$RUN" --refs CQ-40 --without CQ-3,CQ-12
 
 Once the list is accepted, one question at a time:
 
-1. « Mode 100 % autonome ? » with « Oui, je m'absente » (`autonomous`: no question and no push before the end of the pass) and « Non, je reste disponible » (`present`: questions asked as they come, each repo published once all its sections are settled).
-2. « Pousser les branches et créer les MR en brouillon ? » with « Pousser et créer les MR en brouillon » (`mr`), « Garder les branches en local » (`local`: the lead pushes them; no merge request) and « Annuler » (stop, nothing was created). Not asked with `--dry-run` (`dry_run`), nor when no key is `push_ready` (`local`; say so).
-3. « Écrire le résultat de la passe dans Notion ? » with « Oui » (`yes`: the « Correctif automatique » comments, the « En review » statuses of the published merge requests, the page comment) and « Ne rien écrire » (`no`). Asked with `mr` and `local` (a local branch gets its comments, never a status), not with `--dry-run` (`no`).
+1. « Commandes de vérification de la passe ? » with « Utiliser ces commandes » (the detected list as it stands), « Modifier la liste » (the lead removes commands, or adds some in « Autre », one per line as `<repo>|<dossier>|<image>|<type>|<commande>`) and « Aucune » (no command runs: only the syntax checks and stylelint). Asked only when a repo has commands, and in autonomous mode too: the list is validated here, before the lead leaves.
+2. « Mode 100 % autonome ? » with « Oui, je m'absente » (`autonomous`: no question and no push before the end of the pass) and « Non, je reste disponible » (`present`: questions asked as they come, each repo published once all its sections are settled).
+3. « Pousser les branches et créer les MR en brouillon ? » with « Pousser et créer les MR en brouillon » (`mr`), « Garder les branches en local » (`local`: the lead pushes them; no merge request) and « Annuler » (stop, nothing was created). Not asked with `--dry-run` (`dry_run`), nor when no key is `push_ready` (`local`; say so).
+4. « Écrire le résultat de la passe dans Notion ? » with « Oui » (`yes`: the « Correctif automatique » comments, the « En review » statuses of the published merge requests, the page comment) and « Ne rien écrire » (`no`). Asked with `mr` and `local` (a local branch gets its comments, never a status), not with `--dry-run` (`no`).
+
+Whether or not the first question was asked, and whatever the answer, run `commands` again right before `open`: it detects again and applies the lead's choice, `--drop "<name>"` once per command removed, `--add "<repo>|<dir>|<image>|<kind>|<command>"` once per command added, or `--none` for « Aucune » (none of them for « Utiliser ces commandes »). The options do not carry over from one run to the next: repeat every one. `open` takes `fix/commands.json` as it finds it, without checking that it is recent, so a file left by the diagnostic or by an earlier pass must never reach it. Exit 2 (an unknown name, a malformed `--add`, a folder or an image refused): show the message and ask the list again. An image the new list needs and that is still absent in its `images`: offer the download as at step 2, before `open`.
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" commands "$RUN" --drop "<name>" --add "<repo>|<dir>|<image>|<kind>|<command>"
+```
 
 Open the pass with the answers:
 
@@ -839,7 +853,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" open "$RUN" --mode <autonomous|present> --push <mr|local|dry_run> --notion <yes|no>
 ```
 
-It writes `fix/state.json` (stage `keys`, every key at step `selected`, every section `pending`) and archives a finished earlier pass in `fix/_history/`: its worktrees are removed, each after its uncommitted changes were saved in a `leftover-<N>.patch` under the archive folder (`leftovers` in its output, `{"key", "patch"}`: tell the lead).
+It writes `fix/state.json` (stage `keys`, every key at step `selected`, every section `pending`, `check_commands` of each repo from `fix/commands.json`) and archives a finished earlier pass in `fix/_history/`: its worktrees are removed, each after its uncommitted changes were saved in a `leftover-<N>.patch` under the archive folder (`leftovers` in its output, `{"key", "patch"}`: tell the lead).
 
 **4. Keep the workstation awake** for the whole pass:
 
@@ -889,7 +903,7 @@ Dispatch `gm:cqa-fixer` with the line, exactly:
 Run dir: <run_dir>. Fix: <repo>. Section: <alias>. Worktree: <path>. Pass: <N>. Rows: CQ-3, CQ-12. Notes: <path|none>. Stack core: <path|none>. Follow your instructions.
 ```
 
-`Worktree` is the absolute `worktree` that `start` printed. `Section` is the alias of the section in progress, as `pass-start` recorded it. `Stack core` is the `path` of `stack_core["<repo>"]` in `fix/state.json`, `none` without one (read-only for the sub-agents, `references/fix.md`, section 1). A first pass of the section, or a pass on rows back with `retry` true (5.f): `Rows` are the rows of the section still `pending` in `fix/state.json` (a row of another section is refused: « Réf d'une autre section »), and `Notes: none`. A later pass: the rows it answers (5.c) or corrects (5.f), and `Notes: fix/<repo>/notes-<N>.json`, written before the dispatch with Write, in the format of `references/fix.md`, section 1. Then validate the report again (the fixer validated it too):
+`Worktree` is the absolute `worktree` that `start` printed. `Section` is the alias of the section in progress, as `pass-start` recorded it. `Stack core` is the `path` of `stack_core["<repo>"]` in `fix/state.json`, `none` without one (read-only for the sub-agents, `references/fix.md`, section 1). A first pass of the section, a pass on rows back with `retry` true (5.f), or a pass on rows whose dependency was installed (below): `Rows` are the rows of the section still `pending` in `fix/state.json` (a row of another section is refused: « Réf d'une autre section »), and `Notes: none`. A later pass: the rows it answers (5.c) or corrects (5.f), and `Notes: fix/<repo>/notes-<N>.json`, written before the dispatch with Write, in the format of `references/fix.md`, section 1. Then validate the report again (the fixer validated it too):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -897,7 +911,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" validate "$RUN" "<repo>" report --pass <N>
 ```
 
-It prints `{"ok", "errors", "rows", "dev_checkout_changed"}`, `rows` giving the refs per outcome (`fixed`, `skipped`, `question`).
+It prints `{"ok", "errors", "rows", "dev_checkout_changed"}`, `rows` giving the refs per outcome (`fixed`, `skipped`, `question`, `needs_command`).
 
 - Exit 6, or a fixer that returned without a valid report: `pass-start` again (it keeps the base it recorded), dispatch the fixer once more, the dispatch line followed by the `errors`, and validate again. Still invalid: the section fails (end of 5.f). Exit 2 (worktree or state not as expected): show the message; the section fails.
 - Rows skipped with « commit refusé par git : <cause> » (commit signing, git identity, a lock) or « garde indisponible : <cause> » (the guard before the commit could not run): the cause does not depend on the rows, and the next sections and keys may fail the same way. Present mode: tell the lead at once; autonomous mode: set it aside. The rows stay skipped with that reason; a later fix pass takes them again once the cause is fixed. A row skipped with « refusé par la garde : <raison> » keeps that reason, which the merge request gives under « Hors-scope »: nothing to ask.
@@ -909,6 +923,20 @@ git -C "<worktree>" -c core.hooksPath=/dev/null -c core.fsmonitor=false status -
 ```
 
 - `dev_checkout_changed` other than `null` (`{"paths", "head", "branch", "stash"}`): the dev's own checkout changed during the pass, not through the skill. Present mode: tell the lead at once, in French, the paths and whether HEAD, the branch or the stash moved, and that the pass changed nothing there. Autonomous mode: set it aside with that detail. Never undo anything; go on.
+
+Rows of `rows.needs_command`: their fix needs a development dependency. The fixer ran nothing and committed nothing for them: its report carries `needs_command` `{"command", "dir", "reason"}`, and `validate` keeps the row `pending` with that request. Answer each one, one call per row, before 5.c:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" install "$RUN" "<repo>" --ref CQ-<n>
+```
+
+`install` runs the request only when it has an allowed form (`npm install --save-dev`, `npm install --save-exact`, `npm install --package-lock-only`, `composer require --dev`, `composer update --lock`, `yarn add --dev` or `pnpm add -D`, in a folder that holds the manifest, with names of the public registry only). It rebuilds the command from its validated parts, never running the text the fixer wrote, in a disposable container with the network (900 s at most), then commits only the manifest and the lock file, `chore(<alias> CQ-n): add <packages> as a dev dependency`, and prints `{"installed": true, "ref", "commit", "packages", "files", "command", "log"}` (`log`: `fix/<repo>/install/CQ-<n>.log`).
+
+- Exit 0: the row is `pending` again, with that commit among its commits and the reason « dépendance installée : reprendre le correctif ». Once every `needs_command` row is answered, run a fixer pass on the rows of the section still `pending` (5.b again, with the next pass number and `Notes: none`), before 5.c.
+- Exit 5, `{"installed": false, "ref", "kind", "reason"}` with `kind` `form` (not an allowed form, or a folder without the manifest), `config` (the pass changed a package manager configuration), `private` (private dependencies), `failed`, `files` (the install touched other files), `unchanged` or `guard`: nothing was installed or committed, the worktree is as it was and the row keeps its request. Present mode: ask « La ligne CQ-<n> demande une dépendance que le skill n'installe pas : <commande>. » followed by the `reason` of the refusal, with « Laisser aux devs » (drop the row as in 5.c) and « Corriger sans la dépendance » (write the answer in `notes-<N+1>.json` as in 5.c, then run the fixer pass on the row). Autonomous mode: set the row aside for the devs at once, `drop` with the reason « dépendance à installer par un dev : <commande> » (300 characters at most in all): the merge request lists it under « Hors-scope ».
+- Exit 2 (Docker stopped, image absent, delay exceeded, changes not committed in the worktree): show the message, fix its cause (start Docker; `pull-image` for an absent image, as at step 2; the uncommitted changes as above, never cleaned by you) and run `install` again; when the cause stays, answer as for exit 5.
 
 c. Questions: the rows of `rows.question`. Each `question` of `report-<N>.json` has a `text`, 2 to 4 `options` and the `default` the fixer would apply. Questions that bear on the same file and the same element (their `text` names them) make one question to the lead, whose answer holds for each row concerned.
 
@@ -928,7 +956,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" defer "$RUN" --kind fix_question --detail "<repo> : <texte de la question>" --refs CQ-12
 ```
 
-d. Checks of the changed files, then the guard:
+d. Checks of the changed files and commands of the project, then the guard:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -936,17 +964,17 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" check "$RUN" "<repo>"
 ```
 
-It runs the syntax checks (nginx and Varnish included) and stylelint on the files changed in `<start_sha>..HEAD`, writes `checks.json` and prints `{"checks", "not_run", "failed_refs"}`: `failed_refs` are the rows whose commits touch a failed file.
+It runs the syntax checks (nginx and Varnish included) and stylelint on the files changed in `<start_sha>..HEAD`, then, once the branch has a commit, the commands the lead validated for this repo (`check_commands` of `fix/state.json`, in the order of the list) in disposable containers (`references/fix.md`, section 9). They can take several minutes: 900 s at most for an `install`, 600 s for each other command, and the whole list again on the start of the branch the first time a command fails. For a repo with commands, tell the lead, run the call with Bash `run_in_background` and wait for its end. It writes `checks.json` and prints `{"checks", "not_run", "failed_refs"}`: `failed_refs` are the rows whose commits touch a failed file.
 
-A fixer never runs anything: a row it reports as `needs_command` (a development dependency its fix needs) is answered here, once its report is validated:
+An entry of `checks` is `{"name", "status", "files", "detail"}`; a command of the project adds `kind` (`install`, `build`, `lint` or `test`), `command`, `log` (its full log, under `fix/<repo>/check/`, relative to the run) and, for an already broken one, `already_broken`. Its `status`:
 
-```bash
-S="${CLAUDE_SKILL_DIR}/../../scripts"
-RUN="<run_dir>"
-python3 "$S/cqa_fix.py" install "$RUN" "<repo>" --ref CQ-<n>
-```
+- `failed`: a failure that is new on this pass. Its `files` are the files of the pass its log names, else those under its folder, else all of them, so that their rows go to a correction pass (5.f). A linter that exits 0 but rewrites a file of the pass is a failed lint on that file. A failed `install` is a failure like another, and the commands after it in its folder are then `not_run` (« installation des dépendances impossible »).
+- `not_run`, the reason in `detail`: Docker stopped, image absent, delay exceeded, private dependencies (« dépendances privées : non transmises »). An error of the environment is never a failure: no row is blocked.
+- `not_run` with `already_broken` true and « erreur déjà présente avant le correctif » in `detail`: the command fails on the start of the branch too (measured on a detached worktree, kept in `check/baseline.json`). It is never attributed to a row: the summary lists it for the devs, and the merge request says « Déjà en échec avant les correctifs ».
 
-It runs only the allowed forms (`npm install --save-dev`, `composer require --dev`, `yarn add --dev`, `pnpm add -D`...), rebuilt, in a container, and commits the manifest and the lock file (`chore(<alias> CQ-n): add <packages> as a dev dependency`); the row goes back to `pending` for a correction pass. Exit 5: nothing installed and nothing changed (form refused, other files changed, failure, guard): set the row aside. Exit 2: environment or dirty worktree.
+`not_run` of the output stays empty for a repo with commands, which are in `checks`. The tracked files a command wrote are restored, the files it created are removed and nothing is committed; the ignored files (`node_modules`, `vendor`, the build) stay for the commands that follow and go with the worktree.
+
+Exit 2 with « modifications non commitées dans le worktree » (a repo with commands): the fixer left changes, nothing was run and nothing was cleaned, since the commands put the worktree back as it was. Handle them as in 5.b, and never clean them yourself.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -1070,7 +1098,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_fix.py" mr-body "$RUN" "<repo>"
 ```
 
-It needs every section of the key settled or failed (exit 2 names the one that is not: `section-end` first). It writes `mr-title.txt` and `mr.md` for a new merge request, or `mr-addition.md` for a merge request already open (a section « Ajouts du <date> » and « Hors-scope » updated; the rest of its description, which the reviewer may have edited, is kept), its rows grouped by section in the order of the commits (under « Points d'attention », a secret alert the lead waived reads « Alerte de secret levée par le lead : <chemin>, ligne <n> » instead of « à confirmer »), and prints `{"title", "file", "kind", "sections", "fixed", "partial", "covered", "waiting", "out_of_scope"}`.
+It needs every section of the key settled or failed (exit 2 names the one that is not: `section-end` first). It writes `mr-title.txt` and `mr.md` for a new merge request, or `mr-addition.md` for a merge request already open (a section « Ajouts du <date> » and « Hors-scope » updated; the rest of its description, which the reviewer may have edited, is kept), its rows grouped by section in the order of the commits (under « Points d'attention », a secret alert the lead waived reads « Alerte de secret levée par le lead : <chemin>, ligne <n> » instead of « à confirmer »), its « Vérification » section giving each check and each command of the project with its command (« Déjà en échec avant les correctifs » for a command that also fails on the start of the branch), and prints `{"title", "file", "kind", "sections", "fixed", "partial", "covered", "waiting", "out_of_scope"}`.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -1187,7 +1215,7 @@ RUN="<run_dir>"
 bash "$S/cqa-keepawake.sh" stop "$RUN"
 ```
 
-End, in French: show `text` (its section « Clés laissées au lead » gives each key left with its reason, its branch and its worktree, as `left_keys` does, with its rows and their state, a key left before its start included: the lead takes that branch by hand; such a key has no MR block, and the team message counts the keys left instead of listing their merge request), then the failed sections with their reason and patch, the section « Commits retirés de la branche » (each commit a drop removed, with the command that keeps it before a `git gc` loses it, `git branch rescue/cq-<ref> <sha>`), the rows `also_dropped` with the row they depended on, and the message for the team, ready to paste (`team_message`). Once merged and deployed in preprod, the rows « En review » are taken by `/gm:checklist-quality-audit recette` (section 11, `cqa_fix.py merged`).
+End, in French: show `text` (its section « Erreurs déjà présentes avant les correctifs » lists the commands that already failed on the start of the branch, to report to the devs; its section « Clés laissées au lead » gives each key left with its reason, its branch and its worktree, as `left_keys` does, with its rows and their state, a key left before its start included: the lead takes that branch by hand; such a key has no MR block, and the team message counts the keys left instead of listing their merge request), then the failed sections with their reason and patch, the section « Commits retirés de la branche » (each commit a drop removed, with the command that keeps it before a `git gc` loses it, `git branch rescue/cq-<ref> <sha>`), the rows `also_dropped` with the row they depended on, and the message for the team, ready to paste (`team_message`). Once merged and deployed in preprod, the rows « En review » are taken by `/gm:checklist-quality-audit recette` (section 11, `cqa_fix.py merged`).
 
 ## Exit codes
 
@@ -1195,7 +1223,7 @@ End, in French: show `text` (its section « Clés laissées au lead » gives eac
 |---|---|
 | `cqa_notion.py` | 0 success; 2 environment or usage; 3 Notion API or network (token refused, page not shared with the integration); 6 schema of the copy not v2; 7 at least one write blocked; 8 write refused on the template |
 | `cqa_plan.py` | 0 success; 2 usage or missing file (the message names the command to run first); 6 invalid `context.json` or findings; 7 secret found by `scan` |
-| `cqa_fix.py` | 0 success; 2 usage or environment (also a failed push or `glab` call, a stale merge request description, a worktree missing, a section not settled or out of order, a pass of the v2 fix mode, a stack core folder or version unusable, a key left to the lead (`leave`, until `leave --clear`): the message says what to run); 5 refused by a guard (the message says why: guard problem, remote branch diverged, merge request merged or closed, commit not reported, local or dry-run pass, an autonomous pass still in its key loop, uncommitted changes, a commit already pushed that a drop, a reword or a failed section would rewrite, a merge commit or a rewritten history in the branch, a reword that changes the ref of its row, a stack core download refused); 6 invalid `context.json`, report, review or state; 7 secret found in a merge request text or the summary |
+| `cqa_fix.py` | 0 success; 2 usage or environment (also a failed push or `glab` call, a stale merge request description, a worktree missing, a section not settled or out of order, a pass of the v2 fix mode, a stack core folder or version unusable, a key left to the lead (`leave`, until `leave --clear`), `check` on a worktree with uncommitted changes (nothing is run or cleaned), `install` without Docker or its image, past its delay, or on a worktree with uncommitted changes, `commands` with an unknown name or a malformed `--add`: the message says what to run); 5 refused by a guard (the message says why: guard problem, remote branch diverged, merge request merged or closed, commit not reported, local or dry-run pass, an autonomous pass still in its key loop, uncommitted changes, a commit already pushed that a drop, a reword or a failed section would rewrite, a merge commit or a rewritten history in the branch, a reword that changes the ref of its row, a stack core download refused, an `install` refused: a form not allowed, private dependencies, a failed install, other files changed, nothing changed, a guard problem; nothing was installed and the worktree is as it was); 6 invalid `context.json`, report, review or state; 7 secret found in a merge request text or the summary |
 | `cqa_ssh_ro.py` | 0 success; 1 remote failure (command or file missing on the server); 2 usage; 4 refused, to be confirmed by the lead |
 | `cqa-keepawake.sh` | 0 success, also without any inhibitor on the workstation (warning only); 2 usage |
-| `cqa-toolbox.sh` | 0 success; 1 at least one tool failed (the manifest is written); 2 usage or environment; `run` returns the code of the tool (3: target unreachable or 401) |
+| `cqa-toolbox.sh` | 0 success; 1 at least one tool failed (the manifest is written; also an invalid `.gitlab-ci.yml` for `ci-json`, a failed download for `pull-image`, an image absent for `image-present`); 2 usage or environment (Docker stopped, image absent, a refused argument); `run` returns the code of the tool (3: target unreachable or 401); `exec` returns the code of the command (124: delay exceeded, the container is killed); `ci-json` exits 3 without a `.gitlab-ci.yml` |

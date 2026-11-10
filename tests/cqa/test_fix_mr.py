@@ -203,6 +203,67 @@ class TitleAndBodyTest(unittest.TestCase):
                                          waiting=[], left=[]), "")
 
 
+class CommandChecksTest(unittest.TestCase):
+    """The commands of the project (entries of checks.json with a command): one bullet each."""
+    BROKEN = "Déjà en échec avant les correctifs"
+
+    def render(self, *checks):
+        return section(full_body(checks=list(checks), not_run=[]), "Vérification")
+
+    def test_a_passed_command_names_its_command(self):
+        lines = self.render({"name": "build:npm", "status": "passed", "files": [], "detail": "",
+                             "kind": "build", "command": "npx gulp production"})
+        self.assertEqual(lines, ["- ✅ build:npm : `npx gulp production`", CI])
+
+    def test_a_failure_tail_is_one_bullet_without_a_code_fence(self):
+        tail = "src/app.css\n  3:1  Unexpected `foo`\n```\nnpm ERR! code 1\n\n```js\n"
+        lines = self.render({"name": "lint:css", "status": "failed", "files": ["src/app.css"],
+                             "detail": tail, "kind": "lint",
+                             "command": "npx stylelint \"src/**/*.css\""})
+        self.assertEqual(lines, [
+            "- ❌ Échec : lint:css (src/app.css) : `npx stylelint \"src/**/*.css\"` : "
+            "src/app.css ; 3:1 Unexpected 'foo' ; ''' ; npm ERR! code 1 ; '''js",
+            CI,
+        ])
+
+    def test_backticks_and_line_breaks_of_a_command_never_open_a_code_span(self):
+        lines = self.render({"name": "build:npm", "status": "passed", "files": [], "detail": "",
+                             "kind": "build", "command": "cd `pwd`\n&& npm run build"})
+        self.assertEqual(lines, ["- ✅ build:npm : `cd 'pwd' && npm run build`", CI])
+
+    def test_a_command_that_did_not_run_says_why(self):
+        lines = self.render({"name": "test:unit", "status": "not_run", "files": [],
+                             "detail": "image absente : node:18-alpine", "kind": "test",
+                             "command": "npm test"})
+        self.assertEqual(lines, [
+            "- Non lancé : test:unit : `npm test` : image absente : node:18-alpine", CI])
+
+    def test_a_command_already_broken_before_the_fixes_has_its_own_label(self):
+        broken = {"name": "build:npm", "status": "not_run", "files": [], "kind": "build",
+                  "command": "npx gulp production", "already_broken": True,
+                  "detail": "erreur déjà présente avant le correctif (npm ERR! code `1`)"}
+        bare = {**broken, "name": "lint:css", "command": "npx stylelint .",
+                "detail": "erreur déjà présente avant le correctif"}
+        lines = self.render(broken, bare)
+        self.assertEqual(lines, [
+            f"- {self.BROKEN} : build:npm : `npx gulp production` : npm ERR! code '1'",
+            f"- {self.BROKEN} : lint:css : `npx stylelint .`",
+            CI,
+        ])
+        self.assertNotIn("Non lancé", "\n".join(lines))
+
+    def test_checks_without_a_command_keep_their_lines(self):
+        lines = self.render(
+            {"name": PHP, "status": "failed", "files": ["a.php"], "detail": "boom\nligne 2"},
+            {"name": STYLE, "status": "not_run", "files": [],
+             "detail": "erreur déjà présente avant le correctif (x)"})
+        self.assertEqual(lines, [
+            f"- ❌ Échec : {PHP} (a.php) : boom ; ligne 2",
+            f"- Non lancé : {STYLE} : erreur déjà présente avant le correctif (x)",
+            CI,
+        ])
+
+
 class MaterialTest(unittest.TestCase):
     def setUp(self):
         def row(outcome, reason=None, commits=(), attention=None, number=1):
