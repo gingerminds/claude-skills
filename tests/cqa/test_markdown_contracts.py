@@ -3285,6 +3285,23 @@ class VerdictsReferenceTest(unittest.TestCase):
         self.assertIn(SCHEMA, _text(VERDICTS_MD))
         self.assertTrue((ROOT / SCHEMA).is_file())
 
+    def test_finding_schema_lists_the_document_evidence(self):
+        schema = json.loads((ROOT / SCHEMA).read_text(encoding="utf-8"))
+        finding = schema["$defs"]["finding"]
+        branches = [item["$ref"] for item in finding["properties"]["evidence"]["items"]["oneOf"]]
+        self.assertIn("#/$defs/evidence_document", branches)
+        document = schema["$defs"]["evidence_document"]
+        self.assertEqual(document["properties"]["type"]["const"], "document")
+        self.assertEqual(set(document["required"]), {"type", "doc", "ref"})
+        for key in ("doc", "ref"):
+            with self.subTest(key=key):
+                self.assertEqual(document["properties"][key]["type"], "string")
+                self.assertEqual(document["properties"][key]["pattern"], "\\S")
+        self.assertIn("cqa_plan.py", document["description"])
+        self.assertEqual(finding["properties"]["source"]["const"], "context_doc")
+        self.assertNotIn("source", finding["required"])
+        self.assertNotIn(chr(0x2014), json.dumps(schema, ensure_ascii=False))
+
     def test_maps_every_verdict_to_its_status(self):
         text = _text(VERDICTS_MD)
         for verdict, status in STATUS_FOR_VERDICT.items():

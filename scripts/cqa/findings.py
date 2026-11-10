@@ -25,6 +25,7 @@ EVIDENCE_REQUIRED = {
     "page": ("url",),
     "tool": ("tool", "ref"),
     "http": ("url", "detail"),
+    "document": ("doc", "ref"),
 }
 PROBE_METHODS = ("GET", "HEAD")
 MAX_SUMMARY_LENGTH = 600

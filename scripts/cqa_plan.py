@@ -23,9 +23,19 @@ from typing import Callable, NamedTuple, Optional
 from html.parser import HTMLParser
 from urllib.parse import urldefrag, urljoin, urlsplit
 
-from cqa import categories, context_docs, deferred, docs_link, docs_read, fix_state, probes, report
+from cqa import (
+    categories,
+    context_docs,
+    deferred,
+    docs_link,
+    docs_read,
+    docs_verdicts,
+    fix_state,
+    probes,
+    report,
+)
 from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
-from cqa.findings import apply_guardrails, validate_document
+from cqa.findings import VERDICTS, apply_guardrails, validate_document
 from cqa.git_tools import (
     alignment,
     deployed_from_gitlab,
@@ -77,7 +87,7 @@ _MISSING_ROW = "constat manquant : "
 _RERUN_FILE = re.compile(r"(.+)-rerun-([0-9]{2})\.json")
 _MAX_COMMENT = 1500
 _EM_DASH = chr(0x2014)
-_CONTEXT_DOC_ACTIONS = ("add", "read", "merge", "ignore", "link")
+_CONTEXT_DOC_ACTIONS = ("add", "read", "merge", "ignore", "link", "verdicts")
 _PROPOSED_BYTES = 1000000
 _CONTEXT_DOC_NUMBER = re.compile(r"d([0-9]+)")
 _ROW_RANGE = re.compile(r"([0-9]+)-([0-9]*)")
@@ -333,14 +343,15 @@ def _register_context_docs(commands) -> None:
         help="add : copie les fichiers dans le run ; read : lit une plage d'un document ; "
         "merge : fusionne le layout et les parties de l'importeur (items.json) ; "
         "ignore : écarte le document ; "
-        "link : rattache les points des documents importés aux lignes de la checklist",
+        "link : rattache les points des documents importés aux lignes de la checklist ; "
+        "verdicts : écrit les verdicts de document (constats synthétiques) des lignes rattachées",
     )
     sub.add_argument(
         "targets",
         nargs="*",
         metavar="cible",
         help="add : les fichiers à copier ; read, merge, ignore : l'identifiant du document (d1) ; "
-        "link : aucune cible",
+        "link, verdicts : aucune cible",
     )
     sub.add_argument("--sheet", default=None, metavar="NOM", help="read : feuille du classeur")
     sub.add_argument(
@@ -1461,6 +1472,8 @@ def _cmd_context_docs(args, services) -> int:
         return _context_docs_add(run_dir, args.targets)
     if args.action == "link":
         return _context_docs_link(run_dir, args)
+    if args.action == "verdicts":
+        return _context_docs_verdicts(run_dir, args)
     if len(args.targets) != 1:
         raise UsageError(f"{args.action} : indiquer un seul identifiant de document (d1).")
     entry = _context_doc_entry(run_dir, args.targets[0])
@@ -1684,20 +1697,47 @@ def _context_docs_link(run_dir: Path, args) -> int:
         raise UsageError("link : aucune cible (cqa_plan.py context-docs <run_dir> link).")
     if args.accept and (args.proposed is not None or args.detail):
         raise UsageError("--accept s'utilise seul : cqa_plan.py context-docs <run_dir> link --accept.")
-    scope = _load_context(run_dir).get("category_filter")
-    scope = [name for name in scope if isinstance(name, str)] if isinstance(scope, list) else []
+    scope = _category_scope(run_dir)
     rows, _ = _read_rows(run_dir)
     if args.accept:
-        return _context_docs_accept(run_dir, rows, scope or None)
+        return _context_docs_accept(run_dir, rows, scope)
     proposed = _read_proposed(args.proposed) if args.proposed is not None else None
-    links = docs_link.link(run_dir, rows, scope or None, proposed)
+    links = docs_link.link(run_dir, rows, scope, proposed)
     docs_link.write_links(run_dir, links)
     (run_dir / context_docs.FOLDER / docs_link.MARKDOWN_FILE).unlink(missing_ok=True)
     if args.detail:
         points = docs_link.imported_points(run_dir)
         shown = {doc_id: points.get(doc_id, []) for doc_id in links["categories"]}
         docs_link.write_markdown(run_dir, docs_link.render_markdown(links, shown))
-    _emit(_link_summary(run_dir, links, rows, scope or None))
+    _emit(_link_summary(run_dir, links, rows, scope))
+    return EXIT_OK
+
+
+def _category_scope(run_dir: Path) -> Optional[list]:
+    """Return the category_filter of context.json as a list of names, None without a filter."""
+    scope = _load_context(run_dir).get("category_filter")
+    scope = [name for name in scope if isinstance(name, str)] if isinstance(scope, list) else []
+    return scope or None
+
+
+def _context_docs_verdicts(run_dir: Path, args) -> int:
+    if args.targets:
+        raise UsageError("verdicts : aucune cible (cqa_plan.py context-docs <run_dir> verdicts).")
+    scope = _category_scope(run_dir)
+    rows, _ = _read_rows(run_dir)
+    verdicts = docs_verdicts.document_verdicts(run_dir, rows, scope)
+    docs_verdicts.write_verdicts(run_dir, verdicts)
+    by_verdict = Counter(entry["verdict"] for entry in verdicts.values())
+    per_document = Counter(
+        evidence["doc"] for entry in verdicts.values() for evidence in entry["finding"]["evidence"]
+    )
+    _emit(
+        {
+            "rows": len(verdicts),
+            "by_verdict": {verdict: by_verdict[verdict] for verdict in VERDICTS if by_verdict[verdict]},
+            "documents": [{"id": doc_id, "rows": per_document[doc_id]} for doc_id in sorted(per_document)],
+        }
+    )
     return EXIT_OK
 
 

@@ -15,7 +15,7 @@ from unittest import mock
 from urllib.parse import urljoin, urlsplit
 
 import cqa_plan as cqa_plan_module
-from cqa import context_docs, docs_link, docs_read, fix_state, probes, report
+from cqa import context_docs, docs_link, docs_read, docs_verdicts, fix_state, probes, report
 from cqa.notion_write import apply_plan, text_digest, validate_plan
 from cqa.plan import operation_key
 from tests.cqa.fakes import apply_report
@@ -4340,6 +4340,102 @@ class ContextDocsCommandTest(AuditCase):
         code, out, err = self.docs("link")
         self.assertEqual(code, 2)
         self.assertIn("rows.json", err)
+
+    def verdictable(self):
+        """Merged document, rows 112, 113 and 120, links validated: 112 is ko, 113 is ok."""
+        self.linkable()
+        self.docs_json("link")
+        self.docs_json("link", "--accept")
+
+    def stored_verdicts(self):
+        return self.read(self.run_dir, "context-docs/verdicts.json")["verdicts"]
+
+    def test_verdicts_writes_the_findings_and_prints_the_counts(self):
+        self.verdictable()
+        code, out, err = self.docs("verdicts")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            json.loads(out),
+            {
+                "rows": 2,
+                "by_verdict": {"ko": 1, "ok": 1},
+                "documents": [{"id": "d1", "rows": 2}],
+            },
+        )
+        stored = self.stored_verdicts()
+        self.assertEqual(sorted(stored), ["112", "113"])
+        self.assertEqual((stored["112"]["verdict"], stored["113"]["verdict"]), ("ko", "ok"))
+        finding = stored["112"]["finding"]
+        self.assertEqual(finding["source"], "context_doc")
+        self.assertEqual(
+            finding["evidence"], [{"type": "document", "doc": "d1", "ref": "critères 1.1"}]
+        )
+        self.assertIn("Rapport « Audit RGAA example » (2026-10-01) : 1 point non conforme", finding["summary"])
+        self.assertEqual(finding["todo"], "Ajouter un attribut alt aux images")
+        self.assertNotIn("in_repo", stored["113"]["finding"])
+        self.assertEqual(sorted(docs_verdicts.document_refs(self.run_dir)), [112, 113])
+        self.assertNotIn(120, docs_verdicts.document_refs(self.run_dir))
+
+    def test_verdicts_print_no_text_of_the_document(self):
+        self.verdictable()
+        code, out, err = self.docs("verdicts")
+        self.assertEqual(code, 0, err)
+        for text in ("Audit RGAA example", "Images sans alternative", "alt"):
+            self.assertNotIn(text, out)
+
+    def test_verdicts_of_unvalidated_links_are_empty_and_replace_a_previous_file(self):
+        self.verdictable()
+        self.docs_json("verdicts")
+        self.docs_json("link")
+        result = self.docs_json("verdicts")
+        self.assertEqual(result, {"rows": 0, "by_verdict": {}, "documents": []})
+        self.assertEqual(self.stored_verdicts(), {})
+
+    def test_verdicts_follow_the_category_filter_of_the_run(self):
+        self.verdictable()
+        for scope, rows in ((["QUALITÉ"], 0), ([self.ACCESS], 2), (None, 2)):
+            with self.subTest(scope=scope):
+                self.edit(
+                    self.run_dir, "context.json", lambda context: context.update(category_filter=scope)
+                )
+                self.assertEqual(self.docs_json("verdicts")["rows"], rows)
+
+    def test_verdicts_without_a_readable_document_are_empty(self):
+        self.verdictable()
+        self.items_path().unlink()
+        code, out, err = self.docs("verdicts")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["rows"], 0)
+        self.items_path().write_text("{", encoding="utf-8")
+        self.assertEqual(self.docs("verdicts")[0], 0)
+
+    def test_verdicts_without_any_document(self):
+        self.link_rows()
+        self.assertEqual(
+            self.docs_json("verdicts"), {"rows": 0, "by_verdict": {}, "documents": []}
+        )
+
+    def test_verdicts_exit_codes(self):
+        self.verdictable()
+        for argv in (
+            ("verdicts", "d1"),
+            ("verdicts", "--accept"),
+            ("verdicts", "--detail"),
+            ("verdicts", "--proposed", self.proposal({}, "empty.json")),
+            ("verdicts", "--sheet", "p01"),
+            ("verdicts", "--rows", "1-2"),
+            ("--check", "verdicts"),
+        ):
+            with self.subTest(argv=argv):
+                code, out, err = self.docs(*argv)
+                self.assertEqual(code, 2, out)
+        (self.run_dir / "rows.json").unlink()
+        code, out, err = self.docs("verdicts")
+        self.assertEqual(code, 2)
+        self.assertIn("rows.json", err)
+        self.write(self.run_dir, "rows.json", {"rows": [], "missing_in_copy": []})
+        (self.run_dir / "context.json").unlink()
+        self.assertEqual(self.docs("verdicts")[0], 6)
 
 
 class RegistrationTest(AuditCase):

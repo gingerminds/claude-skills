@@ -293,6 +293,18 @@ class FormatCommentTest(unittest.TestCase):
             comment(finding(evidence=evidence)),
         )
 
+    def test_document_evidence_line(self):
+        evidence = [{"type": "document", "doc": "d1", "ref": "critères 7.3"}]
+        text = comment(finding(evidence=evidence))
+        self.assertIn("Preuves :\n- Rapport d1 : critères 7.3\n", text)
+        self.assertNotIn("/-/blob/", text)
+        two = [
+            {"type": "document", "doc": "d1", "ref": "critères 7.3, 12.9"},
+            {"type": "document", "doc": "d2", "ref": "Constat 4"},
+        ]
+        text = comment(finding(evidence=two))
+        self.assertIn("\n- Rapport d1 : critères 7.3, 12.9\n- Rapport d2 : Constat 4\n", text)
+
     def test_unknown_evidence_type_is_refused(self):
         with self.assertRaises(ValueError):
             comment(finding(evidence=[{"type": "video", "url": "https://example.org/"}]))
