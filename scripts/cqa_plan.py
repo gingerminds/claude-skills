@@ -1014,6 +1014,7 @@ def _cmd_lots(args, services) -> int:
     lots = build_lots(kept, document_refs=refs)
     counts = coverage(kept, excluded, context["available_tools"], document_refs=refs)
     docs_verdicts.write_findings(run_dir, {row["ref"] for row in kept if row["ref"] in refs})
+    docs_verdicts.write_hints(run_dir, lots)
     write_json(run_dir / "lots.json", {"lots": lots, "excluded": excluded, "coverage": counts})
     _emit(
         {

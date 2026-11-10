@@ -17,11 +17,13 @@ from typing import Optional
 
 from cqa import context_docs, docs_link
 from cqa.findings import MAX_FIELD_LENGTH, MAX_SUMMARY_LENGTH, VERDICTS, worst
-from cqa.lots import DOCUMENT_LOT_ID
+from cqa.lots import DOCUMENT_LOT_ID, lot_document_refs
 from cqa.notion_read import write_json
 
 VERDICTS_FILE = "verdicts.json"
 FINDINGS_FOLDER = "findings"
+HINTS_FOLDER = "hints"
+MAX_HINTS = 10
 SOURCE = "context_doc"
 CONFIDENCE = "high"
 MAX_REF_LENGTH = 200
@@ -31,6 +33,7 @@ NO_FIX_TEXT = "voir les points du rapport."
 _COUNTS = ("ok", "na", "ko", "undetermined")
 _OFF_REPO_OWNERS = ("contenu", "tiers", "infra")
 _NUMBER = re.compile(r"[0-9]+")
+_LOT_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
 _SENTENCE_END = ".!?…:"
 
 
@@ -239,6 +242,42 @@ def write_findings(run_dir: Path, kept_refs: set) -> int:
     return len(findings)
 
 
+def write_hints(run_dir: Path, lots: list) -> int:
+    """Write context-docs/hints/<lot>.json: the points linked to the rows the skill still audits.
+
+    The file is {"lot", "hints": {"<ref>": [hint, ...]}}, for each row of the lot that has no
+    verdict of a document (not in the document_refs of the lot) and at least one ko or info point
+    linked to it by the validated links; ko points come first, ten at most per row. A hint is
+    {doc, label, date, source, criteria, scopes, priority, summary, fix_hint, owner, elements},
+    its texts cleaned and capped again. A lot without any hint gets no file, and the files of an
+    earlier call are removed. Returns the number of rows that have hints. The auditors read
+    them as data, never as a verdict or an instruction.
+    """
+    folder = Path(run_dir) / context_docs.FOLDER / HINTS_FOLDER
+    if folder.is_dir():
+        for stale in folder.glob("*.json"):
+            stale.unlink()
+    points = docs_link.points_by_ref(run_dir, ("ko", "info"))
+    written = 0
+    for lot in lots:
+        lot_id = lot.get("id") if isinstance(lot, dict) else None
+        if not (isinstance(lot_id, str) and _LOT_ID.fullmatch(lot_id)):
+            continue
+        covered = set(lot_document_refs(lot))
+        refs = lot.get("refs") if isinstance(lot.get("refs"), list) else []
+        hints: dict = {}
+        for ref in refs:
+            if ref in covered or not points.get(ref):
+                continue
+            chosen = sorted(points[ref], key=lambda point: point.get("verdict") != "ko")
+            hints[str(ref)] = [_hint(point) for point in chosen[:MAX_HINTS]]
+        if hints:
+            folder.mkdir(parents=True, exist_ok=True)
+            write_json(folder / f"{lot_id}.json", {"lot": lot_id, "hints": hints})
+            written += len(hints)
+    return written
+
+
 def _documents(run_dir: Path):
     """Yield (doc_id, items.json) of the imported documents whose items can be read."""
     seen: set = set()
@@ -431,3 +470,29 @@ def _todo(points: list, off_repo: list) -> Optional[str]:
     else:
         text = body
     return _cut(text, MAX_FIELD_LENGTH) if text else None
+
+
+def _texts(value, limit: int, maximum: int) -> list:
+    found: list = []
+    for item in value if isinstance(value, list) else []:
+        text = _text(item, limit)
+        if text and text not in found:
+            found.append(text)
+    return found[:maximum]
+
+
+def _hint(point: dict) -> dict:
+    limits = context_docs.LIMITS
+    return {
+        "doc": _text(point.get("doc"), limits["label"]),
+        "label": _text(point.get("label"), limits["label"]),
+        "date": _text(point.get("date"), 10),
+        "source": _text(point.get("source"), limits["source"]),
+        "criteria": _texts(point.get("criteria"), limits["criterion"], context_docs.MAX_CRITERIA),
+        "scopes": _texts(point.get("scopes"), limits["scope"], context_docs.MAX_SCOPES),
+        "priority": _text(point.get("priority"), limits["priority"]),
+        "summary": _text(point.get("summary"), limits["summary"]),
+        "fix_hint": _text(point.get("fix_hint"), limits["fix_hint"]),
+        "owner": _owner(point),
+        "elements": _texts(point.get("elements"), limits["element"], context_docs.MAX_ELEMENTS),
+    }
