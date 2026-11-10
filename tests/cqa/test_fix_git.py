@@ -762,6 +762,162 @@ ROBOTS = "robots.txt"
 FAILED = "Rapport invalide après une nouvelle tentative."
 
 
+class ContextItemsTest(GitCase):
+    """cqa_fix.py validate report: the outcome of each report point a row was given."""
+
+    POINTS = [{"id": "d1-004", "priority": "Majeur", "owner": "dev"},
+              {"id": "d1-009", "priority": "Moyen", "owner": "dev"}]
+
+    def setUp(self):
+        super().setUp()
+        self.write_run(flight(), sections={"securite": (3,)})
+        self.give_points(self.POINTS)
+        self.open_pass()
+        self.worktree = Path(self.start_ok()["worktree"])
+        self.section_start()
+        self.pass_start(1)
+
+    def give_points(self, points):
+        """Write the points in the candidate row, as cqa_fix.py candidates would."""
+        path = self.run_dir / "fix" / "candidates.json"
+        candidates = json.loads(path.read_text(encoding="utf-8"))
+        row = candidates["keys"][0]["sections"][0]["rows"][0]
+        if points:
+            row["context_items"] = points
+        else:
+            row.pop("context_items", None)
+        path.write_text(json.dumps(candidates), encoding="utf-8")
+
+    def pass_start(self, number):
+        code, out, err = self.run_main(["pass-start", self.run_dir, KEY, "--pass", str(number),
+                                        "--section", "securite"])
+        self.assertEqual(code, 0, err)
+
+    def validate(self, kind, number, rows, **extra):
+        document = {"key": KEY, "pass": number, "rows": rows, **extra}
+        (self.run_dir / "fix" / "front" / f"{kind}-{number}.json").write_text(
+            json.dumps(document), encoding="utf-8")
+        code, out, err = self.run_main(["validate", self.run_dir, KEY, kind, "--pass", str(number)])
+        return code, json.loads(out) if out else None, err
+
+    def fixed(self, sha, **extra):
+        return {"ref": 3, "outcome": "fixed", "change": "Ajoute a.", "uat": "Lire a.",
+                "commits": [sha], **extra}
+
+    def commit(self, name):
+        return self.fixer_commit(self.worktree, f"{name}.txt", f"fix(CQ-3): add {name}")
+
+    def test_a_fixed_row_with_points_must_report_them(self):
+        sha = self.commit("a")
+        code, result, err = self.validate("report", 1, [self.fixed(sha)])
+        self.assertEqual(code, 6, err)
+        self.assertEqual(result["errors"], [
+            "ligne CQ-3 : « context_items » est obligatoire pour une ligne corrigée qui a des "
+            "points de rapport (d1-004, d1-009)"])
+        row = self.key()["rows"]["3"]
+        self.assertEqual(row["outcome"], "pending")
+        self.assertNotIn("context_items", row)
+
+    def test_validate_report_records_context_items_in_the_state(self):
+        sha = self.commit("a")
+        items = [{"id": "d1-009", "outcome": "left", "note": "Le texte vient du CMS."},
+                 {"id": "d1-004", "outcome": "already_ok", "note": "Le lien porte déjà un intitulé."}]
+        code, result, err = self.validate("report", 1, [self.fixed(sha, context_items=items)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(result["rows"]["fixed"], [3])
+        row = self.key()["rows"]["3"]
+        self.assertEqual(row["outcome"], "fixed")
+        self.assertEqual(row["context_items"], [
+            {"id": "d1-004", "outcome": "already_ok", "note": "Le lien porte déjà un intitulé."},
+            {"id": "d1-009", "outcome": "left", "note": "Le texte vient du CMS."}])
+
+    def test_a_new_report_replaces_the_context_items_of_the_row(self):
+        first = self.commit("a")
+        done = [{"id": "d1-004", "outcome": "fixed", "note": None},
+                {"id": "d1-009", "outcome": "fixed", "note": None}]
+        self.assertEqual(self.validate("report", 1, [self.fixed(first, context_items=done)])[0], 0)
+        blocking = [{"ref": 3, "verdict": "blocking", "notes": "Échappement manquant."}]
+        self.assertEqual(self.validate("review", 1, blocking, attention=[])[0], 0)
+        self.pass_start(2)
+        second = self.commit("b")
+        again = [{"id": "d1-004", "outcome": "fixed", "note": None},
+                 {"id": "d1-009", "outcome": "left", "note": "Hors du dépôt."}]
+        report = self.fixed(first, context_items=again)
+        report["commits"] = [first, second]
+        self.assertEqual(self.validate("report", 2, [report])[0], 0)
+        self.assertEqual(self.key()["rows"]["3"]["context_items"], [
+            {"id": "d1-004", "outcome": "fixed", "note": None},
+            {"id": "d1-009", "outcome": "left", "note": "Hors du dépôt."}])
+
+    def test_context_items_are_dropped_from_the_state_when_a_report_has_none(self):
+        first = self.commit("a")
+        done = [{"id": "d1-004", "outcome": "fixed", "note": None},
+                {"id": "d1-009", "outcome": "fixed", "note": None}]
+        self.assertEqual(self.validate("report", 1, [self.fixed(first, context_items=done)])[0], 0)
+        self.assertIn("context_items", self.key()["rows"]["3"])
+        blocking = [{"ref": 3, "verdict": "blocking", "notes": "Échappement manquant."}]
+        self.assertEqual(self.validate("review", 1, blocking, attention=[])[0], 0)
+        self.pass_start(2)
+        self.give_points([])
+        second = self.commit("b")
+        report = self.fixed(first)
+        report["commits"] = [first, second]
+        self.assertEqual(self.validate("report", 2, [report])[0], 0)
+        self.assertNotIn("context_items", self.key()["rows"]["3"])
+
+    def test_a_row_that_is_not_fixed_does_not_report_context_items(self):
+        items = [{"id": "d1-004", "outcome": "left", "note": "Hors du dépôt."},
+                 {"id": "d1-009", "outcome": "left", "note": "Hors du dépôt."}]
+        skipped = {"ref": 3, "outcome": "skipped", "reason": "Hors du repo."}
+        code, result, err = self.validate("report", 1, [{**skipped, "context_items": items}])
+        self.assertEqual(code, 6, err)
+        self.assertEqual(result["errors"], [
+            "ligne CQ-3 : « context_items » ne sert qu'à une ligne corrigée (fixed)"])
+        code, result, err = self.validate("report", 1, [skipped])
+        self.assertEqual(code, 0, err)
+        row = self.key()["rows"]["3"]
+        self.assertEqual(row["outcome"], "skipped")
+        self.assertNotIn("context_items", row)
+
+    def test_an_unknown_point_is_refused(self):
+        sha = self.commit("a")
+        items = [{"id": "d1-004", "outcome": "fixed", "note": None},
+                 {"id": "d1-009", "outcome": "fixed", "note": None},
+                 {"id": "d1-042", "outcome": "fixed", "note": None}]
+        code, result, err = self.validate("report", 1, [self.fixed(sha, context_items=items)])
+        self.assertEqual(code, 6, err)
+        self.assertEqual(result["errors"], [
+            "ligne CQ-3 : « context_items » : point d1-042 inconnu pour cette ligne"])
+
+    def test_only_the_points_of_the_key_are_expected(self):
+        path = self.run_dir / "fix" / "candidates.json"
+        candidates = json.loads(path.read_text(encoding="utf-8"))
+        other = json.loads(json.dumps(candidates["keys"][0]))
+        other["key"] = other["repo"] = "back"
+        other["sections"][0]["rows"][0]["context_items"] = [{"id": "d2-001", "priority": "Moyen"}]
+        candidates["keys"].append(other)
+        path.write_text(json.dumps(candidates), encoding="utf-8")
+        sha = self.commit("a")
+        items = [{"id": "d1-004", "outcome": "fixed", "note": None},
+                 {"id": "d1-009", "outcome": "fixed", "note": None}]
+        code, result, err = self.validate("report", 1, [self.fixed(sha, context_items=items)])
+        self.assertEqual(code, 0, err)
+
+    def test_a_run_without_points_needs_no_context_items(self):
+        self.give_points([])
+        sha = self.commit("a")
+        code, result, err = self.validate("report", 1, [self.fixed(sha)])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("context_items", self.key()["rows"]["3"])
+
+    def test_without_the_candidates_file_the_report_is_judged_without_points(self):
+        (self.run_dir / "fix" / "candidates.json").unlink()
+        sha = self.commit("a")
+        code, result, err = self.validate("report", 1, [self.fixed(sha)])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("context_items", self.key()["rows"]["3"])
+
+
 def notes(*items):
     """The documentation file of the replay tests, with one line per note."""
     return "# WordPress\n\n## Notes\n" + "".join(f"- {item}\n" for item in items) + "\nEnd.\n"

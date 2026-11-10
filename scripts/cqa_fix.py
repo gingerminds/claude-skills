@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import quote
 
-from cqa import categories, deferred, git_tools, fix_checks, fix_commands, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_stack, fix_state, fix_summary
+from cqa import categories, deferred, docs_link, git_tools, fix_checks, fix_commands, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_stack, fix_state, fix_summary
 from cqa.checklist import STATUS_REVIEW, parse_refs, ref_label
 from cqa.notion_read import write_json, write_text
 from cqa.project import project_name
@@ -598,6 +598,7 @@ def _cmd_candidates(args, services: Services) -> int:
         result = fix_rows.select(
             rows, findings, excluded, repos, access, flights,
             refs=refs, without=without, run_dir=run_dir, categories=requested,
+            points=docs_link.fixer_points(run_dir),
         )
     except ValueError as error:
         raise UsageError(str(error))
@@ -1244,6 +1245,7 @@ def _cmd_validate(args, services: Services) -> int:
             commits=commits, pass_commits=pass_commits,
             reviewed={int(number) for number in _recorded(key, "reviews")},
             sections={ref: row.get("section") for ref, row in key["rows"].items()},
+            context_ids=_context_ids(run_dir, args.key),
         )
     errors = closed + errors
     summary = {outcome: [] for outcome in fix_guard.REPORT_OUTCOMES}
@@ -1265,6 +1267,10 @@ def _cmd_validate(args, services: Services) -> int:
             )
             # The texts of a new report replace those an earlier review corrected.
             row.pop("corrections", None)
+            if entry.get("context_items"):
+                row["context_items"] = entry["context_items"]
+            else:
+                row.pop("context_items", None)
             if entry["outcome"] == "needs_command":
                 row["needs_command"] = entry["needs_command"]
             else:
@@ -1283,6 +1289,31 @@ def _cmd_validate(args, services: Services) -> int:
         "dev_checkout_changed": changed,
     })
     return EXIT_CONTEXT if errors else EXIT_OK
+
+
+def _context_ids(run_dir: Path, name: str) -> dict:
+    """Return {ref: [ids]} of the report points fix/candidates.json gave to the rows of a key.
+
+    A file that is absent or unreadable gives none: the report is then judged without points.
+    """
+    try:
+        candidates = json.loads((run_dir / "fix" / "candidates.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    entries = candidates.get("keys") if isinstance(candidates, dict) else None
+    found: dict = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if not (isinstance(entry, dict) and entry.get("key") == name):
+            continue
+        for row in fix_rows.key_rows(entry):
+            points = row.get("context_items")
+            ids = list(dict.fromkeys(
+                point["id"] for point in points if isinstance(point, dict)
+                and isinstance(point.get("id"), str)
+            )) if isinstance(points, list) else []
+            if ids and isinstance(row.get("ref"), int):
+                found[row["ref"]] = ids
+    return found
 
 
 def _pass_rows(key: dict, number: int) -> dict:

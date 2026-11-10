@@ -9,6 +9,7 @@ line by line, every line being checked.
 import copy
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
@@ -20,8 +21,27 @@ LINKS_FILE = "links.json"
 MARKDOWN_FILE = "links.md"
 MAX_PROPOSED = 5
 HOWS = ("criterion", "proposed")
+FIXER_OWNERS = ("dev", "inconnu")
 
 _FICHES = "fiches"
+_PRIORITY_RANKS = {
+    "critique": 0,
+    "bloquant": 0,
+    "majeur": 0,
+    "majeure": 0,
+    "haute": 0,
+    "haut": 0,
+    "elevee": 0,
+    "eleve": 0,
+    "moyen": 1,
+    "moyenne": 1,
+    "faible": 2,
+    "basse": 2,
+    "bas": 2,
+    "mineur": 2,
+    "mineure": 2,
+}
+_MIDDLE_RANK = 1
 _POINT_ID = re.compile(r"[A-Za-z0-9_.-]{1,40}")
 _HEADING = re.compile(r"(#{1,6})\s")
 _HEADER_LINE = re.compile(r"Catégories\s+(\S+)\s*:(.*)")
@@ -334,6 +354,39 @@ def points_by_ref(run_dir: Path, verdicts: tuple = ("ko",)) -> dict:
     return {ref: found[ref] for ref in sorted(found)}
 
 
+def priority_rank(text: Optional[str]) -> int:
+    """Return 0 for a high priority of the report, 1 for a middle or unknown one, 2 for a low one.
+
+    The text is the priority of a point as the document words it, compared whole, without case
+    or accents ("Élevée", "critique"): anything else, or no text, is the middle rank.
+    """
+    if not isinstance(text, str):
+        return _MIDDLE_RANK
+    folded = unicodedata.normalize("NFKD", text)
+    folded = "".join(char for char in folded if not unicodedata.combining(char))
+    return _PRIORITY_RANKS.get(folded.strip().casefold(), _MIDDLE_RANK)
+
+
+def fixer_points(run_dir: Path) -> dict:
+    """Return {ref: [point]}: the ko points of the dev (or of an unknown owner) given to the fixer.
+
+    They come from the validated links and the imported documents only; {} when there is
+    nothing, or when the files cannot be read. A point of an unknown owner is given as a dev's
+    ("owner": "dev"): the fixer leaves it, with its reason, when the repo cannot fix it. A point
+    of the content, a third party or the infrastructure stays with them. The points of a ref
+    come by priority of the report (priority_rank), then by id. The fields are those of the
+    document, cleaned and capped again, since the fixer reads them as data and never as
+    instructions: {id, doc, label, date, source, criteria, scopes, priority, summary, fix_hint,
+    owner, elements}.
+    """
+    found: dict = {}
+    for ref, points in points_by_ref(run_dir, ("ko",)).items():
+        kept = [_fixer_point(point) for point in points if _owner(point) in FIXER_OWNERS]
+        if kept:
+            found[ref] = sorted(kept, key=lambda point: (priority_rank(point["priority"]), point["id"]))
+    return found
+
+
 def imported_points(run_dir: Path) -> dict:
     """Return {doc: [points]} of the imported documents whose items.json can be read."""
     return {doc_id: _points(document) for doc_id, document in _imported(run_dir)}
@@ -350,6 +403,44 @@ def _imported(run_dir: Path):
         document = context_docs.read_items(run_dir, doc_id)
         if document is not None:
             yield doc_id, document
+
+
+def _owner(point: dict) -> str:
+    owner = context_docs.clean_text(point.get("owner")).casefold()
+    return owner if owner in context_docs.OWNERS else "inconnu"
+
+
+def _fixer_point(point: dict) -> dict:
+    limits = context_docs.LIMITS
+    return {
+        "id": point["id"],
+        "doc": _text(point.get("doc"), limits["label"]),
+        "label": _text(point.get("label"), limits["label"]),
+        "date": _text(point.get("date"), 10),
+        "source": _text(point.get("source"), limits["source"]),
+        "criteria": _texts(point.get("criteria"), limits["criterion"], context_docs.MAX_CRITERIA),
+        "scopes": _texts(point.get("scopes"), limits["scope"], context_docs.MAX_SCOPES),
+        "priority": _text(point.get("priority"), limits["priority"]),
+        "summary": _text(point.get("summary"), limits["summary"]),
+        "fix_hint": _text(point.get("fix_hint"), limits["fix_hint"]),
+        "owner": "dev",
+        "elements": _texts(point.get("elements"), limits["element"], context_docs.MAX_ELEMENTS),
+    }
+
+
+def _text(value, limit: int) -> str:
+    """Return the text cleaned, or its beginning followed by an ellipsis when over the limit."""
+    text = context_docs.clean_text(value)
+    return text if len(text) <= limit else text[: max(limit - 1, 0)].rstrip() + "…"
+
+
+def _texts(value, limit: int, maximum: int) -> list:
+    found: list = []
+    for item in value if isinstance(value, list) else []:
+        text = _text(item, limit)
+        if text and text not in found:
+            found.append(text)
+    return found[:maximum]
 
 
 def _points(document: dict) -> list:
