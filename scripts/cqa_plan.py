@@ -23,7 +23,7 @@ from typing import Callable, NamedTuple, Optional
 from html.parser import HTMLParser
 from urllib.parse import urldefrag, urljoin, urlsplit
 
-from cqa import deferred, fix_state, probes, report
+from cqa import categories, deferred, fix_state, probes, report
 from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
 from cqa.findings import apply_guardrails, validate_document
 from cqa.git_tools import (
@@ -201,6 +201,19 @@ def _run_command(commands, name: str, help_text: str, handler) -> argparse.Argum
 def _register_audit(commands) -> None:
     _run_command(commands, "coverage", "couverture des lignes selon les outils", _cmd_coverage)
     _run_command(commands, "lots", "répartit les lignes en lots (lots.json)", _cmd_lots)
+    sub = _run_command(
+        commands, "categories", "catégories de la copie et périmètre du run", _cmd_categories
+    )
+    sub.add_argument(
+        "--category",
+        action="append",
+        default=[],
+        metavar="NOM",
+        help="catégorie du périmètre (nom Notion ou alias, sans accent ni casse), répétable",
+    )
+    sub.add_argument(
+        "--write", action="store_true", help="range le périmètre dans context.json (category_filter)"
+    )
     sub = _run_command(commands, "probes", "sondes HTTP de la boîte à outils", _cmd_probes)
     sub.add_argument(
         "--followup",
@@ -943,6 +956,27 @@ def _cmd_lots(args, services) -> int:
     return EXIT_OK
 
 
+def _cmd_categories(args, services) -> int:
+    run_dir = args.run_dir
+    context = _load_context(run_dir)
+    rows, _ = _read_rows(run_dir)
+    listed = categories.available(rows)
+    names, unknown = categories.resolve(args.category, rows)
+    if unknown:
+        raise UsageError(
+            f"Catégorie inconnue : {', '.join(unknown)}. "
+            f"Catégories de la copie : {', '.join(entry['name'] for entry in listed)}."
+        )
+    chosen = names or None
+    stored = context.get("category_filter")
+    same = set(chosen or ()) == set(stored if isinstance(stored, list) else ())
+    if args.write:
+        context["category_filter"] = chosen
+        write_json(run_dir / "context.json", context)
+    _emit({"available": listed, "category_filter": chosen, "same": same, "unknown": unknown})
+    return EXIT_OK
+
+
 def _cmd_probes(args, services) -> int:
     run_dir = args.run_dir
     if args.followup:
@@ -1394,7 +1428,12 @@ def _cmd_assign(args, services) -> int:
     lead = _lead_option(context)
     rows, _ = _read_rows(run_dir)
     verdicts = _verdicts(run_dir, context, rows) if args.include_unknown else {}
-    annotated = [{**row, "verdict": verdicts.get(row.get("ref"))} for row in rows]
+    scope = context.get("category_filter")
+    annotated = [
+        {**row, "verdict": verdicts.get(row.get("ref"))}
+        for row in rows
+        if categories.in_scope(row, scope)
+    ]
     team = [member for member in context["team"] if member.get("option")]
     without_option = [member["name"] for member in context["team"] if not member.get("option")]
     document = {
@@ -1967,6 +2006,19 @@ def _path(value) -> Optional[str]:
     return "doit être un chemin non vide, sans tabulation ni retour à la ligne"
 
 
+MAX_CATEGORY_FILTER = 10
+
+
+def _category_filter(value) -> Optional[str]:
+    """Check category_filter: null, or 1 to MAX_CATEGORY_FILTER non-empty texts."""
+    if value is None:
+        return None
+    filled = isinstance(value, list) and all(_text(item) is None for item in value)
+    if filled and 1 <= len(value) <= MAX_CATEGORY_FILTER:
+        return None
+    return f"doit être une liste de 1 à {MAX_CATEGORY_FILTER} textes non vides ou null"
+
+
 _TOP_FIELDS = {
     "schema": _schema,
     "run_id": _text,
@@ -1980,6 +2032,7 @@ _OPTIONAL_TOP_FIELDS = {
     "mode": _choice("autonome", "interactif"),
     "notion_write": _choice_or_null("all", "keep_human", "none"),
     "crawl_minutes": _crawl_minutes_value,
+    "category_filter": _category_filter,
 }
 _SECTIONS = {
     "project": {"slug": _text, "name": _text, "protection": _text_or_null},
@@ -2127,7 +2180,11 @@ def _selection(run_dir: Path) -> tuple:
     context = _checked_context(run_dir)
     rows, _ = _read_rows(run_dir)
     kept, excluded = select_rows(
-        rows, context["technos"], context["available_tools"], context["phase_filter"]
+        rows,
+        context["technos"],
+        context["available_tools"],
+        context["phase_filter"],
+        context.get("category_filter"),
     )
     for row in kept:
         if not _is_ref(row.get("ref")):

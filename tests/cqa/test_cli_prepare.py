@@ -725,6 +725,36 @@ class ContextCheckTest(RunDirCase):
         context["notion_write"] = "tout"
         self.assertIn("keep_human", self.check(context)[1]["errors"][0])
 
+    def test_category_filter_is_optional_and_checked(self):
+        code, report, _ = self.check(valid_context())
+        self.assertEqual((code, report["errors"]), (0, []))
+        for value in (None, ["SÉCURITÉ"], ["SÉCURITÉ", "SEO / GEO"], [f"C{n}" for n in range(10)]):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["category_filter"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report["errors"]), (0, []))
+
+    def test_context_check_refuses_a_category_filter_that_is_a_text(self):
+        context = valid_context()
+        context["category_filter"] = "SÉCURITÉ"
+        code, report, _ = self.check(context)
+        self.assertEqual(code, 6)
+        self.assertEqual(len(report["errors"]), 1, report["errors"])
+        self.assertIn("« category_filter »", report["errors"][0])
+        self.assertIn("liste de 1 à 10 textes non vides", report["errors"][0])
+
+    def test_context_check_refuses_other_category_filters(self):
+        for value in ([], [""], ["  "], ["SÉCURITÉ", 3], [None], {"a": 1}, 3, True,
+                      [f"C{n}" for n in range(11)]):
+            with self.subTest(value=value):
+                context = valid_context()
+                context["category_filter"] = value
+                code, report, _ = self.check(context)
+                self.assertEqual(code, 6)
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                self.assertIn("« category_filter »", report["errors"][0])
+
     def test_crawl_minutes_is_optional_and_checked(self):
         for value in (60, 5, 240):
             with self.subTest(value=value):

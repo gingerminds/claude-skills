@@ -114,9 +114,11 @@ def build_plan(
     status changes, or when neither the visible comments of the integration nor the history of
     earlier runs already carry the verdict. A kept row without finding counts as unknown.
     Excluded rows: techno gets the status "Non applicable" and a comment, no_tools a comment,
-    standby, phase and no_fiche nothing. A row without ref never gets an operation. A status
-    operation carries human_override when the status it replaces was set by a person, except
-    for the refs of recette_refs: the devs set their status on purpose, the recette may change it.
+    standby, phase and no_fiche nothing. A row of another category than the scope (category)
+    gets nothing either, whatever its status, and is left out of "rows" and of the summary. A
+    row without ref never gets an operation. A status operation carries human_override when the
+    status it replaces was set by a person, except for the refs of recette_refs: the devs set
+    their status on purpose, the recette may change it.
 
     Operations come by ref. Besides the keys of the exchange format the plan carries "rows",
     the status of every row before and after the run, which filter_plan needs to recompute
@@ -135,9 +137,12 @@ def build_plan(
     }
     by_ref = {row["ref"]: row for row in rows if row.get("ref") is not None}
     excluded_by_ref = {entry["ref"]: entry for entry in excluded if entry.get("ref") is not None}
+    out_of_scope = {entry.get("page_id") for entry in excluded if entry.get("reason") == "category"}
     ops, unknown, deferred = [], [], []
     for ref in sorted(by_ref):
         row, entry = by_ref[ref], excluded_by_ref.get(ref)
+        if row["page_id"] in out_of_scope:
+            continue
         if entry is None:
             dated = (comment_dates or {}).get(ref)
             row_ops, verdict = _finding_operations(
@@ -158,7 +163,7 @@ def build_plan(
             elif entry["reason"] == "phase":
                 deferred.append(ref)
         ops.extend(row_ops)
-    states = _row_states(rows, ops)
+    states = _row_states([row for row in rows if row["page_id"] not in out_of_scope], ops)
     plan = {
         "run_id": context["run_id"],
         "copy_data_source_id": notion["copy_data_source_id"],

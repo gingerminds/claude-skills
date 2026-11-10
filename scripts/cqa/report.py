@@ -123,7 +123,7 @@ def _synthesis(context, plan, lots, rows, tools, now, run_dir) -> str:
         _duration_line(run_dir, start, now),
     ]
     sections = [
-        ("Couverture", _coverage_lines(lots["coverage"])),
+        ("Couverture", _coverage_lines(lots["coverage"], context.get("category_filter"))),
         ("Décompte par statut", _status_lines(summary["by_status_after"])),
         ("Décompte par catégorie", _category_lines(plan["rows"], row_list)),
         (
@@ -300,7 +300,9 @@ def _duration_text(minutes: int) -> str:
     return f"{minutes} min" if not hours else f"{hours} h {rest:02d} min"
 
 
-def _coverage_lines(coverage: dict) -> list:
+def _coverage_lines(coverage: dict, categories: Optional[list] = None) -> list:
+    """Lines of the coverage section; the last one names the rows left out of the scope."""
+
     def count(key):
         return coverage.get(key, 0)
 
@@ -320,6 +322,12 @@ def _coverage_lines(coverage: dict) -> list:
         for gain in gains:
             noun = "ligne" if gain["rows"] == 1 else "lignes"
             lines.append(f"  - {gain['tool']} : {gain['rows']} {noun} ({gain['action']})")
+    outside = count("out_of_scope")
+    if outside > 0:
+        names = ", ".join(_line(name) for name in categories or [])
+        noun = "ligne" if outside == 1 else "lignes"
+        detail = f" (catégories : {names})" if names else ""
+        lines.append(f"- Hors périmètre : {outside} {noun}{detail}")
     return lines
 
 

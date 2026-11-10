@@ -54,6 +54,7 @@
     "deferred": 0,
     "na": 1,
     "standby": 0,
+    "out_of_scope": 0,
     "gains": [
       {
         "tool": "Navigateur",

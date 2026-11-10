@@ -35,8 +35,8 @@ def make_row(ref=1, **overrides):
     return row
 
 
-def select(rows, technos=PROJECT, available=CODE_TOOLS, phase_filter=None):
-    return select_rows(rows, technos, available, phase_filter)
+def select(rows, technos=PROJECT, available=CODE_TOOLS, phase_filter=None, category_filter=None):
+    return select_rows(rows, technos, available, phase_filter, category_filter)
 
 
 def lot_ids(built):
@@ -220,6 +220,61 @@ class SelectRowsTest(unittest.TestCase):
         base["phases"] = ["Build"]
         self.assertEqual(select([make_row(1, **base)])[1][0]["reason"], "no_tools")
 
+    def test_category_filter_is_the_first_rule(self):
+        row = make_row(1, category="QUALITÉ", status=checklist.STATUS_STANDBY)
+        kept, excluded = select([row], category_filter=["SÉCURITÉ"])
+        self.assertEqual(kept, [])
+        self.assertEqual(
+            (excluded[0]["reason"], excluded[0]["verdict"]), ("category", "skip")
+        )
+        self.assertEqual(excluded[0]["detail"], "catégorie hors du périmètre (SÉCURITÉ)")
+        self.assertEqual(excluded[0]["ref"], 1)
+        self.assertEqual(excluded[0]["page_id"], row["page_id"])
+
+    def test_category_detail_lists_every_name_of_the_filter(self):
+        _, excluded = select([make_row(1)], category_filter=["SÉCURITÉ", "SEO / GEO"])
+        self.assertEqual(excluded[0]["detail"], "catégorie hors du périmètre (SÉCURITÉ, SEO / GEO)")
+
+    def test_category_filter_keeps_the_rows_of_its_categories(self):
+        rows = [
+            make_row(1, category="SÉCURITÉ"),
+            make_row(2, category="QUALITÉ"),
+            make_row(3, category="SEO / GEO"),
+            make_row(4, category=None),
+        ]
+        kept, excluded = select(rows, category_filter=["SÉCURITÉ", "SEO / GEO"])
+        self.assertEqual([row["ref"] for row in kept], [1, 3])
+        self.assertEqual([entry["ref"] for entry in excluded], [2, 4])
+        self.assertEqual({entry["reason"] for entry in excluded}, {"category"})
+
+    def test_no_filter_and_an_empty_filter_keep_every_category(self):
+        rows = [make_row(1, category="SÉCURITÉ"), make_row(2, category=None)]
+        for category_filter in (None, []):
+            with self.subTest(category_filter=category_filter):
+                kept, excluded = select(rows, category_filter=category_filter)
+                self.assertEqual(len(kept), 2)
+                self.assertEqual(excluded, [])
+
+    def test_a_row_out_of_scope_is_silent_whatever_else_applies(self):
+        row = make_row(1, category="QUALITÉ", technos=["Wordpress"], tools=["BDD"], fiche_path=None)
+        _, excluded = select([row], category_filter=["SÉCURITÉ"])
+        self.assertEqual(excluded[0]["reason"], "category")
+
+    def test_category_and_phase_filters_intersect(self):
+        rows = [
+            make_row(1, category="ACCESSIBILITÉ", phases=["Build"]),
+            make_row(2, category="ACCESSIBILITÉ", phases=["MEL J0"]),
+            make_row(3, category="QUALITÉ", phases=["Build"]),
+        ]
+        kept, excluded = select(
+            rows, phase_filter="Build", category_filter=["ACCESSIBILITÉ"]
+        )
+        self.assertEqual([row["ref"] for row in kept], [1])
+        self.assertEqual(
+            [(entry["ref"], entry["reason"]) for entry in excluded],
+            [(2, "phase"), (3, "category")],
+        )
+
     def test_order_is_preserved_in_both_lists(self):
         rows = [
             make_row(9),
@@ -269,12 +324,41 @@ class CoverageTest(unittest.TestCase):
                     "deferred",
                     "na",
                     "standby",
+                    "out_of_scope",
                     "gains",
                 ]
             ),
         )
         self.assertEqual(result["total"], 0)
         self.assertEqual(result["gains"], [])
+
+    def test_coverage_counts_out_of_scope_apart(self):
+        rows = [
+            make_row(1, category="SÉCURITÉ"),
+            make_row(2, category="SÉCURITÉ", tools=["BDD"]),
+            make_row(3, category="QUALITÉ"),
+            make_row(4, category="QUALITÉ", status=checklist.STATUS_STANDBY),
+        ]
+        kept, excluded = select(rows, category_filter=["SÉCURITÉ"])
+        result = coverage(kept, excluded, CODE_TOOLS)
+        self.assertEqual((result["total"], result["out_of_scope"]), (2, 2))
+        self.assertEqual((result["evaluable"], result["not_evaluable"], result["standby"]), (1, 1, 0))
+        parts = ("evaluable", "partial", "not_evaluable", "deferred", "na", "standby")
+        self.assertEqual(sum(result[key] for key in parts), result["total"])
+
+    def test_out_of_scope_rows_bring_no_gain(self):
+        rows = [
+            make_row(1, category="SÉCURITÉ", tools=["Code", "BDD"]),
+            make_row(2, category="QUALITÉ", tools=["BDD"]),
+            make_row(3, category="QUALITÉ", tools=["Code", "Audit web"]),
+        ]
+        kept, excluded = select(rows, category_filter=["SÉCURITÉ"])
+        gains = coverage(kept, excluded, CODE_TOOLS)["gains"]
+        self.assertEqual(gains, [{"tool": "BDD", "action": TOOL_ACTIONS["BDD"], "rows": 1}])
+
+    def test_coverage_without_filter_has_no_out_of_scope_row(self):
+        result = self.run_coverage([make_row(1), make_row(2)])
+        self.assertEqual((result["total"], result["out_of_scope"]), (2, 0))
 
     def test_each_bucket(self):
         rows = [

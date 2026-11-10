@@ -168,6 +168,30 @@ class CoverageAndLotsTest(AuditCase):
         self.assertEqual(summary["coverage"]["na"], 1)
         self.assertEqual(self.read(run_dir, "lots.json")["lots"], [])
 
+    def test_lots_with_a_category_filter(self):
+        run_dir = self.make_run()
+        self.edit(
+            run_dir, "context.json", lambda context: context.update(category_filter=["SÉCURITÉ"])
+        )
+        summary = self.run_json(["lots", run_dir])
+        self.assertEqual([lot["id"] for lot in summary["lots"]], ["code-securite"])
+        written = self.read(run_dir, "lots.json")
+        self.assertEqual(written["lots"][0]["refs"], [103, 104])
+        self.assertEqual(summary["excluded"], {"category": 4})
+        self.assertEqual(
+            {entry["ref"]: entry["reason"] for entry in written["excluded"]},
+            {101: "category", 102: "category", 105: "category", 106: "category"},
+        )
+        self.assertEqual(summary["coverage"]["out_of_scope"], 4)
+        self.assertEqual(summary["coverage"]["total"], 2)
+        self.assertEqual(summary["coverage"]["gains"], [])
+        self.assertEqual(self.run_json(["coverage", run_dir]), summary["coverage"])
+
+    def test_a_context_without_category_filter_is_read_as_no_filter(self):
+        run_dir = self.make_run()
+        self.assertNotIn("category_filter", self.read(run_dir, "context.json"))
+        self.assertEqual(self.run_json(["coverage", run_dir])["out_of_scope"], 0)
+
     def test_missing_rows_json_is_a_usage_error(self):
         run_dir = self.make_run()
         (run_dir / "rows.json").unlink()
@@ -194,6 +218,87 @@ class CoverageAndLotsTest(AuditCase):
         code, out, err = self.run_main(["lots", run_dir])
         self.assertEqual(code, 2)
         self.assertIn("ref", err)
+
+
+class CategoriesCommandTest(AuditCase):
+    def stored(self, run_dir):
+        return self.read(run_dir, "context.json").get("category_filter", "absent")
+
+    def test_categories_command_resolves_then_writes(self):
+        run_dir = self.make_run()
+        result = self.run_json(["categories", run_dir, "--category", "securite"])
+        self.assertEqual(set(result), {"available", "category_filter", "same", "unknown"})
+        self.assertEqual(result["category_filter"], ["SÉCURITÉ"])
+        self.assertEqual(
+            result["available"],
+            [
+                {"name": "PERFORMANCE", "alias": "performance", "rows": 2},
+                {"name": "SÉCURITÉ", "alias": "securite", "rows": 2},
+                {"name": "QUALITÉ", "alias": "qualite", "rows": 2},
+            ],
+        )
+        self.assertEqual((result["same"], result["unknown"]), (False, []))
+        self.assertEqual(self.stored(run_dir), "absent")
+        written = self.run_json(["categories", run_dir, "--category", "Sécurité", "--write"])
+        self.assertEqual(written["category_filter"], ["SÉCURITÉ"])
+        self.assertEqual(self.stored(run_dir), ["SÉCURITÉ"])
+        again = self.run_json(["categories", run_dir, "--category", "SÉCURITÉ"])
+        self.assertTrue(again["same"])
+        self.assertEqual(self.run_main(["context", run_dir, "--check"])[0], 0)
+
+    def test_same_ignores_the_order_of_the_names(self):
+        run_dir = self.make_run()
+        self.edit(
+            run_dir,
+            "context.json",
+            lambda context: context.update(category_filter=["QUALITÉ", "SÉCURITÉ"]),
+        )
+        result = self.run_json(["categories", run_dir, "--category", "securite", "--category", "qualite"])
+        self.assertEqual(result["category_filter"], ["SÉCURITÉ", "QUALITÉ"])
+        self.assertTrue(result["same"])
+        other = self.run_json(["categories", run_dir, "--category", "securite"])
+        self.assertFalse(other["same"])
+
+    def test_without_category_the_filter_is_null_and_same_tells_about_the_stored_one(self):
+        run_dir = self.make_run()
+        result = self.run_json(["categories", run_dir])
+        self.assertIsNone(result["category_filter"])
+        self.assertTrue(result["same"])
+        self.edit(
+            run_dir, "context.json", lambda context: context.update(category_filter=["SÉCURITÉ"])
+        )
+        self.assertFalse(self.run_json(["categories", run_dir])["same"])
+        self.run_json(["categories", run_dir, "--write"])
+        self.assertIsNone(self.stored(run_dir))
+
+    def test_categories_unknown_name_lists_the_copy_categories(self):
+        run_dir = self.make_run()
+        code, out, err = self.run_main(
+            ["categories", run_dir, "--category", "securite", "--category", "a11y", "--write"]
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Catégorie inconnue : a11y.", err)
+        self.assertIn("Catégories de la copie : PERFORMANCE, SÉCURITÉ, QUALITÉ.", err)
+        self.assertEqual(self.stored(run_dir), "absent")
+
+    def test_write_keeps_the_rest_of_the_context(self):
+        run_dir = self.make_run()
+        before = self.read(run_dir, "context.json")
+        self.run_json(["categories", run_dir, "--category", "qualite", "--write"])
+        after = self.read(run_dir, "context.json")
+        self.assertEqual(after.pop("category_filter"), ["QUALITÉ"])
+        self.assertEqual(after, before)
+
+    def test_categories_needs_rows_json_and_a_context(self):
+        run_dir = self.make_run()
+        (run_dir / "rows.json").unlink()
+        code, out, err = self.run_main(["categories", run_dir, "--category", "securite"])
+        self.assertEqual(code, 2)
+        self.assertIn("rows.json", err)
+        code, out, err = self.run_main(["categories", self.tmp_dir()])
+        self.assertEqual(code, 6)
+        self.assertIn("context.json", err)
 
 
 class BuildProbesTest(unittest.TestCase):
@@ -1053,6 +1158,21 @@ class PlanTest(AuditCase):
         self.assertEqual(plan["assignee_options"], ["Inès", "Marc", "Côme D"])
         validate_plan(plan)
 
+    def test_plan_with_a_category_filter_touches_only_the_scope(self):
+        run_dir = self.make_run()
+        self.edit(
+            run_dir, "context.json", lambda context: context.update(category_filter=["SÉCURITÉ"])
+        )
+        self.run_json(["lots", run_dir])
+        summary = self.plan(run_dir)
+        plan = self.read(run_dir, "notion/plan.json")
+        self.assertEqual({op["ref"] for op in plan["ops"]}, {103, 104})
+        self.assertEqual([state["ref"] for state in plan["rows"]], [103, 104])
+        self.assertEqual(summary["by_status_after"], {"À traiter": 1, "Mise en place partielle": 1})
+        self.assertEqual(summary["human_overrides"], [])
+        self.assertEqual(summary["unknown"], [104])
+        validate_plan(plan)
+
     def test_plan_operations(self):
         run_dir = self.make_run()
         self.plan(run_dir)
@@ -1426,6 +1546,46 @@ class SynthesisTest(AuditCase):
         self.assertIn("- Navigateur : 1 ligne", text)
         self.assertIn("- lighthouse : en échec (navigateur de test indisponible)", text)
         self.assertIn("- http : ok", text)
+
+    def test_synthesis_says_out_of_scope(self):
+        run_dir = self.make_run()
+        self.edit(
+            run_dir, "context.json", lambda context: context.update(category_filter=["SÉCURITÉ"])
+        )
+        self.run_json(["lots", run_dir])
+        self.run_json(["plan", run_dir])
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+        coverage = text.split("## Couverture")[1].split("##")[0]
+        self.assertIn("- Hors périmètre : 4 lignes (catégories : SÉCURITÉ)", coverage)
+        self.assertIn("- Lignes de la checklist : 2", coverage)
+        self.assertEqual(coverage.rstrip().splitlines()[-1], "- Hors périmètre : 4 lignes (catégories : SÉCURITÉ)")
+        categories = text.split("## Décompte par catégorie")[1].split("##")[0]
+        self.assertIn("SÉCURITÉ", categories)
+        self.assertNotIn("PERFORMANCE", categories)
+        self.assertNotIn("QUALITÉ", categories)
+
+    def test_synthesis_without_a_filter_has_no_out_of_scope_line(self):
+        run_dir = self.make_planned_run()
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+        self.assertNotIn("Hors périmètre", text)
+
+    def test_coverage_lines_out_of_scope(self):
+        base = {"total": 3, "out_of_scope": 1, "gains": []}
+        lines = report._coverage_lines(base, ["SÉCURITÉ", "QUALITÉ"])
+        self.assertEqual(lines[-1], "- Hors périmètre : 1 ligne (catégories : SÉCURITÉ, QUALITÉ)")
+        self.assertEqual(
+            report._coverage_lines({**base, "out_of_scope": 12}, ["SÉCURITÉ"])[-1],
+            "- Hors périmètre : 12 lignes (catégories : SÉCURITÉ)",
+        )
+        gains = {**base, "gains": [{"tool": "BDD", "action": "x", "rows": 1}]}
+        self.assertTrue(report._coverage_lines(gains, ["SÉCURITÉ"])[-1].startswith("- Hors périmètre"))
+        for silent in ({**base, "out_of_scope": 0}, {"total": 3}):
+            self.assertFalse(
+                [line for line in report._coverage_lines(silent, ["SÉCURITÉ"]) if "Hors périmètre" in line]
+            )
+        self.assertEqual(
+            report._coverage_lines(base)[-1], "- Hors périmètre : 1 ligne"
+        )
 
     def test_unknown_rows_come_with_their_reason(self):
         run_dir = self.make_planned_run()
@@ -2126,6 +2286,17 @@ class AssignTest(AuditCase):
         self.assertEqual(
             set(document["proposal"][0]), {"ref", "page_id", "title", "sections", "assignee"}
         )
+
+    def test_assign_leaves_out_of_scope_rows_alone(self):
+        run_dir = self.make_run()
+        self.edit(
+            run_dir, "context.json", lambda context: context.update(category_filter=["SÉCURITÉ"])
+        )
+        self.assertEqual(self.proposed(self.assign(run_dir)), {103: "Marc", 104: "Inès"})
+        for ref in (101, 102, 103, 105, 106):
+            self.edit_row(run_dir, ref, status="Mis en place")
+        document = self.assign(run_dir, "--include-unknown")
+        self.assertEqual(self.proposed(document), {104: "Inès"})
 
     def test_members_without_option_are_never_proposed(self):
         run_dir = self.make_run()
@@ -3526,6 +3697,7 @@ class RegistrationTest(AuditCase):
         for name in (
             "coverage",
             "lots",
+            "categories",
             "probes",
             "validate",
             "plan",

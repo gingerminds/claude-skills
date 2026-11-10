@@ -4,6 +4,7 @@ import unicodedata
 from collections import Counter
 from typing import Optional
 
+from cqa.categories import in_scope
 from cqa.checklist import STATUS_STANDBY
 
 TOOLS = [
@@ -39,7 +40,13 @@ _SERVER_TOOLS = ("SSH serveur", "BDD")
 _TOOLBOX_TOOLS = ("Audit web", "Crawler")
 _DEFERRED_PHASES = frozenset({"MEL J0", "Post-MEL J+7"})
 _MERGED_CATEGORIES = {"process-interne": "process-rgpd", "rgpd-legal": "process-rgpd"}
-_BUCKETS = {"standby": "standby", "techno": "na", "phase": "deferred", "no_tools": "not_evaluable"}
+_BUCKETS = {
+    "category": "out_of_scope",
+    "standby": "standby",
+    "techno": "na",
+    "phase": "deferred",
+    "no_tools": "not_evaluable",
+}
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
 _TEST_ACCOUNTS = "Comptes de test"
 _BACKOFFICE_SECTION = re.compile(r"^(back|bo$)", re.IGNORECASE)
@@ -52,19 +59,25 @@ _TOOLBOX_HINT = re.compile(
 
 
 def select_rows(
-    rows: list[dict], technos: list[str], available_tools: list[str], phase_filter: Optional[str]
+    rows: list[dict],
+    technos: list[str],
+    available_tools: list[str],
+    phase_filter: Optional[str],
+    category_filter: Optional[list] = None,
 ) -> tuple[list[dict], list[dict]]:
     """Split rows into the rows to audit and the rows excluded before any evaluation.
 
-    The first rule that matches excludes a row: standby, no fiche, techno, phase, no tool.
-    A row without phase never counts as deferred. With a phase_filter, only the rows that
-    contain that phase are kept. "Intervention humaine" is not a tool: a row that asks for
-    nothing else is kept. An excluded entry is {ref, page_id, reason, verdict, detail, tools};
-    tools lets coverage count the rows a missing tool would bring back.
+    The first rule that matches excludes a row: category, standby, no fiche, techno, phase,
+    no tool. A row without phase never counts as deferred. With a phase_filter, only the rows
+    that contain that phase are kept; with a category_filter (Notion names), only the rows of
+    those categories, and the two filters intersect. "Intervention humaine" is not a tool: a
+    row that asks for nothing else is kept. An excluded entry is
+    {ref, page_id, reason, verdict, detail, tools}; tools lets coverage count the rows a
+    missing tool would bring back.
     """
     kept, excluded = [], []
     for row in rows:
-        found = _exclusion(row, technos, set(available_tools), phase_filter)
+        found = _exclusion(row, technos, set(available_tools), phase_filter, category_filter)
         if found is None:
             kept.append(row)
             continue
@@ -85,11 +98,12 @@ def select_rows(
 def coverage(kept: list[dict], excluded: list[dict], available_tools: list[str]) -> dict:
     """Count the rows by what the lead's workstation lets the skill do, and the gains.
 
-    total is every row received, including those without fiche, which belong to no other
+    total is every row of the scope, including those without fiche, which belong to no other
     count. evaluable holds the rows whose required tools (human intervention aside) are all
     available; evaluable_human is the part of them that also asks for a human validation.
     partial holds the kept rows with a missing tool. not_evaluable, deferred, na and standby
-    are the rows excluded for no_tools, phase, techno and standby.
+    are the rows excluded for no_tools, phase, techno and standby. out_of_scope holds the
+    rows of the other categories (category_filter): they are not in total.
 
     gains lists each unavailable tool with the number of rows, kept or excluded for no_tools,
     that require it, most rows first (ties in TOOLS order). Tools no row requires are left
@@ -97,7 +111,7 @@ def coverage(kept: list[dict], excluded: list[dict], available_tools: list[str])
     """
     available = set(available_tools)
     counts = {
-        "total": len(kept) + len(excluded),
+        "total": 0,
         "evaluable": 0,
         "evaluable_human": 0,
         "partial": 0,
@@ -105,6 +119,7 @@ def coverage(kept: list[dict], excluded: list[dict], available_tools: list[str])
         "deferred": 0,
         "na": 0,
         "standby": 0,
+        "out_of_scope": 0,
     }
     needed = Counter()
     for row in kept:
@@ -122,6 +137,7 @@ def coverage(kept: list[dict], excluded: list[dict], available_tools: list[str])
             counts[bucket] += 1
         if entry["reason"] == "no_tools":
             needed.update(set(_required(entry)))
+    counts["total"] = len(kept) + len(excluded) - counts["out_of_scope"]
     gains = [
         {"tool": tool, "action": TOOL_ACTIONS[tool], "rows": needed[tool]}
         for tool in TOOLS
@@ -179,7 +195,9 @@ def lot_needs_session(lot: dict) -> bool:
     return lot.get("needs_session") is True
 
 
-def _exclusion(row, technos, available, phase_filter):
+def _exclusion(row, technos, available, phase_filter, category_filter=None):
+    if not in_scope(row, category_filter):
+        return "category", "skip", f"catégorie hors du périmètre ({', '.join(category_filter)})"
     if row.get("status") == STATUS_STANDBY:
         return "standby", "skip", "ligne en standby"
     if not row.get("fiche_path"):

@@ -61,16 +61,19 @@ def rich(text):
     return {"type": "rich_text", "rich_text": [{"plain_text": text}] if text else []}
 
 
-def page(page_id, ref, title, status="À traiter", editor=None):
+def page(page_id, ref, title, status="À traiter", editor=None, category=None):
+    properties = {
+        "Tâche": {"type": "title", "title": [{"plain_text": title}]},
+        "Réf modèle": rich(f"CQ-{ref}" if ref else ""),
+        "Statut": {"type": "status", "status": {"name": status}},
+    }
+    if category:
+        properties["Catégorie"] = {"type": "select", "select": {"name": category}}
     return {
         "object": "page",
         "id": page_id,
         "last_edited_by": {"object": "user", "id": editor} if editor else {},
-        "properties": {
-            "Tâche": {"type": "title", "title": [{"plain_text": title}]},
-            "Réf modèle": rich(f"CQ-{ref}" if ref else ""),
-            "Statut": {"type": "status", "status": {"name": status}},
-        },
+        "properties": properties,
     }
 
 
@@ -761,12 +764,15 @@ class RecetteCommandTest(CliTestCase):
     REFERENCE_URL = f"https://www.notion.so/ws/Modele-{fake_id(4)}"
     ENV = {"NOTION_TOKEN": "tok", "GM_CQA_REFERENCE": REFERENCE_URL}
 
+    categories = {}
+
     def routes(self, comments=None):
         copy_pages = [
-            page("c1", 79, "Activer la compression", status="Mis en place"),
-            page("c2", 80, "Forcer HTTPS", status="Mis en place"),
-            page("c3", 81, "Limiter les redirections"),
-            page("c4", 82, "Autre ligne"),
+            page("c1", 79, "Activer la compression", status="Mis en place",
+                 category=self.categories.get("c1")),
+            page("c2", 80, "Forcer HTTPS", status="Mis en place", category=self.categories.get("c2")),
+            page("c3", 81, "Limiter les redirections", category=self.categories.get("c3")),
+            page("c4", 82, "Autre ligne", category=self.categories.get("c4")),
         ]
         ref_pages = [
             page("r1", 79, "Activer la compression"),
@@ -845,6 +851,38 @@ class RecetteCommandTest(CliTestCase):
         self.assertTrue(posts)
         self.assertTrue(all(call.url.split("?")[0].endswith("/query") for call in posts))
         self.assertEqual({call.method for call in transport.calls}, {"GET", "POST"})
+
+    def test_recette_ignores_rows_outside_the_category_filter(self):
+        self.categories = {"c1": "SÉCURITÉ", "c2": "QUALITÉ", "c3": "SÉCURITÉ", "c4": "QUALITÉ"}
+        code, _, err, _ = self.run_recette()
+        self.assertEqual(code, 0, err)
+        refs = [item["ref"] for item in self.read_json("notion/recette.json")["rows"]]
+        self.assertEqual(refs, [79, 80])
+        self.write_json(
+            "context.json",
+            {"schema": 1, "notion": {"copy_data_source_id": COPY_DS, "bot_id": BOT},
+             "category_filter": ["SÉCURITÉ"]},
+        )
+        code, out, err = self.run_recette(options=["--refs", "CQ-81,CQ-82"])[:3]
+        self.assertEqual(code, 0, err)
+        found = {item["ref"]: item for item in self.read_json("notion/recette.json")["rows"]}
+        self.assertEqual(sorted(found), [79, 81])
+        self.assertEqual(json.loads(out)["recette"], [79, 81])
+        self.assertIn("CQ-82", err)
+        self.assertIn("hors du périmètre", err)
+        self.assertNotIn("ne figure pas dans la copie", err)
+        self.assertEqual(len(self.read_json("rows.json")["rows"]), 4)
+
+    def test_recette_without_a_category_filter_keeps_every_row(self):
+        self.write_json(
+            "context.json",
+            {"schema": 1, "notion": {"copy_data_source_id": COPY_DS, "bot_id": BOT},
+             "category_filter": None},
+        )
+        code, _, err, _ = self.run_recette()
+        self.assertEqual(code, 0, err)
+        refs = [item["ref"] for item in self.read_json("notion/recette.json")["rows"]]
+        self.assertEqual(refs, [79, 80])
 
     def test_recette_gives_the_fix_info(self):
         self.write_audit()

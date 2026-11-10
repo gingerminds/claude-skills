@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from cqa.categories import in_scope
 from cqa.checklist import STATUS_REVIEW, parse_refs, ref_label, validate_schema
 from cqa import fix_notion, fix_rows, fix_state, report
 from cqa.comments import (
@@ -248,7 +249,12 @@ def _cmd_recette(args, client) -> int:
     run_dir = args.run_dir
     notion = _notion_context(run_dir, "bot_id")
     counts = _read_copy(run_dir, client)
-    rows = _read_rows(run_dir)
+    context = _read_json(run_dir / "context.json")
+    scope = context.get("category_filter") if isinstance(context, dict) else None
+    if not isinstance(scope, list) or not all(isinstance(name, str) for name in scope):
+        scope = None
+    all_rows = _read_rows(run_dir)
+    rows = [row for row in all_rows if in_scope(row, scope)]
     plan = _optional_json(
         run_dir / "notion" / "plan.json",
         "les valeurs du journal donnent encore le dernier statut écrit par le skill",
@@ -261,7 +267,6 @@ def _cmd_recette(args, client) -> int:
     links = _mr_links(run_dir)
     known = known_values_from_env()
     chosen = {item["ref"]: item for item in recette_candidates(rows, plan, applied)}
-    context = _read_json(run_dir / "context.json")
     candidates = rerun_candidates(
         run_dir,
         extra_refs=[],
@@ -282,9 +287,12 @@ def _cmd_recette(args, client) -> int:
                 "status": row["status"],
                 "skill_last": last_of(ref),
             }
+    outside = {item.get("ref") for item in all_rows if isinstance(item, dict)} - set(by_ref)
     for ref in _parse_refs(args.refs):
         row = by_ref.get(ref)
-        if row is None:
+        if row is None and ref in outside:
+            _log(f"CQ-{ref} est hors du périmètre du run ({', '.join(scope)}) : ignorée.")
+        elif row is None:
             _log(f"CQ-{ref} ne figure pas dans la copie : ignorée.")
         elif ref not in chosen:
             chosen[ref] = {
