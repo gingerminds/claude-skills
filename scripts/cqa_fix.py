@@ -52,6 +52,7 @@ LEFT_KEY = ("La clé {name} est laissée au lead ({reason}) : {command} ne la to
 LINKS_FILE = "fix/mr-links.json"
 STACK_CORE_FILE = "fix/stack-core.json"
 COMMANDS_FILE = "fix/commands.json"
+BASELINE_FILE = "baseline.json"
 ADD_FORMAT = "--add attend « <repo>|<dossier>|<image>|<type>|<commande> » (type : install, build, lint ou test)."
 DOCKER_UNCHECKED = "Docker ne répond pas : présence des images non vérifiée."
 KEY_HELP = "clé de la passe : le nom du repo (fix/candidates.json)"
@@ -212,7 +213,7 @@ def _build_parser() -> argparse.ArgumentParser:
     choice.add_argument("--reason", help="raison, en français, donnée dans la synthèse")
     choice.add_argument("--clear", action="store_true",
                         help="reprend la clé : le lead a réglé le problème de la branche")
-    sub = _command(commands, "check", "contrôles de syntaxe et stylelint des fichiers corrigés", _cmd_check)
+    sub = _command(commands, "check", "contrôles des fichiers corrigés et commandes du projet", _cmd_check)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help=KEY_HELP)
     sub = _command(commands, "mr-body", "titre et description de la MR d'une clé", _cmd_mr_body)
@@ -1416,6 +1417,9 @@ def _cmd_check(args, services: Services) -> int:
     key = _started_key(state, args.key)
     worktree = _key_worktree(run_dir, key, services.run)
     third_party = _third_party(_repo(run_dir, key["repo"]))
+    commands = fix_state.check_commands(state, key["repo"])
+    if commands:
+        _refuse_dirty(worktree, services.run)
     folder = _key_folder(run_dir, key)
     check_dir = folder / "check"
     try:
@@ -1423,25 +1427,96 @@ def _cmd_check(args, services: Services) -> int:
         added = fix_checks.added_lines(worktree, key["start_sha"], services.run)
     except ValueError as error:
         raise UsageError(str(error))
+    baseline = _read_baseline(check_dir)
     shutil.rmtree(check_dir, ignore_errors=True)
     check_dir.mkdir(parents=True)
+    if baseline is not None:
+        write_json(check_dir / BASELINE_FILE, baseline)
     checks = []
-    if files:
-        try:
+    try:
+        if files:
             checks = fix_checks.run_checks(
                 services.run, LAUNCHER, check_dir, worktree, key["repo"], files, added, third_party,
                 start_sha=key["start_sha"],
             )
-        except ValueError as error:
-            raise UsageError(str(error))
+        if commands:
+            checks += _project_checks(
+                run_dir, services.run, key, worktree, check_dir, commands, files, baseline)
+    except ValueError as error:
+        raise UsageError(str(error))
     refs = fix_checks.failed_refs(worktree, key["start_sha"], checks, services.run)
-    not_run = [{**item, "why": fix_checks.NOT_RUN_WHY} for item in fix_checks.project_commands(worktree)]
+    not_run = [] if commands else [
+        {**item, "why": fix_checks.NOT_RUN_WHY} for item in fix_checks.project_commands(worktree)]
     write_json(folder / "checks.json", {"checks": checks, "not_run": not_run})
     if fix_state.STEPS.index(key.get("step", "started")) < fix_state.STEPS.index("checked"):
         key["step"] = "checked"
         fix_state.save(run_dir, state)
     _emit({"checks": checks, "not_run": not_run, "failed_refs": refs})
     return EXIT_OK
+
+
+def _refuse_dirty(worktree: Path, run) -> None:
+    """Exit 2 when the worktree has changes that are not committed: the commands put it back as
+    it was after each run, which would destroy what the fixer left. Nothing is touched."""
+    try:
+        dirty = fix_checks.dirty_files(worktree, run)
+    except ValueError as error:
+        raise UsageError(str(error))
+    if dirty:
+        shown = ", ".join(dirty[:5]) + (f" et {len(dirty) - 5} autre(s)" if len(dirty) > 5 else "")
+        raise UsageError(
+            f"Contrôle refusé : modifications non commitées dans le worktree {worktree} ({shown}). "
+            "Commitez-les ou retirez-les, puis relancez cqa_fix.py check. Rien n'a été nettoyé."
+        )
+
+
+def _project_checks(run_dir: Path, run, key: dict, worktree: Path, check_dir: Path,
+                    commands: list, files: list, baseline: Optional[dict]) -> list:
+    """Run the commands the lead validated on the worktree, once the branch has a commit, and
+    return their entries of checks.json (fix_checks.project_checks). The base is measured, on
+    the first failure, at the start of the branch (see _baseline)."""
+    ahead = fix_names.git_out(worktree, run, "rev-list", "--count", f"{key['start_sha']}..HEAD")
+    if not ahead or int(ahead) == 0:
+        return []
+    results = fix_checks.run_project_commands(
+        run, LAUNCHER, worktree, commands, check_dir, pass_files=files)
+    base = None
+    if any(item["status"] == "failed" and not item["exact"] for item in results):
+        base = _baseline(run, key, worktree, check_dir, commands, baseline)
+    return fix_checks.project_checks(
+        results, base, files, log_prefix=check_dir.relative_to(run_dir).as_posix())
+
+
+def _baseline(run, key: dict, worktree: Path, check_dir: Path, commands: list,
+              stored: Optional[dict]) -> list:
+    """Return the results of the commands on the start of the branch: those recorded in
+    check/baseline.json for the same start and the same commands, else measured on a detached
+    worktree of start_sha (fix_checks.measure_base), then recorded."""
+    if stored is not None and stored["start_sha"] == key["start_sha"] and stored["commands"] == commands:
+        return stored["results"]
+    results = fix_checks.measure_base(run, LAUNCHER, worktree, key["start_sha"], commands, check_dir)
+    write_json(check_dir / BASELINE_FILE, {
+        "start_sha": key["start_sha"], "commands": commands,
+        "results": [{field: item[field] for field in ("name", "status", "kind", "detail")}
+                    for item in results],
+    })
+    return results
+
+
+def _read_baseline(check_dir: Path) -> Optional[dict]:
+    """Return check/baseline.json when it is well formed, else None."""
+    try:
+        document = json.loads((check_dir / BASELINE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (isinstance(document, dict) and fix_git.is_sha(document.get("start_sha"))
+            and isinstance(document.get("commands"), list)
+            and isinstance(document.get("results"), list)
+            and all(isinstance(item, dict) and isinstance(item.get("name"), str)
+                    and item.get("status") in ("ok", "failed", "not_run", "already_broken")
+                    for item in document["results"])):
+        return document
+    return None
 
 
 def _third_party(repo: dict) -> list:
@@ -2529,7 +2604,7 @@ def _cmd_summary(args, services: Services) -> int:
     context = _load_context(run_dir)
     candidates = _read_run_json(run_dir, "fix/candidates.json", "cqa_fix.py candidates")
     checks = {name: _optional_key_json(run_dir, key, "checks.json")
-              for name, key in state["keys"].items() if key.get("mr")}
+              for name, key in state["keys"].items() if key.get("mr") or key.get("branch")}
     found = fix_summary.summary(
         project=_summary_project(state, context), state=state, candidates=candidates,
         checks=checks, replace_failed=failed, in_review=in_review,

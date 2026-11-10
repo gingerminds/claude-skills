@@ -142,6 +142,31 @@ class SummaryTest(SummaryCase):
         text = json.loads(self.summary()[1])["text"]
         self.assertEqual(section(text, "Vérifications à faire par le relecteur").count("make test"), 1)
 
+    def test_commands_already_broken_before_the_pass_are_listed_per_repo(self):
+        broken = "erreur déjà présente avant le correctif (lint is red)"
+        (self.run_dir / "fix" / "front" / "checks.json").write_text(json.dumps({
+            "checks": [
+                {"name": "npm run lint", "status": "not_run", "files": [], "detail": broken,
+                 "kind": "lint", "already_broken": True},
+                {"name": "npm test", "status": "passed", "files": [], "detail": "", "kind": "test"},
+                {"name": "npm run build", "status": "not_run", "files": [], "kind": "build",
+                 "detail": "délai dépassé"},
+            ], "not_run": []}), encoding="utf-8")
+        text = json.loads(self.summary()[1])["text"]
+        found = section(text, "Erreurs déjà présentes avant les correctifs")
+        self.assertIn("à signaler aux devs", found)
+        self.assertIn(f"- front : npm run lint : {broken}", found)
+        self.assertNotIn("npm test", found)
+        self.assertNotIn("npm run build", found)
+        checks = section(text, "Vérifications à faire par le relecteur")
+        self.assertNotIn("npm run lint", checks)
+        self.assertIn("- npm run build", checks)
+        self.assertNotIn(LONG_DASH, text)
+
+    def test_without_a_broken_command_the_section_is_left_out(self):
+        text = json.loads(self.summary()[1])["text"]
+        self.assertNotIn("Erreurs déjà présentes", text)
+
     def test_team_message_lists_every_mr(self):
         state = fix_state.load(self.run_dir)
         state["keys"]["back"]["mr"] = {"iid": 8, "url": "https://gitlab.example.org/acme/api/-/merge_requests/8"}

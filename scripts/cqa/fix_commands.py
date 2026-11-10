@@ -153,6 +153,11 @@ def from_ci(ci: dict) -> tuple:
     return commands, notes
 
 
+def start_dir(item: dict) -> str:
+    """Return the folder a command works in: its dir, then its leading cd chain ("" is the root)."""
+    return _start_dir(item)
+
+
 def covered_dirs(commands: list) -> set:
     """Return the folders the commands of the CI work in, once their leading cd is followed."""
     return {_start_dir(item) for item in commands

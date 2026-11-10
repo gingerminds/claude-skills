@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -7,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from cqa import fix_checks, fix_names, fix_state
+from cqa import fix_checks, fix_commands, fix_names, fix_state
 from tests.cqa.test_fix_git import KEY, GitCase
 from tests.cqa.test_git_tools import git as real_git
 
@@ -627,6 +628,737 @@ class GitFilesTest(GitCase):
         self.assertEqual(fix_checks.failed_refs(worktree, start, failed, subprocess.run), [5])
         passed = [{"name": PHP, "status": "passed", "files": ["web/a.php"], "detail": ""}]
         self.assertEqual(fix_checks.failed_refs(worktree, start, passed, subprocess.run), [])
+
+
+
+INSTALL_IMPOSSIBLE = "installation des dépendances impossible"
+PRIVATE = "dépendances privées : non transmises"
+MASKED = "ligne masquée : secret possible"
+REFORMATTED = "fichiers reformatés par le linter"
+
+
+def cmd(name, kind, command, dir="", image="node:20-alpine", env=None, private=False,
+        source="package.json"):
+    item = {"name": name, "dir": dir, "image": image, "kind": kind, "command": command,
+            "env": env or {}, "source": source, "private": private}
+    assert fix_commands.valid_command(item), item
+    return item
+
+
+def on_base(tree):
+    return "baseline-wt" in str(tree)
+
+
+def fails_on_the_pass_only(tree):
+    return 0 if on_base(tree) else 1
+
+
+class ExecFake:
+    """The exec subcommand of the launcher without Docker: it answers by the text of the command,
+    writes the log as the container would and applies its effects to the worktree it is given.
+
+    code, out and err may be callables of the worktree. refuse stands for a refusal of the
+    launcher (exit 2, a message, no log), which is not the exit 2 of a command (it has a log).
+    """
+
+    def __init__(self):
+        self.rules, self.calls = [], []
+
+    def on(self, needle, code=0, out="", err="", effects=None, refuse=False):
+        self.rules.append({"needle": needle, "code": code, "out": out, "err": err,
+                           "effects": effects, "refuse": refuse})
+
+    def __call__(self, command, **kwargs):
+        if command[0] != "bash":
+            return subprocess.run(command, **kwargs)
+        if command[2] != "exec" or command[9] != "--" or len(command) != 11:
+            raise AssertionError(command)
+        tree = Path(command[3])
+        self.calls.append({
+            "worktree": tree, "log": Path(command[4]), "image": command[5], "workdir": command[6],
+            "network": command[7], "timeout": int(command[8]), "command": command[10],
+        })
+        rule = next((item for item in self.rules if item["needle"] in command[10]),
+                    {"code": 0, "out": "", "err": "", "effects": None, "refuse": False})
+
+        def value(name):
+            return rule[name](tree) if callable(rule[name]) else rule[name]
+
+        if rule["refuse"]:
+            return done(2, "", value("err"))
+        if rule["effects"]:
+            rule["effects"](tree)
+        Path(command[4]).write_text(value("out"), encoding="utf-8")
+        return done(value("code"), "", value("err"))
+
+    def texts(self):
+        return [call["command"] for call in self.calls]
+
+
+class ShellCommandTest(unittest.TestCase):
+    def test_env_is_set_for_the_whole_chain_and_quoted(self):
+        item = cmd("build", "build", "printf '%s' \"$A\" > one.txt && printf '%s' \"$B\" > two.txt "
+                   "&& printf '%s' \"$C\" > three.txt", env={"A": "x y", "B": "it's", "C": "$HOME"})
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(["sh", "-c", fix_checks.shell_command(item)], cwd=tmp,
+                                    capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([(Path(tmp) / name).read_text(encoding="utf-8")
+                              for name in ("one.txt", "two.txt", "three.txt")],
+                             ["x y", "it's", "$HOME"])
+
+    def test_without_env_the_command_is_given_as_it_is(self):
+        self.assertEqual(fix_checks.shell_command(cmd("a", "test", "npm test && npm run b")),
+                         "npm test && npm run b")
+
+    def test_the_exit_code_is_the_one_of_the_command(self):
+        item = cmd("a", "test", "false", env={"A": "1"})
+        result = subprocess.run(["sh", "-c", fix_checks.shell_command(item)])
+        self.assertEqual(result.returncode, 1)
+
+
+class CitedFilesTest(unittest.TestCase):
+    def test_container_and_relative_paths_are_brought_back_to_the_repo(self):
+        files = ["web/src/a.ts", "web/src/b.ts", "web/src/c.ts", "web/src/d.ts", "web/src/e.tsx"]
+        text = ("/work/web/src/a.ts:3:1  error  x\n"
+                "src/b.ts(3,4): error TS1\n"
+                "at ./web/src/c.ts:8\n"
+                "see web/src/d.ts.map and xweb/src/e.ts\n")
+        self.assertEqual(fix_checks.cited_files(text, files, "web"),
+                         ["web/src/a.ts", "web/src/b.ts", "web/src/c.ts"])
+
+    def test_a_relative_name_needs_the_folder_of_the_command(self):
+        self.assertEqual(fix_checks.cited_files("src/b.ts:1\n", ["web/src/b.ts"], ""), [])
+        self.assertEqual(fix_checks.cited_files("src/b.ts:1\n", ["web/src/b.ts"], "web"),
+                         ["web/src/b.ts"])
+
+
+class RunProjectCommandsTest(GitCase):
+    """run_project_commands and restore_worktree on a real worktree, exec simulated."""
+
+    def setUp(self):
+        super().setUp()
+        commit_files(self, self.repo, "chore: project", {
+            ".gitignore": "node_modules/\nvendor/\n", "dist/app.css": "a{}\n",
+            "web/package.json": "{}\n", "web/src/a.ts": "a\n", "web/src/old.ts": "old\n",
+        })
+        self.tree = self.repo
+        self.exec = ExecFake()
+        self.log_dir = self.root / "logs"
+        self.launcher = Path("/x/cqa-toolbox.sh")
+
+    def run_commands(self, commands, pass_files=()):
+        return fix_checks.run_project_commands(
+            self.exec, self.launcher, self.tree, commands, self.log_dir, pass_files=pass_files)
+
+    def porcelain(self):
+        return real_git(self.tree, "status", "--porcelain=v1", "-uall")
+
+    def test_project_commands_run_in_order_and_install_failure_skips_the_folder(self):
+        commands = [
+            cmd("npm ci (web)", "install", "npm ci", dir="web"),
+            cmd("npm run build (web)", "build", "npm run build", dir="web"),
+            cmd("npm run lint (web)", "lint", "npm run lint", dir="web"),
+            cmd("npm test (web)", "test", "npm test", dir="web"),
+            cmd("composer install (api)", "install", "composer install", dir="api",
+                image="composer:2"),
+            cmd("composer test (api)", "test", "composer test", dir="api", image="composer:2"),
+        ]
+        self.exec.on("npm ci", code=1, out="npm ERR! code ELOCKVERIFY\n")
+        results = self.run_commands(commands)
+        self.assertEqual([(item["name"], item["status"], item["kind"]) for item in results], [
+            ("npm ci (web)", "failed", "install"),
+            ("npm run build (web)", "not_run", "build"),
+            ("npm run lint (web)", "not_run", "lint"),
+            ("npm test (web)", "not_run", "test"),
+            ("composer install (api)", "ok", "install"),
+            ("composer test (api)", "ok", "test"),
+        ])
+        self.assertEqual([item["detail"] for item in results[1:4]], [INSTALL_IMPOSSIBLE] * 3)
+        self.assertEqual(results[0]["detail"], "npm ERR! code ELOCKVERIFY")
+        self.assertTrue({"name", "status", "files", "detail", "kind"} <= set(results[0]))
+        self.assertEqual(self.exec.texts(), ["npm ci", "composer install", "composer test"])
+        first = self.exec.calls[0]
+        self.assertEqual((first["image"], first["workdir"], first["network"], first["timeout"]),
+                         ("node:20-alpine", "web", "on", 900))
+        last = self.exec.calls[2]
+        self.assertEqual((last["image"], last["workdir"], last["network"], last["timeout"]),
+                         ("composer:2", "api", "off", 600))
+        self.assertEqual(fix_checks.restore_worktree(self.tree, subprocess.run), [])
+
+    def test_network_and_timeout_follow_the_kind(self):
+        kinds = ("install", "build", "lint", "test")
+        results = self.run_commands([cmd(kind, kind, f"run {kind}") for kind in kinds])
+        self.assertEqual([item["status"] for item in results], ["ok"] * 4)
+        self.assertEqual([(call["network"], call["timeout"]) for call in self.exec.calls],
+                         [("on", 900), ("off", 600), ("off", 600), ("off", 600)])
+
+    def test_each_command_has_its_own_log_with_the_whole_output(self):
+        self.exec.on("run one", out="first\n")
+        self.exec.on("run two", out="second\n")
+        self.run_commands([cmd("one", "build", "run one"), cmd("two", "lint", "run two")])
+        logs = [call["log"] for call in self.exec.calls]
+        self.assertEqual(len(set(logs)), 2)
+        self.assertTrue(all(path.parent == self.log_dir for path in logs))
+        self.assertEqual([path.read_text(encoding="utf-8") for path in logs], ["first\n", "second\n"])
+
+    def test_the_command_env_is_part_of_the_chain_given_to_sh(self):
+        item = cmd("ci", "build", "cd $DIR && npm run build", env={"DIR": "web/assets"})
+        self.run_commands([item])
+        self.assertEqual(self.exec.texts(), [fix_checks.shell_command(item)])
+        self.assertTrue(self.exec.texts()[0].startswith("export DIR=web/assets; cd $DIR"))
+
+    def test_private_dependencies_are_not_run_and_block_their_folder(self):
+        commands = [
+            cmd("composer install (api)", "install", "composer install", dir="api",
+                image="composer:2", private=True),
+            cmd("composer test (api)", "test", "composer test", dir="api", image="composer:2",
+                private=True),
+            cmd("npm test (web)", "test", "npm test", dir="web"),
+        ]
+        results = self.run_commands(commands)
+        self.assertEqual([(item["status"], item["detail"]) for item in results],
+                         [("not_run", PRIVATE), ("not_run", PRIVATE), ("ok", "")])
+        self.assertEqual(self.exec.texts(), ["npm test"])
+
+    def test_a_private_ci_install_blocks_the_commands_that_follow_in_its_folder_only(self):
+        commands = [
+            cmd("composer", "install", "composer install", image="composer:2", private=True),
+            cmd("phpunit", "test", "vendor/bin/phpunit", image="composer:2"),
+            cmd("build:npm", "build", "cd web && npm run build", image="node:20-alpine"),
+        ]
+        results = self.run_commands(commands)
+        self.assertEqual([item["status"] for item in results], ["not_run", "not_run", "ok"])
+        self.assertEqual(results[1]["detail"], PRIVATE)
+        self.assertEqual(self.exec.texts(), ["cd web && npm run build"])
+
+    def test_tracked_files_written_by_a_build_are_restored_and_not_committed(self):
+        head = real_git(self.tree, "rev-parse", "HEAD")
+
+        def build(tree):
+            write(tree, "dist/app.css", "compiled{}\n")
+            write(tree, "dist/new.css", "new\n")
+            write(tree, "node_modules/pkg/index.js", "x\n")
+            write(tree, "brand/new/dir/file.txt", "x\n")
+
+        self.exec.on("npm run build", effects=build)
+        results = self.run_commands([cmd("build", "build", "npm run build", dir="web")])
+        self.assertEqual(results[0]["status"], "ok")
+        self.assertEqual((self.tree / "dist" / "app.css").read_text(encoding="utf-8"), "a{}\n")
+        self.assertFalse((self.tree / "dist" / "new.css").exists())
+        self.assertFalse((self.tree / "brand").exists())
+        self.assertTrue((self.tree / "node_modules" / "pkg" / "index.js").is_file())
+        self.assertEqual(self.porcelain(), "")
+        self.assertEqual(real_git(self.tree, "rev-parse", "HEAD"), head)
+
+    def test_an_interrupted_command_still_leaves_the_worktree_as_it_was(self):
+        def interrupted(tree):
+            write(tree, "dist/app.css", "half{}\n")
+            write(tree, "dist/half.css", "x\n")
+            raise KeyboardInterrupt
+
+        self.exec.on("npm run build", effects=interrupted)
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_commands([cmd("build", "build", "npm run build")])
+        self.assertEqual(self.porcelain(), "")
+
+    def test_commands_share_the_worktree_so_vendor_serves_the_next_jobs(self):
+        seen = {}
+
+        def install(tree):
+            write(tree, "vendor/autoload.php", "<?php\n")
+            write(tree, "web/stray.txt", "x\n")
+
+        def test(tree):
+            seen["vendor"] = (tree / "vendor" / "autoload.php").is_file()
+            seen["stray"] = (tree / "web" / "stray.txt").exists()
+
+        self.exec.on("composer install", effects=install)
+        self.exec.on("composer test", effects=test)
+        results = self.run_commands([
+            cmd("install", "install", "composer install", image="composer:2"),
+            cmd("test", "test", "composer test", image="composer:2"),
+        ])
+        self.assertEqual([item["status"] for item in results], ["ok", "ok"])
+        self.assertEqual(seen, {"vendor": True, "stray": False})
+        self.assertEqual({call["worktree"] for call in self.exec.calls}, {self.tree})
+
+    def test_autofixing_linter_fails_on_the_pass_files_it_reformats(self):
+        def lint(tree):
+            write(tree, "web/src/a.ts", "reformatted\n")
+            write(tree, "web/src/old.ts", "reformatted\n")
+
+        self.exec.on("npm run lint", effects=lint)
+        results = self.run_commands([cmd("lint", "lint", "npm run lint", dir="web")],
+                                    pass_files=["web/src/a.ts"])
+        self.assertEqual(results[0]["status"], "failed")
+        self.assertEqual(results[0]["files"], ["web/src/a.ts"])
+        self.assertTrue(results[0]["detail"].startswith(REFORMATTED), results[0]["detail"])
+        self.assertEqual(self.porcelain(), "")
+
+    def test_autofixing_linter_that_only_touches_other_files_is_already_broken(self):
+        def lint(tree):
+            write(tree, "web/src/old.ts", "reformatted\n")
+
+        self.exec.on("npm run lint", effects=lint)
+        results = self.run_commands([cmd("lint", "lint", "npm run lint", dir="web")],
+                                    pass_files=["web/src/a.ts"])
+        self.assertEqual((results[0]["status"], results[0]["files"]), ("already_broken", []))
+        self.assertIn("web/src/old.ts", results[0]["detail"])
+        self.assertEqual(self.porcelain(), "")
+
+    def test_a_linter_that_changes_nothing_passes_and_only_a_linter_is_judged_by_its_changes(self):
+        results = self.run_commands([cmd("lint", "lint", "npm run lint")],
+                                    pass_files=["web/src/a.ts"])
+        self.assertEqual(results[0]["status"], "ok")
+
+        def touch(tree):
+            write(tree, "web/src/a.ts", "changed\n")
+
+        self.exec.on("npm run build", effects=touch)
+        results = self.run_commands([cmd("build", "build", "npm run build")],
+                                    pass_files=["web/src/a.ts"])
+        self.assertEqual(results[0]["status"], "ok")
+
+    def test_missing_image_or_timeout_is_not_run(self):
+        self.exec.on("npm ci", refuse=True, err="image absente : node:20-alpine\n")
+        self.exec.on("npm run build", code=124, out="partial\n",
+                     err="exec : délai de 600 s dépassé, le conteneur x a été arrêté.\n")
+        self.exec.on("npm run lint", refuse=True,
+                     err="Docker ne répond pas : démarrez Docker Desktop ou le service Docker.\n")
+        results = self.run_commands([
+            cmd("install", "install", "npm ci", dir="web"),
+            cmd("build", "build", "npm run build", dir="api"),
+            cmd("lint", "lint", "npm run lint", dir="other"),
+            cmd("test", "test", "npm test", dir="web"),
+        ])
+        self.assertEqual([(item["status"], item["detail"]) for item in results], [
+            ("not_run", "image absente : node:20-alpine"),
+            ("not_run", "délai dépassé"),
+            ("not_run", "Docker ne répond pas : démarrez Docker Desktop ou le service Docker."),
+            ("not_run", INSTALL_IMPOSSIBLE),
+        ])
+
+    def test_exit_2_of_a_command_is_a_failure_not_a_refusal_of_the_launcher(self):
+        self.exec.on("npm run lint", code=2, out="eslint: configuration error\n")
+        results = self.run_commands([cmd("lint", "lint", "npm run lint")])
+        self.assertEqual((results[0]["status"], results[0]["detail"]),
+                         ("failed", "eslint: configuration error"))
+
+    def test_secret_in_the_log_tail_is_masked(self):
+        token = "ghp_" + "Ab1" * 14
+        lines = [f"line {number}" for number in range(1, 16)]
+        lines[12] = f"using {token} to log in"
+        self.exec.on("npm run lint", code=1, out="\n".join(lines) + "\n")
+        results = self.run_commands([cmd("lint", "lint", "npm run lint")])
+        self.assertEqual(results[0]["detail"].split("\n"), (
+            [f"line {number}" for number in range(6, 13)] + [MASKED, "line 14", "line 15"]))
+        self.assertNotIn(token, results[0]["detail"])
+
+    def test_a_private_key_in_the_log_tail_is_masked_to_the_end(self):
+        lines = ["start", "-----BEGIN RSA PRIVATE KEY-----", "MIIEowIBAAKCAQEA", "xyz"]
+        self.exec.on("npm run lint", code=1, out="\n".join(lines) + "\n")
+        results = self.run_commands([cmd("lint", "lint", "npm run lint")])
+        self.assertEqual(results[0]["detail"].split("\n"), ["start", MASKED, MASKED, MASKED])
+
+    def test_the_tail_drops_colors_and_progress_lines(self):
+        self.exec.on("npm run lint", code=1,
+                     out="\x1b[31mfailed\x1b[0m\nprogress 10%\rprogress 100%\n\n\n")
+        results = self.run_commands([cmd("lint", "lint", "npm run lint")])
+        self.assertEqual(results[0]["detail"], "failed\nprogress 100%")
+
+    def test_restore_worktree_keeps_ignored_files_and_the_paths_to_keep(self):
+        write(self.tree, "dist/app.css", "changed\n")
+        write(self.tree, "web/package.json", '{"devDependencies": {}}\n')
+        write(self.tree, "web/package-lock.json", "{}\n")
+        write(self.tree, "new/x.txt", "x\n")
+        write(self.tree, "node_modules/p/i.js", "x\n")
+        (self.tree / "web" / "src" / "old.ts").unlink()
+        modified = fix_checks.restore_worktree(
+            self.tree, subprocess.run, keep=("web/package.json", "web/package-lock.json"))
+        self.assertEqual(modified, ["dist/app.css", "web/package.json", "web/src/old.ts"])
+        self.assertEqual((self.tree / "dist" / "app.css").read_text(encoding="utf-8"), "a{}\n")
+        self.assertEqual((self.tree / "web" / "src" / "old.ts").read_text(encoding="utf-8"), "old\n")
+        self.assertIn("devDependencies",
+                      (self.tree / "web" / "package.json").read_text(encoding="utf-8"))
+        self.assertTrue((self.tree / "web" / "package-lock.json").is_file())
+        self.assertFalse((self.tree / "new").exists())
+        self.assertTrue((self.tree / "node_modules" / "p" / "i.js").is_file())
+
+    def test_restore_worktree_treats_odd_names_as_literal_paths(self):
+        commit_files(self, self.tree, "chore: odd", {"a[1].txt": "x\n", "-dash.txt": "x\n"})
+        write(self.tree, "a[1].txt", "y\n")
+        write(self.tree, "-dash.txt", "y\n")
+        write(self.tree, "a1.txt", "z\n")
+        modified = fix_checks.restore_worktree(self.tree, subprocess.run, keep=("other.txt",))
+        self.assertEqual(modified, ["-dash.txt", "a[1].txt"])
+        self.assertEqual((self.tree / "a[1].txt").read_text(encoding="utf-8"), "x\n")
+        self.assertFalse((self.tree / "a1.txt").exists())
+
+    def test_dirty_files_lists_modified_and_untracked_files_but_not_ignored_ones(self):
+        self.assertEqual(fix_checks.dirty_files(self.tree, subprocess.run), [])
+        write(self.tree, "dist/app.css", "changed\n")
+        write(self.tree, "left/over.txt", "x\n")
+        write(self.tree, "node_modules/p/i.js", "x\n")
+        self.assertEqual(fix_checks.dirty_files(self.tree, subprocess.run),
+                         ["dist/app.css", "left/over.txt"])
+
+
+class ProjectChecksTest(unittest.TestCase):
+    """The judgment of the results of the pass against those of the base."""
+
+    def entry(self, name, status, detail="", kind="lint", files=(), exact=False):
+        return {"name": name, "status": status, "files": list(files), "detail": detail,
+                "kind": kind, "command": name, "log": f"{name}.log", "folder": "web",
+                "exact": exact}
+
+    def test_a_failure_of_the_base_too_is_already_broken_and_never_attributed(self):
+        results = [self.entry("lint", "failed", "3 problems\nlast line"),
+                   self.entry("test", "failed", "boom")]
+        base = [self.entry("lint", "failed", "3 problems"), self.entry("test", "ok")]
+        checks = {item["name"]: item for item in
+                  fix_checks.project_checks(results, base, ["web/src/a.ts"])}
+        self.assertEqual((checks["lint"]["status"], checks["lint"]["files"],
+                          checks["lint"]["already_broken"]), ("not_run", [], True))
+        self.assertEqual(checks["lint"]["detail"], f"{fix_checks.ALREADY_BROKEN} (last line)")
+        self.assertEqual((checks["test"]["status"], checks["test"]["files"]),
+                         ("failed", ["web/src/a.ts"]))
+        self.assertNotIn("already_broken", checks["test"])
+
+    def test_statuses_follow_the_existing_rendering_of_the_checks(self):
+        results = [self.entry("a", "ok", kind="build"), self.entry("b", "not_run", INSTALL_IMPOSSIBLE),
+                   self.entry("c", "already_broken", "reformatted: x"),
+                   self.entry("d", "failed", "x", files=["web/src/a.ts"], exact=True)]
+        base = [self.entry("d", "failed", "x")]
+        checks = fix_checks.project_checks(results, base, ["web/src/a.ts", "web/src/b.ts"])
+        self.assertEqual([(item["status"], item["files"]) for item in checks], [
+            ("passed", []), ("not_run", []), ("not_run", []), ("failed", ["web/src/a.ts"])])
+        self.assertEqual(checks[0]["kind"], "build")
+        self.assertEqual(checks[1]["detail"], INSTALL_IMPOSSIBLE)
+        self.assertTrue(checks[2]["already_broken"])
+        self.assertTrue(checks[2]["detail"].startswith(fix_checks.ALREADY_BROKEN))
+
+    def test_without_a_base_a_failure_stays_a_failure(self):
+        checks = fix_checks.project_checks([self.entry("lint", "failed", "x")], None, ["a.ts"])
+        self.assertEqual(checks[0]["status"], "failed")
+
+
+class ProjectCommandsCheckTest(GitCase):
+    """cqa_fix.py check with the commands of the lead, exec simulated."""
+
+    def setUp(self):
+        super().setUp()
+        commit_files(self, self.repo, "chore: project", {
+            ".gitignore": "node_modules/\n", "dist/app.css": "a{}\n", "web/package.json": "{}\n"})
+        real_git(self.repo, "push", "-q", "origin", "develop")
+        self.exec = ExecFake()
+        self.commands = [
+            cmd("npm ci", "install", "npm ci", dir="web"),
+            cmd("npm run lint", "lint", "npm run lint", dir="web"),
+            cmd("npm test", "test", "npm test", dir="web"),
+        ]
+        self.folder = self.run_dir / "fix" / "front"
+
+    def started(self, commands=None):
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        state = self.state()
+        state["check_commands"] = {"front": self.commands if commands is None else commands}
+        fix_state.save(self.run_dir, state)
+        return worktree
+
+    def fixer(self, worktree):
+        commit_files(self, worktree, "fix(CQ-3): a", {"web/src/a.ts": "a\n"})
+        commit_files(self, worktree, "fix(CQ-5): b", {"web/src/b.ts": "b\n"})
+
+    def check(self, run=None):
+        code, out, err = self.run_main(["check", self.run_dir, KEY], run=run or self.exec)
+        return code, json.loads(out) if out else None, err
+
+    def checked(self):
+        code, out, err = self.check()
+        self.assertEqual(code, 0, err)
+        return out
+
+    def by_name(self, out):
+        return {item["name"]: item for item in out["checks"]}
+
+    def base_calls(self):
+        return [call for call in self.exec.calls if on_base(call["worktree"])]
+
+    def test_check_runs_the_commands_in_the_worktree_and_records_them(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        out = self.checked()
+        self.assertEqual([(item["name"], item["status"], item["kind"]) for item in out["checks"]], [
+            ("npm ci", "passed", "install"), ("npm run lint", "passed", "lint"),
+            ("npm test", "passed", "test")])
+        self.assertEqual((out["not_run"], out["failed_refs"]), ([], []))
+        self.assertEqual({call["worktree"] for call in self.exec.calls}, {worktree})
+        saved = json.loads((self.folder / "checks.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["checks"], out["checks"])
+        logs = sorted(path.name for path in (self.folder / "check").glob("*.log"))
+        self.assertEqual(len(logs), 3)
+        self.assertEqual(self.key()["step"], "checked")
+        self.assertEqual(self.base_calls(), [])
+        self.assertFalse((self.folder / "check" / "baseline.json").exists())
+
+    def test_check_without_a_pass_commit_runs_nothing(self):
+        self.started()
+        out = self.checked()
+        self.assertEqual(out["checks"], [])
+        self.assertEqual(self.exec.calls, [])
+
+    def test_project_commands_without_retained_commands_stay_as_not_run(self):
+        worktree = self.started(commands=[])
+        commit_files(self, worktree, "fix(CQ-3): make", {"Makefile": "lint:\n\tx\n"})
+        out = self.checked()
+        self.assertEqual(out["not_run"], [{"name": "Makefile (lint)", "command": "make lint",
+                                           "why": WHY}])
+        self.assertEqual(self.exec.calls, [])
+
+    def test_tracked_files_written_by_a_command_are_restored_and_not_committed(self):
+        worktree = self.started(commands=[
+            cmd("npm run build", "build", "npm run build", dir="web"),
+            cmd("npm test", "test", "npm test", dir="web")])
+        self.fixer(worktree)
+        head = real_git(worktree, "rev-parse", "HEAD")
+        self.exec.on("npm run build", effects=lambda tree: write(tree, "dist/app.css", "x{}\n"))
+        out = self.checked()
+        self.assertEqual(self.by_name(out)["npm run build"]["status"], "passed")
+        self.assertEqual(out["failed_refs"], [])
+        self.assertEqual((worktree / "dist" / "app.css").read_text(encoding="utf-8"), "a{}\n")
+        self.assertEqual(real_git(worktree, "status", "--porcelain=v1", "-uall"), "")
+        self.assertEqual(real_git(worktree, "rev-parse", "HEAD"), head)
+
+    def test_dirty_worktree_is_refused_and_left_as_is(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        write(worktree, "a.txt", "edited by the fixer\n")
+        write(worktree, "left/over.txt", "x\n")
+        write(worktree, "node_modules/p/i.js", "x\n")
+        code, out, err = self.check()
+        self.assertEqual(code, 2, err)
+        self.assertIn("modifications non commitées dans le worktree", err)
+        self.assertEqual(self.exec.calls, [])
+        self.assertEqual((worktree / "a.txt").read_text(encoding="utf-8"), "edited by the fixer\n")
+        self.assertEqual((worktree / "left" / "over.txt").read_text(encoding="utf-8"), "x\n")
+        self.assertTrue((worktree / "node_modules" / "p" / "i.js").is_file())
+        self.assertFalse((self.folder / "checks.json").exists())
+        self.assertEqual(self.key()["step"], "started")
+
+    def test_failure_also_on_the_base_is_already_broken(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        self.exec.on("npm run lint", code=1, out="12 problems\nlint is red\n")
+        self.exec.on("npm test", code=fails_on_the_pass_only, out="1 failing\n")
+        out = self.checked()
+        checks = self.by_name(out)
+        lint = checks["npm run lint"]
+        self.assertEqual((lint["status"], lint["files"], lint["already_broken"]),
+                         ("not_run", [], True))
+        self.assertEqual(lint["detail"], f"{fix_checks.ALREADY_BROKEN} (lint is red)")
+        self.assertEqual(checks["npm test"]["status"], "failed")
+        self.assertEqual(checks["npm test"]["files"], ["web/src/a.ts", "web/src/b.ts"])
+        self.assertEqual(out["failed_refs"], [3, 5])
+        self.assertEqual(len(self.base_calls()), 3)
+        baseline = json.loads((self.folder / "check" / "baseline.json").read_text(encoding="utf-8"))
+        self.assertEqual(baseline["start_sha"], self.key()["start_sha"])
+        self.assertEqual({item["name"]: item["status"] for item in baseline["results"]},
+                         {"npm ci": "ok", "npm run lint": "failed", "npm test": "ok"})
+        self.assertFalse((self.folder / "check" / "baseline-wt").exists())
+        listing = real_git(self.repo, "worktree", "list", "--porcelain")
+        self.assertNotIn("baseline-wt", listing)
+        self.assertIn(str(worktree), listing)
+
+    def test_only_a_lint_that_also_fails_on_the_base_never_blocks_a_row(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        self.exec.on("npm run lint", code=1, out="lint is red\n")
+        out = self.checked()
+        self.assertEqual(out["failed_refs"], [])
+        self.assertEqual(self.by_name(out)["npm run lint"]["status"], "not_run")
+
+    def test_the_base_is_measured_once_and_only_when_a_command_failed(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        self.exec.on("npm test", code=fails_on_the_pass_only)
+        self.checked()
+        self.assertEqual(len(self.base_calls()), 3)
+        self.checked()
+        self.assertEqual(len(self.base_calls()), 3)
+        self.assertTrue((self.folder / "check" / "baseline.json").is_file())
+
+    def test_the_base_is_measured_again_when_the_commands_change(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        self.exec.on("npm test", code=fails_on_the_pass_only)
+        self.checked()
+        state = self.state()
+        state["check_commands"]["front"] = self.commands[:1] + [
+            cmd("npm test", "test", "npm test --silent", dir="web")]
+        fix_state.save(self.run_dir, state)
+        self.checked()
+        self.assertEqual(len(self.base_calls()), 3 + 2)
+
+    def test_new_failure_maps_to_the_rows_of_the_files_it_names(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        self.exec.on("npm run lint", code=fails_on_the_pass_only,
+                     out="/work/web/src/a.ts\n  3:1  error  no-undef\n\n1 problem\n")
+        out = self.checked()
+        lint = self.by_name(out)["npm run lint"]
+        self.assertEqual((lint["status"], lint["files"]), ("failed", ["web/src/a.ts"]))
+        self.assertEqual(out["failed_refs"], [3])
+        self.assertNotIn("already_broken", lint)
+
+    def test_a_path_relative_to_the_folder_of_the_command_maps_to_its_row(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        self.exec.on("npm test", code=fails_on_the_pass_only, out="FAIL src/b.ts(3,4): boom\n")
+        out = self.checked()
+        self.assertEqual(self.by_name(out)["npm test"]["files"], ["web/src/b.ts"])
+        self.assertEqual(out["failed_refs"], [5])
+
+    def test_a_failure_that_names_no_file_maps_to_the_pass_files_under_its_folder(self):
+        worktree = self.started()
+        commit_files(self, worktree, "fix(CQ-3): a", {"web/src/a.ts": "a\n"})
+        commit_files(self, worktree, "fix(CQ-5): elsewhere", {"docs/x.ts": "x\n"})
+        self.exec.on("npm test", code=fails_on_the_pass_only, out="Tests failed\n")
+        out = self.checked()
+        self.assertEqual(self.by_name(out)["npm test"]["files"], ["web/src/a.ts"])
+        self.assertEqual(out["failed_refs"], [3])
+
+    def test_a_ci_command_with_its_own_cd_maps_to_the_files_of_that_folder(self):
+        worktree = self.started(commands=[cmd(
+            "build:npm", "build", "cd $DIR && npx gulp production", dir="", env={"DIR": "web"})])
+        self.fixer(worktree)
+        commit_files(self, worktree, "fix(CQ-7): elsewhere", {"docs/x.ts": "x\n"})
+        self.exec.on("npx gulp", code=fails_on_the_pass_only, out="gulp failed\n")
+        out = self.checked()
+        self.assertEqual(self.by_name(out)["build:npm"]["files"], ["web/src/a.ts", "web/src/b.ts"])
+        self.assertEqual(out["failed_refs"], [3, 5])
+
+    def test_missing_image_docker_down_or_timeout_is_not_run_and_blocks_nothing(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        self.exec.on("npm ci", refuse=True, err="image absente : node:20-alpine\n")
+        out = self.checked()
+        self.assertEqual([(item["status"], item["detail"]) for item in out["checks"]], [
+            ("not_run", "image absente : node:20-alpine"),
+            ("not_run", INSTALL_IMPOSSIBLE), ("not_run", INSTALL_IMPOSSIBLE)])
+        self.assertEqual(out["failed_refs"], [])
+        self.assertEqual(self.base_calls(), [])
+        self.assertEqual(self.key()["step"], "checked")
+        self.exec.rules.clear()
+        self.exec.on("npm run lint", code=124, err="exec : délai de 600 s dépassé.\n")
+        out = self.checked()
+        self.assertEqual(self.by_name(out)["npm run lint"]["detail"], "délai dépassé")
+        self.assertEqual(out["failed_refs"], [])
+
+    def test_private_dependencies_are_not_run_through_check(self):
+        worktree = self.started(commands=[
+            cmd("composer install", "install", "composer install", image="composer:2", private=True),
+            cmd("composer test", "test", "composer test", image="composer:2", private=True)])
+        self.fixer(worktree)
+        out = self.checked()
+        self.assertEqual([(item["status"], item["detail"]) for item in out["checks"]],
+                         [("not_run", PRIVATE), ("not_run", PRIVATE)])
+        self.assertEqual(self.exec.calls, [])
+
+    def test_the_log_tail_of_a_failure_is_masked_by_the_secret_guard(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        token = "ghp_" + "Ab1" * 14
+        self.exec.on("npm test", code=fails_on_the_pass_only, out=f"login with {token}\nfailed\n")
+        out = self.checked()
+        detail = self.by_name(out)["npm test"]["detail"]
+        self.assertEqual(detail.split("\n"), [MASKED, "failed"])
+        saved = (self.folder / "checks.json").read_text(encoding="utf-8")
+        self.assertNotIn(token, saved)
+
+    def test_the_commands_the_lead_validated_reach_check_through_open(self):
+        self.write_json("fix/commands.json", {"repos": {"front": {"commands": self.commands}},
+                                               "images": []})
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        self.fixer(worktree)
+        out = self.checked()
+        self.assertEqual([item["name"] for item in out["checks"]],
+                         ["npm ci", "npm run lint", "npm test"])
+
+
+
+class LauncherContractTest(GitCase):
+    """run_project_commands through the real launcher, with the fake docker of the toolbox tests:
+    what Python sends is what cqa-toolbox.sh exec takes, and its exit codes mean what is read."""
+
+    LAUNCHER = Path(__file__).resolve().parents[2] / "scripts" / "cqa-toolbox.sh"
+    STUBS = Path(__file__).resolve().parent / "stubs"
+
+    def setUp(self):
+        super().setUp()
+        commit_files(self, self.repo, "chore: project", {"web/package.json": "{}\n"})
+        self.docker_log = self.root / "docker.log"
+        self.stub = {}
+
+    def run_real(self, command, **kwargs):
+        if command[0] != "bash":
+            return subprocess.run(command, **kwargs)
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("GM_", "CQA_"))}
+        env["PATH"] = str(self.STUBS) + os.pathsep + env["PATH"]
+        env["CQA_STUB_LOG"] = str(self.docker_log)
+        env.update(self.stub)
+        return subprocess.run(command, env=env, **kwargs)
+
+    def run_commands(self, commands):
+        return fix_checks.run_project_commands(
+            self.run_real, self.LAUNCHER, self.repo, commands, self.root / "logs")
+
+    def docker_runs(self):
+        calls = [json.loads(line) for line in self.docker_log.read_text(encoding="utf-8").splitlines()]
+        return [call for call in calls if call[:1] == ["run"]]
+
+    def test_the_launcher_runs_the_command_with_its_env_in_the_folder_and_writes_the_log(self):
+        self.stub = {"CQA_STUB_OUT": "all good\n"}
+        item = cmd("build", "build", "npm run build", dir="web", env={"DIR": "a b"})
+        results = self.run_commands([item])
+        self.assertEqual((results[0]["status"], results[0]["detail"]), ("ok", ""))
+        (call,) = self.docker_runs()
+        self.assertEqual(call[-3:], ["node:20-alpine", "-c", fix_checks.shell_command(item)])
+        self.assertEqual(call[call.index("-w") + 1], "/work/web")
+        self.assertEqual(call[call.index("--network") + 1], "none")
+        self.assertEqual(Path(results[0]["log"]).read_text(encoding="utf-8"), "all good\n")
+
+    def test_the_exit_code_of_the_command_is_a_failure_with_the_end_of_its_log(self):
+        self.stub = {"CQA_STUB_RUN_CODE": "1", "CQA_STUB_OUT": "npm ERR! boom\n"}
+        results = self.run_commands([cmd("lint", "lint", "npm run lint", dir="web")])
+        self.assertEqual((results[0]["status"], results[0]["detail"]), ("failed", "npm ERR! boom"))
+
+    def test_an_exit_2_of_the_command_is_still_a_failure(self):
+        self.stub = {"CQA_STUB_RUN_CODE": "2", "CQA_STUB_OUT": "config error\n"}
+        results = self.run_commands([cmd("lint", "lint", "npm run lint", dir="web")])
+        self.assertEqual((results[0]["status"], results[0]["detail"]), ("failed", "config error"))
+
+    def test_a_missing_image_is_not_run_with_the_message_of_the_launcher(self):
+        self.stub = {"CQA_STUB_MISSING": "node"}
+        results = self.run_commands([cmd("build", "build", "npm run build", dir="web"),
+                                     cmd("lint", "lint", "npm run lint", dir="web")])
+        self.assertEqual([(item["status"], item["detail"]) for item in results],
+                         [("not_run", "image absente : node:20-alpine")] * 2)
+        self.assertEqual(self.docker_runs(), [])
+
+    def test_a_workdir_missing_from_the_worktree_is_not_run(self):
+        results = self.run_commands([cmd("build", "build", "npm run build", dir="absent")])
+        self.assertEqual(results[0]["status"], "not_run")
+        self.assertIn("absent", results[0]["detail"])
+
+    def test_a_timeout_is_not_run(self):
+        self.stub = {"CQA_STUB_HANG": "1"}
+        with mock.patch.object(fix_checks, "COMMAND_TIMEOUT", 1):
+            results = self.run_commands([cmd("test", "test", "npm test", dir="web")])
+        self.assertEqual((results[0]["status"], results[0]["detail"]), ("not_run", "délai dépassé"))
 
 
 if __name__ == "__main__":

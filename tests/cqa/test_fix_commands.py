@@ -626,6 +626,16 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(fix_commands.covered_dirs([manifest]), set())
 
 
+    def test_start_dir_is_the_dir_then_the_leading_cd_whatever_the_source(self):
+        manifest = {"source": "package.json", "command": "npm ci", "env": {}, "dir": "web"}
+        self.assertEqual(fix_commands.start_dir(manifest), "web")
+        ci = {"source": ".gitlab-ci.yml (x)", "command": "cd $D && npm ci", "env": {"D": "a/b"},
+              "dir": ""}
+        self.assertEqual(fix_commands.start_dir(ci), "a/b")
+        self.assertEqual(fix_commands.start_dir({**manifest, "command": "cd ../x"}), "x")
+        self.assertEqual(fix_commands.start_dir({**manifest, "command": "cd ../../x"}), "web")
+
+
 class ShapeTest(unittest.TestCase):
     GOOD = {"name": "npm ci", "dir": "web", "image": "node:18-alpine", "kind": "install",
             "command": "npm ci", "env": {"A": "b"}, "source": "package.json", "private": False}

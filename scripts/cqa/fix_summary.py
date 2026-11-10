@@ -12,6 +12,8 @@ NO_REASON = "Raison non précisée"
 NO_TITLE = "sans titre"
 NO_MR = "Aucune MR créée."
 NO_CHECK = "Aucune vérification en attente."
+BROKEN_BEFORE = ("Ces commandes échouaient déjà sur la branche de base : aucune ligne n'en est "
+                 "responsable, à signaler aux devs.")
 NOTHING_PREPARED = "Aucun correctif préparé."
 EMPTY_BRANCH = " (aucun commit)"
 LEFT_KEY = "- {repo} : {reason} (branche {branch}, worktree {worktree})."
@@ -59,6 +61,10 @@ def summary(*, project: str, state: dict, candidates: dict, checks: dict,
     left = _left(keys, candidates, info)
     if left:
         parts.append(("Laissées aux devs", left))
+    broken = _broken_lines(keys, checks)
+    if broken:
+        parts.append(("Erreurs déjà présentes avant les correctifs",
+                      BROKEN_BEFORE + "\n\n" + "\n".join(broken)))
     parts.append(("Vérifications à faire par le relecteur", _checks_section(keys, checks)))
     local = _local_lines(state)
     if local:
@@ -252,7 +258,8 @@ def _checks_section(keys: dict, checks: dict) -> str:
         if not isinstance(document, dict):
             continue
         entries = [(item.get("name"), None) for item in document.get("checks") or []
-                   if isinstance(item, dict) and item.get("status") not in _RAN]
+                   if isinstance(item, dict) and item.get("status") not in _RAN
+                   and not item.get("already_broken")]
         entries += [(item.get("name"), item.get("command")) for item in document.get("not_run") or []
                     if isinstance(item, dict)]
         for label, command in entries:
@@ -260,6 +267,25 @@ def _checks_section(keys: dict, checks: dict) -> str:
                 seen.add((label, command))
                 lines.append(f"- {label} : `{command}`" if command else f"- {label}")
     return "\n".join(lines) if lines else NO_CHECK
+
+
+def _broken_lines(keys: dict, checks: dict) -> list:
+    """Return a line per command that failed on the base too (checks.json « already_broken »),
+    by repo."""
+    seen, lines = set(), []
+    for name, key in keys.items():
+        document = checks.get(name) if not _is_left(key) else None
+        if not isinstance(document, dict):
+            continue
+        for item in document.get("checks") or []:
+            if isinstance(item, dict) and item.get("already_broken"):
+                line = f"- {key['repo']} : {item.get('name')}"
+                if item.get("detail"):
+                    line += f" : {item['detail']}"
+                if line not in seen:
+                    seen.add(line)
+                    lines.append(line)
+    return lines
 
 
 def _local_keys(state: dict) -> list:

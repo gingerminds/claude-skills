@@ -4,15 +4,21 @@ The checks run in the Docker toolbox (cqa-toolbox.sh check) on the worktree, nev
 project's own containers. A failed file maps back to the checklist rows whose commits touch it.
 nginx and Varnish run on the worktree and on their folders at the start of the pass: only an
 error the base does not have fails.
+
+The commands of the project (install, build, lint, test) run one by one in disposable containers
+(cqa-toolbox.sh exec) on the same worktree, which is put back as it was after each of them. Only
+a failure the base does not have fails; an error of the environment is never a failure.
 """
 import json
 import os
 import re
+import shlex
 import shutil
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
-from cqa import fix_guard, fix_names
+from cqa import fix_commands, fix_guard, fix_names
+from cqa.secrets import known_values_from_env, scan_spans
 
 NOT_RUN_WHY = "à lancer dans l'environnement du projet (shared/runner.md)"
 TOOLBOX_DOWN = "boîte à outils indisponible"
@@ -26,6 +32,21 @@ SCSS = "Syntaxe SCSS (postcss-scss)"
 ALREADY_BROKEN = "erreur déjà présente avant le correctif"
 OUTSIDE = "contrôle impossible hors de l'environnement du projet"
 MISSING = "résultat absent de la boîte à outils"
+INSTALL_IMPOSSIBLE = "installation des dépendances impossible"
+PRIVATE_DEPENDENCIES = "dépendances privées : non transmises"
+TIMED_OUT = "délai dépassé"
+REFORMATTED = "fichiers reformatés par le linter"
+MASKED_LINE = "ligne masquée : secret possible"
+LAUNCHER_FAILED = "exécution impossible"
+BASELINE_DIR = "baseline-wt"
+INSTALL_TIMEOUT = 900
+COMMAND_TIMEOUT = 600
+TAIL_LINES = 10
+_TAIL_WINDOW = 200
+_MAX_LOG = 2_000_000
+_CHUNK = 500
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_TOKEN = re.compile(r"[\w./@+~-]+")
 # kind -> (label, check column of config.tsv)
 CONFIG = {
     "nginx": ("Syntaxe nginx (nginx -t)", "nginx -t"),
@@ -152,6 +173,287 @@ def failed_refs(worktree: Path, start_sha: str, checks: list, run) -> list:
         if failed & set(touched.stdout.split("\0")):
             refs.add(ref)
     return sorted(refs)
+
+
+def shell_command(item: dict) -> str:
+    """Return the text sh -c runs for a command: its env exported first, so that it holds for
+    every command of a chain joined by "&&". The values are quoted, never expanded."""
+    env = item.get("env") or {}
+    if not env:
+        return item["command"]
+    assigned = " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
+    return f"export {assigned}; {item['command']}"
+
+
+def run_project_commands(run, launcher: Path, worktree: Path, commands: list, log_dir: Path,
+                         pass_files: tuple = ()) -> list:
+    """Run the commands of the project one after the other in worktree; return one result each.
+
+    A result is {"name", "status", "files", "detail", "kind", "command", "log", "folder",
+    "exact"}: status "ok", "failed", "not_run" or "already_broken". The commands run in the order
+    given, each through cqa-toolbox.sh exec (network for an install only), and the worktree is
+    put back as it was after each (restore_worktree). The full log of each is a file of log_dir.
+
+    A failed or not run install makes the later commands of its folder not_run, as a command that
+    needs private dependencies, which is never run. An error of the environment (a launcher that
+    refuses, an exit 124) is not_run, never failed. A lint that exits 0 but rewrites tracked files
+    is judged by them: failed on those the pass changed (exact), already_broken on the others.
+    The detail of a failure is the end of its log, without secrets (log_tail).
+    """
+    worktree, log_dir = Path(worktree), Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    changed = set(pass_files)
+    blocked, results = {}, []
+    for index, item in enumerate(commands, 1):
+        folder = fix_commands.start_dir(item)
+        log = log_dir / f"{index:02d}-{_slug(item['name'])}.log"
+        if folder in blocked:
+            results.append(_result(item, folder, "not_run", blocked[folder]))
+            continue
+        if item["private"]:
+            blocked[folder] = PRIVATE_DEPENDENCIES
+            results.append(_result(item, folder, "not_run", PRIVATE_DEPENDENCIES))
+            continue
+        result = _execute(run, launcher, worktree, item, folder, log, changed)
+        if item["kind"] == "install" and result["status"] in ("failed", "not_run"):
+            blocked[folder] = INSTALL_IMPOSSIBLE
+        results.append(result)
+    return results
+
+
+def _execute(run, launcher: Path, worktree: Path, item: dict, folder: str, log: Path,
+             changed: set) -> dict:
+    install = item["kind"] == "install"
+    log.unlink(missing_ok=True)
+    try:
+        done = run(
+            ["bash", str(launcher), "exec", str(worktree), str(log), item["image"], item["dir"],
+             "on" if install else "off", str(INSTALL_TIMEOUT if install else COMMAND_TIMEOUT), "--",
+             shell_command(item)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError as error:
+        return _result(item, folder, "not_run", f"{LAUNCHER_FAILED} : {error}")
+    finally:
+        modified = restore_worktree(worktree, run)
+    code = done.returncode
+    if code == 124:
+        return _result(item, folder, "not_run", TIMED_OUT, log=log)
+    if code == 2 and not log.exists():
+        # A refusal of the launcher (image absent, Docker down) comes before the log is made.
+        lines = [line.strip() for line in (done.stderr or "").splitlines() if line.strip()]
+        return _result(item, folder, "not_run", lines[-1][:300] if lines else LAUNCHER_FAILED)
+    if code == 0:
+        if item["kind"] == "lint" and modified:
+            inside = [path for path in modified if path in changed]
+            if inside:
+                return _result(item, folder, "failed", f"{REFORMATTED} : {_listed(inside)}",
+                               files=inside, log=log, exact=True)
+            return _result(item, folder, "already_broken",
+                           f"{REFORMATTED}, hors des fichiers de la passe : {_listed(modified)}",
+                           log=log)
+        return _result(item, folder, "ok", log=log)
+    return _result(item, folder, "failed", log_tail(_read_log(log)), log=log)
+
+
+def _result(item: dict, folder: str, status: str, detail: str = "", files=(), log=None,
+            exact: bool = False) -> dict:
+    return {"name": item["name"], "status": status, "files": list(files), "detail": detail,
+            "kind": item["kind"], "command": item["command"],
+            "log": str(log) if log is not None else "", "folder": folder, "exact": exact}
+
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()[:40] or "command"
+
+
+def _listed(paths: list) -> str:
+    shown = ", ".join(paths[:MAX_DETAIL])
+    more = len(paths) - MAX_DETAIL
+    return shown + (f" et {more} autre(s)" if more > 0 else "")
+
+
+def _read_log(path: Path) -> str:
+    """Return the end of a log (at most _MAX_LOG bytes) without colors and progress rewrites."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > _MAX_LOG:
+                handle.seek(size - _MAX_LOG)
+            data = handle.read()
+    except OSError:
+        return ""
+    text = _ANSI.sub("", data.decode("utf-8", errors="replace")).replace("\r\n", "\n")
+    return "\n".join(line.rsplit("\r", 1)[-1] for line in text.split("\n"))
+
+
+def log_tail(text: str) -> str:
+    """Return the last TAIL_LINES non-empty lines of a log. A line the secret scan flags is
+    replaced by MASKED_LINE, and so are the lines of a private key from its first line on."""
+    lines = [line.rstrip() for line in text.split("\n") if line.strip()][-_TAIL_WINDOW:]
+    hidden = set()
+    for label, first, last in scan_spans("\n".join(lines), known_values_from_env()):
+        hidden.update(range(first, (len(lines) if label == "private_key" else last) + 1))
+    shown = [MASKED_LINE if number in hidden else line[:300]
+             for number, line in enumerate(lines, 1)]
+    return "\n".join(shown[-TAIL_LINES:])
+
+
+def cited_files(text: str, files: list, folder: str = "") -> list:
+    """Return the files a log names: by their path under the repo, under /work/ (the worktree
+    as the container sees it), or relative to folder, where the command worked."""
+    tokens = set()
+    for token in _TOKEN.findall(text):
+        token = token.rstrip(".")
+        for prefix in ("/work/", "./"):
+            if token.startswith(prefix):
+                token = token[len(prefix):]
+        tokens.add(token)
+    found = []
+    for path in files:
+        relative = path[len(folder) + 1:] if folder and path.startswith(folder + "/") else None
+        if path in tokens or (relative is not None and relative in tokens):
+            found.append(path)
+    return found
+
+
+def project_checks(results: list, base: Optional[list], pass_files: list,
+                   log_prefix: str = "") -> list:
+    """Return the entries of checks.json for the results of run_project_commands.
+
+    status is "passed", "failed" or "not_run", as for the other checks. A failure the base has
+    too (a result of base failed or already_broken, by name) is not attributed to the pass: its
+    entry is not_run, with already_broken true and ALREADY_BROKEN in its detail. Any other failure
+    is attributed to the files of the pass its log names, else to those under its folder, else to
+    all of them (failed_refs maps them to the rows). A failure by files (exact) keeps its own.
+    """
+    broken = {item["name"] for item in base or [] if item["status"] in ("failed", "already_broken")}
+    changed = list(pass_files)
+    checks = []
+    for item in results:
+        log = f"{log_prefix}/{Path(item['log']).name}".lstrip("/") if item["log"] else ""
+        status, files, detail, known = item["status"], [], item["detail"], False
+        if status == "ok":
+            status, detail = "passed", ""
+        elif status == "failed" and not item["exact"] and item["name"] in broken:
+            known = True
+        elif status == "failed":
+            files = item["files"] if item["exact"] else _attributed(item, changed)
+        elif status == "already_broken":
+            known = True
+        if known:
+            last = next((line for line in reversed(detail.split("\n")) if line.strip()), "")
+            status, detail = "not_run", f"{ALREADY_BROKEN} ({last})" if last else ALREADY_BROKEN
+        entry = {"name": item["name"], "status": status, "files": files, "detail": detail,
+                 "kind": item["kind"], "command": item["command"]}
+        if log:
+            entry["log"] = log
+        if known:
+            entry["already_broken"] = True
+        checks.append(entry)
+    return checks
+
+
+def _attributed(item: dict, changed: list) -> list:
+    cited = cited_files(_read_log(Path(item["log"])) if item["log"] else "", changed, item["folder"])
+    if cited:
+        return cited
+    folder = item["folder"]
+    under = [path for path in changed if not folder or path == folder or path.startswith(folder + "/")]
+    return under or changed
+
+
+def measure_base(run, launcher: Path, worktree: Path, start_sha: str, commands: list,
+                 check_dir: Path) -> list:
+    """Run the commands on a worktree of start_sha detached under check_dir, removed after;
+    return their results (run_project_commands). Raises ValueError when it cannot be made."""
+    check_dir = Path(check_dir)
+    base = check_dir / BASELINE_DIR
+    shutil.rmtree(base, ignore_errors=True)
+    fix_names.git(worktree, run, "worktree", "prune")
+    added = fix_names.git(worktree, run, "worktree", "add", "--detach", str(base), start_sha)
+    if added.returncode != 0:
+        raise ValueError(f"État de départ non mesuré : git worktree add a échoué : "
+                         f"{added.stderr.strip()}")
+    try:
+        return run_project_commands(run, launcher, base, commands, check_dir / "baseline-logs")
+    finally:
+        fix_names.git(worktree, run, "worktree", "remove", "--force", str(base))
+        shutil.rmtree(base, ignore_errors=True)
+        fix_names.git(worktree, run, "worktree", "prune")
+
+
+def dirty_files(worktree: Path, run) -> list:
+    """Return the sorted files of the worktree that differ from HEAD: modified, deleted or
+    untracked, never the ignored ones."""
+    return sorted(path for path, _ in _status(worktree, run))
+
+
+def restore_worktree(worktree: Path, run, keep: tuple = ()) -> list:
+    """Put the worktree back as it was: restore the tracked files that were modified (git checkout
+    -- .), except keep, and delete the untracked files that are not ignored (and the folders they
+    leave empty), except keep. Ignored files stay: node_modules and vendor serve the next
+    command. Return the sorted tracked files that were modified, those kept included."""
+    worktree = Path(worktree)
+    kept = set(keep)
+    entries = _status(worktree, run)
+    modified = sorted(path for path, code in entries if code != "??")
+    if modified:
+        if not kept & set(modified):
+            _checkout(worktree, run, ["."])
+        else:
+            literal = [f":(literal){path}" for path in modified if path not in kept]
+            for start in range(0, len(literal), _CHUNK):
+                _checkout(worktree, run, literal[start:start + _CHUNK])
+    for path, code in entries:
+        if code == "??" and path not in kept:
+            _remove(worktree, path)
+    return modified
+
+
+def _checkout(worktree: Path, run, paths: list) -> None:
+    result = fix_names.git(worktree, run, "checkout", "--", *paths)
+    if result.returncode != 0:
+        raise ValueError(f"git checkout a échoué dans {worktree} : {result.stderr.strip()}")
+
+
+def _remove(worktree: Path, path: str) -> None:
+    posix = PurePosixPath(path)
+    if not posix.parts or posix.is_absolute() or ".." in posix.parts:
+        return
+    target = worktree.joinpath(*posix.parts)
+    try:
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+        parent = target.parent
+        while parent != worktree and worktree in parent.parents:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+    except OSError as error:
+        raise ValueError(f"{path} n'a pas pu être retiré du worktree : {error}")
+
+
+def _status(worktree: Path, run) -> list:
+    """Return the (path, XY) entries of git status, untracked files included, ignored ones not."""
+    result = fix_names.git(worktree, run, "status", "--porcelain=v1", "-uall", "-z")
+    if result.returncode != 0:
+        raise ValueError(f"git status a échoué dans {worktree} : {result.stderr.strip()}")
+    fields = result.stdout.split("\0")
+    entries, index = [], 0
+    while index < len(fields):
+        field = fields[index]
+        index += 1
+        if len(field) < 4:
+            continue
+        if "R" in field[:2] or "C" in field[:2]:
+            index += 1
+        entries.append((field[3:], field[:2]))
+    return entries
 
 
 def host_syntax(worktree: Path, files: list, run) -> list:
