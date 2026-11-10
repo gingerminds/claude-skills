@@ -1,6 +1,8 @@
 .DS_Store
 .idea
 *.log
+__pycache__/
+*.pyc
 
 # Artefacts de conception / scratch — locaux, hors dépôt
 docs/superpowers/

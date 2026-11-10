@@ -1,0 +1,1224 @@
+import copy
+import unittest
+from datetime import date
+
+from cqa.comments import (
+    CONFIDENCE_LABELS,
+    MAX_COMMENT_LENGTH,
+    MR_LABEL,
+    VERDICT_LABELS,
+    format_comment,
+    format_excluded_comment,
+    format_fix_comment,
+    format_fix_page_comment,
+    format_page_summary,
+    has_mr_block,
+    is_audit_comment,
+    is_fix_comment,
+    is_linkable_url,
+    is_skill_comment,
+    parse_fix_comment,
+    parse_verdict,
+    to_rich_text,
+    without_mr_block,
+)
+from cqa.secrets import scan_text
+
+EM_DASH = chr(0x2014)
+RUN_DATE = date(2026, 10, 20)
+LEAD = "Côme D"
+VERSION = "0.9.0"
+SHA_NUXT = "3f2a1c9" + "e" * 33
+SHA_LARAVEL = "8b1d4e2" + "f" * 33
+REPO_NUXT = {
+    "name": "nuxt",
+    "web_url": "https://gitlab.example.org/acme/front",
+    "audited_sha": SHA_NUXT,
+}
+REPO_LARAVEL = {
+    "name": "laravel",
+    "web_url": "https://gitlab.example.org/acme/back",
+    "audited_sha": SHA_LARAVEL,
+}
+ROW_79 = {"ref": 79, "title": "Ordre de tabulation logique"}
+BLOB_NUXT = f"https://gitlab.example.org/acme/front/-/blob/{SHA_NUXT}"
+HEADER = "Audit PRE-MEL · 20/10/2026 · lancé par Côme D"
+FOOTER = "Réf CQ-79 · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0"
+
+F_KO = {
+    "ref": 79,
+    "verdict": "ko",
+    "confidence": "high",
+    "summary": (
+        "3 éléments ont un tabindex positif : l'ordre de tabulation saute le menu principal."
+    ),
+    "evidence": [
+        {"type": "file", "repo": "nuxt", "path": "components/AppHeader.vue", "line": 42},
+        {
+            "type": "page",
+            "url": "https://preprod.example.org/actualites/x",
+            "detail": "parcours au clavier",
+        },
+        {"type": "tool", "tool": "a11y", "ref": "summary.json#home/3"},
+    ],
+    "todo": "Supprimer les tabindex positifs et suivre l'ordre du DOM.",
+    "human_check": None,
+    "divergence": None,
+    "needs_probes": [],
+}
+
+EXPECTED_KO_TEXT = "\n".join(
+    [
+        HEADER,
+        "",
+        "Verdict :",
+        "À traiter (confiance haute)",
+        "",
+        "Constat :",
+        "3 éléments ont un tabindex positif : l'ordre de tabulation saute le menu principal.",
+        "",
+        "Preuves :",
+        f"- components/AppHeader.vue:42 ({BLOB_NUXT}/components/AppHeader.vue#L42)",
+        "- https://preprod.example.org/actualites/x : parcours au clavier",
+        "- a11y : summary.json#home/3",
+        "",
+        "À faire :",
+        "Supprimer les tabindex positifs et suivre l'ordre du DOM.",
+        FOOTER,
+    ]
+)
+
+PAGE_SUMMARY = {
+    "by_status_after": {
+        "Ok / Recetté": 40,
+        "À traiter": 12,
+        "Non applicable": 8,
+        "Mise en place partielle": 3,
+        "Mis en place": 5,
+        "En standby": 0,
+    },
+    "blocking_non_conform": [79, 81],
+    "unknown": 4,
+    "human_overrides": [
+        {"ref": 12, "before": "Ok / Recetté", "after": "À traiter"},
+        {"ref": 14, "before": "Mis en place", "after": "Mise en place partielle"},
+    ],
+    "deferred": 6,
+    "missing_in_copy": [{"ref": 3, "title": "Titre absent de la copie"}],
+}
+
+EXPECTED_PAGE_TEXT = "\n".join(
+    [
+        HEADER,
+        "Décompte par statut :",
+        "- À traiter : 12",
+        "- Mise en place partielle : 3",
+        "- Mis en place : 5",
+        "- Ok / Recetté : 40",
+        "- Non applicable : 8",
+        "Lignes bloquantes non conformes (2) : CQ-79, CQ-81",
+        "Lignes non évaluées : 4",
+        "Statuts posés par un humain et contredits par l'audit (2) : CQ-12, CQ-14",
+        "Lignes reportées à J0 / J+7 : 6",
+        "Lignes du modèle absentes de la copie : 1",
+    ]
+)
+
+
+def finding(**changes):
+    return {**F_KO, **changes}
+
+
+def page_evidence(number, detail="constat"):
+    return {
+        "type": "page",
+        "url": f"https://preprod.example.org/page-{number}",
+        "detail": detail,
+    }
+
+
+def comment(item, repos=None, lead=LEAD):
+    return format_comment(
+        finding=item,
+        row=ROW_79,
+        run_date=RUN_DATE,
+        lead_option=lead,
+        repos=[REPO_NUXT] if repos is None else repos,
+        plugin_version=VERSION,
+    )
+
+
+def excluded(verdict="na", detail="tâche propre à Wordpress, projet Laravel + Nuxt", lead=LEAD):
+    return format_excluded_comment(
+        row=ROW_79,
+        verdict=verdict,
+        detail=detail,
+        run_date=RUN_DATE,
+        lead_option=lead,
+        repos=[REPO_NUXT],
+        plugin_version=VERSION,
+    )
+
+
+def page_summary(summary=PAGE_SUMMARY, lead=LEAD):
+    return format_page_summary(summary=summary, run_date=RUN_DATE, lead_option=lead)
+
+
+def contents(rich_text):
+    return [item["text"]["content"] for item in rich_text]
+
+
+def links(rich_text):
+    return [item["text"]["link"]["url"] for item in rich_text if "link" in item["text"]]
+
+
+class LabelsTest(unittest.TestCase):
+    def test_verdict_labels(self):
+        self.assertEqual(
+            VERDICT_LABELS,
+            {
+                "ok": "Ok / Recetté",
+                "ok_human": "Mis en place, à valider",
+                "partial": "Mise en place partielle",
+                "ko": "À traiter",
+                "na": "Non applicable",
+                "unknown": "Non évaluable",
+            },
+        )
+
+    def test_confidence_labels(self):
+        self.assertEqual(CONFIDENCE_LABELS, {"high": "haute", "medium": "moyenne", "low": "basse"})
+
+
+class FormatCommentTest(unittest.TestCase):
+    def test_exact_comment(self):
+        self.assertEqual(
+            format_comment(
+                finding=F_KO,
+                row=ROW_79,
+                run_date=date(2026, 10, 20),
+                lead_option="Côme D",
+                repos=[REPO_NUXT],
+                plugin_version="0.9.0",
+            ),
+            EXPECTED_KO_TEXT,
+        )
+
+    def test_verdict_line_per_confidence(self):
+        for confidence, label in (("high", "haute"), ("medium", "moyenne"), ("low", "basse")):
+            with self.subTest(confidence=confidence):
+                lines = comment(finding(confidence=confidence)).split("\n")
+                self.assertEqual(lines[2:4], ["Verdict :", f"À traiter (confiance {label})"])
+
+    def test_optional_lines_follow_the_template_order(self):
+        text = comment(
+            finding(
+                todo="Corriger.",
+                human_check="Vérifier au lecteur d'écran.",
+                divergence="Le correctif est absent de la préprod.",
+            )
+        )
+        self.assertEqual(
+            text.split("\n")[-9:],
+            [
+                "À faire :",
+                "Corriger.",
+                "",
+                "À valider :",
+                "Vérifier au lecteur d'écran.",
+                "",
+                "Écart code / préprod :",
+                "Le correctif est absent de la préprod.",
+                FOOTER,
+            ],
+        )
+
+    def test_empty_optional_fields_leave_no_line(self):
+        for empty in (None, "", "  "):
+            with self.subTest(empty=empty):
+                text = comment(finding(todo=empty, human_check=empty, divergence=empty))
+                for label in ("À faire", "À valider", "Écart code / préprod"):
+                    self.assertNotIn(label, text)
+                self.assertNotIn("\n\n\n", text)
+
+    def test_missing_optional_keys_are_tolerated(self):
+        minimal = {key: F_KO[key] for key in ("ref", "verdict", "confidence", "summary")}
+        self.assertEqual(
+            comment(minimal).split("\n"),
+            [
+                HEADER,
+                "",
+                "Verdict :",
+                "À traiter (confiance haute)",
+                "",
+                "Constat :",
+                F_KO["summary"],
+                FOOTER,
+            ],
+        )
+
+    def test_no_evidence_leaves_no_evidence_block(self):
+        self.assertNotIn("Preuves", comment(finding(evidence=[])))
+
+    def test_file_evidence_without_line_has_no_anchor(self):
+        evidence = [{"type": "file", "repo": "nuxt", "path": "nuxt.config.ts"}]
+        text = comment(finding(evidence=evidence))
+        self.assertIn(f"\n- nuxt.config.ts ({BLOB_NUXT}/nuxt.config.ts)\n", text)
+        self.assertNotIn("#L", text)
+
+    def test_file_evidence_links_to_its_own_repo(self):
+        evidence = [{"type": "file", "repo": "laravel", "path": "app/Http/Kernel.php", "line": 7}]
+        text = comment(finding(evidence=evidence), repos=[REPO_NUXT, REPO_LARAVEL])
+        blob = f"https://gitlab.example.org/acme/back/-/blob/{SHA_LARAVEL}"
+        self.assertIn(f"\n- app/Http/Kernel.php:7 ({blob}/app/Http/Kernel.php#L7)\n", text)
+
+    def test_file_evidence_of_an_unknown_repo_has_no_link(self):
+        evidence = [{"type": "file", "repo": "ghost", "path": "a.vue", "line": 3}]
+        text = comment(finding(evidence=evidence))
+        self.assertIn("\n- a.vue:3\n", text)
+        self.assertNotIn("/-/blob/", text)
+
+    def test_page_evidence_without_detail_is_the_url(self):
+        evidence = [{"type": "page", "url": "https://preprod.example.org/contact"}]
+        self.assertIn(
+            "\n- https://preprod.example.org/contact\n", comment(finding(evidence=evidence))
+        )
+
+    def test_http_evidence(self):
+        evidence = [
+            {"type": "http", "url": "https://preprod.example.org/.env", "detail": "404 attendu"}
+        ]
+        self.assertIn(
+            "\n- https://preprod.example.org/.env : 404 attendu\n",
+            comment(finding(evidence=evidence)),
+        )
+
+    def test_document_evidence_line(self):
+        evidence = [{"type": "document", "doc": "d1", "ref": "critères 7.3"}]
+        text = comment(finding(evidence=evidence))
+        self.assertIn("Preuves :\n- Rapport d1 : critères 7.3\n", text)
+        self.assertNotIn("/-/blob/", text)
+        two = [
+            {"type": "document", "doc": "d1", "ref": "critères 7.3, 12.9"},
+            {"type": "document", "doc": "d2", "ref": "Constat 4"},
+        ]
+        text = comment(finding(evidence=two))
+        self.assertIn("\n- Rapport d1 : critères 7.3, 12.9\n- Rapport d2 : Constat 4\n", text)
+
+    def test_unknown_evidence_type_is_refused(self):
+        with self.assertRaises(ValueError):
+            comment(finding(evidence=[{"type": "video", "url": "https://example.org/"}]))
+
+    def test_two_repos_footer(self):
+        text = comment(F_KO, repos=[REPO_NUXT, REPO_LARAVEL])
+        self.assertEqual(
+            text.split("\n")[-1],
+            "Réf CQ-79 · nuxt@3f2a1c9, laravel@8b1d4e2 · gm:checklist-quality-audit 0.9.0",
+        )
+
+    def test_five_evidences_are_all_shown(self):
+        text = comment(finding(evidence=[page_evidence(n) for n in range(5)]))
+        self.assertEqual(text.count("\n- "), 5)
+        self.assertNotIn("autre", text)
+
+    def test_evidences_past_five_are_replaced_by_a_count(self):
+        text = comment(finding(evidence=[page_evidence(n) for n in range(8)]))
+        self.assertEqual(text.count("\n- "), 6)
+        self.assertIn("/page-4 : constat\n- et 3 autres preuves\n", text)
+        self.assertNotIn("/page-5", text)
+
+    def test_a_single_extra_evidence_uses_the_singular(self):
+        text = comment(finding(evidence=[page_evidence(n) for n in range(6)]))
+        self.assertIn("\n- et 1 autre preuve\n", text)
+
+    def test_cap_1500(self):
+        evidence = [page_evidence(n, "parcours au clavier") for n in range(20)]
+        text = comment(finding(summary="s" * 600, evidence=evidence))
+        self.assertLessEqual(len(text), 1500)
+        self.assertIn("autres preuves", text)
+        self.assertIn("- et 15 autres preuves\n", text)
+        self.assertIn("Constat :\n" + "s" * 600 + "\n", text)
+
+    def test_cap_drops_evidence_from_the_end(self):
+        evidence = [page_evidence(n, "d" * 300) for n in range(8)]
+        text = comment(finding(evidence=evidence))
+        self.assertLessEqual(len(text), 1500)
+        shown = [n for n in range(8) if f"/page-{n} :" in text]
+        self.assertTrue(1 <= len(shown) < 5)
+        self.assertEqual(shown, list(range(len(shown))))
+        self.assertIn(f"- et {8 - len(shown)} autres preuves\n", text)
+        self.assertIn("Constat :\n" + F_KO["summary"] + "\n", text)
+        self.assertEqual(text.split("\n")[-1], FOOTER)
+
+    def test_cap_truncates_the_summary_last(self):
+        todo = "t" * 1000
+        text = comment(finding(summary="s" * 600, todo=todo, evidence=[]))
+        self.assertLessEqual(len(text), 1500)
+        self.assertIn("À faire :\n" + todo + "\n", text)
+        lines = text.split("\n")
+        constat = lines[lines.index("Constat :") + 1]
+        self.assertTrue(constat.endswith("…"))
+        self.assertTrue(constat.startswith("s" * 100))
+        self.assertLess(len(constat), 600)
+        self.assertEqual(text.split("\n")[-1], FOOTER)
+
+    def test_cap_cuts_the_other_lines_when_the_summary_is_not_enough(self):
+        text = comment(
+            finding(
+                summary="s" * 600,
+                todo="t" * 1500,
+                human_check="h" * 1500,
+                divergence="d" * 1500,
+                evidence=[],
+            )
+        )
+        self.assertEqual(len(text), 1500)
+        lines = text.split("\n")
+        self.assertEqual(lines[lines.index("Constat :") + 1], "…")
+        for label in ("À faire", "À valider", "Écart code / préprod"):
+            self.assertIn(label + " :", lines)
+        self.assertEqual(lines[-1], FOOTER)
+
+    def test_cap_holds_for_oversized_fields(self):
+        huge = "x" * 5000
+        cases = {
+            "summary": finding(summary=huge),
+            "todo": finding(todo=huge),
+            "human_check and divergence": finding(human_check=huge, divergence=huge),
+            "everything": finding(
+                summary=huge,
+                todo=huge,
+                human_check=huge,
+                divergence=huge,
+                evidence=[page_evidence(n, huge) for n in range(40)],
+            ),
+            "one huge evidence": finding(evidence=[page_evidence(0, huge)]),
+        }
+        for name, item in cases.items():
+            with self.subTest(name):
+                text = comment(item)
+                self.assertLessEqual(len(text), 1500)
+                self.assertEqual(text.split("\n")[-1], FOOTER)
+                self.assertEqual(parse_verdict(text), "ko")
+
+    def test_cap_holds_whatever_the_lead_name(self):
+        self.assertLessEqual(len(comment(F_KO, lead="x" * 3000)), 1500)
+
+    def test_finding_is_not_modified(self):
+        item = finding(summary="s" * 5000, evidence=[page_evidence(n) for n in range(20)])
+        before = copy.deepcopy(item)
+        comment(item)
+        self.assertEqual(item, before)
+
+    def test_no_em_dash(self):
+        dirty = f"a {EM_DASH} b"
+        text = comment(
+            finding(
+                summary=dirty,
+                todo=dirty,
+                human_check=dirty,
+                divergence=dirty,
+                evidence=[page_evidence(0, dirty)],
+            )
+        )
+        self.assertNotIn(EM_DASH, text)
+        self.assertIn("Constat :\na - b\n", text)
+        self.assertIn("À faire :\na - b\n", text)
+        self.assertIn("/page-0 : a - b\n", text)
+
+
+class FormatExcludedCommentTest(unittest.TestCase):
+    def test_exact_comment(self):
+        self.assertEqual(
+            excluded(),
+            "\n".join(
+                [
+                    HEADER,
+                    "",
+                    "Verdict :",
+                    "Non applicable",
+                    "",
+                    "Constat :",
+                    "tâche propre à Wordpress, projet Laravel + Nuxt",
+                    FOOTER,
+                ]
+            ),
+        )
+
+    def test_unknown_verdict(self):
+        text = excluded(verdict="unknown", detail="outils indisponibles : SSH serveur, BDD")
+        self.assertEqual(
+            text.split("\n")[2:7],
+            [
+                "Verdict :",
+                "Non évaluable",
+                "",
+                "Constat :",
+                "outils indisponibles : SSH serveur, BDD",
+            ],
+        )
+
+    def test_cap_truncates_the_detail(self):
+        text = excluded(detail="d" * 5000)
+        self.assertLessEqual(len(text), 1500)
+        lines = text.split("\n")
+        self.assertEqual(lines[5], "Constat :")
+        self.assertTrue(lines[6].startswith("d" * 100))
+        self.assertTrue(lines[6].endswith("…"))
+        self.assertEqual(lines[-1], FOOTER)
+        self.assertEqual(parse_verdict(text), "na")
+
+    def test_cap_holds_whatever_the_lead_name(self):
+        self.assertLessEqual(len(excluded(lead="x" * 3000)), 1500)
+
+    def test_no_em_dash(self):
+        self.assertNotIn(EM_DASH, excluded(detail=f"a {EM_DASH} b"))
+
+
+class ParseVerdictTest(unittest.TestCase):
+    def test_parse_roundtrip(self):
+        for verdict in VERDICT_LABELS:
+            for confidence in CONFIDENCE_LABELS:
+                with self.subTest(verdict=verdict, confidence=confidence):
+                    text = comment(finding(verdict=verdict, confidence=confidence))
+                    self.assertEqual(parse_verdict(text), verdict)
+
+    def test_parse_roundtrip_of_excluded_comments(self):
+        for verdict in VERDICT_LABELS:
+            with self.subTest(verdict=verdict):
+                self.assertEqual(parse_verdict(excluded(verdict=verdict)), verdict)
+
+    def test_reads_the_line_anywhere_in_the_text(self):
+        text = "Intro\nVerdict : Mis en place, à valider (confiance moyenne)\nSuite"
+        self.assertEqual(parse_verdict(text), "ok_human")
+
+    def test_confidence_is_optional(self):
+        self.assertEqual(parse_verdict("Verdict : Non applicable"), "na")
+
+    def test_tolerates_line_endings_and_spacing(self):
+        crlf = "Audit\r\nVerdict :  Ok / Recetté  (confiance haute)\r\n"
+        self.assertEqual(parse_verdict(crlf), "ok")
+        self.assertEqual(parse_verdict("Verdict\xa0: À traiter"), "ko")
+
+    def test_first_verdict_line_wins(self):
+        text = "Verdict : À traiter (confiance haute)\nVerdict : Ok / Recetté (confiance haute)"
+        self.assertEqual(parse_verdict(text), "ko")
+
+    def test_reads_the_block_layout(self):
+        text = "Audit\n\nVerdict :\nMis en place, à valider (confiance moyenne)\n\nConstat :\nx"
+        self.assertEqual(parse_verdict(text), "ok_human")
+        self.assertEqual(parse_verdict("Verdict :\nNon applicable"), "na")
+        self.assertEqual(parse_verdict("Verdict :\r\nÀ traiter (confiance haute)\r\n"), "ko")
+        self.assertEqual(parse_verdict("Verdict\xa0:\nOk / Recetté"), "ok")
+
+    def test_reads_the_old_one_line_layout_written_by_0_10(self):
+        old = "\n".join(
+            [
+                HEADER,
+                "Verdict : À traiter (confiance moyenne)",
+                "Constat : x",
+                "À faire : y",
+                FOOTER,
+            ]
+        )
+        self.assertEqual(parse_verdict(old), "ko")
+
+    def test_block_label_alone_needs_a_known_verdict_after_it(self):
+        for text in ("Verdict :", "Verdict :\n", "Verdict :\n\nÀ traiter", "Verdict :\nPeut-être"):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_verdict(text))
+
+    def test_none_without_a_verdict_line(self):
+        for text in ("", "Pas de verdict ici", "Le Verdict : À traiter est discutable"):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_verdict(text))
+
+    def test_none_for_an_unknown_label(self):
+        self.assertIsNone(parse_verdict("Verdict : Peut-être (confiance haute)"))
+
+
+class ToRichTextTest(unittest.TestCase):
+    URL = "https://gitlab.example.org/a/-/blob/x/f.vue#L4"
+
+    def test_rich_text_links_and_chunks(self):
+        rt = to_rich_text("voir https://gitlab.example.org/a/-/blob/x/f.vue#L4 ok " + "a" * 2500)
+        self.assertEqual(
+            rt[1]["text"]["link"]["url"], "https://gitlab.example.org/a/-/blob/x/f.vue#L4"
+        )
+        self.assertTrue(all(len(i["text"]["content"]) <= 2000 for i in rt))
+        self.assertEqual(rt[0], {"type": "text", "text": {"content": "voir "}})
+        self.assertEqual(
+            rt[1],
+            {"type": "text", "text": {"content": self.URL, "link": {"url": self.URL}}},
+        )
+        self.assertEqual(len(contents(rt)[2]), 2000)
+        self.assertEqual("".join(contents(rt)), f"voir {self.URL} ok " + "a" * 2500)
+
+    def test_plain_text_is_one_object_without_link(self):
+        self.assertEqual(
+            to_rich_text("bonjour"), [{"type": "text", "text": {"content": "bonjour"}}]
+        )
+
+    def test_empty_text(self):
+        self.assertEqual(to_rich_text(""), [])
+
+    def test_every_url_is_its_own_object(self):
+        rt = to_rich_text("a https://example.org/1 b http://example.org/2 c")
+        self.assertEqual(
+            contents(rt),
+            ["a ", "https://example.org/1", " b ", "http://example.org/2", " c"],
+        )
+        self.assertEqual(links(rt), ["https://example.org/1", "http://example.org/2"])
+
+    def test_link_stops_before_a_closing_parenthesis(self):
+        rt = to_rich_text(f"lien ({self.URL}) ok")
+        self.assertEqual(contents(rt), ["lien (", self.URL, ") ok"])
+        self.assertEqual(links(rt), [self.URL])
+
+    def test_link_drops_trailing_punctuation(self):
+        for suffix in (".", ",", ";", ":", "!", "?", "`", "'", '"', "*", ">", "…", ")."):
+            with self.subTest(suffix=suffix):
+                rt = to_rich_text(f"voir {self.URL}{suffix} suite")
+                self.assertEqual(links(rt), [self.URL])
+                self.assertEqual("".join(contents(rt)), f"voir {self.URL}{suffix} suite")
+
+    def test_link_keeps_balanced_parentheses(self):
+        url = "https://example.org/wiki/Foo_(bar)"
+        self.assertEqual(links(to_rich_text(f"voir {url}")), [url])
+        self.assertEqual(links(to_rich_text(f"({url})")), [url])
+
+    def test_scheme_alone_is_not_a_link(self):
+        for text in ("https://", "(https://)", "http://."):
+            with self.subTest(text=text):
+                rt = to_rich_text(text)
+                self.assertEqual(links(rt), [])
+                self.assertEqual("".join(contents(rt)), text)
+
+    def test_url_stops_at_markup(self):
+        rt = to_rich_text('<a href="https://www.example.org">Accueil')
+        self.assertEqual(links(rt), ["https://www.example.org"])
+        self.assertEqual("".join(contents(rt)), '<a href="https://www.example.org">Accueil')
+        rt = to_rich_text("https://example.org/a'b")
+        self.assertEqual(links(rt), ["https://example.org/a"])
+        for char in "<>\"'":
+            with self.subTest(char=char):
+                text = f"https://example.org/a{char}b"
+                rt = to_rich_text(text)
+                self.assertEqual(links(rt), ["https://example.org/a"])
+                self.assertEqual("".join(contents(rt)), text)
+
+    def test_placeholder_urls_stay_text(self):
+        for text in ("https://<domaine prod>/robots.txt", "https://", "voir https:// ici"):
+            with self.subTest(text=text):
+                rt = to_rich_text(text)
+                self.assertEqual(links(rt), [])
+                self.assertEqual("".join(contents(rt)), text)
+
+    def test_valid_urls_stay_links(self):
+        for url in (
+            "https://example.org:8443/a/b?x=1#y",
+            "http://[2001:db8::1]/",
+            "http://localhost:8080/",
+        ):
+            with self.subTest(url=url):
+                rt = to_rich_text(f"voir {url} ok")
+                self.assertEqual(links(rt), [url])
+                self.assertEqual("".join(contents(rt)), f"voir {url} ok")
+
+    def test_link_url_is_ascii(self):
+        url = "https://bücher.example/été?q=ü#frag-é"
+        rt = to_rich_text(f"voir {url} ok")
+        target = links(rt)[0]
+        self.assertTrue(target.isascii(), target)
+        self.assertEqual(
+            target, "https://xn--bcher-kva.example/%C3%A9t%C3%A9?q=%C3%BC#frag-%C3%A9"
+        )
+        self.assertEqual("".join(contents(rt)), f"voir {url} ok")
+
+    def test_link_url_keeps_reserved_characters_and_never_double_encodes(self):
+        url = "https://bücher.example/a%20b/é:@!$&()*+,;=~?x=%C3%A9&y=é#é"
+        target = links(to_rich_text(url))[0]
+        self.assertTrue(target.isascii(), target)
+        self.assertEqual(
+            target,
+            "https://xn--bcher-kva.example/a%20b/%C3%A9:@!$&()*+,;=~?x=%C3%A9&y=%C3%A9#%C3%A9",
+        )
+        self.assertEqual(
+            links(to_rich_text("https://example.org/é/100%"))[0], "https://example.org/%C3%A9/100%25"
+        )
+
+    def test_link_url_keeps_port_and_ipv6(self):
+        self.assertEqual(
+            links(to_rich_text("https://bücher.example:8443/é"))[0],
+            "https://xn--bcher-kva.example:8443/%C3%A9",
+        )
+        self.assertEqual(
+            links(to_rich_text("http://[2001:db8::1]/é"))[0], "http://[2001:db8::1]/%C3%A9"
+        )
+
+    def test_url_with_credentials_is_never_linked(self):
+        for url in (
+            "https://user:pass@example.org/x",
+            "https://user@example.org/",
+            "https://bücher.example@example.org/é",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(is_linkable_url(url))
+                rt = to_rich_text(f"voir {url} ok")
+                self.assertEqual(links(rt), [])
+                self.assertEqual("".join(contents(rt)), f"voir {url} ok")
+
+    def test_is_linkable_url(self):
+        for url in (
+            "https://example.org",
+            "http://localhost",
+            "http://127.0.0.1:80/x",
+            "http://[2001:db8::1]/",
+            "https://bücher.example/",
+        ):
+            with self.subTest(url=url):
+                self.assertTrue(is_linkable_url(url))
+        for url in (
+            "",
+            "https://",
+            "ftp://example.org",
+            "https://nodot",
+            "https:///path",
+            "https://<domaine>/x",
+            "https://example.org/a b",
+            "https://example.org/a\"b",
+            "https://example..org/",
+            "https://example.org:99999/",
+            "http://[2001:db8/",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(is_linkable_url(url))
+
+    def test_chunk_boundary(self):
+        self.assertEqual([len(c) for c in contents(to_rich_text("a" * 2000))], [2000])
+        self.assertEqual([len(c) for c in contents(to_rich_text("a" * 2001))], [2000, 1])
+        self.assertEqual([len(c) for c in contents(to_rich_text("a" * 4001))], [2000, 2000, 1])
+
+    def test_chunks_stay_within_the_limit_in_utf16_units(self):
+        text = "\U0001F600" * 1500
+        rt = to_rich_text(text)
+        for chunk in contents(rt):
+            self.assertLessEqual(len(chunk.encode("utf-16-le")) // 2, 2000)
+        self.assertEqual("".join(contents(rt)), text)
+
+    def test_url_too_long_for_a_link_stays_plain(self):
+        text = "https://example.org/" + "a" * 2100
+        rt = to_rich_text(text)
+        self.assertEqual(links(rt), [])
+        self.assertTrue(all(len(c) <= 2000 for c in contents(rt)))
+        self.assertEqual("".join(contents(rt)), text)
+
+    def test_comment_evidence_links_are_clean(self):
+        rt = to_rich_text(comment(F_KO))
+        self.assertEqual(
+            links(rt),
+            [
+                f"{BLOB_NUXT}/components/AppHeader.vue#L42",
+                "https://preprod.example.org/actualites/x",
+            ],
+        )
+        self.assertEqual("".join(contents(rt)), EXPECTED_KO_TEXT)
+
+
+class FormatPageSummaryTest(unittest.TestCase):
+    def test_exact_summary(self):
+        self.assertEqual(page_summary(), EXPECTED_PAGE_TEXT)
+
+    def test_no_blocking_line_is_stated(self):
+        text = page_summary({"by_status_after": {"Ok / Recetté": 3}, "blocking_non_conform": []})
+        self.assertEqual(
+            text.split("\n"),
+            [
+                HEADER,
+                "Décompte par statut :",
+                "- Ok / Recetté : 3",
+                "Lignes bloquantes non conformes : aucune",
+            ],
+        )
+
+    def test_empty_summary(self):
+        self.assertEqual(
+            page_summary({}).split("\n"),
+            [HEADER, "Lignes bloquantes non conformes : aucune"],
+        )
+
+    def test_counts_may_be_numbers_or_lists(self):
+        as_numbers = {"unknown": 4, "deferred": 6, "missing_in_copy": 1}
+        as_lists = {"unknown": [1, 2, 3, 4], "deferred": [5] * 6, "missing_in_copy": [{"ref": 3}]}
+        self.assertEqual(page_summary(as_numbers), page_summary(as_lists))
+        self.assertEqual(
+            page_summary(as_numbers).split("\n")[2:],
+            [
+                "Lignes non évaluées : 4",
+                "Lignes reportées à J0 / J+7 : 6",
+                "Lignes du modèle absentes de la copie : 1",
+            ],
+        )
+
+    def test_zero_counts_leave_no_line(self):
+        empty = {"unknown": 0, "deferred": [], "missing_in_copy": 0, "human_overrides": []}
+        text = page_summary(empty)
+        self.assertEqual(text.split("\n"), [HEADER, "Lignes bloquantes non conformes : aucune"])
+
+    def test_refs_may_already_be_labels(self):
+        text = page_summary({"blocking_non_conform": ["CQ-79", "CQ-81"]})
+        self.assertIn("Lignes bloquantes non conformes (2) : CQ-79, CQ-81", text)
+
+    def test_page_summary_cap(self):
+        summary = {**PAGE_SUMMARY, "blocking_non_conform": list(range(100, 300))}
+        text = page_summary(summary)
+        self.assertLessEqual(len(text), 1500)
+        self.assertIn("- À traiter : 12", text)
+        self.assertIn("Lignes non évaluées : 4", text)
+        line = next(item for item in text.split("\n") if item.startswith("Lignes bloquantes"))
+        self.assertIn("(200) : CQ-100, CQ-101, CQ-102", line)
+        shown = line.count("CQ-")
+        self.assertTrue(0 < shown < 200)
+        self.assertTrue(line.endswith(f" et {200 - shown} autres"))
+
+    def test_page_summary_cap_keeps_a_count_when_no_ref_fits(self):
+        count_line = "Lignes bloquantes non conformes : 30"
+        fixed = "\n".join([HEADER, "Décompte par statut :", "-  : 1", count_line])
+        status = "s" * (1500 - len(fixed) - 1)
+        summary = {
+            "by_status_after": {status: 1},
+            "blocking_non_conform": list(range(100, 130)),
+        }
+        self.assertEqual(
+            page_summary(summary),
+            "\n".join([HEADER, "Décompte par statut :", f"- {status} : 1", count_line]),
+        )
+
+    def test_page_summary_cap_holds_for_extreme_inputs(self):
+        summary = {"by_status_after": {f"Statut {n} " + "x" * 80: n + 1 for n in range(100)}}
+        self.assertLessEqual(len(page_summary(summary)), 1500)
+        self.assertLessEqual(len(page_summary(PAGE_SUMMARY, lead="x" * 3000)), 1500)
+
+    def test_unknown_statuses_follow_the_known_ones(self):
+        text = page_summary({"by_status_after": {"Autre": 2, "À traiter": 1}})
+        self.assertEqual(
+            text.split("\n")[1:4], ["Décompte par statut :", "- À traiter : 1", "- Autre : 2"]
+        )
+
+    def test_no_em_dash(self):
+        text = page_summary({"by_status_after": {f"A {EM_DASH} B": 1}})
+        self.assertNotIn(EM_DASH, text)
+        self.assertIn("- A - B : 1", text)
+
+
+class SecretScanTest(unittest.TestCase):
+    def test_formatted_comments_pass_the_scan_that_gates_writes(self):
+        texts = [
+            comment(F_KO),
+            comment(finding(verdict="ok_human", human_check="Valider.", divergence="Écart.")),
+            excluded(),
+            page_summary(),
+        ]
+        for text in texts:
+            with self.subTest(first_line=text.split("\n")[1]):
+                self.assertEqual(scan_text(text, []), [])
+
+
+MR_URL = "https://gitlab.example.org/acme/shop/-/merge_requests/12"
+MR_URL_2 = "https://gitlab.example.org/acme/front/-/merge_requests/3"
+REPO_SHOP = {
+    "name": "shop",
+    "web_url": "https://gitlab.example.org/acme/shop",
+    "audited_sha": "abc1234" + "0" * 33,
+}
+FIX_HEAD = "Correctif automatique · 29/10/2026 · lancé par Camille D"
+FIX_FOOT = "Réf CQ-107 · develop@abc1234 · gm:checklist-quality-audit 0.15.0"
+REDUCED_V2 = (
+    f"Audit PRE-MEL · 29/10/2026 · lancé par Camille D\n\nMR :\n{MR_URL}\n"
+    "Réf CQ-107 · develop@abc1234 · gm:checklist-quality-audit 0.14.0"
+)
+
+
+def fix_comment(**changes):
+    values = {
+        "row": {"ref": 107},
+        "run_date": date(2026, 10, 29),
+        "lead_option": "Camille D",
+        "repos": [REPO_SHOP],
+        "plugin_version": "0.15.0",
+        "mrs": [MR_URL],
+        "done": "Ajoute l'en-tête HSTS dans la configuration nginx.",
+        "remaining": None,
+        "uat": "Vérifier l'en-tête Strict-Transport-Security sur l'accueil.",
+        "commits": ["abc12345", "def67890"],
+        "not_done": None,
+    }
+    values.update(changes)
+    return format_fix_comment(**values)
+
+
+class MrBlockTest(unittest.TestCase):
+    def test_mr_label(self):
+        self.assertEqual(MR_LABEL, "MR :")
+
+    def test_format_comment_without_links_is_unchanged(self):
+        text = format_comment(
+            finding=F_KO, row=ROW_79, run_date=RUN_DATE, lead_option=LEAD,
+            repos=[REPO_NUXT], plugin_version=VERSION,
+        )
+        self.assertEqual(text, EXPECTED_KO_TEXT)
+
+    def test_audit_comment_has_no_mr_block_anymore(self):
+        with self.assertRaises(TypeError):
+            format_comment(
+                finding=F_KO, row=ROW_79, run_date=RUN_DATE, lead_option=LEAD,
+                repos=[REPO_NUXT], plugin_version=VERSION, mr_links=[MR_URL],
+            )
+
+    def test_without_mr_block_removes_the_v2_block(self):
+        body, foot = EXPECTED_KO_TEXT.rsplit("\n", 1)
+        with_block = f"{body}\n\nMR :\n{MR_URL}\n{MR_URL_2}\n{foot}"
+        self.assertTrue(has_mr_block(with_block))
+        self.assertTrue(has_mr_block(REDUCED_V2))
+        self.assertEqual(without_mr_block(with_block), EXPECTED_KO_TEXT)
+        self.assertFalse(has_mr_block(EXPECTED_KO_TEXT))
+        self.assertEqual(without_mr_block(EXPECTED_KO_TEXT), EXPECTED_KO_TEXT)
+        self.assertEqual(
+            without_mr_block(f"Verdict :\nÀ traiter\n\nMR :\n{MR_URL}"), "Verdict :\nÀ traiter"
+        )
+
+    def test_an_mr_line_inside_a_block_is_not_the_v2_block(self):
+        body, foot = EXPECTED_KO_TEXT.rsplit("\n", 1)
+        inside = [
+            body.replace("À faire :\n", f"À faire :\nMR :\n{MR_URL}\n") + "\n" + foot,
+            f"{body}\n\nMR :\n{MR_URL}\nvoir avec l'équipe\n{foot}",
+            f"{body}\n\nMR :\n{foot}",
+            f"{HEADER}\n\nVerdict :\nÀ traiter\n\nMR :\n{MR_URL}\n\nConstat :\nx\n{FOOTER}",
+        ]
+        for text in inside:
+            with self.subTest(text=text[-120:]):
+                self.assertFalse(has_mr_block(text))
+                self.assertEqual(without_mr_block(text), text)
+
+    def test_a_block_under_a_0_15_footer_is_not_the_v2_block(self):
+        """Final wave N1: plan.py of 0.15.0 never writes the block, so a « MR : » block in a
+        comment whose footer names 0.15.0 or later is text of the comment, kept as it is."""
+        body, foot = EXPECTED_KO_TEXT.rsplit("\n", 1)
+        block = f"{body}\n\nMR :\n{MR_URL}\n"
+        for version, expected in (("0.14.0", True), ("0.9.0", True), ("0.15.0", False),
+                                  ("0.15.1", False), ("1.0.0", False)):
+            text = block + foot.replace("0.9.0", version)
+            with self.subTest(version=version):
+                self.assertIs(has_mr_block(text), expected)
+                self.assertEqual(without_mr_block(text) == text, not expected)
+                self.assertTrue(is_skill_comment(text))
+        self.assertTrue(has_mr_block(f"Verdict :\nÀ traiter\n\nMR :\n{MR_URL}"))
+
+    def test_reduced_mr_comment_counts_as_the_skill_comment(self):
+        self.assertTrue(is_skill_comment(REDUCED_V2))
+        self.assertTrue(is_skill_comment(EXPECTED_KO_TEXT))
+        self.assertFalse(is_skill_comment(f"MR : {MR_URL}"))
+        self.assertFalse(is_skill_comment(f"MR :\n{MR_URL}\nmerci"))
+        self.assertFalse(is_skill_comment("Réf CQ-1 ok"))
+
+
+class FixCommentTest(unittest.TestCase):
+    def test_fix_comment_layout_done_partial_and_not_done(self):
+        self.assertEqual(
+            fix_comment(),
+            "\n".join([
+                FIX_HEAD,
+                "",
+                "MR :",
+                MR_URL,
+                "",
+                "Fait :",
+                "Ajoute l'en-tête HSTS dans la configuration nginx.",
+                "",
+                "À tester :",
+                "Vérifier l'en-tête Strict-Transport-Security sur l'accueil.",
+                "",
+                "Commits :",
+                "abc12345, def67890",
+                FIX_FOOT,
+            ]),
+        )
+        self.assertEqual(
+            fix_comment(mrs=[MR_URL, MR_URL_2], remaining="Poser l'en-tête sur le sous-domaine."),
+            "\n".join([
+                FIX_HEAD,
+                "",
+                "MR :",
+                MR_URL,
+                MR_URL_2,
+                "",
+                "Fait :",
+                "Ajoute l'en-tête HSTS dans la configuration nginx.",
+                "",
+                "Reste à faire :",
+                "Poser l'en-tête sur le sous-domaine.",
+                "",
+                "À tester :",
+                "Vérifier l'en-tête Strict-Transport-Security sur l'accueil.",
+                "",
+                "Commits :",
+                "abc12345, def67890",
+                FIX_FOOT,
+            ]),
+        )
+        not_done = "\n".join([FIX_HEAD, "", "Non traité :", "laissée aux devs par le lead", FIX_FOOT])
+        self.assertEqual(
+            fix_comment(mrs=[], done=None, uat=None, commits=[],
+                        not_done="laissée aux devs par le lead"),
+            not_done,
+        )
+        self.assertEqual(fix_comment(not_done="laissée aux devs par le lead"), not_done)
+
+    def test_fix_comment_on_a_local_branch(self):
+        text = fix_comment(mrs=[], branches=["feature/checklist-qa-fix"], uat=None)
+        self.assertEqual(
+            text,
+            "\n".join([
+                FIX_HEAD,
+                "",
+                "Branche locale : feature/checklist-qa-fix (non poussée)",
+                "",
+                "Fait :",
+                "Ajoute l'en-tête HSTS dans la configuration nginx.",
+                "",
+                "Commits :",
+                "abc12345, def67890",
+                FIX_FOOT,
+            ]),
+        )
+        self.assertNotIn("MR :", text)
+
+    def test_fix_comment_on_a_branch_pushed_without_mr(self):
+        text = fix_comment(mrs=[], pushed=["feature/checklist-qa-fix"], uat=None, commits=[])
+        self.assertEqual(
+            text,
+            "\n".join([
+                FIX_HEAD,
+                "",
+                "Branche poussée sans MR : feature/checklist-qa-fix",
+                "",
+                "Fait :",
+                "Ajoute l'en-tête HSTS dans la configuration nginx.",
+                FIX_FOOT,
+            ]),
+        )
+        self.assertNotIn("non poussée", text)
+
+    def test_fix_comment_on_a_branch_with_an_open_mr_and_unpushed_commits(self):
+        """Final wave F4: a key that took over an open MR and ended with its branch local."""
+        text = fix_comment(mrs=[], unpushed=[{"name": "feature/checklist-qa-fix", "iid": 12}],
+                           uat=None, commits=[])
+        self.assertEqual(
+            text,
+            "\n".join([
+                FIX_HEAD,
+                "",
+                "Branche feature/checklist-qa-fix poussée, MR !12 ouverte : nouveaux commits non "
+                "poussés",
+                "",
+                "Fait :",
+                "Ajoute l'en-tête HSTS dans la configuration nginx.",
+                FIX_FOOT,
+            ]),
+        )
+        self.assertNotIn("non poussée)", text)
+        self.assertEqual(parse_fix_comment(text), {"mrs": [], "remaining": None})
+
+    def test_fix_comment_stays_within_the_limit(self):
+        text = fix_comment(mrs=[MR_URL, MR_URL_2], done="d" * 600, uat="u" * 600,
+                           remaining="r" * 300)
+        self.assertLessEqual(len(text), MAX_COMMENT_LENGTH)
+        self.assertTrue(text.endswith(f"Commits :\nabc12345, def67890\n{FIX_FOOT}"))
+        self.assertIn(f"MR :\n{MR_URL}\n{MR_URL_2}\n\nFait :\n", text)
+        self.assertIn("Reste à faire :\n" + "r" * 300 + "\n", text)
+
+    def test_fix_comment_has_no_long_dash_and_no_blank_line_in_a_block(self):
+        text = fix_comment(done=f"Avant {EM_DASH} après.\n\nSuite du texte.")
+        self.assertNotIn(EM_DASH, text)
+        self.assertIn("Fait :\nAvant - après.\nSuite du texte.\n\nÀ tester :", text)
+
+    def test_the_two_skill_comments_are_told_apart_by_their_header(self):
+        fixed = fix_comment()
+        tricky = fix_comment(done="Verdict : À traiter (confiance haute)")
+        shell = f"{HEADER}\n\n{FOOTER}"
+        for text in (fixed, tricky, fix_comment(not_done="hors du dépôt")):
+            with self.subTest(text=text[:60]):
+                self.assertTrue(is_fix_comment(text))
+                self.assertFalse(is_audit_comment(text))
+                self.assertTrue(is_skill_comment(text))
+        for text in (EXPECTED_KO_TEXT, REDUCED_V2, shell):
+            with self.subTest(text=text[:60]):
+                self.assertFalse(is_fix_comment(text))
+                self.assertTrue(is_audit_comment(text))
+                self.assertTrue(is_skill_comment(text))
+        for text in ("Correctif automatique : merci", f"Note\n{FIX_HEAD}", "Synthèse sans verdict"):
+            with self.subTest(text=text):
+                self.assertFalse(is_fix_comment(text))
+                self.assertFalse(is_audit_comment(text))
+
+    def test_parse_fix_comment(self):
+        partial = fix_comment(mrs=[MR_URL, MR_URL_2], remaining="Poser l'en-tête partout.")
+        self.assertEqual(parse_fix_comment(partial),
+                         {"mrs": [MR_URL, MR_URL_2], "remaining": "Poser l'en-tête partout."})
+        self.assertEqual(parse_fix_comment(fix_comment()), {"mrs": [MR_URL], "remaining": None})
+        self.assertEqual(parse_fix_comment(fix_comment(not_done="hors du dépôt")),
+                         {"mrs": [], "remaining": None})
+        local = fix_comment(mrs=[], branches=["feature/checklist-qa-fix"])
+        self.assertEqual(parse_fix_comment(local), {"mrs": [], "remaining": None})
+
+
+class FixPageCommentTest(unittest.TestCase):
+    def page(self, **changes):
+        values = {
+            "run_date": date(2026, 10, 29),
+            "lead_option": "Camille D",
+            "mrs": [MR_URL],
+            "branches": [],
+            "in_mr": [101, 103, 107],
+            "local": [],
+            "partial": [101],
+            "in_review": [101, 103],
+            "review_missing": False,
+            "not_done": [
+                ("hors du dépôt", [40]),
+                ("écartées", [12, 13]),
+                ("retirées", []),
+                ("laissées aux devs", [14]),
+                ("sans réponse", [15]),
+            ],
+            "reverted": [],
+        }
+        values.update(changes)
+        return format_fix_page_comment(**values)
+
+    def test_page_comment_of_the_pass(self):
+        self.assertEqual(
+            self.page(),
+            "\n".join([
+                "Correctifs automatiques · 29/10/2026 · lancé par Camille D",
+                f"MR : {MR_URL}",
+                "Lignes mises en MR : 3, dont 1 partielle.",
+                "Statut « En review » : 2 lignes, sauf statut changé depuis le lancement.",
+                "Non traitées :",
+                "- hors du dépôt : CQ-40",
+                "- écartées : CQ-12, CQ-13",
+                "- laissées aux devs : CQ-14",
+                "- sans réponse : CQ-15",
+                "Suite : relire et tester la MR, la fusionner, déployer en préprod, puis lancer "
+                "/gm:checklist-quality-audit recette.",
+            ]),
+        )
+        self.assertEqual(
+            self.page(mrs=[], branches=["feature/checklist-qa-fix"], in_mr=[], local=[101, 103],
+                      in_review=[], not_done=[]),
+            "\n".join([
+                "Correctifs automatiques · 29/10/2026 · lancé par Camille D",
+                "Branche locale : feature/checklist-qa-fix (non poussée)",
+                "Lignes corrigées sur la branche locale : 2, dont 1 partielle ; statuts inchangés.",
+                "Suite : pousser la branche et ouvrir la MR, la relire et la tester, la fusionner, "
+                "déployer en préprod, puis lancer /gm:checklist-quality-audit recette.",
+            ]),
+        )
+
+    def test_page_comment_without_the_review_option_and_with_closed_mrs(self):
+        text = self.page(mrs=[MR_URL, MR_URL_2], in_mr=[101], partial=[], in_review=[],
+                         review_missing=True, not_done=[], reverted=[5, 6])
+        self.assertEqual(
+            text,
+            "\n".join([
+                "Correctifs automatiques · 29/10/2026 · lancé par Camille D",
+                f"MR : {MR_URL}",
+                f"MR : {MR_URL_2}",
+                "Lignes mises en MR : 1.",
+                "Statut « En review » non posé : option absente de la copie.",
+                "MR fermées sans fusion : CQ-5, CQ-6 remises à leur statut d'avant la passe si "
+                "elles étaient encore « En review ».",
+                "Suite : relire et tester les MR, les fusionner, déployer en préprod, puis lancer "
+                "/gm:checklist-quality-audit recette.",
+            ]),
+        )
+        self.assertNotIn(EM_DASH, text)
+
+    def test_page_comment_of_a_mixed_pass(self):
+        text = self.page(branches=["feature/checklist-qa-fix du repo front"],
+                         pushed=["feature/checklist-qa-fix du repo back"], in_mr=[101],
+                         local=[108], pushed_rows=[109, 110], partial=[109], in_review=[101],
+                         not_done=[], reverted=[5])
+        self.assertEqual(
+            text,
+            "\n".join([
+                "Correctifs automatiques · 29/10/2026 · lancé par Camille D",
+                f"MR : {MR_URL}",
+                "Branche poussée sans MR : feature/checklist-qa-fix du repo back",
+                "Branche locale : feature/checklist-qa-fix du repo front (non poussée)",
+                "Lignes mises en MR : 1.",
+                "Statut « En review » : 1 ligne, sauf statut changé depuis le lancement.",
+                "Lignes corrigées sur la branche poussée sans MR : 2, dont 1 partielle ; "
+                "statuts inchangés.",
+                "Lignes corrigées sur la branche locale : 1 ; statuts inchangés.",
+                "MR fermées sans fusion : CQ-5 remise à son statut d'avant la passe si elle était "
+                "encore « En review ».",
+                "Suite (MR) : relire et tester la MR, la fusionner, déployer en préprod, puis "
+                "lancer /gm:checklist-quality-audit recette.",
+                "Suite (branche poussée sans MR) : ouvrir la MR, la relire et la tester, la "
+                "fusionner, déployer en préprod, puis lancer /gm:checklist-quality-audit recette.",
+                "Suite (branche locale) : pousser la branche et ouvrir la MR, la relire et la "
+                "tester, la fusionner, déployer en préprod, puis lancer "
+                "/gm:checklist-quality-audit recette.",
+            ]),
+        )
+        only_pushed = self.page(mrs=[], pushed=["feature/checklist-qa-fix"], in_mr=[],
+                                pushed_rows=[101], partial=[], in_review=[], not_done=[])
+        self.assertTrue(only_pushed.endswith(
+            "Branche poussée sans MR : feature/checklist-qa-fix\n"
+            "Lignes corrigées sur la branche poussée sans MR : 1 ; statuts inchangés.\n"
+            "Suite : ouvrir la MR, la relire et la tester, la fusionner, déployer en préprod, "
+            "puis lancer /gm:checklist-quality-audit recette."))
+        self.assertNotIn("pousser", only_pushed.replace("poussée", ""))
+
+    def test_page_comment_of_a_resumed_v2_pass_and_of_an_unpushed_mr_branch(self):
+        """Final wave F5 and F4: the retroactive write of a finished v2 pass says which pass it
+        resumes; a branch whose open MR waits for its new commits has its own line."""
+        text = self.page(resumed=date(2026, 10, 27), partial=[], in_review=[101, 103, 107],
+                         not_done=[])
+        self.assertEqual(text.split("\n")[:4], [
+            "Correctifs automatiques (reprise de la passe du 27/10/2026) · 29/10/2026 · lancé "
+            "par Camille D",
+            f"MR : {MR_URL}",
+            "Lignes mises en MR : 3.",
+            "Statut « En review » : 3 lignes, sauf statut changé depuis le lancement.",
+        ])
+        text = self.page(mrs=[], in_mr=[], in_review=[], partial=[], not_done=[],
+                         unpushed=[{"name": "feature/checklist-qa-fix", "iid": 12}], local=[101])
+        self.assertEqual(
+            text,
+            "\n".join([
+                "Correctifs automatiques · 29/10/2026 · lancé par Camille D",
+                "Branche feature/checklist-qa-fix poussée, MR !12 ouverte : nouveaux commits non "
+                "poussés",
+                "Lignes corrigées sur la branche locale : 1 ; statuts inchangés.",
+                "Suite : pousser la branche (sa MR est déjà ouverte), la relire et la tester, la "
+                "fusionner, déployer en préprod, puis lancer /gm:checklist-quality-audit recette.",
+            ]),
+        )
+        mixed = self.page(mrs=[], in_mr=[], in_review=[], partial=[], not_done=[],
+                          unpushed=[{"name": "feature/checklist-qa-fix du repo back", "iid": 12}],
+                          branches=["feature/checklist-qa-fix du repo front"], local=[101, 108])
+        self.assertIn("Lignes corrigées sur les branches locales : 2 ; statuts inchangés.", mixed)
+        self.assertIn("Suite : pousser les branches et ouvrir les MR", mixed)
+
+    def test_page_comment_shortens_long_lists(self):
+        text = self.page(not_done=[("écartées", list(range(1, 400)))])
+        self.assertLessEqual(len(text), MAX_COMMENT_LENGTH)
+        self.assertIn("- écartées : CQ-1, CQ-2", text)
+        self.assertRegex(text, r"et [0-9]+ autres\n")
+        self.assertTrue(text.endswith("recette."))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,50 @@
+{
+  "lot": "code-performance",
+  "findings": [
+    {
+      "ref": 101,
+      "verdict": "ko",
+      "confidence": "high",
+      "summary": "La compression gzip est absente des réponses HTML.",
+      "evidence": [
+        {
+          "type": "file",
+          "repo": "laravel",
+          "path": "app/Http/Kernel.php",
+          "line": 12
+        },
+        {
+          "type": "http",
+          "url": "https://preprod.example.org/",
+          "detail": "pas de Content-Encoding"
+        }
+      ],
+      "todo": "Activer la compression au niveau du serveur web.",
+      "human_check": null,
+      "divergence": null,
+      "needs_probes": [
+        {
+          "url": "https://preprod.example.org/telescope",
+          "method": "GET"
+        }
+      ]
+    },
+    {
+      "ref": 102,
+      "verdict": "ok",
+      "confidence": "high",
+      "summary": "Toutes les images publiées sont servies en WebP.",
+      "evidence": [
+        {
+          "type": "tool",
+          "tool": "http",
+          "ref": "summary.json#root"
+        }
+      ],
+      "todo": null,
+      "human_check": null,
+      "divergence": null,
+      "needs_probes": []
+    }
+  ]
+}

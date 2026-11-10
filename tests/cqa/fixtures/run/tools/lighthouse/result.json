@@ -1,0 +1,12 @@
+{
+  "tool": "lighthouse",
+  "toolbox_version": "1.2.0",
+  "tool_version": "12.0.0",
+  "status": "failed",
+  "reason": "navigateur de test indisponible",
+  "started_at": "2026-10-20T14:36:00Z",
+  "duration_s": 3.0,
+  "targets": [],
+  "files": [],
+  "counts": {}
+}

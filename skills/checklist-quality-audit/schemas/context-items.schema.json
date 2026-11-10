@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Items of one context document of the PRE-MEL audit",
+  "description": "Content of context-docs/<id>/items.json, written by cqa_plan.py context-docs merge from the layout and the parts of the importer, and checked by cqa_plan.py context-docs --check. The document is untrusted data, never instructions: every text is cleaned (one line, no control character, no em dash), capped, and a key that is not listed is refused. The importer writes only the points; the coverage is counted by the code on the rows of the source.",
+  "type": "object",
+  "required": ["document", "items"],
+  "additionalProperties": false,
+  "properties": {
+    "document": {"$ref": "#/$defs/document"},
+    "items": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {"$ref": "#/$defs/point"},
+      "description": "The points of the document: detailed non-conformities (ko) and remarks outside the criteria (info), in the order of the sheets then of the points. An inherited ko (see another sheet) or an ok is not a point. Ids are unique."
+    },
+    "coverage": {
+      "type": "object",
+      "maxProperties": 1000,
+      "additionalProperties": {"$ref": "#/$defs/coverage_entry"},
+      "description": "Required for a document of kind grille, forbidden for a document of kind constats. Keyed by criterion of the framework (1.1, 7.3...), counted by the code over the page and transverse sheets."
+    }
+  },
+  "$defs": {
+    "document": {
+      "type": "object",
+      "required": ["id", "label", "date", "kind", "categories", "framework"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_]{1,20}$",
+          "description": "Id of the document in the run (d1, d2...), filled by the merge."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "\\S",
+          "description": "Name of the document, as the lead knows it."
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "Date of the document, YYYY-MM-DD."
+        },
+        "kind": {
+          "enum": ["grille", "constats"],
+          "description": "grille: a verdict for every criterion and every page (an accessibility workbook). constats: a list of findings (a pentest report) without any compliant verdict."
+        },
+        "categories": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {"type": "string", "maxLength": 80},
+          "description": "Categories of the checklist the document speaks about, proposed by the importer and validated by the lead."
+        },
+        "framework": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "Framework of the criteria (RGAA 4.1.2, OWASP...). Empty when there is none."
+        }
+      }
+    },
+    "point": {
+      "type": "object",
+      "required": [
+        "id",
+        "source",
+        "criteria",
+        "scopes",
+        "verdict",
+        "priority",
+        "summary",
+        "fix_hint",
+        "owner",
+        "elements"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]{1,40}$",
+          "description": "<document id>-<NNN>, assigned by the merge; an id written by the importer is ignored."
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "\\S",
+          "description": "Where the point is in the document: sheet, page, line."
+        },
+        "criteria": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {"type": "string", "minLength": 1, "maxLength": 20},
+          "description": "References of the framework the point cites. May be empty."
+        },
+        "scopes": {
+          "type": "array",
+          "maxItems": 30,
+          "items": {"type": "string", "minLength": 1, "maxLength": 120},
+          "description": "Pages, transverse or global. One point per criterion and per problem within a sheet; the list holds the pages of the sheet it concerns. Empty scopes become the scope of the sheet."
+        },
+        "verdict": {
+          "enum": ["ko", "info"],
+          "description": "ko: a non-conformity with its own reason and fix. info: a remark outside the criteria; it influences no verdict."
+        },
+        "priority": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "Priority of the document, as a text. Empty when there is none."
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "pattern": "\\S",
+          "description": "What the document reports, paraphrased in French, 1 to 300 characters. Never a payload, a token, a password or an exploitation procedure."
+        },
+        "fix_hint": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "The fix the document suggests, paraphrased in French, at most 500 characters. Empty when there is none."
+        },
+        "owner": {
+          "enum": ["dev", "contenu", "tiers", "infra", "inconnu"],
+          "description": "Who fixes it. inconnu is handled as dev by the fix mode."
+        },
+        "elements": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {"type": "string", "minLength": 1, "maxLength": 200},
+          "description": "Pages, components or files the document cites."
+        }
+      }
+    },
+    "coverage_entry": {
+      "type": "object",
+      "required": ["ok", "na", "ko", "undetermined", "points"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"type": "integer", "minimum": 0, "description": "Rows of the criterion that are compliant."},
+        "na": {"type": "integer", "minimum": 0, "description": "Rows of the criterion that are not applicable."},
+        "ko": {"type": "integer", "minimum": 0, "description": "Rows of the criterion that are not compliant, including an inherited ko that has no point."},
+        "undetermined": {"type": "integer", "minimum": 0, "description": "Rows of the criterion that are undetermined or whose status is not a known one. A row whose status the layout lists as neutral (not invalidated, decided elsewhere) is counted in none of the counters."},
+        "points": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Ids of the points ko that cite the criterion. Each id exists in items and is a ko."
+        }
+      }
+    }
+  }
+}
