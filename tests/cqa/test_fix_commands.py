@@ -813,6 +813,15 @@ REFUSED = {
         "npm install -D lodash lodash@1.0.0", "composer require --dev vendor/p vendor/p",
         "composer require --dev vendor/p:1.0 vendor/p:2.0",
     ),
+    # npm, yarn and pnpm read a name or a version that ends so as a file of the folder.
+    "a local archive instead of a package of the registry": (
+        "npm install -D evil.tgz", "npm install --save-dev a@b.tgz", "npm install -D x.tar",
+        "npm install --save-exact a@b.tar.gz", "npm install -D lodash evil.tar.gz",
+        "npm install -D @scope/evil.tgz", "npm install -D a@1.0.0.TGZ", "npm install -D a@b.Tar.Gz",
+        "npm install --save-exact a@B.TAR", "yarn add --dev evil.tgz", "yarn add --dev x.tar",
+        "yarn add --dev x.tar.gz", "pnpm add -D evil.tgz", "pnpm add -D x.tar",
+        "pnpm add -D @scope/x.tar.gz",
+    ),
 }
 
 

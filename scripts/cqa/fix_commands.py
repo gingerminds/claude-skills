@@ -76,6 +76,8 @@ _VERSION = r"[\^~]?[A-Za-z0-9][A-Za-z0-9._+-]*"
 _NPM_PACKAGE = re.compile(rf"({_NPM_NAME})(?:@({_VERSION}))?")
 _COMPOSER_PACKAGE = re.compile(rf"({_COMPOSER_NAME})(?::({_VERSION}))?")
 _NODE_LOCKS = {"npm": "package-lock.json", "yarn": "yarn.lock", "pnpm": "pnpm-lock.yaml"}
+# npm, yarn and pnpm read a package or a version that ends so as a local archive, not a name.
+_ARCHIVES = (".tgz", ".tar", ".tar.gz")
 
 
 class _Unreadable(Exception):
@@ -129,8 +131,9 @@ def allowed_install(command, manager_files) -> Optional[dict]:
     Only these forms, written with single spaces: npm install --save-dev|-D <p>[@v]..., npm
     install --save-exact <p>@<v>, npm install --package-lock-only, composer require --dev
     <vendor/p>[:v]..., composer update --lock, yarn add --dev <p>, pnpm add -D <p>. A package
-    is a name of the public registry (no URL, path, git+ or scope other than @scope/), a version
-    one token without space, "/", ":" or "*". Nothing else passes: no other option, no "--", no
+    is a name of the public registry (no URL, path, git+ or scope other than @scope/, and for npm,
+    yarn and pnpm nothing that ends with .tgz, .tar or .tar.gz, a local archive), a version one
+    token without space, "/", ":" or "*". Nothing else passes: no other option, no "--", no
     repeated option or package, no shell metacharacter, no capital outside a version, nothing
     but printable ASCII. manager_files are the names of the files of the folder: it must hold the
     manifest of the manager and no lock file of another node manager.
@@ -162,7 +165,8 @@ def allowed_install(command, manager_files) -> Optional[dict]:
         if (found is None or len(found.group(1)) > MAX_PACKAGE_NAME
                 or len(version or "") > MAX_VERSION
                 or (form == "exact" and version is None)
-                or (manager in ("yarn", "pnpm") and version is not None)):
+                or (manager in ("yarn", "pnpm") and version is not None)
+                or (manager != "composer" and spec.lower().endswith(_ARCHIVES))):
             return None
         names.append(found.group(1))
     if len(specs) > MAX_INSTALL_PACKAGES or len(set(names)) != len(names):

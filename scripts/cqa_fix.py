@@ -60,6 +60,12 @@ NOT_ALLOWED = ("Installation refusée : commande hors des formes autorisées (ou
 # Files that steer a package manager (registry, plugins, hooks that run code): an install never
 # runs when the pass changed one, since a fixer could then pair them with its request.
 PACKAGE_MANAGER_CONFIG = (".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmrc", ".pnpmfile.cjs")
+# The sections of a manifest that hold production dependencies: an install never changes them.
+PRODUCTION_SECTIONS = {
+    "package.json": ("dependencies", "optionalDependencies", "peerDependencies",
+                     "bundleDependencies", "bundledDependencies"),
+    "composer.json": ("require",),
+}
 ADD_FORMAT = "--add attend « <repo>|<dossier>|<image>|<type>|<commande> » (type : install, build, lint ou test)."
 DOCKER_UNCHECKED = "Docker ne répond pas : présence des images non vérifiée."
 KEY_HELP = "clé de la passe : le nom du repo (fix/candidates.json)"
@@ -1546,11 +1552,14 @@ def _cmd_install(args, services: Services) -> int:
 
     Only the forms of fix_commands.allowed_install run, rebuilt from their validated parts, in a
     container with the network and the worktree of the key (cqa-toolbox.sh exec): the fixer never
-    runs anything. Only the manifest and the lock file of the folder may change, else everything is
-    put back (exit 5). They go through the guard, then into one commit
+    runs anything. It never runs beside a package manager configuration that the pass changed or
+    that HEAD does not track. Only the manifest and the lock file of the folder may change, and
+    never the production sections of the manifest (PRODUCTION_SECTIONS), else everything is put
+    back (exit 5). They go through the guard, then into one commit
     chore(<alias> CQ-n): add <packages> as a dev dependency; the row goes back to pending, with the
     commit among its commits, for a correction pass of the fixer. A refusal changes nothing (exit 5:
-    form, files, failure, private dependencies, guard; exit 2: environment, a dirty worktree).
+    form, config, files, production, failure, private dependencies, guard; exit 2: environment, a
+    dirty worktree, a .git the install changed).
     """
     run_dir = args.run_dir.resolve()
     refs = parse_refs(args.ref)
@@ -1576,7 +1585,6 @@ def _cmd_install(args, services: Services) -> int:
     if found is None:
         return _install_refused(ref, "form", NOT_ALLOWED)
     folder, allowed = request["dir"], found["files"]
-    _refuse_dirty(worktree, services.run, "Installation refusée", "cqa_fix.py install")
     try:
         touched = [path for path in fix_checks.changed_files(worktree, key["start_sha"], services.run)
                    if _manager_config(path)]
@@ -1586,6 +1594,14 @@ def _cmd_install(args, services: Services) -> int:
         return _install_refused(ref, "config", (
             f"Configuration du gestionnaire de paquets modifiée par la passe ({', '.join(touched)}) "
             ": installation refusée, rien n'a été lancé."))
+    untracked = _untracked_configs(worktree, folder, services.run)
+    if untracked:
+        return _install_refused(ref, "config", (
+            f"Configuration du gestionnaire de paquets présente sans être suivie par git "
+            f"({', '.join(untracked)}) : installation refusée, rien n'a été lancé."))
+    _refuse_dirty(worktree, services.run, "Installation refusée", "cqa_fix.py install")
+    manifest = posixpath.join(folder, allowed[0])
+    production = _production_dependencies(worktree / manifest)
     target = fix_commands.install_target(
         found["manager"], worktree, folder, fix_state.check_commands(state, key["repo"]))
     if target["private"]:
@@ -1615,6 +1631,13 @@ def _cmd_install(args, services: Services) -> int:
         return _install_refused(ref, "unchanged", (
             "L'installation n'a rien changé au manifeste ni au lockfile (dépendance déjà "
             "présente ?) : rien à commiter."))
+    moved = _changed_sections(production, _production_dependencies(worktree / manifest))
+    if moved:
+        fix_checks.restore_worktree(worktree, services.run)
+        return _install_refused(ref, "production", (
+            f"L'installation change les dépendances de production de {manifest} "
+            f"({', '.join(moved)}) : seule une dépendance de développement est permise. Tout est "
+            "restauré, rien n'est commité."))
     committed = [path for path in paths if path in result["changed"]]
     subject = fix_names.install_subject(
         row.get("section"), ref, found["form"], found["names"], found["packages"])
@@ -1658,6 +1681,44 @@ def _manager_config(path: str) -> bool:
     """True for a file of PACKAGE_MANAGER_CONFIG, or one below a .yarn folder (plugins, releases)."""
     parts = path.split("/")
     return parts[-1] in PACKAGE_MANAGER_CONFIG or ".yarn" in parts[:-1]
+
+
+def _untracked_configs(worktree: Path, folder: str, run) -> list:
+    """Return the package manager configurations (PACKAGE_MANAGER_CONFIG, a .yarn folder) of
+    folder and of each of its parents up to the root of the worktree that HEAD does not track:
+    ignored or untracked, only the fixer or a command of the project could have written them."""
+    parts = folder.split("/") if folder else []
+    found = []
+    for depth in range(len(parts), -1, -1):
+        for name in (*PACKAGE_MANAGER_CONFIG, ".yarn"):
+            relative = "/".join([*parts[:depth], name])
+            if os.path.lexists(worktree / relative) and not _in_head(worktree, relative, run):
+                found.append(relative)
+    return found
+
+
+def _in_head(worktree: Path, relative: str, run) -> bool:
+    listing = fix_names.git(worktree, run, "ls-tree", "-z", "--name-only", "HEAD", "--", relative)
+    return listing.returncode == 0 and relative in listing.stdout.split("\0")
+
+
+def _production_dependencies(manifest: Path) -> Optional[dict]:
+    """Return the sections of PRODUCTION_SECTIONS of a manifest (None for an absent one), or None
+    when it is not a JSON object."""
+    try:
+        document = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    return {section: document.get(section) for section in PRODUCTION_SECTIONS[manifest.name]}
+
+
+def _changed_sections(before: Optional[dict], after: Optional[dict]) -> list:
+    """Return the production sections an install changed (all of them for an unreadable one)."""
+    if before is None or after is None:
+        return ["manifeste illisible"]
+    return [section for section in before if before[section] != after[section]]
 
 
 def _install_form(worktree: Path, request: dict) -> Optional[dict]:

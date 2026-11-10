@@ -2069,6 +2069,103 @@ class InstallCommandTest(GitCase):
                 self.assertEqual((self.exec.calls, self.head()), ([], before))
                 real_git(worktree, "reset", "-q", "--hard", "HEAD~1")
 
+    def test_a_package_manager_config_the_pass_left_ignored_or_untracked_is_refused(self):
+        worktree = self.started()
+        self.request()
+        commit_files(self, worktree, "chore: ignore the npm config",
+                     {".gitignore": "node_modules/\nvendor/\n.npmrc\n.yarn/\n"})
+        for path, reported, content in (
+            ("web/.npmrc", "web/.npmrc", "registry=https://registry.example.org/\n"),
+            (".npmrc", ".npmrc", "registry=https://registry.example.org/\n"),
+            (".yarnrc.yml", ".yarnrc.yml", "yarnPath: .x.cjs\n"),
+            ("web/.pnpmfile.cjs", "web/.pnpmfile.cjs", "module.exports = {};\n"),
+            ("web/.yarn/plugins/x.cjs", "web/.yarn", "x\n"),
+        ):
+            with self.subTest(path=path):
+                write(worktree, path, content)
+                before = self.head()
+                state_before = self.state()
+                code, out, err = self.install()
+                self.assertEqual(code, 5, err)
+                self.assertEqual((out["installed"], out["kind"]), (False, "config"))
+                self.assertIn(reported, out["reason"])
+                self.assertEqual((self.exec.calls, self.head()), ([], before))
+                self.assertEqual(self.state(), state_before)
+                self.assertTrue((worktree / path).exists())
+                shutil.rmtree(worktree / "web" / ".yarn", ignore_errors=True)
+                (worktree / path).unlink(missing_ok=True)
+
+    def test_a_package_manager_config_tracked_at_the_start_does_not_block(self):
+        commit_files(self, self.repo, "chore: npm config",
+                     {".npmrc": "audit=false\n", "web/.npmrc": "fund=false\n",
+                      ".yarn/releases/yarn-4.cjs": "x\n"})
+        real_git(self.repo, "push", "-q", "origin", "develop")
+        worktree = self.started()
+        self.request()
+        write(worktree, ".yarn/install-state.gz", "x\n")
+        commit_files(self, worktree, "chore: ignore the yarn state",
+                     {".gitignore": "node_modules/\nvendor/\n.yarn/install-state.gz\n"})
+        self.exec.on("npm install", effects=npm_writes)
+        self.assertEqual(self.installed()["files"], ["web/package.json", "web/package-lock.json"])
+
+    def with_production_dependencies(self):
+        commit_files(self, self.repo, "chore: production dependencies", {
+            "web/package.json": '{"dependencies": {"axios": "^1.6.0", "stylelint": "^16.0.0"}, '
+                                '"devDependencies": {}}\n'})
+        real_git(self.repo, "push", "-q", "origin", "develop")
+
+    def refused_for_production(self, command, folder, manifest, lock, written, keys):
+        worktree = self.started()
+        self.request(command, dir=folder)
+        before = self.head()
+        original = (worktree / manifest).read_text(encoding="utf-8")
+        self.exec.on(command.split()[0] + " ", effects=lambda tree: (
+            write(tree, manifest, written), write(tree, lock, '{"x": 1}\n')))
+        state_before = self.state()
+        code, out, err = self.install()
+        self.assertEqual(code, 5, err)
+        self.assertEqual((out["installed"], out["kind"]), (False, "production"))
+        self.assertIn(keys, out["reason"])
+        self.assertIn(manifest, out["reason"])
+        self.assertEqual((self.head(), self.status()), (before, ""))
+        self.assertEqual((worktree / manifest).read_text(encoding="utf-8"), original)
+        self.assertEqual(self.state(), state_before)
+
+    def test_save_exact_on_a_production_package_is_refused(self):
+        self.with_production_dependencies()
+        self.refused_for_production(
+            "npm install --save-exact axios@1.7.4", "web", "web/package.json",
+            "web/package-lock.json",
+            '{"dependencies": {"axios": "1.7.4", "stylelint": "^16.0.0"}, "devDependencies": {}}\n',
+            "dependencies")
+
+    def test_a_dev_install_that_takes_a_package_out_of_the_production_is_refused(self):
+        self.with_production_dependencies()
+        self.refused_for_production(
+            "npm install -D stylelint", "web", "web/package.json", "web/package-lock.json",
+            '{"dependencies": {"axios": "^1.6.0"}, "devDependencies": {"stylelint": "^16.0.0"}}\n',
+            "dependencies")
+
+    def test_a_dev_install_that_adds_an_optional_or_peer_dependency_is_refused(self):
+        self.refused_for_production(
+            "npm install -D left-pad", "web", "web/package.json", "web/package-lock.json",
+            '{"devDependencies": {"left-pad": "1.3.0"}, "peerDependencies": {"react": "^18"}, '
+            '"optionalDependencies": {"fsevents": "2.3.3"}}\n',
+            "optionalDependencies, peerDependencies")
+
+    def test_composer_require_dev_that_changes_require_is_refused(self):
+        self.refused_for_production(
+            "composer require --dev vendor/p", "", "composer.json", "composer.lock",
+            '{"require": {"vendor/p": "^2.0"}, "require-dev": {}}\n', "require")
+
+    def test_save_exact_on_a_dev_package_is_accepted(self):
+        self.started()
+        self.request("npm install --save-exact stylelint@16.2.1")
+        self.exec.on("npm install", effects=lambda tree: (
+            write(tree, "web/package.json", '{"devDependencies": {"stylelint": "16.2.1"}}\n'),
+            write(tree, "web/package-lock.json", STYLELINT_LOCK)))
+        self.assertEqual(self.installed()["packages"], ["stylelint@16.2.1"])
+
     def test_the_image_of_the_install_command_of_the_folder_is_used(self):
         self.started(commands=[cmd("npm ci", "install", "npm ci", dir="web", image="node:18-alpine"),
                                cmd("npm run build", "build", "npm run build", dir="web",

@@ -2861,7 +2861,7 @@ class FixProjectCommandsTest(unittest.TestCase):
                        "chore(<alias> CQ-n): add <packages> as a dev dependency",
                        "`pending` again", cqa_fix.INSTALLED, "`Notes: none`",
                        "Exit 5", "Exit 2", "`kind`", "`form`", "`config`", "`private`",
-                       "`failed`", "`files`", "`unchanged`", "`guard`",
+                       "`failed`", "`files`", "`production`", "`unchanged`", "`guard`",
                        "« Laisser aux devs »", "« Corriger sans la dépendance »",
                        "dépendance à installer par un dev", "Autonomous mode",
                        "`drop`", "fix/<repo>/install/CQ-<n>.log"):
@@ -2921,7 +2921,8 @@ class FixProjectCommandsTest(unittest.TestCase):
                        "500 characters", "no version for these two", "You run nothing",
                        "the orchestrator installs it", cqa_fix.INSTALLED,
                        "report it `fixed`", "never `needs_command`, `skipped` or `question` again",
-                       "undo your change first"):
+                       "undo your change first",
+                       "`--save-exact` pins a development dependency the manifest already has"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, dependencies)
         rules = _section(self.fixer, "Hard rules")
@@ -2938,7 +2939,8 @@ class FixProjectCommandsTest(unittest.TestCase):
         dependencies = next(line for line in _section(text, "7. Guard rails").splitlines()
                             if line.startswith("- **Dependencies**"))
         for needle in ("`needs_command`", "`cqa_fix.py install`", "`installs`", "manifest",
-                       "lock file", "no package script"):
+                       "lock file", "no package script", "`.tgz`", "git does not track",
+                       "`production`", "`dependencies`", "`require`"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, dependencies)
         project = next(line for line in _section(text, "7. Guard rails").splitlines()

@@ -129,7 +129,7 @@ When `Notes:` names `notes-<N>.json`: `{"answers": [{"ref", "answer"}], "problem
 A row whose fix needs a package the project lacks (a linter its rule asks for, say) or a lock file regenerated is reported `needs_command`, never fixed by hand and never skipped when one of the forms below covers it. The row has no commit of yours in the pass: undo your change first (Method, step 7), since the orchestrator refuses to install on a worktree with changes. The report row carries `needs_command` = `{"command", "dir", "reason"}`:
 
 - `command`: one of these forms, 500 characters at most, single spaces, names of the public registry only (no URL, no path, no `git+`), no other option, no shell character:
-  - npm: `npm install --save-dev <package>[@<version>] ...` (`-D` too), `npm install --save-exact <package>@<version>`, `npm install --package-lock-only`.
+  - npm: `npm install --save-dev <package>[@<version>] ...` (`-D` too), `npm install --save-exact <package>@<version>`, `npm install --package-lock-only`. `--save-exact` pins a development dependency the manifest already has, never a production one: the orchestrator refuses any change of `dependencies`, `optionalDependencies`, `peerDependencies`, `bundleDependencies` or Composer's `require`.
   - composer: `composer require --dev <vendor/package>[:<version>] ...`, `composer update --lock`.
   - yarn: `yarn add --dev <package>`; pnpm: `pnpm add -D <package>` (a single package and no version for these two).
 - `dir`: the folder of the repo that holds the manifest (`package.json` or `composer.json`), relative to the worktree root, `""` for the root.
