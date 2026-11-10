@@ -11,8 +11,11 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | Skill | Invocation | Rôle |
 | :--- | :--- | :--- |
 | `ticket` | `/gm:ticket` | Digère un ticket Mantis (ou collé) en brief de dev — objectif, où regarder dans le code, contraintes, critères d'acceptation, pièces jointes chargées à la demande — pour amorcer le contexte avant une session dev spécifique à la stack. Détecte la stack du projet pour router vers le bon skill dev, et classe le ticket en bug ou feature/refactor pour appliquer la discipline adaptée (hypothèse de cause racine, ou esquisse d'ampleur/approches). Orienté Mantis + GitLab. |
+| `ticket-refine` | `/gm:ticket-refine` | Qualifie un ticket Mantis (ou une issue GitLab / GitHub via son URL, en lecture seule) en note interne **privée**, rédigée en BBCode pour le rendu Mantis (devs et chefs de projet, jamais le client) — objectif en langage clair, hors périmètre, questions ouvertes prêtes à relayer au client, comment tester, reproduction, critères d'acceptation testables — avec un verdict de préparation (prêt / prêt avec hypothèses / pas prêt). Écrit `.gm/handoff/<id>/refine.md` puis publie la note privée sur Mantis (avec ton accord en usage manuel ; directement en mode agent ou avec `--publish` ; `--dry-run` n'envoie rien). Le compte Mantis du token doit pouvoir ajouter des notes privées. Une issue GitLab / GitHub est lue via `glab` / `gh` mais jamais commentée : la note reste dans `.gm/handoff/`. À utiliser avant d'assigner ou de développer ; pour préparer une session dev, voir `ticket`. |
 | `drupal` | `/gm:drupal` | Expertise backend Drupal 10/11 — architecture, services, plugins, events, entités, cache, sécurité. |
 | `vue` | `/gm:vue` | Expertise frontend Vue 3 / Nuxt 3 — Composition API, composables, Pinia, SSR/SSG, TypeScript, architecture de composants. |
+| `react` | `/gm:react` | Expertise frontend React (dont Next.js) — hooks, architecture de composants, state client/serveur, data fetching, TypeScript. |
+| `angular` | `/gm:angular` | Expertise frontend Angular — composants standalone, RxJS, injection de dépendances, signals, formulaires réactifs. |
 | `laravel` | `/gm:laravel` | Expertise backend Laravel — Eloquent, migrations, form requests, services, queues, events, tests. |
 | `django` | `/gm:django` | Expertise backend Django — apps, modèles, ORM, migrations, DRF, forms/serializers, tests. |
 | `python` | `/gm:python` | Expertise Python générique (hors framework web) — packaging, typing, structure, erreurs, tests. |
@@ -24,6 +27,8 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `security` | `/gm:security` | Audit sécurité des dépendances et de l'infra — `composer audit` / `npm audit`, advisories CMS/framework, config Docker — priorisé par criticité réelle, avec correctifs ou marches à suivre. Stack-agnostique : les checks spécifiques (ex. SA Drupal) viennent de `stack/`. |
 | `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressources dédiées par techno quand elles existent. |
 | `checklist-quality-audit` | `/gm:checklist-quality-audit` (alias `/gm:cqa`) | Audit PRE-MEL de la checklist qualité d'un projet : vérifie le poste et que la préprod sert le code audité, évalue chaque ligne de la copie Notion du projet (code, préprod, boîte à outils Docker, navigateur), écrit statuts et commentaires de preuve après confirmation du lead, puis répartit le reste entre les devs. Lecture seule sur les repos, les serveurs et les bases, sauf le mode `fix`, qui corrige dans ses propres worktrees et livre une MR en brouillon par passe et par repo, ses lignes rangées par catégorie. Peut être limité à des catégories (`--category`) et reprendre des rapports d'audit tiers comme documents de contexte (`--context`). Prérequis : voir « Préparer son poste ». |
+| `nuxt4-migration` | `/gm:nuxt4-migration` | Audite un projet Nuxt 3 et pilote sa migration vers Nuxt 4 — lance `nuxt upgrade` + les codemods officiels, met à jour l'écosystème de modules (Node, modules Nuxt, TypeScript/Vite), passe en revue chaque zone de breaking change (structure de dossiers, comportement `useAsyncData`/`useFetch`, noms de composants normalisés, styles inline, Unhead v2, config TypeScript, `window.__NUXT__`, options supprimées), déclenche `/gm:swiper-migration` si Swiper est détecté, et produit un plan de migration priorisé. |
+| `swiper-migration` | `/gm:swiper-migration` | Audite les sliders Swiper d'un projet Vue/Nuxt utilisant un ancien wrapper/API (`vue-awesome-swiper`, prop `options` unique, directive `v-swiper`) et les migre vers les composants Vue modernes de Swiper.js (`swiper/vue`). Invocable seul, ou déclenché automatiquement par `/gm:nuxt4-migration` si Swiper est présent. |
 
 ## Installation
 
@@ -66,10 +71,11 @@ Sur un clone local, fais d'abord un `git pull` dans le dépôt, puis `/plugin ma
 Tape `/gm:<skill>` dans Claude Code. Les skills se chaînent — un flux Drupal typique :
 
 ```
-/gm:ticket        # digère le ticket Mantis en brief
-/gm:drupal        # implémente en s'appuyant sur le brief + le code existant
-/gm:review        # verdict severity-ranked sur le diff
-/gm:merge-request # ouvre la MR GitLab (Draft) liée au ticket
+/gm:ticket-refine  # (optionnel) qualifie le ticket en note Mantis privée
+/gm:ticket         # digère le ticket Mantis en brief
+/gm:drupal         # implémente en s'appuyant sur le brief + le code existant
+/gm:review         # verdict severity-ranked sur le diff
+/gm:merge-request  # ouvre la MR GitLab (Draft) liée au ticket
 ```
 
 Côté reviewer, `/gm:merge-review` prend une MR existante (URL ou numéro), charge le ticket lié et rédige la note de review. `/gm:security` fait un audit dépendances + infra à part entière, `/gm:docker-devops` couvre tout le volet conteneurs / CI.
@@ -175,25 +181,35 @@ claude-skills/
 │   ├── cqa_fix.py  cqa_notion.py  cqa_plan.py  cqa_ssh_ro.py   # CLI de l'audit : mode correction, API Notion, plan, garde SSH en lecture seule
 │   ├── cqa/                 # bibliothèque de l'audit (Python >= 3.9, bibliothèque standard seule)
 │   ├── cqa-keepawake.sh     # empêche la mise en veille du poste pendant l'audit (systemd-inhibit, caffeinate)
-│   └── cqa-toolbox.sh       # lanceur de la boîte à outils Docker de l'audit
+│   ├── cqa-toolbox.sh       # lanceur de la boîte à outils Docker de l'audit
+│   └── mantis-note.sh       # publie une note Mantis privée (ticket-refine)
 ├── shared/                  # ressources transverses (indépendantes de la techno)
 │   ├── runner.md            # ordre de priorité du runner : make → docker → lando
 │   ├── stack-detect.md      # cheatsheet de détection de stack + règle de chargement
 │   ├── root-cause.md        # investigation de cause racine (tickets bug) — consommé par ticket
-│   └── scope-classification.md  # classification bounded/architectural (tickets feature) — consommé par ticket
+│   ├── scope-classification.md  # classification bounded/architectural (tickets feature) — consommé par ticket
+│   └── ticket-format.md     # gabarit de la note de qualification — consommé par ticket-refine
+├── tests/
+│   ├── cqa/                  # tests unittest de l'audit et hygiène du dépôt public (voir « Contribuer »)
+│   └── mantis-note.test.sh  # tests de scripts/mantis-note.sh
 ├── stack/                   # spécificités par techno, chargées à la demande
 │   ├── drupal/              # Forme 2 : dispatcher + natures découpées
 │   │   ├── MAIN.md          #   route vers core + la nature (dev | review | security)
 │   │   ├── core.md  dev.md  review.md  security.md
 │   │   └── …
-│   └── vue/
-│       └── MAIN.md          # Forme 1 : fichier unique sectionné (## core / dev / review / security)
-├── tests/
-│   └── cqa/                 # tests unittest de l'audit et hygiène du dépôt public (voir « Contribuer »)
+│   ├── vue/
+│   │   └── MAIN.md          # Forme 1 : fichier unique sectionné (## core / dev / review / security / nuxt4-migration / swiper-migration)
+│   ├── react/
+│   │   └── MAIN.md
+│   └── angular/
+│       └── MAIN.md
 └── skills/
     ├── ticket/SKILL.md
+    ├── ticket-refine/SKILL.md
     ├── drupal/SKILL.md      # point d'entrée : charge stack/drupal/MAIN.md (dev)
     ├── vue/SKILL.md         # point d'entrée : charge stack/vue/MAIN.md (dev)
+    ├── react/SKILL.md       # point d'entrée : charge stack/react/MAIN.md (dev)
+    ├── angular/SKILL.md     # point d'entrée : charge stack/angular/MAIN.md (dev)
     ├── laravel/SKILL.md     # point d'entrée : charge stack/laravel/MAIN.md (dev)
     ├── django/SKILL.md      # point d'entrée : charge stack/django/MAIN.md (dev)
     ├── python/SKILL.md      # point d'entrée : charge stack/python/MAIN.md (dev)
@@ -208,12 +224,14 @@ claude-skills/
     │   ├── references/      # lues au fil des étapes de l'audit (fix.md : mode fix ; documents.md : documents de contexte)
     │   └── schemas/         # finding, fix-report et fix-review (contrats des sous-agents)
     ├── cqa/SKILL.md         # alias /gm:cqa de checklist-quality-audit
-    └── archi-c4/
-        ├── SKILL.md
-        └── assets/          # template.html figé + model.example.js (contrat)
+    ├── archi-c4/
+    │   ├── SKILL.md
+    │   └── assets/          # template.html figé + model.example.js (contrat)
+    ├── nuxt4-migration/SKILL.md   # point d'entrée : charge stack/vue/MAIN.md (nuxt4-migration, déclenche swiper-migration si Swiper détecté)
+    └── swiper-migration/SKILL.md  # point d'entrée : charge stack/vue/MAIN.md (swiper-migration)
 ```
 
-Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh` — une seule copie, pas de duplication.
+Les skills qui lisent Mantis (`ticket`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-issue.sh` — une seule copie, pas de duplication. `ticket-refine` y ajoute l'écriture : il publie sa note privée via `${CLAUDE_SKILL_DIR}/../../scripts/mantis-note.sh`.
 
 ### Architecture stack-agnostique
 
@@ -236,6 +254,8 @@ Pour développer en local, lance Claude Code avec le plugin lu **directement dep
 claude --plugin-dir ~/claude-skills   # lit les skills en place (le plugin.json fixe le namespace gm)
 /reload-plugins                       # applique tes édits dans la session, sans redémarrer
 ```
+
+Pour tester le script de publication de notes Mantis : `bash tests/mantis-note.test.sh` (aucun appel réseau, tout est simulé).
 
 À l'inverse, `/plugin marketplace update gingerminds` puis `/plugin install gm@gingerminds` recopient depuis la source — plus lourd, à réserver à la vérification d'une version installée.
 
