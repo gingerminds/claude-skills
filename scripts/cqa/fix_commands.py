@@ -10,7 +10,6 @@ build, lint or test), "command", "env", "source", "private"}. A job of the CI th
 variable which is not a literal, a service, a trigger, a deployment or docker, ssh, rsync, scp or
 sudo is never retained: its commands could need a secret or reach beyond the worktree.
 """
-import fnmatch
 import json
 import os
 import posixpath
@@ -78,6 +77,13 @@ _COMPOSER_PACKAGE = re.compile(rf"({_COMPOSER_NAME})(?::({_VERSION}))?")
 _NODE_LOCKS = {"npm": "package-lock.json", "yarn": "yarn.lock", "pnpm": "pnpm-lock.yaml"}
 # npm, yarn and pnpm read a package or a version that ends so as a local archive, not a name.
 _ARCHIVES = (".tgz", ".tar", ".tar.gz")
+# The tools whose dependencies an install of the family provides (see families).
+FAMILIES = {
+    "php": ("composer", "php", "artisan", "phpunit", "pint", "phpstan", "phpcs", "php-cs-fixer"),
+    "node": ("npm", "npx", "yarn", "pnpm", "node"),
+}
+_FAMILY_DIRS = {"php": "vendor", "node": "node_modules"}
+_WORD = re.compile(r"[^\s;|&()<>`'\"]+")
 
 
 class _Unreadable(Exception):
@@ -220,7 +226,7 @@ def install_target(manager: str, repo_dir: Path, folder: str, commands: list) ->
     repo = Path(repo_dir)
     if manager == "composer":
         document = _read_json(repo / folder / "composer.json")
-        return {"image": COMPOSER_IMAGE, "private": _composer_private(document, _auth_ignored(repo))}
+        return {"image": COMPOSER_IMAGE, "private": _composer_private(document)}
     document = _read_json(repo / folder / "package.json")
     image, _ = _node_image(repo, folder, document if isinstance(document, dict) else {}, "")
     return {"image": image, "private": False}
@@ -273,6 +279,19 @@ def start_dir(item: dict) -> str:
     return _start_dir(item)
 
 
+def families(command) -> set:
+    """Return the families of the tools a command runs: "php" (Composer and the PHP tools, or a
+    path under vendor/) and "node" (npm, npx, yarn, pnpm, node, or a path under node_modules/).
+    A command that names none of them has no family."""
+    found = set()
+    for word in _WORD.findall(str(command)):
+        parts = word.split("/")
+        for family, names in FAMILIES.items():
+            if parts[-1] in names or _FAMILY_DIRS[family] in parts[:-1]:
+                found.add(family)
+    return found
+
+
 def covered_dirs(commands: list) -> set:
     """Return the folders the commands of the CI work in, once their leading cd is followed."""
     return {_start_dir(item) for item in commands
@@ -284,14 +303,13 @@ def from_manifests(repo_dir: Path, covered: set, skip: tuple = ()) -> tuple:
     the repo (four levels deep, never node_modules, vendor or .git) that are not covered."""
     repo = Path(repo_dir)
     commands, notes = [], []
-    auth_ignored = _auth_ignored(repo)
     for folder in _folders(repo):
         if folder in covered or any(_under(folder, path) for path in skip):
             continue
         found, noted = _node_commands(repo, folder)
         commands.extend(found)
         notes.extend(noted)
-        found, noted = _composer_commands(repo, folder, auth_ignored)
+        found, noted = _composer_commands(repo, folder)
         commands.extend(found)
         notes.extend(noted)
     return commands, notes
@@ -583,12 +601,11 @@ def _start_dir(item: dict) -> str:
 
 
 def _mark_private(repo: Path, commands: list) -> None:
-    """A composer install of the CI needs private packages when the project says so."""
-    auth_ignored = _auth_ignored(repo)
+    """A composer install of the CI needs private packages when its composer.json says so."""
     for item in commands:
         if item["kind"] == "install" and _COMPOSER_INSTALL.search(item["command"]):
             document = _read_json(repo / _start_dir(item) / "composer.json")
-            if _composer_private(document, auth_ignored):
+            if _composer_private(document):
                 item["private"] = True
 
 
@@ -660,7 +677,7 @@ def _node_image(repo: Path, folder: str, document: dict, label: str) -> tuple:
         f"{label} : version de Node introuvable (.nvmrc, engines.node), {DEFAULT_NODE} par défaut."]
 
 
-def _composer_commands(repo: Path, folder: str, auth_ignored: bool) -> tuple:
+def _composer_commands(repo: Path, folder: str) -> tuple:
     manifest = repo / folder / "composer.json"
     if not manifest.is_file():
         return [], []
@@ -668,7 +685,7 @@ def _composer_commands(repo: Path, folder: str, auth_ignored: bool) -> tuple:
     document = _read_json(manifest)
     if not isinstance(document, dict):
         return [], [f"{label} illisible : aucune commande proposée."]
-    private = _composer_private(document, auth_ignored)
+    private = _composer_private(document)
     scripts = document.get("scripts") if isinstance(document.get("scripts"), dict) else {}
     suffix = f" ({folder})" if folder else ""
     commands = [_manifest_command(f"composer install{suffix}", folder, COMPOSER_IMAGE, "install",
@@ -685,10 +702,10 @@ def _manifest_command(name, folder, image, kind, command, source, private=False)
             "env": {}, "source": source, "private": private}
 
 
-def _composer_private(document, auth_ignored: bool) -> bool:
-    """True when the packages cannot all come from packagist without a credential."""
-    if auth_ignored:
-        return True
+def _composer_private(document) -> bool:
+    """True when the packages cannot all come from packagist without a credential: a repository
+    on another host (a private Packagist, a VCS, a vendor such as ACF Pro or Nova). An auth.json
+    that git ignores is no sign: the default .gitignore of Laravel lists it."""
     repositories = document.get("repositories") if isinstance(document, dict) else None
     if isinstance(repositories, dict):
         repositories = list(repositories.values())
@@ -723,22 +740,3 @@ def _host(url: str) -> Optional[str]:
     match = _SSH_HOST.match(url)
     return match.group(1).lower() if match else None
 
-
-def _auth_ignored(repo: Path) -> bool:
-    """True when the .gitignore at the root of the repo ignores auth.json."""
-    try:
-        text = (repo / ".gitignore").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    ignored = False
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        negated = line.startswith("!")
-        pattern = (line[1:] if negated else line).lstrip("/")
-        if pattern.startswith("**/"):
-            pattern = pattern[3:]
-        if fnmatch.fnmatchcase("auth.json", pattern):
-            ignored = not negated
-    return ignored

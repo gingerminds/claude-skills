@@ -8,6 +8,18 @@ from cqa import fix_commands
 
 AGENCY_IMAGE = "registry.gitlab.gingerminds.fr/gm/docker-images/php-8.2-node-16-composer-2:latest"
 PINNED_NODE = "node:18-alpine@sha256:" + "ab12" * 16
+# The CI of a Laravel project of the agency: one global image, Composer and Node installs.
+AGENCY_CI = {
+    "image": AGENCY_IMAGE,
+    "stages": ["vendors", "build", "quality", "deploy"],
+    "composer": {"stage": "vendors", "script": ["composer install --no-interaction"]},
+    "npm": {"stage": "vendors", "script": ["npm ci"]},
+    "build-assets": {"stage": "build", "dependencies": ["composer", "npm"],
+                     "script": ["npm run prod"]},
+    "php-cs-fixer": {"stage": "quality", "script": ["./vendor/bin/pint --test"]},
+    "deploy": {"stage": "deploy", "script": ["dep deploy production"]},
+}
+LARAVEL_GITIGNORE = "/node_modules\n/public/build\n/vendor\n.env\nauth.json\n"
 
 
 def write(root, path, content):
@@ -526,22 +538,20 @@ class ManifestTest(unittest.TestCase):
             "packagist": {False}, "path": {False}, "none": {False}})
         self.assertEqual(len([item for item in commands if item["dir"] == "vcs"]), 3)
 
-    def test_ignored_auth_json_at_the_root_marks_composer_private(self):
+    def test_an_ignored_auth_json_alone_does_not_make_composer_private(self):
+        # The default .gitignore of Laravel ignores auth.json: only a host of repositories that
+        # is not packagist says that a credential is needed.
         write(self.root, "composer.json", {"scripts": {"test": "z"}})
-        write(self.root, "api/composer.json", {"scripts": {"test": "z"}})
-        write(self.root, ".gitignore", "/vendor\n# comment\n/auth.json\n")
-        commands, _ = fix_commands.from_manifests(self.root, set())
-        self.assertEqual({item["private"] for item in commands}, {True})
-        write(self.root, ".gitignore", "auth.json\n!auth.json\n")
-        commands, _ = fix_commands.from_manifests(self.root, set())
-        self.assertEqual({item["private"] for item in commands}, {False})
-        for pattern in ("*.json", "**/auth.json", "auth.*"):
-            write(self.root, ".gitignore", pattern + "\n")
-            commands, _ = fix_commands.from_manifests(self.root, set())
-            self.assertEqual({item["private"] for item in commands}, {True}, pattern)
-        write(self.root, ".gitignore", "config/auth.json\n/vendor/\n")
-        commands, _ = fix_commands.from_manifests(self.root, set())
-        self.assertEqual({item["private"] for item in commands}, {False})
+        write(self.root, "api/composer.json", {"scripts": {"test": "z"}, "repositories": [
+            {"type": "composer", "url": "https://nova.example.org"}]})
+        for ignore in ("/vendor\n# comment\n/auth.json\n", "auth.json\n", "*.json\n", ""):
+            with self.subTest(ignore=ignore):
+                write(self.root, ".gitignore", ignore)
+                commands, _ = fix_commands.from_manifests(self.root, set())
+                self.assertEqual({item["dir"]: item["private"] for item in commands},
+                                 {"": False, "api": True})
+        self.assertFalse(fix_commands.install_target("composer", self.root, "", [])["private"])
+        self.assertTrue(fix_commands.install_target("composer", self.root, "api", [])["private"])
 
     def test_unreadable_manifests_give_a_note(self):
         write(self.root, "package.json", "{broken")
@@ -607,6 +617,21 @@ class DetectTest(unittest.TestCase):
         self.assertEqual({item["name"]: item["private"] for item in found["commands"]
                           if item["source"].startswith(".gitlab-ci.yml")},
                          {"composer": True, "npm": False})
+
+    def test_the_agency_laravel_ci_is_not_private_with_its_default_gitignore(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        write(root, ".gitignore", LARAVEL_GITIGNORE)
+        write(root, "composer.json", {"require": {"php": "^8.2", "laravel/framework": "^11.0"},
+                                      "require-dev": {"laravel/pint": "^1.0"}})
+        write(root, "package.json", {"scripts": {"prod": "vite build"}})
+        write(root, "package-lock.json", "{}")
+        found = fix_commands.detect(root, AGENCY_CI)
+        self.assertEqual([(item["name"], item["kind"], item["private"]) for item in found["commands"]
+                          if item["source"].startswith(".gitlab-ci.yml")], [
+            ("composer", "install", False), ("npm", "install", False),
+            ("build-assets", "build", False), ("php-cs-fixer", "lint", False)])
 
     def test_covered_dirs_resolve_the_leading_cd_chain(self):
         def item(command, env=None, folder=""):
@@ -823,6 +848,33 @@ REFUSED = {
         "pnpm add -D @scope/x.tar.gz",
     ),
 }
+
+
+class FamiliesTest(unittest.TestCase):
+    def test_the_family_of_a_command_comes_from_the_tools_it_names(self):
+        for command, expected in (
+            ("composer install --no-interaction", {"php"}),
+            ("./vendor/bin/pint --test", {"php"}),
+            ("/work/vendor/bin/phpunit", {"php"}),
+            ("php artisan test", {"php"}),
+            ("./artisan test", {"php"}),
+            ("bin/phpstan analyse", {"php"}),
+            ("php-cs-fixer fix --dry-run", {"php"}),
+            ("phpcs src", {"php"}),
+            ("npm ci", {"node"}),
+            ("npx gulp production", {"node"}),
+            ("cd $DIR && yarn build", {"node"}),
+            ("pnpm install --frozen-lockfile", {"node"}),
+            ("node scripts/build.js", {"node"}),
+            ("node_modules/.bin/eslint .", {"node"}),
+            ("php artisan ziggy:generate && npm run build", {"php", "node"}),
+            ("{ composer install\n}&&(npm ci)", {"php", "node"}),
+            ("make lint", set()),
+            ("sh build.sh", set()),
+            ("echo phpunit.xml vendors node_modules", set()),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(fix_commands.families(command), expected)
 
 
 class AllowedInstallTest(unittest.TestCase):

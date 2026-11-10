@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from cqa import fix_checks, fix_commands, fix_guard, fix_names, fix_state
+from tests.cqa.test_fix_commands import AGENCY_CI, AGENCY_IMAGE, LARAVEL_GITIGNORE
 from tests.cqa.test_fix_git import KEY, GitCase
 from tests.cqa.test_git_tools import commit as real_commit, git as real_git
 
@@ -952,6 +953,61 @@ class RunProjectCommandsTest(GitCase):
         self.assertEqual([item["status"] for item in results], ["not_run", "not_run", "ok"])
         self.assertEqual(results[1]["detail"], PRIVATE)
         self.assertEqual(self.exec.texts(), ["cd web && npm run build"])
+
+    def test_a_blocked_install_blocks_only_the_commands_of_its_family(self):
+        commands = [
+            cmd("composer", "install", "composer install --no-interaction", image=AGENCY_IMAGE,
+                private=True),
+            cmd("npm", "install", "npm ci", image=AGENCY_IMAGE),
+            cmd("build-assets", "build", "npm run prod", image=AGENCY_IMAGE),
+            cmd("php-cs-fixer", "lint", "./vendor/bin/pint --test", image=AGENCY_IMAGE),
+            cmd("ziggy", "build", "php artisan ziggy:generate && npm run build",
+                image=AGENCY_IMAGE),
+            cmd("make", "lint", "make lint", image=AGENCY_IMAGE),
+            cmd("web", "test", "composer test", dir="web", image=AGENCY_IMAGE),
+        ]
+        results = self.run_commands(commands)
+        self.assertEqual([(item["name"], item["status"], item["detail"]) for item in results], [
+            ("composer", "not_run", PRIVATE), ("npm", "ok", ""), ("build-assets", "ok", ""),
+            ("php-cs-fixer", "not_run", PRIVATE), ("ziggy", "not_run", PRIVATE),
+            ("make", "not_run", PRIVATE), ("web", "ok", "")])
+        self.assertEqual(self.exec.texts(), ["npm ci", "npm run prod", "composer test"])
+
+    def test_a_failed_install_blocks_its_family_and_one_of_two_families_blocks_both(self):
+        both = ["composer install", "npm ci"]
+        for installs, failing, ran in (
+            (both, "npm ci", ["composer install", "npm ci", "./vendor/bin/pint --test"]),
+            (both, "composer install", ["composer install", "npm ci", "npm run prod"]),
+            (["make install"], "make install", ["make install"]),
+            (["composer install && npm ci"], "composer install", ["composer install && npm ci"]),
+        ):
+            with self.subTest(installs=installs, failing=failing):
+                self.exec = ExecFake()
+                self.exec.on(failing, code=1, out="boom\n")
+                results = self.run_commands([cmd(text, "install", text) for text in installs] + [
+                    cmd("build-assets", "build", "npm run prod"),
+                    cmd("php-cs-fixer", "lint", "./vendor/bin/pint --test")])
+                self.assertEqual(self.exec.texts(), ran)
+                self.assertTrue(all(item["detail"] == INSTALL_IMPOSSIBLE for item in results
+                                    if item["status"] == "not_run"))
+
+    def test_the_agency_laravel_ci_runs_its_node_jobs_when_composer_cannot(self):
+        layout = self.root / "laravel"
+        write(layout, ".gitignore", LARAVEL_GITIGNORE)
+        write(layout, "composer.json", '{"require": {"laravel/framework": "^11.0"}}\n')
+        write(layout, "package.json", '{"scripts": {"prod": "vite build"}}\n')
+        write(layout, "package-lock.json", "{}\n")
+        commands = [item for item in fix_commands.detect(layout, AGENCY_CI)["commands"]
+                    if item["source"].startswith(".gitlab-ci.yml")]
+        self.assertEqual({item["private"] for item in commands}, {False})
+        self.exec.on("composer install", code=1, out="Your requirements could not be resolved\n")
+        results = self.run_commands(commands)
+        self.assertEqual([(item["name"], item["status"]) for item in results], [
+            ("composer", "failed"), ("npm", "ok"), ("build-assets", "ok"),
+            ("php-cs-fixer", "not_run")])
+        self.assertEqual(results[3]["detail"], INSTALL_IMPOSSIBLE)
+        self.assertEqual(self.exec.texts(), ["composer install --no-interaction", "npm ci",
+                                             "npm run prod"])
 
     def test_tracked_files_written_by_a_build_are_restored_and_not_committed(self):
         head = real_git(self.tree, "rev-parse", "HEAD")

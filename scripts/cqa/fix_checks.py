@@ -208,12 +208,15 @@ def run_project_commands(run, launcher: Path, worktree: Path, commands: list, lo
     given, each through cqa-toolbox.sh exec (network for an install only), and the worktree is
     put back as it was after each (restore_worktree). The full log of each is a file of log_dir.
 
-    A failed or not run install makes the later commands of its folder not_run, as a command that
-    needs private dependencies, which is never run. An error of the environment (a launcher that
-    refuses, an exit 124 or 125) is not_run, never failed. A lint that exits 0 but rewrites tracked
-    files is judged by them: failed on those the pass changed (exact), already_broken on the
-    others. The detail of a failure is the end of its log, without secrets (log_tail). A command
-    that changed the .git entry of worktree raises ValueError (GIT_TAMPERED), no git run after it.
+    A failed or not run install makes not_run the later commands of its folder and of its family
+    (fix_commands.families: Composer and PHP, or Node), as a command that needs private
+    dependencies, which is never run. A command of both families is blocked by either; a command or
+    an install of no known family is blocked by, or blocks, every family of its folder. An error of
+    the environment (a launcher that refuses, an exit 124 or 125) is not_run, never failed. A lint
+    that exits 0 but rewrites tracked files is judged by them: failed on those the pass changed
+    (exact), already_broken on the others. The detail of a failure is the end of its log, without
+    secrets (log_tail). A command that changed the .git entry of worktree raises ValueError
+    (GIT_TAMPERED), no git run after it.
     """
     worktree, log_dir = Path(worktree), Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -222,18 +225,38 @@ def run_project_commands(run, launcher: Path, worktree: Path, commands: list, lo
     for index, item in enumerate(commands, 1):
         folder = fix_commands.start_dir(item)
         log = log_dir / f"{index:02d}-{_slug(item['name'])}.log"
-        if folder in blocked:
-            results.append(_result(item, folder, "not_run", blocked[folder]))
+        reason = _blocked_by(blocked.get(folder, {}), item)
+        if reason:
+            results.append(_result(item, folder, "not_run", reason))
             continue
         if item["private"]:
-            blocked[folder] = PRIVATE_DEPENDENCIES
+            _block(blocked.setdefault(folder, {}), item, PRIVATE_DEPENDENCIES)
             results.append(_result(item, folder, "not_run", PRIVATE_DEPENDENCIES))
             continue
         result = _execute(run, launcher, worktree, item, folder, log, changed)
         if item["kind"] == "install" and result["status"] in ("failed", "not_run"):
-            blocked[folder] = INSTALL_IMPOSSIBLE
+            _block(blocked.setdefault(folder, {}), item, INSTALL_IMPOSSIBLE)
         results.append(result)
     return results
+
+
+_EVERY_FAMILY = "*"
+
+
+def _block(blocked: dict, item: dict, reason: str) -> None:
+    """Block, in the {family: reason} of a folder, the families of item (all without one)."""
+    for family in fix_commands.families(item["command"]) or {_EVERY_FAMILY}:
+        blocked.setdefault(family, reason)
+
+
+def _blocked_by(blocked: dict, item: dict) -> Optional[str]:
+    """Return why the {family: reason} of its folder blocks item, None when nothing does."""
+    if not blocked:
+        return None
+    families = fix_commands.families(item["command"])
+    if _EVERY_FAMILY in blocked or not families:
+        return blocked.get(_EVERY_FAMILY) or next(iter(blocked.values()))
+    return next((blocked[family] for family in sorted(families) if family in blocked), None)
 
 
 def _execute(run, launcher: Path, worktree: Path, item: dict, folder: str, log: Path,
