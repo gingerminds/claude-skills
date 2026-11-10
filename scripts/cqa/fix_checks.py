@@ -9,12 +9,15 @@ The commands of the project (install, build, lint, test) run one by one in dispo
 (cqa-toolbox.sh exec) on the same worktree, which is put back as it was after each of them. Only
 a failure the base does not have fails; an error of the environment is never a failure. The install
 a fixer asks for runs alone (run_install), keeping the manifest and the lock file it changed.
+The .git entry of the worktree is compared before and after each command: when it changed, no
+git runs in that worktree again (ValueError), since its config could run code on the workstation.
 """
 import json
 import os
 import re
 import shlex
 import shutil
+import stat
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -39,6 +42,16 @@ TIMED_OUT = "délai dépassé"
 REFORMATTED = "fichiers reformatés par le linter"
 MASKED_LINE = "ligne masquée : secret possible"
 LAUNCHER_FAILED = "exécution impossible"
+DOCKER_FAILED = "docker run a échoué (code 125)"
+INSTALL_UNRELATED = ("installation en échec alors que la passe n'a changé aucun manifeste ni "
+                     "lockfile de son dossier (cause probable : l'environnement)")
+GIT_MISSING = ("{worktree}/.git est absent ou n'est ni un fichier ni un dossier ordinaire (lien "
+               "symbolique ?) : commande non lancée.")
+GIT_TAMPERED = ("{worktree}/.git a été modifié pendant « {name} » : arrêt, aucune commande git "
+                "n'est lancée dans ce worktree (sa configuration pourrait exécuter du code sur le "
+                "poste). N'y lancez pas git vous-même : supprimez ce dossier (rm -rf) et signalez "
+                "cette commande du projet aux devs.")
+DEPENDENCY_FILES = tuple(pattern.rsplit("/", 1)[-1] for pattern in fix_guard.DEPENDENCY_FILES)
 BASELINE_DIR = "baseline-wt"
 INSTALL_TIMEOUT = 900
 COMMAND_TIMEOUT = 600
@@ -197,9 +210,10 @@ def run_project_commands(run, launcher: Path, worktree: Path, commands: list, lo
 
     A failed or not run install makes the later commands of its folder not_run, as a command that
     needs private dependencies, which is never run. An error of the environment (a launcher that
-    refuses, an exit 124) is not_run, never failed. A lint that exits 0 but rewrites tracked files
-    is judged by them: failed on those the pass changed (exact), already_broken on the others.
-    The detail of a failure is the end of its log, without secrets (log_tail).
+    refuses, an exit 124 or 125) is not_run, never failed. A lint that exits 0 but rewrites tracked
+    files is judged by them: failed on those the pass changed (exact), already_broken on the
+    others. The detail of a failure is the end of its log, without secrets (log_tail). A command
+    that changed the .git entry of worktree raises ValueError (GIT_TAMPERED), no git run after it.
     """
     worktree, log_dir = Path(worktree), Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -225,11 +239,13 @@ def run_project_commands(run, launcher: Path, worktree: Path, commands: list, lo
 def _execute(run, launcher: Path, worktree: Path, item: dict, folder: str, log: Path,
              changed: set) -> dict:
     log.unlink(missing_ok=True)
+    before = git_entry(worktree)
     try:
         done = _launch(run, launcher, worktree, item, log)
     except OSError as error:
         return _result(item, folder, "not_run", f"{LAUNCHER_FAILED} : {error}")
     finally:
+        same_git_entry(worktree, before, item["name"])
         modified = restore_worktree(worktree, run)
     failure = _failure(item, folder, done, log)
     if failure is not None:
@@ -258,18 +274,51 @@ def _launch(run, launcher: Path, worktree: Path, item: dict, log: Path):
 
 
 def _failure(item: dict, folder: str, done, log: Path) -> Optional[dict]:
-    """Return the result of a command that did not exit 0 (None when it did): a timeout and a
-    refusal of the launcher are not_run, any other code is a failure with the end of its log."""
+    """Return the result of a command that did not exit 0 (None when it did): a timeout, an error
+    of docker run itself (125) and a refusal of the launcher are not_run, any other code is a
+    failure with the end of its log."""
     code = done.returncode
     if code == 0:
         return None
     if code == 124:
         return _result(item, folder, "not_run", TIMED_OUT, log=log)
+    if code == 125:
+        last = log_tail(_read_log(log)).split("\n")[-1]
+        detail = f"{DOCKER_FAILED} : {last}" if last else DOCKER_FAILED
+        return _result(item, folder, "not_run", detail, log=log)
     if code == 2 and not log.exists():
         # A refusal of the launcher (image absent, Docker down) comes before the log is made.
         lines = [line.strip() for line in (done.stderr or "").splitlines() if line.strip()]
         return _result(item, folder, "not_run", lines[-1][:300] if lines else LAUNCHER_FAILED)
     return _result(item, folder, "failed", log_tail(_read_log(log)), log=log)
+
+
+def git_entry(worktree: Path) -> tuple:
+    """Return what <worktree>/.git is: ("file", its bytes) for the gitdir file of a worktree,
+    ("dir", device, inode) for the folder of a clone. Raises ValueError (GIT_MISSING) when it is
+    absent, a symbolic link or anything else: no command runs on such a worktree."""
+    path = Path(worktree) / ".git"
+    try:
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            return ("dir", info.st_dev, info.st_ino)
+        if stat.S_ISREG(info.st_mode):
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(descriptor, "rb") as handle:
+                return ("file", handle.read())
+    except OSError:
+        pass
+    raise ValueError(GIT_MISSING.format(worktree=worktree))
+
+
+def same_git_entry(worktree: Path, before: tuple, name: str) -> None:
+    """Raise ValueError (GIT_TAMPERED) when the .git entry of worktree is no longer before."""
+    try:
+        now = git_entry(worktree)
+    except ValueError:
+        now = None
+    if now != before:
+        raise ValueError(GIT_TAMPERED.format(worktree=worktree, name=name))
 
 
 def run_install(run, launcher: Path, worktree: Path, item: dict, log: Path,
@@ -281,11 +330,13 @@ def run_install(run, launcher: Path, worktree: Path, item: dict, log: Path,
     the worktree it touched (modified, deleted or untracked and not ignored; ignored files, such as
     node_modules, are left). The changes of allowed stay in the worktree, uncommitted, only when
     the command succeeded, touched nothing else and changed something: in every other case, and
-    when the run is interrupted, the worktree is put back as it was (restore_worktree).
+    when the run is interrupted, the worktree is put back as it was (restore_worktree). An install
+    that changed the .git entry raises ValueError (GIT_TAMPERED): no git runs after it.
     """
     worktree = Path(worktree)
     folder = fix_commands.start_dir(item)
     log.unlink(missing_ok=True)
+    before = git_entry(worktree)
     changed, stray, keep = [], [], False
     try:
         try:
@@ -294,12 +345,14 @@ def run_install(run, launcher: Path, worktree: Path, item: dict, log: Path,
             result = _result(item, folder, "not_run", f"{LAUNCHER_FAILED} : {error}")
         else:
             result = _failure(item, folder, done, log) or _result(item, folder, "ok", log=log)
+        same_git_entry(worktree, before, item["name"])
         dirty = dirty_files(worktree, run)
         changed = [path for path in dirty if path in allowed]
         stray = [path for path in dirty if path not in allowed]
         keep = result["status"] == "ok" and bool(changed) and not stray
     finally:
         if not keep:
+            same_git_entry(worktree, before, item["name"])
             restore_worktree(worktree, run)
     return {**result, "changed": changed, "stray": stray}
 
@@ -373,7 +426,9 @@ def project_checks(results: list, base: Optional[list], pass_files: list,
     too (a result of base failed or already_broken, by name) is not attributed to the pass: its
     entry is not_run, with already_broken true and ALREADY_BROKEN in its detail. Any other failure
     is attributed to the files of the pass its log names, else to those under its folder, else to
-    all of them (failed_refs maps them to the rows). A failure by files (exact) keeps its own.
+    all of them (failed_refs maps them to the rows). A failure by files (exact) keeps its own. A
+    failed install is attributed only when the pass changed a manifest or a lock file in or under
+    its folder; else it is not_run (INSTALL_UNRELATED): a network cut is not the fault of a row.
     """
     broken = {item["name"] for item in base or [] if item["status"] in ("failed", "already_broken")}
     changed = list(pass_files)
@@ -385,13 +440,15 @@ def project_checks(results: list, base: Optional[list], pass_files: list,
             status, detail = "passed", ""
         elif status == "failed" and not item["exact"] and item["name"] in broken:
             known = True
+        elif status == "failed" and item["kind"] == "install" and not _manifest_changed(
+                item["folder"], changed):
+            status, detail = "not_run", _with_last_line(INSTALL_UNRELATED, detail)
         elif status == "failed":
             files = item["files"] if item["exact"] else _attributed(item, changed)
         elif status == "already_broken":
             known = True
         if known:
-            last = next((line for line in reversed(detail.split("\n")) if line.strip()), "")
-            status, detail = "not_run", f"{ALREADY_BROKEN} ({last})" if last else ALREADY_BROKEN
+            status, detail = "not_run", _with_last_line(ALREADY_BROKEN, detail)
         entry = {"name": item["name"], "status": status, "files": files, "detail": detail,
                  "kind": item["kind"], "command": item["command"]}
         if log:
@@ -402,33 +459,53 @@ def project_checks(results: list, base: Optional[list], pass_files: list,
     return checks
 
 
+def _with_last_line(reason: str, detail: str) -> str:
+    last = next((line for line in reversed(detail.split("\n")) if line.strip()), "")
+    return f"{reason} ({last})" if last else reason
+
+
+def _manifest_changed(folder: str, changed: list) -> bool:
+    """True when a manifest or a lock file of the pass lies in folder or below it."""
+    return any(PurePosixPath(path).name in DEPENDENCY_FILES and _under(path, folder)
+               for path in changed)
+
+
+def _under(path: str, folder: str) -> bool:
+    return not folder or path == folder or path.startswith(folder + "/")
+
+
 def _attributed(item: dict, changed: list) -> list:
     cited = cited_files(_read_log(Path(item["log"])) if item["log"] else "", changed, item["folder"])
     if cited:
         return cited
-    folder = item["folder"]
-    under = [path for path in changed if not folder or path == folder or path.startswith(folder + "/")]
+    under = [path for path in changed if _under(path, item["folder"])]
     return under or changed
 
 
 def measure_base(run, launcher: Path, worktree: Path, start_sha: str, commands: list,
                  check_dir: Path) -> list:
     """Run the commands on a worktree of start_sha detached under check_dir, removed after;
-    return their results (run_project_commands). Raises ValueError when it cannot be made."""
+    return their results (run_project_commands). Raises ValueError when it cannot be made. The
+    other worktrees of the dev's repo are never pruned: only this one is removed (_drop_base)."""
     check_dir = Path(check_dir)
     base = check_dir / BASELINE_DIR
-    shutil.rmtree(base, ignore_errors=True)
-    fix_names.git(worktree, run, "worktree", "prune")
-    added = fix_names.git(worktree, run, "worktree", "add", "--detach", str(base), start_sha)
+    _drop_base(worktree, run, base)
+    added = fix_names.git(worktree, run, "worktree", "add", "--force", "--detach", str(base),
+                          start_sha)
     if added.returncode != 0:
         raise ValueError(f"État de départ non mesuré : git worktree add a échoué : "
                          f"{added.stderr.strip()}")
     try:
         return run_project_commands(run, launcher, base, commands, check_dir / "baseline-logs")
     finally:
-        fix_names.git(worktree, run, "worktree", "remove", "--force", str(base))
-        shutil.rmtree(base, ignore_errors=True)
-        fix_names.git(worktree, run, "worktree", "prune")
+        _drop_base(worktree, run, base)
+
+
+def _drop_base(worktree: Path, run, base: Path) -> None:
+    """Remove the base worktree: its folder first, so that git never reads what a command left
+    there, then its record in the dev's repo (a failure is ignored: add --force reuses it)."""
+    shutil.rmtree(base, ignore_errors=True)
+    fix_names.git(worktree, run, "worktree", "remove", "--force", str(base))
 
 
 def dirty_files(worktree: Path, run) -> list:
@@ -487,8 +564,10 @@ def _remove(worktree: Path, path: str) -> None:
 
 
 def _status(worktree: Path, run) -> list:
-    """Return the (path, XY) entries of git status, untracked files included, ignored ones not."""
-    result = fix_names.git(worktree, run, "status", "--porcelain=v1", "-uall", "-z")
+    """Return the (path, XY) entries of git status, untracked files included, ignored ones not.
+    The checkout of a submodule is never read: a .git planted there would steer git."""
+    result = fix_names.git(worktree, run, "status", "--porcelain=v1", "-uall", "-z",
+                           "--ignore-submodules=all")
     if result.returncode != 0:
         raise ValueError(f"git status a échoué dans {worktree} : {result.stderr.strip()}")
     fields = result.stdout.split("\0")

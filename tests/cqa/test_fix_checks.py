@@ -10,7 +10,7 @@ from unittest import mock
 
 from cqa import fix_checks, fix_commands, fix_guard, fix_names, fix_state
 from tests.cqa.test_fix_git import KEY, GitCase
-from tests.cqa.test_git_tools import git as real_git
+from tests.cqa.test_git_tools import commit as real_commit, git as real_git
 
 PHP = "Syntaxe PHP (php -l)"
 JS = "Syntaxe JavaScript (node --check)"
@@ -695,6 +695,127 @@ class ExecFake:
         return [call["command"] for call in self.calls]
 
 
+class Recorded:
+    """A run that records every command it passes on to inner."""
+
+    def __init__(self, inner):
+        self.inner, self.commands = inner, []
+
+    def __call__(self, command, **kwargs):
+        self.commands.append([str(part) for part in command])
+        return self.inner(command, **kwargs)
+
+    def git_after(self, tree, needle):
+        """The git commands run in tree after the last exec in tree whose command holds needle."""
+        start = max(index for index, command in enumerate(self.commands)
+                    if command[0] == "bash" and command[3] == str(tree) and needle in command[-1])
+        return [command for command in self.commands[start + 1:]
+                if command[:3] == ["git", "-C", str(tree)]]
+
+
+def hijack(tree):
+    """What a hostile build does: a tracked file changed and .git pointed at a repo of its own."""
+    write(tree, "dist/app.css", "x{}\n")
+    (Path(tree) / ".git").write_text("gitdir: .x\n", encoding="utf-8")
+
+
+class GitEntryTest(GitCase):
+    """The .git of a worktree is compared before and after each command: when it changed, nothing
+    of git runs in that worktree again (its config could run code on the workstation)."""
+
+    def setUp(self):
+        super().setUp()
+        commit_files(self, self.repo, "chore: project", {
+            ".gitignore": "node_modules/\n", "dist/app.css": "a{}\n", "web/package.json": "{}\n",
+            "web/package-lock.json": "{}\n"})
+        self.tree = self.root / "wt"
+        real_git(self.repo, "worktree", "add", "-q", "--detach", str(self.tree), "HEAD")
+        self.exec = ExecFake()
+        self.run = Recorded(self.exec)
+
+    def run_commands(self, commands):
+        return fix_checks.run_project_commands(self.run, Path("/x/cqa-toolbox.sh"), self.tree,
+                                               commands, self.root / "logs")
+
+    def test_a_command_that_rewrites_the_git_file_stops_without_running_git(self):
+        self.exec.on("npm run build", effects=hijack)
+        with self.assertRaises(ValueError) as raised:
+            self.run_commands([cmd("build", "build", "npm run build", dir="web"),
+                               cmd("lint", "lint", "npm run lint", dir="web")])
+        message = str(raised.exception)
+        self.assertIn(f"{self.tree}/.git", message)
+        self.assertIn("« build »", message)
+        self.assertIn("aucune commande git", message)
+        self.assertEqual(self.run.git_after(self.tree, "npm run build"), [])
+        self.assertEqual(self.exec.texts(), ["npm run build"])
+        self.assertEqual((self.tree / "dist" / "app.css").read_text(encoding="utf-8"), "x{}\n")
+        self.assertEqual((self.tree / ".git").read_text(encoding="utf-8"), "gitdir: .x\n")
+
+    def test_a_git_entry_replaced_by_a_folder_or_a_link_or_removed_stops_too(self):
+        entry = self.tree / ".git"
+        gitdir = entry.read_bytes()
+        outside = self.root / "outside.git"
+        outside.write_bytes(gitdir)
+        for label, effects in (
+            ("folder", lambda tree: (entry.unlink(), entry.mkdir())),
+            ("link to the same content", lambda tree: (entry.unlink(), entry.symlink_to(outside))),
+            ("removed", lambda tree: entry.unlink()),
+        ):
+            with self.subTest(label):
+                self.exec.rules = []
+                self.exec.on("npm run build", effects=effects)
+                with self.assertRaises(ValueError):
+                    self.run_commands([cmd("build", "build", "npm run build", dir="web")])
+                self.assertEqual(self.run.git_after(self.tree, "npm run build"), [])
+                if entry.is_dir() and not entry.is_symlink():
+                    entry.rmdir()
+                entry.unlink(missing_ok=True)
+                entry.write_bytes(gitdir)
+
+    def test_a_worktree_without_a_plain_git_entry_runs_nothing(self):
+        gitdir = (self.tree / ".git").read_bytes()
+        outside = self.root / "outside.git"
+        outside.write_bytes(gitdir)
+        for label in ("missing", "link"):
+            with self.subTest(label):
+                (self.tree / ".git").unlink(missing_ok=True)
+                if label == "link":
+                    (self.tree / ".git").symlink_to(outside)
+                with self.assertRaises(ValueError) as raised:
+                    self.run_commands([cmd("build", "build", "npm run build", dir="web")])
+                self.assertIn(".git", str(raised.exception))
+                self.assertEqual(self.exec.calls, [])
+                self.assertEqual(self.run.commands, [])
+        item = cmd("npm (CQ-3)", "install", "npm install --save-dev --ignore-scripts x", dir="web")
+        with self.assertRaises(ValueError):
+            fix_checks.run_install(self.run, Path("launcher.sh"), self.tree, item,
+                                   self.root / "install.log", ("web/package.json",))
+        self.assertEqual(self.exec.calls, [])
+
+    def test_an_install_that_rewrites_the_git_file_stops_without_running_git(self):
+        item = cmd("npm (CQ-3)", "install", "npm install --save-dev --ignore-scripts x", dir="web")
+        self.exec.on("npm install", effects=lambda tree: (
+            write(tree, "web/package.json", '{"a": 1}\n'), hijack(tree)))
+        with self.assertRaises(ValueError) as raised:
+            fix_checks.run_install(self.run, Path("launcher.sh"), self.tree, item,
+                                   self.root / "install.log", ("web/package.json",))
+        self.assertIn("aucune commande git", str(raised.exception))
+        self.assertEqual(self.run.git_after(self.tree, "npm install"), [])
+        self.assertEqual((self.tree / "web" / "package.json").read_text(encoding="utf-8"),
+                         '{"a": 1}\n')
+
+    def test_the_status_never_reads_a_submodule_checkout(self):
+        sha = real_git(self.repo, "rev-parse", "HEAD")
+        real_git(self.tree, "update-index", "--add", "--cacheinfo", f"160000,{sha},sub")
+        real_git(self.tree, "commit", "-q", "-m", "chore: sub")
+        nested = self.tree / "sub"
+        nested.mkdir()
+        real_git(nested, "init", "-q")
+        real_commit(nested, "x.txt", "planted")
+        self.assertEqual(fix_checks.dirty_files(self.tree, subprocess.run), [])
+        self.assertEqual(fix_checks.restore_worktree(self.tree, subprocess.run), [])
+
+
 class ShellCommandTest(unittest.TestCase):
     def test_env_is_set_for_the_whole_chain_and_quoted(self):
         item = cmd("build", "build", "printf '%s' \"$A\" > one.txt && printf '%s' \"$B\" > two.txt "
@@ -939,6 +1060,20 @@ class RunProjectCommandsTest(GitCase):
             ("not_run", INSTALL_IMPOSSIBLE),
         ])
 
+    def test_an_exit_125_of_docker_run_is_not_run_never_a_failure(self):
+        self.exec.on("npm ci", code=125,
+                     out="docker: Error response from daemon: invalid mount config.\n")
+        self.exec.on("npm run build", code=125, out="")
+        results = self.run_commands([cmd("install", "install", "npm ci", dir="web"),
+                                     cmd("test", "test", "npm test", dir="web"),
+                                     cmd("build", "build", "npm run build", dir="api")])
+        self.assertEqual([item["status"] for item in results], ["not_run", "not_run", "not_run"])
+        self.assertEqual(results[0]["detail"], f"{fix_checks.DOCKER_FAILED} : "
+                                               "docker: Error response from daemon: invalid mount config.")
+        self.assertEqual(results[1]["detail"], INSTALL_IMPOSSIBLE)
+        self.assertEqual(results[2]["detail"], fix_checks.DOCKER_FAILED)
+        self.assertIn("125", fix_checks.DOCKER_FAILED)
+
     def test_exit_2_of_a_command_is_a_failure_not_a_refusal_of_the_launcher(self):
         self.exec.on("npm run lint", code=2, out="eslint: configuration error\n")
         results = self.run_commands([cmd("lint", "lint", "npm run lint")])
@@ -1041,6 +1176,31 @@ class ProjectChecksTest(unittest.TestCase):
     def test_without_a_base_a_failure_stays_a_failure(self):
         checks = fix_checks.project_checks([self.entry("lint", "failed", "x")], None, ["a.ts"])
         self.assertEqual(checks[0]["status"], "failed")
+
+    def test_a_failed_install_is_attributed_only_when_the_pass_changed_a_manifest_of_its_folder(self):
+        install = self.entry("npm ci", "failed", "npm ERR! network\nECONNRESET", kind="install")
+        for pass_files, status in (
+            (["web/src/a.ts"], "not_run"),
+            (["web/src/a.ts", "api/composer.json", "webapp/package.json"], "not_run"),
+            (["web/src/a.ts", "web/package.json"], "failed"),
+            (["web/src/a.ts", "web/package-lock.json"], "failed"),
+            (["web/sub/composer.lock"], "failed"),
+        ):
+            with self.subTest(pass_files=pass_files):
+                (check,) = fix_checks.project_checks([install], [], pass_files)
+                self.assertEqual(check["status"], status)
+                if status == "not_run":
+                    self.assertEqual(check["files"], [])
+                    self.assertEqual(check["detail"], f"{fix_checks.INSTALL_UNRELATED} (ECONNRESET)")
+                    self.assertNotIn("already_broken", check)
+                else:
+                    self.assertTrue(check["files"])
+        root = {**install, "folder": ""}
+        (check,) = fix_checks.project_checks([root], None, ["web/package.json"])
+        self.assertEqual(check["status"], "failed")
+        lint = self.entry("lint", "failed", "x")
+        (check,) = fix_checks.project_checks([lint], [], ["web/src/a.ts"])
+        self.assertEqual(check["status"], "failed")
 
 
 class ProjectCommandsCheckTest(GitCase):
@@ -1277,6 +1437,55 @@ class ProjectCommandsCheckTest(GitCase):
         saved = (self.folder / "checks.json").read_text(encoding="utf-8")
         self.assertNotIn(token, saved)
 
+    def test_a_command_that_rewrites_the_git_file_stops_the_check_with_exit_2(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        self.exec.on("npm run lint", effects=hijack)
+        run = Recorded(self.exec)
+        code, out, err = self.check(run)
+        self.assertEqual((code, out), (2, None), err)
+        self.assertIn(f"{worktree}/.git", err)
+        self.assertIn("aucune commande git", err)
+        self.assertEqual(run.git_after(worktree, "npm run lint"), [])
+        self.assertNotIn("npm test", self.exec.texts())
+        self.assertFalse((self.folder / "checks.json").exists())
+        self.assertEqual(self.key()["step"], "started")
+
+    def test_a_command_that_rewrites_the_git_file_of_the_base_stops_the_check(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        base = self.folder / "check" / "baseline-wt"
+        self.exec.on("npm run lint", code=fails_on_the_pass_only,
+                     effects=lambda tree: hijack(tree) if on_base(tree) else None)
+        run = Recorded(self.exec)
+        code, out, err = self.check(run)
+        self.assertEqual((code, out), (2, None), err)
+        self.assertIn(f"{base}/.git", err)
+        self.assertEqual(run.git_after(base, "npm run lint"), [])
+        self.assertFalse(base.exists())
+        self.assertNotIn("baseline-wt", real_git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertFalse((self.folder / "checks.json").exists())
+
+    def test_the_base_never_prunes_the_worktrees_of_the_dev(self):
+        worktree = self.started()
+        self.fixer(worktree)
+        elsewhere = self.root / "unmounted-disk" / "front-hotfix"
+        real_git(self.repo, "worktree", "add", "-q", "--detach", str(elsewhere), "HEAD")
+        shutil.rmtree(elsewhere)
+        # A base worktree left registered by a check that was killed does not block the next one.
+        stale = self.folder / "check" / "baseline-wt"
+        real_git(self.repo, "worktree", "add", "-q", "--detach", str(stale), "HEAD")
+        shutil.rmtree(stale)
+        self.exec.on("npm test", code=fails_on_the_pass_only)
+        run = Recorded(self.exec)
+        code, out, err = self.check(run)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.base_calls()), 3)
+        self.assertNotIn("prune", [part for command in run.commands for part in command])
+        listing = real_git(self.repo, "worktree", "list", "--porcelain")
+        self.assertIn(str(elsewhere), listing)
+        self.assertNotIn("baseline-wt", listing)
+
     def test_the_commands_the_lead_validated_reach_check_through_open(self):
         self.write_json("fix/commands.json", {"repos": {"front": {"commands": self.commands}},
                                                "images": []})
@@ -1432,7 +1641,8 @@ class RunInstallTest(GitCase):
         self.assertEqual(self.status(), "")
 
     def test_a_failure_or_a_timeout_puts_everything_back_even_the_allowed_files(self):
-        for code, status, detail in ((1, "failed", "boom"), (124, "not_run", "délai dépassé")):
+        for code, status, detail in ((1, "failed", "boom"), (124, "not_run", "délai dépassé"),
+                                     (125, "not_run", "docker run a échoué (code 125) : boom")):
             with self.subTest(code=code):
                 self.exec.rules = []
                 self.exec.on("npm install", code=code, out="boom\n", effects=lambda tree: write(
@@ -1789,6 +1999,19 @@ class InstallCommandTest(GitCase):
                 self.assertIn(reason, err)
                 self.assertEqual((self.head(), self.status()), (before, ""))
                 self.assertEqual(self.state(), state_before)
+
+    def test_an_install_that_rewrites_the_git_file_is_exit_2_and_runs_no_git_there(self):
+        worktree = self.started()
+        self.request()
+        self.exec.on("npm install", effects=lambda tree: (npm_writes(tree), hijack(tree)))
+        state_before = self.state()
+        run = Recorded(self.exec)
+        code, out, err = self.install(run=run)
+        self.assertEqual((code, out), (2, None), err)
+        self.assertIn(f"{worktree}/.git", err)
+        self.assertIn("aucune commande git", err)
+        self.assertEqual(run.git_after(worktree, "npm install"), [])
+        self.assertEqual(self.state(), state_before)
 
     def test_a_private_install_is_never_run(self):
         self.started(commands=[cmd("npm ci", "install", "npm ci", dir="web", private=True)])

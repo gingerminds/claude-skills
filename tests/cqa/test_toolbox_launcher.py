@@ -802,10 +802,14 @@ class ExecTest(LauncherCase):
     """exec <worktree> <log> <image> <workdir> <on|off> <timeout_s> -- <command>: one project
     command in a disposable container that sees only the worktree."""
 
+    GITDIR = "gitdir: /repo/.git/worktrees/wt\n"
+    TMPFS = "/tmp:rw,exec,nosuid,size=2g"
+
     def setUp(self):
         super().setUp()
         self.worktree = self.tmp / "work tree"
         (self.worktree / "src" / "theme").mkdir(parents=True)
+        (self.worktree / ".git").write_text(self.GITDIR, encoding="utf-8")
         self.logs = self.tmp / "logs"
         self.logs.mkdir()
         self.log_file = self.logs / "install.log"
@@ -834,21 +838,55 @@ class ExecTest(LauncherCase):
         self.assertIn("--rm", call)
         self.assertEqual(f"{os.getuid()}:{os.getgid()}", call[call.index("--user") + 1])
         self.assertTrue(has_pair(call, "--env", "HOME=/tmp"))
-        self.assertTrue(has_pair(call, "--tmpfs", "/tmp"))
+        self.assertTrue(has_pair(call, "--tmpfs", self.TMPFS))
+        self.assertEqual(1, call.count("--tmpfs"))
         self.assertTrue(has_pair(call, "-w", "/work/src/theme"))
         self.assertTrue(has_pair(call, "--entrypoint", "sh"))
         self.assertRegex(call[call.index("--name") + 1], r"^cqa-exec-[A-Za-z0-9-]+$")
+        # The .git entry of the worktree, read-only over the worktree, is the only other mount.
         mounts = [call[i + 1] for i in range(len(call) - 1) if call[i] == "-v"]
-        self.assertEqual([f"{self.worktree}:/work"], mounts)
+        self.assertEqual([f"{self.worktree}:/work", f"{self.worktree}/.git:/work/.git:ro"], mounts)
         self.assertEqual(["HOME=/tmp"], env_args(call))
         self.assertEqual(["node:18-alpine", "-c", "npm ci"], call[-3:])
         text = " ".join(call)
         for forbidden in ("docker.sock", "--privileged", "--volumes-from", "--env-file",
-                          "GM_AUDIT_AUTH_USER", "GM_AUDIT_AUTH_PASS", "cqa-user", "pass-xyz-123"):
+                          "--mount", "GM_AUDIT_AUTH_USER", "GM_AUDIT_AUTH_PASS", "cqa-user",
+                          "pass-xyz-123"):
             self.assertNotIn(forbidden, text)
         self.assertEqual([["image", "inspect", "node:18-alpine"]],
                          [c for c in self.calls() if c[:2] == ["image", "inspect"]])
-        self.assertEqual(["src"], [path.name for path in self.worktree.iterdir()])
+        self.assertEqual([".git", "src"], sorted(path.name for path in self.worktree.iterdir()))
+        self.assertEqual(self.GITDIR, (self.worktree / ".git").read_text(encoding="utf-8"))
+
+    def test_exec_mounts_a_git_folder_read_only_too(self):
+        (self.worktree / ".git").unlink()
+        (self.worktree / ".git").mkdir()
+        self.assertEqual(0, self.exec_().returncode)
+        call = self.only_run()
+        mounts = [call[i + 1] for i in range(len(call) - 1) if call[i] == "-v"]
+        self.assertEqual([f"{self.worktree}:/work", f"{self.worktree}/.git:/work/.git:ro"], mounts)
+
+    def test_exec_refuses_a_worktree_whose_git_entry_is_missing_or_a_link(self):
+        outside = self.tmp / "outside.git"
+        outside.write_text(self.GITDIR, encoding="utf-8")
+        for label, make in (
+            ("missing", lambda path: path.unlink()),
+            ("link to a file", lambda path: (path.unlink(), path.symlink_to(outside))),
+            ("dangling link", lambda path: (path.unlink(), path.symlink_to(self.tmp / "absent"))),
+        ):
+            with self.subTest(label):
+                git = self.worktree / ".git"
+                if git.is_symlink() or git.exists():
+                    git.unlink()
+                git.write_text(self.GITDIR, encoding="utf-8")
+                make(git)
+                result = self.exec_()
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn(".git", result.stderr)
+                self.assertIn("lien symbolique", result.stderr)
+                self.assertEqual([], self.calls())
+                self.assertFalse(self.log_file.exists())
+        self.assertEqual(self.GITDIR, outside.read_text(encoding="utf-8"))
 
     def test_exec_opens_the_network_only_for_on(self):
         self.assertEqual(0, self.exec_(network="on").returncode)
@@ -918,7 +956,7 @@ class ExecTest(LauncherCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("src/absent", result.stderr)
         self.assertEqual([], self.docker_runs())
-        self.assertEqual(["src"], [path.name for path in self.worktree.iterdir()])
+        self.assertEqual([".git", "src"], sorted(path.name for path in self.worktree.iterdir()))
 
     def test_exec_refuses_malformed_arguments(self):
         colon = self.tmp / "a:b"
@@ -1003,7 +1041,8 @@ class CiJsonTest(LauncherCase):
     def docker_runs(self):
         return [call for call in self.calls() if call[:1] == ["run"]]
 
-    def test_ci_json_mounts_the_repo_read_only_offline(self):
+    def test_ci_json_mounts_only_the_ci_file_read_only_offline(self):
+        (self.repo / ".env").write_text("APP_KEY=x\n", encoding="utf-8")
         result = self.ci_json(CQA_STUB_CI_JSON='{"build:npm": {"script": ["npm ci"]}}', **SECRETS)
         self.assertEqual(0, result.returncode, result.stderr)
         runs = self.docker_runs()
@@ -1018,7 +1057,8 @@ class CiJsonTest(LauncherCase):
         self.assertTrue(has_pair(call, "--env", "HOME=/tmp"))
         self.assertTrue(has_pair(call, "--tmpfs", "/tmp"))
         mounts = [call[i + 1] for i in range(len(call) - 1) if call[i] == "-v"]
-        self.assertEqual([f"{self.repo}:/repo:ro"], mounts)
+        self.assertEqual([f"{self.repo}/.gitlab-ci.yml:/repo/.gitlab-ci.yml:ro"], mounts)
+        self.assertNotIn("--mount", call)
         self.assertEqual(["HOME=/tmp"], env_args(call))
         for secret in ("GM_AUDIT_AUTH_USER", "GM_AUDIT_AUTH_PASS", "cqa-user", "pass-xyz-123"):
             self.assertNotIn(secret, " ".join(call))
@@ -1030,7 +1070,21 @@ class CiJsonTest(LauncherCase):
         self.assertEqual("/repo/.gitlab-ci.yml", arguments[2])
         self.assertEqual({"build:npm": {"script": ["npm ci"]}},
                          json.loads(self.out_file.read_text(encoding="utf-8")))
-        self.assertEqual([".gitlab-ci.yml"], [path.name for path in self.repo.iterdir()])
+        self.assertEqual([".env", ".gitlab-ci.yml"], sorted(path.name for path in self.repo.iterdir()))
+
+    def test_ci_json_refuses_a_ci_file_that_is_a_link(self):
+        outside = self.tmp / "elsewhere.yml"
+        outside.write_text("stages: [build]\n", encoding="utf-8")
+        for target in (outside, self.tmp / "absent.yml"):
+            with self.subTest(target=target.name):
+                (self.repo / ".gitlab-ci.yml").unlink()
+                (self.repo / ".gitlab-ci.yml").symlink_to(target)
+                self.out_file.write_text("stale", encoding="utf-8")
+                result = self.ci_json()
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn("lien symbolique", result.stderr)
+                self.assertEqual([], self.calls())
+                self.assertFalse(self.out_file.exists())
 
     def test_ci_json_without_a_ci_file_exits_3_and_needs_no_docker(self):
         (self.repo / ".gitlab-ci.yml").unlink()
@@ -1140,6 +1194,29 @@ class CiJsonTest(LauncherCase):
         result = self.run_script(folder, "x: 1\n")
         self.assertEqual(3, result.returncode)
         self.assertEqual("", result.stdout)
+
+    def test_script_prefers_the_safe_loader_of_js_yaml_3(self):
+        if shutil.which("node") is None:
+            self.skipTest("node absent")
+        # js-yaml 3: load accepts !!js/function, safeLoad does not.
+        folder = self.fake_modules(**{"js-yaml": (
+            "exports.DEFAULT_SAFE_SCHEMA = {};\n"
+            "exports.safeLoad = (text) => ({kind: 'safeLoad'});\n"
+            "exports.load = (text) => ({kind: 'load'});\n")})
+        result = self.run_script(folder, "x: 1\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("safeLoad", json.loads(result.stdout)["kind"])
+
+    def test_script_uses_load_of_js_yaml_4_whose_safe_loader_is_removed(self):
+        if shutil.which("node") is None:
+            self.skipTest("node absent")
+        # js-yaml 4: load is safe by default and safeLoad only throws.
+        folder = self.fake_modules(**{"js-yaml": (
+            "exports.safeLoad = () => { throw new Error('safeLoad is removed in js-yaml 4'); };\n"
+            "exports.load = (text) => ({kind: 'load'});\n")})
+        result = self.run_script(folder, "x: 1\n")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("load", json.loads(result.stdout)["kind"])
 
 
 class PullImageTest(LauncherCase):

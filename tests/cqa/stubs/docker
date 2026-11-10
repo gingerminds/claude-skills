@@ -26,13 +26,21 @@ if log:
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(args) + "\n")
 
+# The read-only input of "secrets" and the CI file of "ci-json" are files, the .git of "exec" a
+# file or a folder (never a link); every other bind source is a folder.
+FILE_TARGETS = ("/in/input:ro", "/repo/.gitlab-ci.yml:ro")
 for index, arg in enumerate(args[:-1]):
     if arg == "-v" and args[index + 1].startswith("/"):
         host, _, target = args[index + 1].partition(":")
-        # Only the read-only input of "secrets" is a file; every other bind source is a folder.
-        expected = os.path.isfile if target == "/in/input:ro" else os.path.isdir
+        if target == "/work/.git:ro":
+            kind, expected = "file or directory", lambda path: not os.path.islink(path) and (
+                os.path.isfile(path) or os.path.isdir(path))
+        elif target in FILE_TARGETS:
+            kind, expected = "file", os.path.isfile
+        else:
+            kind, expected = "directory", os.path.isdir
         if not expected(host):
-            sys.stderr.write("stub: bind mount source is not a " + ("file" if target == "/in/input:ro" else "directory") + ": " + host + "\n")
+            sys.stderr.write(f"stub: bind mount source is not a {kind}: {host}\n")
             sys.exit(99)
 
 needle = os.environ.get("CQA_STUB_FAIL")

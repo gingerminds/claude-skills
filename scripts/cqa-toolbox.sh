@@ -925,6 +925,7 @@ cmd_secrets() {
 }
 
 # .gitlab-ci.yml converted to JSON by the yaml module of the agence image (merge keys resolved).
+# js-yaml 3 is read with safeLoad (its load accepts !!js/function); js-yaml 4 has a safe load.
 # Exits 3 when no module is found, 1 on invalid YAML or when the file is not a mapping.
 IFS= read -r -d '' CI_JSON_JS <<'SCRIPT' || true
 const {createRequire}=require("module");
@@ -933,16 +934,17 @@ let y,legacy=false;
 try{y=r("yaml")}catch(e){try{y=r("js-yaml");legacy=true}catch(f){process.exit(3)}}
 try{
   const t=require("fs").readFileSync(process.argv[1],"utf8");
-  const d=legacy?y.load(t):y.parse(t,{merge:true,logLevel:"error"});
+  const d=legacy?(y.DEFAULT_SAFE_SCHEMA&&y.safeLoad?y.safeLoad(t):y.load(t)):y.parse(t,{merge:true,logLevel:"error"});
   if(d===null||typeof d!=="object"||Array.isArray(d)){throw new Error("le fichier n'est pas un mapping YAML")}
   process.stdout.write(JSON.stringify(d))
 }catch(e){console.error(e.message);process.exit(1)}
 SCRIPT
 
 # ci-json <repo_dir> <out_file>: .gitlab-ci.yml of <repo_dir> converted to JSON in <out_file>,
-# offline, on a read-only mount, with the yaml module of the agence image. Exit 0 and the file
-# written, 3 without a CI file, 2 without Docker or the agence image, 1 on invalid YAML (message
-# on stderr). A stale <out_file> is always removed first.
+# offline, with the yaml module of the agence image; only that file is mounted, read-only. Exit 0
+# and the file written, 3 without a CI file, 2 without Docker or the agence image or for a CI file
+# that is a symbolic link, 1 on invalid YAML (message on stderr). A stale <out_file> is always
+# removed first.
 cmd_ci_json() {
   local repo out_file out_dir uid_gid ref err rc=0
   [ "$#" -eq 2 ] || usage
@@ -955,6 +957,9 @@ cmd_ci_json() {
     *:*) die "Les chemins de la conversion ne doivent pas contenir « : » (montage Docker)." ;;
   esac
   rm -f -- "$out_file" || return 1
+  if [ -L "$repo/.gitlab-ci.yml" ]; then
+    die "ci-json : .gitlab-ci.yml est un lien symbolique dans $repo : fichier non lu."
+  fi
   if [ ! -f "$repo/.gitlab-ci.yml" ]; then
     say "ci-json : .gitlab-ci.yml est introuvable dans $repo."
     return 3
@@ -965,7 +970,8 @@ cmd_ci_json() {
     || die "L'image agence de la boîte à outils est absente ($ref) : lancez cqa-toolbox.sh pull."
   uid_gid="$(id -u):$(id -g)"
   err="$(docker run --rm --pull never --network none --cap-drop ALL --security-opt no-new-privileges \
-    --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp -v "$repo:/repo:ro" \
+    --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
+    -v "$repo/.gitlab-ci.yml:/repo/.gitlab-ci.yml:ro" \
     --entrypoint node "$ref" -e "$CI_JSON_JS" /repo/.gitlab-ci.yml 2>&1 >"$out_file" </dev/null)" || rc=$?
   if [ "$rc" -eq 0 ]; then
     return 0
@@ -1002,9 +1008,11 @@ valid_image_ref() {
 # exec <worktree> <log_file> <image> <workdir> <on|off> <timeout_s> -- <command>: one project
 # command run by sh in a disposable container that sees only the worktree (read-write, as /work),
 # as the current user, without capabilities, without the Docker socket and without any variable
-# of the workstation. The network is open only for "on". The whole output goes to <log_file>.
-# Exit: the code of the command, 124 when <timeout_s> is exceeded (the container is killed),
-# 2 for a refused argument, without Docker or without the image (it is never pulled here).
+# of the workstation. The .git entry of the worktree is mounted read-only over it: the host's git
+# reads it after the command. The network is open only for "on". The whole output goes to
+# <log_file>. Exit: the code of the command, 124 when <timeout_s> is exceeded (the container is
+# killed), 2 for a refused argument (a .git missing or a symbolic link included), without Docker
+# or without the image (it is never pulled here).
 cmd_exec() {
   local worktree log_file log_dir image workdir network timeout_s command dir uid_gid name pid
   local rc=0 timed_out=0 start
@@ -1023,6 +1031,9 @@ cmd_exec() {
   case "$worktree$log_file" in
     *:*) die "Les chemins de l'exécution ne doivent pas contenir « : » (montage Docker)." ;;
   esac
+  if [ -L "$worktree/.git" ] || { [ ! -f "$worktree/.git" ] && [ ! -d "$worktree/.git" ]; }; then
+    die "Le .git du worktree est absent ou est un lien symbolique : $worktree/.git (commande non lancée)."
+  fi
   valid_image_ref "$image" || die "Le nom d'image « $image » ne convient pas."
   case "$workdir" in
     /* | .. | ../* | */.. | */../*) die "Le dossier de travail doit rester dans le worktree : $workdir" ;;
@@ -1065,8 +1076,8 @@ cmd_exec() {
   : >"$log_file" || die "Le journal n'est pas inscriptible : $log_file"
   docker run --rm --pull never --name "$name" ${net[@]+"${net[@]}"} \
     --cap-drop ALL --security-opt no-new-privileges \
-    --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp \
-    -v "$worktree:/work" -w "$dir" \
+    --user "$uid_gid" --env HOME=/tmp --tmpfs /tmp:rw,exec,nosuid,size=2g \
+    -v "$worktree:/work" -v "$worktree/.git:/work/.git:ro" -w "$dir" \
     --entrypoint sh "$image" -c "$command" >"$log_file" 2>&1 </dev/null &
   pid=$!
   EXEC_NAME="$name"
