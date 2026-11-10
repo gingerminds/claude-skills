@@ -56,6 +56,12 @@ def resolve(requested: list, rows: list) -> tuple:
     return [entry["name"] for entry in listed if entry["name"] in chosen], unknown
 
 
+def unknown_message(unknown: list, rows: list) -> str:
+    """Return the message that names the unknown categories and lists those of the copy."""
+    listed = ", ".join(entry["name"] for entry in available(rows))
+    return f"Catégorie inconnue : {', '.join(unknown)}. Catégories de la copie : {listed}."
+
+
 def in_scope(row: dict, category_filter: Optional[list]) -> bool:
     """Return True when the row belongs to the scope: always without a filter (None or empty)."""
     if not category_filter:

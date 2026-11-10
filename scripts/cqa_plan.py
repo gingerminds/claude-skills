@@ -963,10 +963,7 @@ def _cmd_categories(args, services) -> int:
     listed = categories.available(rows)
     names, unknown = categories.resolve(args.category, rows)
     if unknown:
-        raise UsageError(
-            f"Catégorie inconnue : {', '.join(unknown)}. "
-            f"Catégories de la copie : {', '.join(entry['name'] for entry in listed)}."
-        )
+        raise UsageError(categories.unknown_message(unknown, rows))
     chosen = names or None
     stored = context.get("category_filter")
     same = set(chosen or ()) == set(stored if isinstance(stored, list) else ())

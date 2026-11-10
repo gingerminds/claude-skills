@@ -27,7 +27,7 @@ python3 "$S/cqa_plan.py" lots "$RUN"
 ```
 
 - Writes `lots.json` and prints the lots (`id`, `kind`, `needs_toolbox`, `needs_server_facts`, `needs_session`, `rows`), the rows excluded by reason and the coverage.
-- Excluded before any evaluation: `standby` (never touched), `no_fiche`, `techno` (« Non applicable » with its reason), `phase` (J0 / J+7, left as they are), `no_tools` (not evaluable, with the missing tools).
+- Excluded before any evaluation: `category` (the row is outside the `category_filter` of the run: tested first and silent, no Notion operation of any kind, not even for a row whose status a person set; counted apart as `out_of_scope`, never in `total`), `standby` (never touched), `no_fiche`, `techno` (« Non applicable » with its reason), `phase` (J0 / J+7, left as they are), `no_tools` (not evaluable, with the missing tools).
 - Order of the lots: `server`, the `code-*` lots, the `browser-*` lots without a session, the `browser-*-session` lots, then the `-outils` siblings (rows that need "Audit web" or "Crawler", or whose `tooling_hint` names a toolbox tool such as gitleaks, testssl, lighthouse, axe, Nu validator, Yellow Lab, redocly, schemathesis or a crawl).
 - A browser row needs a session when its tools include "Comptes de test" or one of its sections starts with "Back" or is "BO". Those rows go to `browser-accessibilite-session` and `browser-autres-session`, with `needs_session: true`; every other lot has `needs_session: false`. The other browser rows are evaluated without any login.
 - Lots are frozen per run: a `lots.json` written by an older version has no `needs_session`, which is read as `false`. An old run keeps its lots (no `-session` split); only a new run, or a run that runs `cqa_plan.py lots` again, gets the split.

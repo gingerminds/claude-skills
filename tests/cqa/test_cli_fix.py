@@ -266,6 +266,104 @@ class CandidatesTest(FixCase):
                              [(1, "déjà dans la MR !318", url)])
             self.assertEqual(result["flights"]["front"]["open"][0]["refs"], [1])
 
+    def make_category_run(self, root, category_filter, excluded):
+        run_dir = self.make_run(root)
+        names = {1: "SÉCURITÉ", 2: "QUALITÉ", 3: "PERFORMANCE"}
+        rows = [{"ref": ref, "page_id": f"p{ref}", "title": f"Ligne {ref}", "status": "À traiter",
+                 "assignees": [], "category": name, "automation": "Auto : détection + MR"}
+                for ref, name in names.items()]
+        (run_dir / "rows.json").write_text(json.dumps({"rows": rows}), encoding="utf-8")
+        context = json.loads((run_dir / "context.json").read_text(encoding="utf-8"))
+        context["category_filter"] = category_filter
+        (run_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
+        (run_dir / "lots.json").write_text(json.dumps({
+            "lots": [{"id": "lot-a", "refs": [1, 2, 3]}],
+            "excluded": [{"ref": ref, "reason": "category"} for ref in excluded]}), encoding="utf-8")
+        item = {"verdict": "ko", "confidence": "high", "summary": "s", "todo": "t",
+                "human_check": None, "divergence": None, "needs_probes": [],
+                "evidence": [{"type": "file", "repo": "front", "path": "a.php"}]}
+        (run_dir / "findings" / "lot-a.json").write_text(json.dumps({
+            "findings": [{"ref": ref, **item} for ref in names]}), encoding="utf-8")
+        return run_dir
+
+    def candidate_rows(self, out):
+        result = json.loads(out)
+        return [(s["alias"], [r["ref"] for r in s["rows"]])
+                for k in result["keys"] for s in k["sections"]]
+
+    def test_candidates_category_restricts_the_run_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_category_run(Path(tmp), ["SÉCURITÉ", "QUALITÉ"], [3])
+            with mock.patch.object(fix_gitlab, "in_flight", self.empty_flight):
+                self.calls = {}
+                code, out, err = self.run_main(["candidates", run_dir])
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.candidate_rows(out), [("securite", [1]), ("qualite", [2])])
+                self.assertEqual(json.loads(out)["left"], [])
+                code, out, err = self.run_main(["candidates", run_dir, "--category", "securite"])
+            self.assertEqual(code, 0, err)
+            self.assertEqual(self.candidate_rows(out), [("securite", [1])])
+            result = json.loads(out)
+            self.assertEqual(result["left"], [])
+            written = json.loads((run_dir / "fix" / "candidates.json").read_text(encoding="utf-8"))
+            self.assertEqual(written, result)
+
+    def test_candidates_category_is_repeatable_and_resolves_names_and_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_category_run(Path(tmp), None, [])
+            with mock.patch.object(fix_gitlab, "in_flight", self.empty_flight):
+                self.calls = {}
+                code, out, err = self.run_main(
+                    ["candidates", run_dir, "--category", "Qualité", "--category", "SÉCURITÉ"])
+            self.assertEqual(code, 0, err)
+            self.assertEqual(self.candidate_rows(out), [("securite", [1]), ("qualite", [2])])
+
+    def test_candidates_category_on_a_full_run_restricts_the_sections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_category_run(Path(tmp), None, [])
+            with mock.patch.object(fix_gitlab, "in_flight", self.empty_flight):
+                self.calls = {}
+                code, out, err = self.run_main(["candidates", run_dir, "--category", "performance"])
+            self.assertEqual(code, 0, err)
+            self.assertEqual(self.candidate_rows(out), [("performance", [3])])
+            self.assertEqual(json.loads(out)["left"], [])
+
+    def test_candidates_category_outside_the_run_filter_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_category_run(Path(tmp), ["SÉCURITÉ", "QUALITÉ"], [3])
+            code, out, err = self.run_main(["candidates", run_dir, "--category", "performance"])
+            self.assertEqual(code, 2)
+            self.assertIn("La catégorie performance est hors du périmètre du run "
+                          "(SÉCURITÉ, QUALITÉ).", err)
+            self.assertEqual(out, "")
+            self.assertFalse((run_dir / "fix" / "candidates.json").exists())
+            code, out, err = self.run_main(
+                ["candidates", run_dir, "--category", "securite", "--category", "performance"])
+            self.assertEqual(code, 2)
+            self.assertIn("La catégorie performance est hors du périmètre du run", err)
+
+    def test_candidates_unknown_category_exits_2_with_the_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_category_run(Path(tmp), None, [])
+            code, out, err = self.run_main(["candidates", run_dir, "--category", "a11y"])
+            self.assertEqual(code, 2)
+            self.assertIn("Catégorie inconnue : a11y. Catégories de la copie : "
+                          "SÉCURITÉ, QUALITÉ, PERFORMANCE.", err)
+            self.assertEqual(out, "")
+            self.assertFalse((run_dir / "fix" / "candidates.json").exists())
+
+    def test_candidates_forced_ref_outside_the_requested_category_is_noted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_category_run(Path(tmp), None, [])
+            with mock.patch.object(fix_gitlab, "in_flight", self.empty_flight):
+                self.calls = {}
+                code, out, err = self.run_main(
+                    ["candidates", run_dir, "--category", "securite", "--refs", "CQ-2"])
+            self.assertEqual(code, 0, err)
+            result = json.loads(out)
+            self.assertEqual(self.candidate_rows(out), [("securite", [1])])
+            self.assertIn("CQ-2 hors des catégories demandées : ignorée.", result["notes"])
+
     def test_candidates_without_rows_json_exits_2(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.make_run(Path(tmp))

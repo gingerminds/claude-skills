@@ -88,6 +88,15 @@ Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépar
 - **Identité git** (`user.name`, `user.email`) configurée dans les repos du projet, pour le mode `fix` : les commits sont ceux du lead. Avec `commit.gpgSign`, la signature doit fonctionner sans saisie.
 - **Claude in Chrome** : extension installée et connectée, pour les contrôles navigateur. Le lead s'y connecte lui-même quand le site est protégé.
 
+### Limiter à une catégorie : `--category`
+
+`--category "<catégorie>"` limite l'audit aux lignes d'une catégorie de la checklist (« Sécurité » seule, par exemple), sans document ni autre préparation. L'option se répète (`--category sécurité --category qualité`), se combine avec `--phase` par intersection et s'accepte avec l'audit, `rerun`, `recette` et `fix`. Le nom se compare sans accent ni casse, avec le nom de la catégorie dans la copie Notion ou son alias de section (`securite`, `seo`) ; un nom inconnu affiche les catégories de la copie et s'arrête.
+
+- **Hors périmètre** : les lignes des autres catégories ne reçoivent aucune opération Notion (ni statut, ni commentaire, ni assignation), même quand une personne a posé leur statut. La couverture et la synthèse ne comptent que le périmètre, et signalent « Hors périmètre : N lignes ».
+- **Lié au run** : le périmètre est enregistré dans le run (`category_filter` de `context.json`), comme la phase. Un run lancé pour une autre catégorie n'est jamais repris : « Ce run a été lancé pour une autre catégorie : nouveau run. » Les questions de contexte (pages clés, comptes de test) restent posées.
+- **`rerun` et `recette`** : l'option choisit seulement le run lancé pour le même périmètre ; le périmètre d'un run ne change jamais.
+- **`fix`** : la passe hérite du périmètre du run, et `--category` ne peut que le restreindre (une catégorie hors du périmètre du run est refusée). À répéter à chaque nouvel appel de `cqa_fix.py candidates`, comme `--refs`.
+
 ### Relancer et recetter : `rerun` et `recette`
 
 - **`/gm:cqa rerun`** : relance ciblée, sans refaire tout l'audit. Le skill choisit les lignes selon un motif : cause supprimée, outil relancé, code modifié depuis le commit audité, ou demande du lead. Il les montre au lead avant de lancer quoi que ce soit. Au démarrage, les restes d'une relance interrompue sont mis de côté et un instantané est pris ; à la clôture, les fichiers invalides sont écartés.

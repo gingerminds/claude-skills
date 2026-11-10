@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 from urllib.parse import quote
 
-from cqa import deferred, git_tools, fix_checks, fix_commands, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_stack, fix_state, fix_summary
+from cqa import categories, deferred, git_tools, fix_checks, fix_commands, fix_git, fix_gitlab, fix_gitleaks, fix_guard, fix_mr, fix_names, fix_rows, fix_stack, fix_state, fix_summary
 from cqa.checklist import STATUS_REVIEW, parse_refs, ref_label
 from cqa.notion_read import write_json, write_text
 from cqa.project import project_name
@@ -132,6 +132,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("--refs", default="", help="Réf à ajouter, séparées par des virgules (CQ-12)")
     sub.add_argument("--without", default="", help="Réf à retirer, séparées par des virgules")
+    sub.add_argument("--category", action="append", default=[], metavar="NOM",
+                     help="catégorie à traiter (répétable) : restreint le périmètre du run")
     sub = _command(commands, "commands",
                    "commandes de vérification du projet, détectées depuis sa CI et ses manifestes",
                    _cmd_commands)
@@ -585,6 +587,7 @@ def _cmd_candidates(args, services: Services) -> int:
     lots = _read_run_json(run_dir, "lots.json", "cqa_plan.py lots")
     if not isinstance(rows, list) or not isinstance(lots.get("lots"), list):
         raise UsageError("rows.json ou lots.json : listes « rows » et « lots » attendues.")
+    requested = _requested_categories(args.category, rows, context.get("category_filter"))
     excluded = [entry for entry in lots.get("excluded") or [] if isinstance(entry, dict)]
     findings = latest_findings(
         run_dir, lots["lots"], lambda lot, name: read_grounded_findings(run_dir, context, lot, name)
@@ -594,13 +597,39 @@ def _cmd_candidates(args, services: Services) -> int:
     try:
         result = fix_rows.select(
             rows, findings, excluded, repos, access, flights,
-            refs=refs, without=without, run_dir=run_dir,
+            refs=refs, without=without, run_dir=run_dir, categories=requested,
         )
     except ValueError as error:
         raise UsageError(str(error))
     write_json(run_dir / "fix" / "candidates.json", result)
     _emit(result)
     return EXIT_OK
+
+
+def _requested_categories(names: list, rows: list, run_filter) -> Optional[frozenset]:
+    """Return the Notion names of the categories asked with --category (None without any).
+
+    A name that is not in the copy is a usage error, and so is a name outside the category
+    filter of the run: the fix may narrow the scope of the audit, never widen it. A name
+    that gives several categories (a shared alias) keeps those of the filter.
+    """
+    if not names:
+        return None
+    _, unknown = categories.resolve(names, rows)
+    if unknown:
+        raise UsageError(categories.unknown_message(unknown, rows))
+    scope = run_filter if isinstance(run_filter, list) and run_filter else None
+    kept = set()
+    for name in names:
+        found = categories.resolve([name], rows)[0]
+        if scope is not None:
+            found = [item for item in found if item in scope]
+            if not found:
+                raise UsageError(
+                    f"La catégorie {name} est hors du périmètre du run ({', '.join(map(str, scope))})."
+                )
+        kept.update(found)
+    return frozenset(kept)
 
 
 def _flights(repos: list, access: list, run) -> dict:

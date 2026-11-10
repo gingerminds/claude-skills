@@ -7,7 +7,7 @@ from cqa.checklist import fiche_filename, ref_label
 
 OPEN_STATUSES = ("À traiter", "Mise en place partielle")
 FIXABLE = {"Auto : détection + MR": False, "Semi-auto : MR à valider": True}
-SILENT_EXCLUSIONS = ("phase", "standby", "techno")
+SILENT_EXCLUSIONS = ("phase", "standby", "techno", "category")
 UNEVALUATED_EXCLUSIONS = ("no_tools", "no_fiche")
 UNEVALUATED = "non évaluée par l'audit : lancer d'abord une relance"
 NOTHING_TO_FIX = "rien à corriger selon l'audit"
@@ -31,6 +31,7 @@ def select(
     refs=(),
     without=(),
     run_dir: Optional[Path] = None,
+    categories: Optional[frozenset] = None,
 ) -> dict:
     """Return the candidate keys, the rows left out with the reason, and a time estimate.
 
@@ -41,7 +42,9 @@ def select(
     findings is {ref: latest finding}; excluded the entries of lots.json; repos the repos of
     context.json; access the entries of doctor.json; flights {repo: in_flight}. refs are rows
     the lead adds (they skip the automation, outside-the-repo and closed MR checks), without
-    rows the lead removes. A finding with in_repo false leaves its row to the devs. run_dir,
+    rows the lead removes. A finding with in_repo false leaves its row to the devs. categories,
+    when given, are the Notion names of the only categories to take: any other row is dropped
+    without an entry in left (the category scope of the run is already in excluded). run_dir,
     when given, tells whether fiches/CQ-xxx.md exists. A row left carries "repos", the repos its
     evidence names ([] when none or without a finding), so that the MR of another repo leaves
     it out; a candidate row keeps the status of the copy (status_before of fix/mr-links.json).
@@ -62,6 +65,8 @@ def select(
             notes.append(f"{ref_label(ref)} a le statut « {by_ref[ref].get('status')} » : ignorée.")
         elif reasons.get(ref) in SILENT_EXCLUSIONS:
             notes.append(f"{ref_label(ref)} exclue de ce run ({reasons[ref]}) : ignorée.")
+        elif not _requested(by_ref[ref], categories):
+            notes.append(f"{ref_label(ref)} hors des catégories demandées : ignorée.")
         else:
             forced.add(ref)
     keys, left = {}, []
@@ -70,6 +75,8 @@ def select(
         if not isinstance(ref, int) or row.get("status") not in OPEN_STATUSES:
             continue
         if reasons.get(ref) in SILENT_EXCLUSIONS or ref in without:
+            continue
+        if not _requested(row, categories):
             continue
         lead = ref in forced
         cited = _cited(findings.get(ref), repo_names)
@@ -134,6 +141,11 @@ def _flight_notes(flights: dict) -> list:
             if note not in notes:
                 notes.append(note)
     return notes
+
+
+def _requested(row: dict, categories: Optional[frozenset]) -> bool:
+    """True when no category was requested or the row is in one of them."""
+    return categories is None or row.get("category") in categories
 
 
 def _verdict(row: dict, finding, exclusion, lead: bool):

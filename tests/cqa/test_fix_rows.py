@@ -96,6 +96,49 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(kept_refs(result), [1])
         self.assertEqual(result["left"], [])
 
+    def test_category_exclusion_is_silent(self):
+        rows = [row(1), row(2, category="QUALITÉ")]
+        findings = {1: finding(1), 2: finding(2)}
+        excluded = [{"ref": 2, "reason": "category"}]
+        result = select(rows, findings, excluded)
+        self.assertEqual(kept_refs(result), [1])
+        self.assertEqual(left_reasons(result), {})
+        result = select(rows, findings, excluded, refs=(2,))
+        self.assertEqual(kept_refs(result), [1])
+        self.assertIn("CQ-2 exclue de ce run (category) : ignorée.", result["notes"])
+
+    def test_categories_argument_restricts_without_leaving_rows(self):
+        rows = [row(1), row(2, category="QUALITÉ"), row(3, category="QUALITÉ", automation="Manuel"),
+                row(4, category=None)]
+        findings = {n: finding(n) for n in (1, 2, 3, 4)}
+        result = select(rows, findings, categories=frozenset({"SÉCURITÉ"}))
+        self.assertEqual(kept_refs(result), [1])
+        self.assertEqual(result["left"], [])
+        result = select(rows, findings, categories=frozenset({"SÉCURITÉ", "QUALITÉ"}))
+        self.assertEqual(kept_refs(result), [1, 2])
+        self.assertEqual(left_reasons(result), {3: "Manuel"})
+
+    def test_categories_argument_none_keeps_every_category(self):
+        rows = [row(1), row(2, category="QUALITÉ"), row(3, category="QUALITÉ", automation="Manuel")]
+        findings = {n: finding(n) for n in (1, 2, 3)}
+        result = select(rows, findings, categories=None)
+        self.assertEqual(kept_refs(result), [1, 2])
+        self.assertEqual(left_reasons(result), {3: "Manuel"})
+
+    def test_lead_ref_outside_the_requested_categories_is_noted(self):
+        rows = [row(1), row(2, category="QUALITÉ")]
+        findings = {1: finding(1), 2: finding(2)}
+        result = select(rows, findings, refs=(2,), categories=frozenset({"SÉCURITÉ"}))
+        self.assertEqual(kept_refs(result), [1])
+        self.assertIn("CQ-2 hors des catégories demandées : ignorée.", result["notes"])
+        result = select(rows, findings, refs=(1,), categories=frozenset({"SÉCURITÉ"}))
+        self.assertEqual(kept_refs(result), [1])
+        self.assertTrue([item for item in key_rows(result["keys"][0]) if item["ref"] == 1][0]["lead"])
+        self.assertEqual(result["notes"], [])
+
+    def test_silent_exclusions_include_the_category(self):
+        self.assertEqual(fix_rows.SILENT_EXCLUSIONS, ("phase", "standby", "techno", "category"))
+
     def test_candidates_skip_rows_in_open_mrs(self):
         url = "https://gitlab.example.org/acme/shop/-/merge_requests/12"
         flights = {"front": flight(

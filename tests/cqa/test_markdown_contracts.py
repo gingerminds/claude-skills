@@ -9,7 +9,7 @@ import cqa_fix
 import cqa_notion
 import cqa_plan
 import cqa_ssh_ro
-from cqa import fix_guard, fix_names, fix_state, ssh_ro
+from cqa import categories, fix_guard, fix_names, fix_state, ssh_ro
 from cqa.findings import VERDICTS, apply_guardrails, validate_document
 from cqa.plan import STATUS_FOR_VERDICT
 
@@ -37,7 +37,10 @@ EXPECTED_REFERENCES = {
     "assign.md",
     "fix.md",
 }
-ARGUMENT_HINT = '"[diagnostic | assign | rerun | recette | fix] [--phase \\"MEL J0\\"] [--dry-run]"'
+ARGUMENT_HINT = (
+    '"[diagnostic | assign | rerun | recette | fix] [--phase \\"MEL J0\\"] '
+    '[--category \\"<catégorie>\\"] [--dry-run]"'
+)
 MAX_DESCRIPTION = 1536
 SCRIPTS_LINE = 'S="${CLAUDE_SKILL_DIR}/../../scripts"'
 
@@ -466,9 +469,93 @@ class SkillTest(unittest.TestCase):
 
     def test_anything_else_hint_matches_the_argument_hint(self):
         self.assertIn(
-            "[diagnostic | assign | rerun | recette | fix] [--phase \"MEL J0\"] [--dry-run]` and stop.",
+            "[diagnostic | assign | rerun | recette | fix] [--phase \"MEL J0\"] "
+            "[--category \"<catégorie>\"] [--dry-run]` and stop.",
             _text(SKILL),
         )
+
+    def test_category_scope_is_documented(self):
+        text = _text(SKILL)
+        arguments = _section(text, "2. Arguments")
+        for needle in (
+            '- `--category "<catégorie>"`',
+            "`category_filter`",
+            "cqa_plan.py categories",
+            "Repeatable",
+            "combined with `--phase` by intersection",
+            "audit, `rerun`, `recette` and `fix`",
+            "« Hors périmètre »",
+            "Section 4 still asks all its context questions",
+            "only chooses the run whose filter is the same",
+            "can only narrow it",
+        ):
+            with self.subTest(section="2", needle=needle):
+                self.assertIn(needle, arguments)
+        resume = _section(text, "3. Resume")
+        for needle in (
+            'cqa_plan.py categories "$RUN"',
+            "`same`",
+            "« Ce run a été lancé pour une autre catégorie : nouveau run. »",
+        ):
+            with self.subTest(section="3", needle=needle):
+                self.assertIn(needle, resume)
+        diagnostic = _section(text, "5. Diagnostic")
+        for needle in (
+            'cqa_plan.py" categories "$RUN" --category "<catégorie>" --write',
+            "Exit 2",
+            "« Catégorie inconnue : <nom>. Catégories de la copie : <liste>. »",
+            "« Hors périmètre »",
+        ):
+            with self.subTest(section="5", needle=needle):
+                self.assertIn(needle, diagnostic)
+        rows = diagnostic.index('cqa_notion.py" rows "$RUN"')
+        resolved = diagnostic.index('cqa_plan.py" categories')
+        coverage = diagnostic.index('cqa_plan.py" coverage "$RUN"')
+        self.assertLess(rows, resolved)
+        self.assertLess(resolved, coverage)
+        for heading in ("10. Rerun", "11. Recette"):
+            section = _section(text, heading)
+            for needle in ('cqa_plan.py categories "$RUN"', "--category", "`same`", "never changes"):
+                with self.subTest(section=heading, needle=needle):
+                    self.assertIn(needle, section)
+        rerun = _section(text, "10. Rerun")
+        self.assertIn("`runs` does not tell the filter of a run", rerun)
+        self.assertLess(rerun.index("`runs` does not tell"), rerun.index("« Utiliser le run <run_id> ? »"))
+        fix = _section(text, "12. Fix")
+        for needle in (
+            'cqa_fix.py" candidates "$RUN" --category "<catégorie>"',
+            "repeat `--category` at every new call, like `--refs` and `--without`",
+            "`--category` included",
+            "« La catégorie <nom> est hors du périmètre du run (<filtre>). »",
+            "« Catégorie inconnue : <nom>. Catégories de la copie : <liste>. »",
+        ):
+            with self.subTest(section="12", needle=needle):
+                self.assertIn(needle, fix)
+        self.assertLess(fix.index('cqa_fix.py" candidates "$RUN"\n'),
+                        fix.index('cqa_fix.py" candidates "$RUN" --category'))
+        for name, needles in (
+            ("context.md", ("`category_filter`", "category_filter\": null")),
+            ("lots.md", ("`category`", "`out_of_scope`")),
+            ("diagnostic.md", ("`out_of_scope`", "« Hors périmètre : <out_of_scope> lignes")),
+        ):
+            reference = _text(REFERENCES / name)
+            for needle in needles:
+                with self.subTest(reference=name, needle=needle):
+                    self.assertIn(needle, reference)
+        readme = _text(ROOT / "README.md")
+        self.assertIn('`--category "<catégorie>"`', readme)
+        self.assertIn("Hors périmètre", readme)
+
+    def test_category_scope_commands_and_messages_match_the_code(self):
+        self.assertLessEqual({"--category", "--write"}, _python_commands(cqa_plan)["categories"])
+        self.assertIn("--category", _python_commands(cqa_fix)["candidates"])
+        text = _text(SKILL)
+        unknown = categories.unknown_message(["<nom>"], [{"category": "<liste>"}])
+        self.assertIn(f"« {unknown} »", text)
+        rows = [{"category": "<nom>"}, {"category": "<filtre>"}]
+        with self.assertRaises(cqa_fix.UsageError) as raised:
+            cqa_fix._requested_categories(["<nom>"], rows, ["<filtre>"])
+        self.assertIn(f"« {raised.exception} »", text)
 
     def test_recette_gives_the_fix_info_to_the_agents(self):
         recette = _section(_text(SKILL), "11. Recette")

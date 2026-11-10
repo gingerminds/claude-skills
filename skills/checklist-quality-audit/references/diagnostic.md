@@ -247,10 +247,11 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" coverage "$RUN"
 ```
 
-It prints `{"total", "evaluable", "evaluable_human", "partial", "not_evaluable", "deferred", "na", "standby", "gains": [{"tool", "action", "rows"}]}`.
+It prints `{"total", "evaluable", "evaluable_human", "partial", "not_evaluable", "deferred", "na", "standby", "out_of_scope", "gains": [{"tool", "action", "rows"}]}`.
 
 - `evaluable_human` is a part of `evaluable`: never add them.
 - Rows without fiche = `total` minus `evaluable`, `partial`, `not_evaluable`, `deferred`, `na` and `standby`.
+- `out_of_scope` counts the rows outside the `category_filter` of the run (0 without a filter): `total` and every other number count only the rows of the scope, and the gains only those rows.
 
 ## 10.1 Account for a restricted role
 
@@ -262,7 +263,7 @@ After `rows.json` is read and the coverage is computed, before « Lancer l'audit
 ## 11. What the lead sees
 
 1. The table of checks, in French: « Contrôle | Résultat | Outil couvert ».
-2. The coverage: « <evaluable>/<total> lignes évaluables, dont <evaluable_human> avec validation humaine ; <partial> partielles (un outil manque) ; <not_evaluable> non évaluables ; <deferred> reportées à J0 / J+7 ; <na> non applicables (techno) ; <standby> en standby. » Add « <n> sans fiche dans le modèle » when there are some.
+2. The coverage: « <evaluable>/<total> lignes évaluables, dont <evaluable_human> avec validation humaine ; <partial> partielles (un outil manque) ; <not_evaluable> non évaluables ; <deferred> reportées à J0 / J+7 ; <na> non applicables (techno) ; <standby> en standby. » Add « <n> sans fiche dans le modèle » when there are some, and, when `out_of_scope` is not 0, « Hors périmètre : <out_of_scope> lignes (catégories : <category_filter>). » (« ligne » when there is only one; the names are those of `category_filter` in `context.json`).
 3. The gains, one line each: « <action> : +<rows> lignes (<tool>) ».
 4. The gaps found: repo not on `develop` up to date, preprod behind, `PROJECT.md` that cites another repo.
 
