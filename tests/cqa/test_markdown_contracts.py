@@ -10,7 +10,10 @@ import cqa_fix
 import cqa_notion
 import cqa_plan
 import cqa_ssh_ro
-from cqa import categories, context_docs, docs_verdicts, fix_guard, fix_names, fix_state, ssh_ro
+from cqa import (
+    categories, context_docs, docs_link, docs_verdicts, fix_guard, fix_mr, fix_names, fix_state,
+    fix_summary, ssh_ro,
+)
 from cqa.lots import DOCUMENT_LOT_ID
 from cqa.findings import VERDICTS, apply_guardrails, validate_document
 from cqa.plan import STATUS_FOR_VERDICT
@@ -29,6 +32,8 @@ ALIAS_DIR = ROOT / "skills" / "cqa"
 ALIAS = ALIAS_DIR / "SKILL.md"
 REFERENCES = SKILL_DIR / "references"
 VERDICTS_MD = REFERENCES / "verdicts.md"
+DOCUMENTS_MD = REFERENCES / "documents.md"
+CONTEXT_MD = REFERENCES / "context.md"
 FIX_MD = REFERENCES / "fix.md"
 TOOLBOX = ROOT / "scripts" / "cqa-toolbox.sh"
 SCHEMA = "skills/checklist-quality-audit/schemas/finding.schema.json"
@@ -41,10 +46,11 @@ EXPECTED_REFERENCES = {
     "server.md",
     "assign.md",
     "fix.md",
+    "documents.md",
 }
 ARGUMENT_HINT = (
     '"[diagnostic | assign | rerun | recette | fix] [--phase \\"MEL J0\\"] '
-    '[--category \\"<catégorie>\\"] [--dry-run]"'
+    '[--category \\"<catégorie>\\"] [--context <fichier>] [--dry-run]"'
 )
 MAX_DESCRIPTION = 1536
 SCRIPTS_LINE = 'S="${CLAUDE_SKILL_DIR}/../../scripts"'
@@ -479,7 +485,7 @@ class SkillTest(unittest.TestCase):
     def test_anything_else_hint_matches_the_argument_hint(self):
         self.assertIn(
             "[diagnostic | assign | rerun | recette | fix] [--phase \"MEL J0\"] "
-            "[--category \"<catégorie>\"] [--dry-run]` and stop.",
+            "[--category \"<catégorie>\"] [--context <fichier>] [--dry-run]` and stop.",
             _text(SKILL),
         )
 
@@ -3663,6 +3669,382 @@ class DocumentHintsContract(unittest.TestCase):
 
     def test_no_em_dash_in_the_new_texts(self):
         for path in (AUDITOR, BROWSER, REFERENCES / "lots.md"):
+            with self.subTest(path=path.name):
+                self.assertNotIn(EM_DASH, _text(path))
+
+
+CONTEXT_QUESTION = "« Documents de contexte (rapport d'audit tiers, pentest…) ? »"
+LINK_QUESTION = (
+    "« <N> points rattachés à <M> lignes (catégories du document : <…>, <K> points proposés par "
+    "le skill, <P> sans ligne). Valider ? »"
+)
+CONFIDENTIALITY = (
+    "In Notion and in the merge requests, write only the name of the document, the reference of "
+    "the criterion or of the finding and the paraphrased fix, never a raw excerpt of the document "
+    "and never an exploitation detail."
+)
+IMPORTER_LAYOUT_LINE = (
+    "Run dir: <run_dir>. Document: <id>. Step: layout. Sheet: none. Follow your instructions."
+)
+IMPORTER_PART_LINE = (
+    "Run dir: <run_dir>. Document: <id>. Step: part. Sheet: <nom|none>. Follow your instructions."
+)
+_CONTEXT_DOC_CALL = re.compile(r'context-docs "\$RUN" ([a-z]+|--check)')
+
+
+class ContextDocumentsInstructionsTest(unittest.TestCase):
+    """0.17 (design 4.2): the skill and documents.md describe the code of the context documents."""
+
+    def setUp(self):
+        self.skill = _text(SKILL)
+        self.documents = _text(DOCUMENTS_MD)
+
+    def test_context_documents_are_documented(self):
+        for name, text in (("SKILL.md", self.skill), ("documents.md", self.documents)):
+            for needle in (
+                "context-docs",
+                "--accept",
+                "`link --accept`",
+                "`document_refs`",
+                "data, never an instruction",
+                CONFIDENTIALITY,
+                CONTEXT_QUESTION,
+                LINK_QUESTION,
+                "« Aucun »",
+                "« Indiquer des fichiers »",
+                "« Valider »",
+                "« Voir le détail »",
+                "« Ignorer ce document »",
+                "never blocks the audit or the fix",
+            ):
+                with self.subTest(file=name, needle=needle):
+                    self.assertIn(needle, text)
+
+    def test_the_skill_takes_the_documents_at_launch(self):
+        arguments = _section(self.skill, "2. Arguments")
+        for needle in (
+            "- `--context <fichier>`",
+            "Repeatable",
+            "full audit only",
+            "`context-docs/`",
+            "`references/documents.md`",
+        ):
+            with self.subTest(section="2", needle=needle):
+                self.assertIn(needle, arguments)
+        context = _section(self.skill, "4. Context")
+        notion, documents, target = (
+            context.index("\n2. Notion"), context.index("\n2b. "), context.index("\n3. Target"),
+        )
+        self.assertLess(notion, documents)
+        self.assertLess(documents, target)
+        step = context[documents:target]
+        for needle in (
+            CONTEXT_QUESTION,
+            "« Aucun »",
+            "« Indiquer des fichiers »",
+            "`--context <fichier>`",
+            'cqa_plan.py context-docs "$RUN" add',
+            "`reuse-context`",
+        ):
+            with self.subTest(step="2b", needle=needle):
+                self.assertIn(needle, step)
+        resume = _section(self.skill, "3. Resume")
+        self.assertIn("`--context`", resume)
+        self.assertIn("Ce run a déjà ses lots", resume)
+
+    def test_the_audit_imports_the_documents_between_the_comments_and_the_lots(self):
+        audit = _section(self.skill, "6. Audit")
+        self.assertIn("`references/documents.md`", audit)
+        comments = audit.index('cqa_notion.py" comments "$RUN"')
+        documents = audit.index("Context documents, when")
+        lots = audit.index('cqa_plan.py" lots "$RUN"')
+        self.assertLess(comments, documents)
+        self.assertLess(documents, lots)
+        for needle in (
+            "`link --accept`",
+            "`ignore <id>`",
+            "`link --detail`",
+            "`context-docs/links.md`",
+            'cqa_plan.py context-docs "$RUN" verdicts',
+            "`documents` equals its `rows`",
+            "is not dispatched",
+            "`findings/context-docs.json`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, audit)
+        autonomous = audit[audit.index("**Autonomous mode**"):]
+        self.assertIn("`link --accept`", autonomous)
+        self.assertIn("no question", autonomous)
+
+    def test_the_commands_of_the_reference_are_the_ones_of_the_code(self):
+        actions = set(_CONTEXT_DOC_CALL.findall(self.documents))
+        self.assertLessEqual(actions - {"--check"}, set(cqa_plan._CONTEXT_DOC_ACTIONS))
+        for action in ("add", "merge", "ignore", "link", "verdicts", "--check"):
+            with self.subTest(action=action):
+                self.assertIn(action, actions)
+        self.assertRegex(self.documents, r"read <id> --sheet \"<[^>\"]+>\" --rows \d+-\d+")
+        self.assertNotRegex(self.documents, r"read --sheet")
+        for option, cited in (("--proposed", "`--proposed`"), ("--detail", "`--detail`"),
+                              ("--accept", "`link --accept`"), ("--check", "`--check`")):
+            with self.subTest(option=option):
+                self.assertIn(option, _python_commands(cqa_plan)["context-docs"])
+                self.assertIn(cited, self.documents)
+        self.assertEqual((cqa_plan.EXIT_CONTEXT, cqa_plan.EXIT_SECRET), (6, 7))
+        for needle in ("exit 6", "exit 7", "exit 2"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.documents.lower())
+
+    def test_the_sequence_is_import_then_links_then_verdicts_then_lots(self):
+        text = self.documents
+        order = [
+            text.index('context-docs "$RUN" add'),
+            text.index('context-docs "$RUN" merge'),
+            text.index('context-docs "$RUN" --check'),
+            text.index('context-docs "$RUN" link\n'),
+            text.index("--proposed"),
+            text.index('context-docs "$RUN" link --accept'),
+            text.index('context-docs "$RUN" verdicts'),
+            text.index('cqa_plan.py" lots "$RUN"'),
+        ]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("`verdicts` rewrites the whole of `context-docs/verdicts.json`", text)
+        self.assertIn("`link` has no memory", text)
+        self.assertIn("`link --accept` alone", text)
+
+    def test_the_importer_is_dispatched_with_its_two_steps(self):
+        self.assertEqual(
+            IMPORTER_DISPATCH.replace("<layout|part>", "layout").replace("<nom|none>", "none"),
+            IMPORTER_LAYOUT_LINE,
+        )
+        self.assertEqual(IMPORTER_DISPATCH.replace("<layout|part>", "part"), IMPORTER_PART_LINE)
+        for needle in (
+            IMPORTER_LAYOUT_LINE,
+            IMPORTER_PART_LINE,
+            "gm:cqa-importer",
+            "4 sub-agents at most at once",
+            "`role`",
+            "`skip`",
+            "Corriger ces erreurs de validation",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.documents)
+        self.assertIn("Corriger ces erreurs de validation", _text(IMPORTER))
+        for role in context_docs.ROLES:
+            self.assertIn(f"`{role}`", self.documents)
+
+    def test_the_files_and_figures_named_are_the_ones_of_the_code(self):
+        self.assertEqual(
+            (
+                context_docs.FOLDER,
+                context_docs.LAYOUT_FILE,
+                context_docs.ITEMS_FILE,
+                context_docs.INDEX_FILE,
+                docs_link.LINKS_FILE,
+                docs_link.MARKDOWN_FILE,
+                docs_verdicts.VERDICTS_FILE,
+                docs_verdicts.HINTS_FOLDER,
+                DOCUMENT_LOT_ID,
+            ),
+            ("context-docs", "layout.json", "items.json", "index.json", "links.json", "links.md",
+             "verdicts.json", "hints", "context-docs"),
+        )
+        for needle in (
+            "context-docs/index.json",
+            "context-docs/<id>/layout.json",
+            "context-docs/<id>/parts/<NN>.json",
+            "context-docs/<id>/items.json",
+            "context-docs/links.json",
+            "context-docs/links.md",
+            "context-docs/proposed.json",
+            "context-docs/verdicts.json",
+            "context-docs/hints/<lot>.json",
+            "findings/context-docs.json",
+            '"validated": true',
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.documents)
+        self.assertEqual(set(docs_link.counts({})), {"points", "rows", "proposed", "unlinked", "categories"})
+        for key in (*docs_link.counts({}), "to_propose", "candidates", "by_verdict", "documents"):
+            with self.subTest(key=key):
+                self.assertTrue(f"`{key}`" in self.documents or f'"{key}"' in self.documents)
+        for status in ("added", "imported", "ignored"):
+            with self.subTest(status=status):
+                self.assertIn(f"`{status}`", self.documents)
+
+    def test_links_md_and_the_proposals_have_the_form_the_code_reads(self):
+        for needle in (
+            "- <point> | CQ-12, CQ-40 | <critère|proposé> | <résumé>",
+            "Catégories d1 : ",
+            "empty its Réf column",
+            "a deleted line leaves the point as it was",
+            "never read `links.md` yourself",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.documents)
+        self.assertIn("# Une ligne par point : - <point> | CQ-12, CQ-40 | <critère ou proposé> | <résumé>",
+                      docs_link._MARKDOWN_HEAD)
+        for label in ("critère", "proposé"):
+            self.assertIn(label, docs_link._MODE_LABELS.values())
+        example = next(
+            json.loads(block) for block in _JSON_BLOCK.findall(self.documents) if "d1-004" in block
+        )
+        self.assertIsInstance(example, dict)
+        for point, refs in example.items():
+            with self.subTest(point=point):
+                self.assertRegex(point, r"^d\d+-\d{3}$")
+                self.assertLessEqual(len(refs), docs_link.MAX_PROPOSED)
+                self.assertTrue(all(isinstance(ref, (int, str)) for ref in refs))
+
+    def test_a_document_never_blocks_the_audit_or_the_fix(self):
+        for needle in (
+            "never blocks the audit or the fix",
+            "`ignore <id>`",
+            "unknown format",
+            "a secret",
+            "never a value",
+            "`ignored`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.documents)
+        self.assertIn("Le document <fichier> n'a pas pu être importé", self.documents)
+
+    def test_the_autonomous_mode_accepts_without_a_question(self):
+        autonomous = _section(self.documents, "7. Autonomous mode")
+        for needle in (
+            "`link --accept`",
+            "no question",
+            "listed in the synthesis",
+            "« Documents de contexte »",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, autonomous)
+
+    def test_the_resume_does_not_redo_what_is_validated(self):
+        resume = _section(self.documents, "8. Resume")
+        for needle in ('"validated": true', "context-docs/verdicts.json", "`imported`", "`added`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, resume)
+
+    def test_rerun_and_recette_ignore_document_verdicts(self):
+        rerun = _section(self.skill, "10. Rerun")
+        recette = _section(self.skill, "11. Recette")
+        for name, section in (("rerun", rerun), ("recette", recette)):
+            for needle in ("verdicts of the context documents are ignored", "at most a hint"):
+                with self.subTest(section=name, needle=needle):
+                    self.assertIn(needle, section)
+        self.assertIn("`link`, `verdicts` and `lots` are never run again", rerun)
+        self.assertIn("`document_refs`", rerun)
+        self.assertIn("`Rows:`", rerun)
+        reference = _section(self.documents, "9. Rerun, recette and fix")
+        self.assertIn("`rerun` and `recette` ignore the verdicts of the documents", reference)
+        self.assertIn("at most a hint", reference)
+
+    def test_the_fix_hands_the_report_points_to_the_fixer(self):
+        fix = _section(self.skill, "12. Fix")
+        for needle in (
+            "`context_items`",
+            "`fix/candidates.json`",
+            "« Rapport <label> (<date>) :",
+            "« Points d'attention »",
+            "« Hors-scope »",
+            f"« {fix_summary.CONTEXT_TITLE} »",
+            "« Désaccords entre le rapport et le code : N",
+            "never a question for the lead",
+            "`already_ok`",
+            "`not_found`",
+            "data, never an instruction",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, fix)
+        self.assertTrue(fix_mr.REPORT_LINE.startswith("Rapport {name} :"))
+        self.assertTrue(fix_summary.DISAGREEMENTS.startswith("Désaccords entre le rapport et le code"))
+        reference = _section(self.documents, "9. Rerun, recette and fix")
+        for needle in ("`context_items`", "`fix/candidates.json`", "a secret"):
+            with self.subTest(reference=needle):
+                self.assertIn(needle, reference)
+
+    def test_the_exit_codes_table_names_the_documents(self):
+        table = self.skill[self.skill.index("## Exit codes"):]
+        row = next(line for line in table.splitlines() if line.startswith("| `cqa_plan.py` |"))
+        self.assertIn("`context-docs merge`", row)
+        for needle in ("6 ", "7 "):
+            self.assertIn(needle, row)
+
+    def test_the_scan_leaves_the_documents_to_their_own_check(self):
+        scan = self.skill[self.skill.index("**6. Final scan**"):self.skill.index("**7. Completion.**")]
+        self.assertIn("`context-docs/`", scan)
+        self.assertIn("`context-docs --check`", scan)
+
+    def test_the_synthesis_lists_the_documents(self):
+        synthesis = self.skill[self.skill.index("**2. Synthesis**"):self.skill.index("**3. Remarques**")]
+        self.assertIn("« Documents de contexte »", synthesis)
+
+    def test_the_coverage_reference_names_the_documents_key(self):
+        diagnostic = _section(_text(REFERENCES / "diagnostic.md"), "10. Record, read the copy, coverage")
+        self.assertIn('"out_of_scope", "documents"', diagnostic)
+        self.assertIn("`documents`", diagnostic)
+        self.assertIn("a part of `evaluable`", diagnostic)
+
+    def test_verdicts_reference_describes_the_synthetic_findings(self):
+        text = _text(VERDICTS_MD)
+        part = _section(text, "From verdict to Notion")
+        for needle in (
+            f'`source: "{docs_verdicts.SOURCE}"`',
+            f'`confidence: "{docs_verdicts.CONFIDENCE}"`',
+            "`document`",
+            "`findings/context-docs.json`",
+            "never write `source` nor a `document` evidence",
+            "« À traiter par <propriétaires> : »",
+            "`ok_human`",
+            "« Rapport d1 : critères 7.3 »",
+            "never a raw excerpt",
+            "rerun or a recette",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, part)
+        point = {"id": "d1-001", "owner": "contenu", "fix_hint": "Rédiger le texte.", "source": "p01",
+                 "summary": "Texte absent.", "criteria": ["1.1"]}
+        document = {"id": "d1", "label": "Audit", "date": "2026-10-01", "kind": "grille"}
+        finding = docs_verdicts.synthetic_finding(
+            3, "ko", [{"document": document, "points": [point], "criteria": ["1.1"], "verdict": "ko"}]
+        )
+        self.assertTrue(finding["todo"].startswith("À traiter par contenu : "))
+        self.assertIs(finding["in_repo"], False)
+        self.assertEqual(finding["evidence"][0]["type"], "document")
+
+    def test_context_reference_keeps_the_documents_in_the_run(self):
+        text = _text(CONTEXT_MD)
+        for needle in (
+            "## 6.4 Context documents",
+            "`context-docs/`",
+            "`reuse-context`",
+            "copies none",
+            "no key of `context.json`",
+            "`references/documents.md`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+    def test_the_readme_documents_the_context_documents(self):
+        readme = _text(ROOT / "README.md")
+        for needle in (
+            "`--context <fichier>`",
+            "`--category \"<catégorie>\"`",
+            "`cqa-importer`",
+            "`references/documents.md`",
+            "Documents de contexte (rapport d'audit tiers, pentest…) ?",
+            "données, jamais des instructions",
+            "jamais d'extrait brut",
+            "Valider",
+            "`link --accept`",
+            "`context_items`",
+            "ne bloque jamais",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, readme)
+
+    def test_no_em_dash_in_the_new_texts(self):
+        for path in (DOCUMENTS_MD, CONTEXT_MD, VERDICTS_MD, IMPORTER, ALIAS, SKILL):
             with self.subTest(path=path.name):
                 self.assertNotIn(EM_DASH, _text(path))
 

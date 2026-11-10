@@ -247,11 +247,12 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" coverage "$RUN"
 ```
 
-It prints `{"total", "evaluable", "evaluable_human", "partial", "not_evaluable", "deferred", "na", "standby", "out_of_scope", "gains": [{"tool", "action", "rows"}]}`.
+It prints `{"total", "evaluable", "evaluable_human", "partial", "not_evaluable", "deferred", "na", "standby", "out_of_scope", "documents", "gains": [{"tool", "action", "rows"}]}`, where `documents` is present only when it is above 0.
 
 - `evaluable_human` is a part of `evaluable`: never add them.
 - Rows without fiche = `total` minus `evaluable`, `partial`, `not_evaluable`, `deferred`, `na` and `standby`.
 - `out_of_scope` counts the rows outside the `category_filter` of the run (0 without a filter): `total` and every other number count only the rows of the scope, and the gains only those rows.
+- `documents` counts the rows judged from a context document (`context-docs/verdicts.json`, written at SKILL.md section 6, step 1: the first diagnostic of a run does not have it, a later call of `coverage` and the output of `lots` do). It is a part of `evaluable`: never add it. Such a row needs no tool, so it is never `partial` and never feeds the gains.
 
 ## 10.1 Account for a restricted role
 

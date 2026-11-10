@@ -262,6 +262,16 @@ Only the orchestrator writes in Notion, after the lead confirms. Sub-agents neve
 
 A status set by a human changes only with the lead's agreement.
 
+### Rows judged from a context document
+
+A row can take its verdict from a context document, a third-party audit report (SKILL.md, section 6, step 1, and `references/documents.md`). The sub-agents never write such a finding: they never write `source` nor a `document` evidence (the schema says so). `cqa_plan.py lots` writes these findings in `findings/context-docs.json` from `context-docs/verdicts.json`, and the plan and the Notion write take them like any other finding.
+
+- Shape: `source: "context_doc"`, `confidence: "high"`, one piece of evidence of type `document` per report (`doc` is the id of the document in the run, `ref` the criteria such as « critères 7.3 », else the places of its points), a `summary` that names the report and its date (« Rapport « <label> » (<date>) : ... ») and paraphrases its points, a `todo` made of the suggested fixes for `ko` and `partial`, and `human_check` and `divergence` at `null`.
+- Verdict: `ko` when a `ko` point of the report is linked to the row and no criterion of the row is `ok`, `partial` when one is (a `ko` of the report is never lost); `ok` when every criterion of the row is covered and `ok` or `na` in the report, `na` when all are `na`; no verdict otherwise (a criterion the report leaves undetermined, or a report of findings without a `ko` for the row): the skill audits the row, the points of the report being hints. With several reports the worst verdict wins.
+- `in_repo` is `false` only when every linked point is for the content, a third party or the infrastructure: the `todo` then starts with « À traiter par <propriétaires> : » and the fix mode leaves the row to the devs with that reason.
+- Notion: the table above applies, and so do the guardrails (an `ok` on a row whose tools include « Intervention humaine » becomes `ok_human`). The comment lists the line « Rapport d1 : critères 7.3 » among its evidence. In Notion and in the merge requests only the name of the document, the reference and the paraphrased fix are written, never a raw excerpt of the document and never an exploitation detail.
+- A rerun or a recette ignores these verdicts: the agents judge the code as it is, and their finding replaces the one of the document.
+
 ## For the orchestrator: plan, confirmation, writing
 
 Sub-agents can skip this section. Every Bash call starts with the `S=` line of SKILL.md (here unexpanded) and `RUN="<run_dir>"`.
