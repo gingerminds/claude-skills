@@ -136,8 +136,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    "commandes de vérification du projet, détectées depuis sa CI et ses manifestes",
                    _cmd_commands)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
-    sub.add_argument("--drop", action="append", default=[], metavar="NOM",
-                     help="nom d'une commande à retirer (répétable)")
+    sub.add_argument("--drop", action="append", default=[], metavar="[REPO|]NOM",
+                     help="commande à retirer, de tous les repos par son nom ou d'un seul avec "
+                          "« <repo>|<nom> » (répétable)")
     sub.add_argument("--add", action="append", default=[], metavar="REPO|DOSSIER|IMAGE|TYPE|COMMANDE",
                      help="commande à ajouter (répétable)")
     sub.add_argument("--none", action="store_true", help="aucune commande de vérification")
@@ -692,15 +693,24 @@ def _read_ci(run_dir: Path, index: int, path: Path, run) -> tuple:
 
 
 def _drop_commands(found: dict, dropped: list) -> None:
-    """Remove the commands named by --drop from every repo; an unknown name exits 2."""
+    """Remove the commands named by --drop: "<name>" from every repo that has one by that name,
+    "<repo>|<name>" (a repo of the context) from that repo only; an unknown one exits 2."""
+    targets = []
+    for text in dropped:
+        repo, bar, name = text.partition("|")
+        targets.append((repo, name) if bar and repo in found else (None, text))
     known = [item["name"] for entry in found.values() for item in entry["commands"]]
-    unknown = [name for name in dropped if name not in known]
+    unknown = [text for text, (repo, name) in zip(dropped, targets)
+               if not any(item["name"] == name for each, entry in found.items()
+                          if repo in (None, each) for item in entry["commands"])]
     if unknown:
         raise UsageError(
             f"--drop : commande inconnue : {', '.join(unknown)} (commandes détectées : "
             f"{', '.join(dict.fromkeys(known)) or 'aucune'}).")
-    for entry in found.values():
-        entry["commands"] = [item for item in entry["commands"] if item["name"] not in dropped]
+    for each, entry in found.items():
+        entry["commands"] = [item for item in entry["commands"]
+                             if (None, item["name"]) not in targets
+                             and (each, item["name"]) not in targets]
 
 
 def _addition(text: str, repos: list) -> tuple:

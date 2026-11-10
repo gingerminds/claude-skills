@@ -163,6 +163,20 @@ class SummaryTest(SummaryCase):
         self.assertIn("- npm run build", checks)
         self.assertNotIn(LONG_DASH, text)
 
+    def test_the_detail_of_a_broken_command_stays_on_its_bullet(self):
+        detail = "erreur déjà présente avant le correctif (```js\nfailed `x`\n\n  at y)"
+        (self.run_dir / "fix" / "front" / "checks.json").write_text(json.dumps({
+            "checks": [{"name": "npm test", "status": "not_run", "files": [], "detail": detail,
+                        "kind": "test", "already_broken": True}], "not_run": []}),
+            encoding="utf-8")
+        text = json.loads(self.summary()[1])["text"]
+        found = section(text, "Erreurs déjà présentes avant les correctifs")
+        self.assertIn("- front : npm test : erreur déjà présente avant le correctif ('''js ; "
+                      "failed 'x' ; at y)", found)
+        self.assertNotIn("`", found)
+        self.assertIn("dans le conteneur", found)
+        self.assertIn("cause possible : l'environnement", found)
+
     def test_without_a_broken_command_the_section_is_left_out(self):
         text = json.loads(self.summary()[1])["text"]
         self.assertNotIn("Erreurs déjà présentes", text)

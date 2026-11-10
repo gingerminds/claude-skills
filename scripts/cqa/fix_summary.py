@@ -12,8 +12,9 @@ NO_REASON = "Raison non précisée"
 NO_TITLE = "sans titre"
 NO_MR = "Aucune MR créée."
 NO_CHECK = "Aucune vérification en attente."
-BROKEN_BEFORE = ("Ces commandes échouaient déjà sur la branche de base : aucune ligne n'en est "
-                 "responsable, à signaler aux devs.")
+BROKEN_BEFORE = ("Ces commandes échouent aussi sur la branche de base, dans le conteneur (cause "
+                 "possible : l'environnement) : aucune ligne n'en est responsable, à signaler aux "
+                 "devs.")
 NOTHING_PREPARED = "Aucun correctif préparé."
 EMPTY_BRANCH = " (aucun commit)"
 LEFT_KEY = "- {repo} : {reason} (branche {branch}, worktree {worktree})."
@@ -271,7 +272,7 @@ def _checks_section(keys: dict, checks: dict) -> str:
 
 def _broken_lines(keys: dict, checks: dict) -> list:
     """Return a line per command that failed on the base too (checks.json « already_broken »),
-    by repo."""
+    by repo, its detail on one line without backtick as in the merge request."""
     seen, lines = set(), []
     for name, key in keys.items():
         document = checks.get(name) if not _is_left(key) else None
@@ -280,8 +281,9 @@ def _broken_lines(keys: dict, checks: dict) -> list:
         for item in document.get("checks") or []:
             if isinstance(item, dict) and item.get("already_broken"):
                 line = f"- {key['repo']} : {item.get('name')}"
-                if item.get("detail"):
-                    line += f" : {item['detail']}"
+                detail = fix_mr._one_line(item.get("detail"))
+                if detail:
+                    line += f" : {detail}"
                 if line not in seen:
                     seen.add(line)
                     lines.append(line)

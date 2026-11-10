@@ -944,6 +944,30 @@ class CommandsTest(FixCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.state()["check_commands"], {"front": [], "back": []})
 
+    def test_commands_drop_a_name_everywhere_or_in_one_repo(self):
+        write_file(self.back, "package.json", {"scripts": {"lint": "eslint ."}})
+        write_file(self.back, "package-lock.json", "{}")
+
+        def names(result, repo):
+            return [item["name"] for item in result["repos"][repo]["commands"]]
+
+        code, out, err = self.commands("--drop", "back|npm ci", "--drop", "front|npm run lint")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertEqual(names(result, "front"), ["build:npm (install)", "build:npm", "npm ci"])
+        self.assertEqual(names(result, "back"), ["npm run lint", "composer install", "composer test"])
+        code, out, err = self.commands("--drop", "npm ci")
+        self.assertEqual(code, 0, err)
+        result = json.loads(out)
+        self.assertNotIn("npm ci", names(result, "front") + names(result, "back"))
+        kept = self.listed()
+        for value in ("back|npm nothing", "nope|npm ci", "back|build:npm"):
+            with self.subTest(drop=value):
+                code, out, err = self.commands("--drop", value)
+                self.assertEqual(code, 2, out)
+                self.assertIn(value, err)
+        self.assertEqual(self.listed(), kept)
+
     def test_commands_refuses_unknown_drops_and_malformed_additions(self):
         self.assertEqual(self.commands()[0], 0)
         kept = self.listed()

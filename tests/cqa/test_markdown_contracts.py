@@ -2841,6 +2841,7 @@ class FixProjectCommandsTest(unittest.TestCase):
     def test_the_launch_asks_the_check_commands_and_runs_commands_again_before_open(self):
         for needle in ("« Commandes de vérification de la passe ? »", "« Utiliser ces commandes »",
                        "« Modifier la liste »", "« Aucune »", "`--drop", "`--add",
+                       '`--drop "<repo>|<name>"`', "from every repo that has one",
                        "`--none`", "before the lead leaves", "right before `open`",
                        "without checking that it is recent"):
             with self.subTest(needle=needle):
@@ -2864,7 +2865,8 @@ class FixProjectCommandsTest(unittest.TestCase):
                        "`failed`", "`files`", "`production`", "`unchanged`", "`guard`",
                        "« Laisser aux devs »", "« Corriger sans la dépendance »",
                        "dépendance à installer par un dev", "Autonomous mode",
-                       "`drop`", "fix/<repo>/install/CQ-<n>.log"):
+                       "`drop`", "fix/<repo>/install/CQ-<n>.log", "`run_in_background`",
+                       "15 minutes", "wait for its end"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.pass_step)
         for stale in ("A fixer never runs anything: a row it reports",):
@@ -2878,7 +2880,9 @@ class FixProjectCommandsTest(unittest.TestCase):
                        "fix/<repo>/check/", "`check/baseline.json`", "`not_run`",
                        "disposable containers", "modifications non commitées dans le worktree",
                        "Exit 2", "never clean", "900 s", "600 s",
-                       "erreur déjà présente avant le correctif", "never attributed to a row"):
+                       "erreur déjà présente avant le correctif", "never attributed to a row",
+                       ".git a été modifié", "never run git in that worktree", "`leave`",
+                       "docker run a échoué (code 125)", "same tools"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.checks)
 
@@ -2943,10 +2947,12 @@ class FixProjectCommandsTest(unittest.TestCase):
                        "`production`", "`dependencies`", "`require`"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, dependencies)
+        self.assertIn("only defers the scripts", dependencies)
         project = next(line for line in _section(text, "7. Guard rails").splitlines()
                        if line.startswith("- **No server, no project command**"))
         for needle in ("disposable container", "no secret", "`.env`", "`auth.json`",
-                       "`--network none`", "only for `install`", "the prod", "no sub-agent"):
+                       "`--network none`", "only for `install`", "the prod", "no sub-agent",
+                       "its `.git` read-only"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, project)
         checks = _section(text, "9. Checks before the merge request")
@@ -2955,7 +2961,8 @@ class FixProjectCommandsTest(unittest.TestCase):
                        "`command`", "`log`", "`already_broken`", "fix/<repo>/check/",
                        "`check/baseline.json`", "erreur déjà présente avant le correctif",
                        "« Déjà en échec avant les correctifs »", "restored",
-                       "dépendances privées : non transmises", "never `failed`"):
+                       "dépendances privées : non transmises", "never `failed`",
+                       "of its family", "an `auth.json` that git ignores is no sign"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, checks)
         report = _section(text, "8. Report and review files")
