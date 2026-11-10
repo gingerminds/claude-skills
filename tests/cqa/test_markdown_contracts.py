@@ -3887,6 +3887,27 @@ class ContextDocumentsInstructionsTest(unittest.TestCase):
         self.assertIn("`link` has no memory", text)
         self.assertIn("`link --accept` alone", text)
 
+    def test_the_detail_is_rendered_from_the_stored_links(self):
+        self.assertIn(
+            'context-docs "$RUN" link --detail\n```', self.documents, "the detail command"
+        )
+        self.assertNotIn('link --proposed "$RUN/context-docs/proposed.json" --detail', self.documents)
+        for needle in (
+            "run `link --detail` alone",
+            "recomputes nothing",
+            "`link --detail` alone and `link --accept` recompute nothing",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.documents)
+        self.assertIn("`link --detail` alone writes `context-docs/links.md`", self.skill)
+        self.assertIn("recomputes nothing", self.skill)
+
+    def test_ignoring_a_document_says_that_the_corrected_detail_is_lost(self):
+        self.assertIn("`ignore <id>`, then `link` again with the same `--proposed` file: it removes a `links.md`", self.skill)
+        self.assertIn("it recomputes and removes `links.md`, so the corrections", self.documents)
+        self.assertIn("the corrections the lead had made in it are lost", self.documents)
+        self.assertIn("the detail is to be redone", self.skill)
+
     def test_the_importer_is_dispatched_with_its_two_steps(self):
         self.assertEqual(
             IMPORTER_DISPATCH.replace("<layout|part>", "layout").replace('<"nom"|none>', "none"),

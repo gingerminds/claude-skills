@@ -1713,16 +1713,46 @@ def _context_docs_link(run_dir: Path, args) -> int:
     rows, _ = _read_rows(run_dir)
     if args.accept:
         return _context_docs_accept(run_dir, rows, scope)
+    if args.detail and args.proposed is None:
+        links = docs_link.read_links(run_dir, validated_only=False)
+        if not links:
+            raise UsageError(
+                "Aucun rattachement à détailler : lancer d'abord cqa_plan.py context-docs <run_dir> link."
+            )
+        links = _links_of_imported(run_dir, links)
+        _write_links_markdown(run_dir, links)
+        _emit(_link_summary(run_dir, links, rows, scope))
+        return EXIT_OK
     proposed = _read_proposed(args.proposed) if args.proposed is not None else None
     links = docs_link.link(run_dir, rows, scope, proposed)
     docs_link.write_links(run_dir, links)
     (run_dir / context_docs.FOLDER / docs_link.MARKDOWN_FILE).unlink(missing_ok=True)
     if args.detail:
-        points = docs_link.imported_points(run_dir)
-        shown = {doc_id: points.get(doc_id, []) for doc_id in links["categories"]}
-        docs_link.write_markdown(run_dir, docs_link.render_markdown(links, shown))
+        _write_links_markdown(run_dir, links)
     _emit(_link_summary(run_dir, links, rows, scope))
     return EXIT_OK
+
+
+def _write_links_markdown(run_dir: Path, links: dict) -> None:
+    points = docs_link.imported_points(run_dir)
+    shown = {doc_id: points.get(doc_id, []) for doc_id in links["categories"]}
+    docs_link.write_markdown(run_dir, docs_link.render_markdown(links, shown))
+
+
+def _links_of_imported(run_dir: Path, links: dict) -> dict:
+    """Return the stored links without the documents that are no longer imported."""
+    imported = set(docs_link.imported_points(run_dir))
+    links["categories"] = {
+        doc_id: names for doc_id, names in links["categories"].items() if doc_id in imported
+    }
+    for key in ("unlinked", "to_propose"):
+        links[key] = [point for point in links[key] if point.split("-", 1)[0] in imported]
+    links["links"] = {
+        point: entry
+        for point, entry in links["links"].items()
+        if point.split("-", 1)[0] in imported
+    }
+    return links
 
 
 def _category_scope(run_dir: Path) -> Optional[list]:
@@ -1795,17 +1825,7 @@ def _context_docs_accept(run_dir: Path, rows: list, scope: Optional[list]) -> in
         raise UsageError(
             "Aucun rattachement à valider : lancer d'abord cqa_plan.py context-docs <run_dir> link."
         )
-    imported = set(docs_link.imported_points(run_dir))
-    links["categories"] = {
-        doc_id: names for doc_id, names in links["categories"].items() if doc_id in imported
-    }
-    for key in ("unlinked", "to_propose"):
-        links[key] = [point for point in links[key] if point.split("-", 1)[0] in imported]
-    links["links"] = {
-        point: entry
-        for point, entry in links["links"].items()
-        if point.split("-", 1)[0] in imported
-    }
+    links = _links_of_imported(run_dir, links)
     markdown = run_dir / context_docs.FOLDER / docs_link.MARKDOWN_FILE
     if markdown.is_file():
         try:

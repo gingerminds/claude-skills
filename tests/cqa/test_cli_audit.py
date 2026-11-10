@@ -4207,6 +4207,73 @@ class ContextDocsCommandTest(ContextDocsFixtures, AuditCase):
         self.docs_json("link", "--proposed", proposed)
         self.assertFalse(self.links_md().exists())
 
+    def test_link_detail_alone_renders_the_stored_links_without_recomputing(self):
+        self.linkable()
+        proposed = self.proposal({"d1-003": [113]})
+        expected = self.docs_json("link", "--proposed", proposed)
+        before = (self.run_dir / "context-docs" / "links.json").read_bytes()
+        result = self.docs_json("link", "--detail")
+        self.assertEqual(result, expected)
+        self.assertEqual(result["proposed"], 1)
+        self.assertEqual(result["to_propose"], [])
+        self.assertEqual((self.run_dir / "context-docs" / "links.json").read_bytes(), before)
+        text = self.links_md().read_text(encoding="utf-8")
+        self.assertIn("- d1-001 | CQ-112 | critère |", text)
+        self.assertIn("- d1-003 | CQ-113 | proposé |", text)
+        self.assertIn("- d1-002 |  | sans ligne |", text)
+        self.assertNotIn(EM_DASH, text)
+
+    def test_link_detail_alone_keeps_the_proposals_up_to_the_acceptance(self):
+        self.linkable()
+        self.docs_json("link", "--proposed", self.proposal({"d1-003": [113]}))
+        self.docs_json("link", "--detail")
+        result = self.docs_json("link", "--accept")
+        self.assertEqual((result["points"], result["proposed"], result["unlinked"]), (2, 1, 1))
+        self.assertEqual(self.links()["links"]["d1-003"], {"refs": [113], "how": "proposed"})
+
+    def test_link_detail_alone_before_any_proposal_lists_the_points_to_place(self):
+        self.linkable()
+        self.docs_json("link")
+        result = self.docs_json("link", "--detail")
+        self.assertEqual([item["id"] for item in result["to_propose"]], ["d1-002", "d1-003"])
+        self.assertIn("- d1-002 |  | sans ligne |", self.links_md().read_text(encoding="utf-8"))
+        self.assertEqual(self.links()["to_propose"], ["d1-002", "d1-003"])
+
+    def test_link_detail_alone_needs_links_to_render(self):
+        self.linkable()
+        code, out, err = self.docs("link", "--detail")
+        self.assertEqual(code, 2)
+        self.assertIn("link", err)
+        self.assertFalse(self.links_md().exists())
+
+    def test_link_detail_alone_leaves_a_document_ignored_since_the_link_out(self):
+        self.linkable()
+        self.docs_json("add", self.workbook("autre.xlsx"))
+        self.docs_json("link")
+        self.docs_json("ignore", "d2")
+        self.docs_json("link", "--detail")
+        text = self.links_md().read_text(encoding="utf-8")
+        self.assertIn("Catégories d1 :", text)
+        self.assertNotIn("d2", text)
+
+    def test_link_detail_alone_keeps_validated_links_validated(self):
+        self.verdictable()
+        self.docs_json("link", "--detail")
+        self.assertIs(self.links()["validated"], True)
+        self.assertIn("- d1-001 | CQ-112 | critère |", self.links_md().read_text(encoding="utf-8"))
+
+    def test_ignore_keeps_a_links_md_the_lead_corrected_and_a_new_link_removes_it(self):
+        self.linkable()
+        self.docs_json("add", self.workbook("autre.xlsx"))
+        proposed = self.proposal({"d1-003": [113]})
+        self.docs_json("link", "--proposed", proposed, "--detail")
+        corrected = self.links_md().read_text(encoding="utf-8").replace("CQ-113", "CQ-112")
+        self.links_md().write_text(corrected, encoding="utf-8")
+        self.docs_json("ignore", "d2")
+        self.assertEqual(self.links_md().read_text(encoding="utf-8"), corrected)
+        self.docs_json("link", "--proposed", proposed)
+        self.assertFalse(self.links_md().exists())
+
     def test_link_does_not_validate_by_itself(self):
         self.linkable()
         self.docs_json("link")

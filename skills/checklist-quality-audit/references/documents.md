@@ -128,7 +128,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" context-docs "$RUN" link --proposed "$RUN/context-docs/proposed.json"
 ```
 
-The figures now count the proposals and `to_propose` is empty. `link` has no memory: every call recomputes everything from the documents, so pass the same `--proposed` file to every later call, `--detail` included, or the proposals are lost. A link by criterion always wins over a proposal.
+The figures now count the proposals and `to_propose` is empty. `link` has no memory: every call recomputes everything from the documents, so pass the same `--proposed` file to every later call that recomputes, or the proposals are lost. `link --detail` alone and `link --accept` recompute nothing: they read `context-docs/links.json` as the last `link` left it. A link by criterion always wins over a proposal.
 
 **The question**, once for all the imported documents (`link` counts them together; never a question per row or per point):
 
@@ -142,12 +142,12 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" context-docs "$RUN" link --accept
 ```
 
-- « Voir le détail »: run `link` again with the same `--proposed` (left out when there was none) and `--detail`:
+- « Voir le détail »: run `link --detail` alone. It renders the `links.json` of the last `link`, the proposals included, and recomputes nothing (with `--proposed` it recomputes with that file, as `link` does):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-python3 "$S/cqa_plan.py" context-docs "$RUN" link --proposed "$RUN/context-docs/proposed.json" --detail
+python3 "$S/cqa_plan.py" context-docs "$RUN" link --detail
 ```
 
   It writes `context-docs/links.md`: for each document a line `Catégories d1 : A, B`, then one line per point:
@@ -157,7 +157,7 @@ python3 "$S/cqa_plan.py" context-docs "$RUN" link --proposed "$RUN/context-docs/
 ```
 
   Give the lead the path of the file and never read `links.md` yourself. The lead may remove a Réf, add one (only rows of the categories of the document are accepted), empty its Réf column to detach a point (it becomes `unlinked`) and correct the categories of its header line; a deleted line leaves the point as it was; the summary column is not read back. Ask « Le détail est dans <chemin de links.md>. Corrigez-le si besoin, puis répondez. » with « Valider » and « Ignorer ce document ». « Valider »: `link --accept` alone, which reads the file again. Exit 2 with « links.md : ligne <n> : ... » (an unknown point, a Réf outside the candidates, an unknown category): show the message, let the lead correct the file and ask again.
-- « Ignorer ce document »: `ignore <id>`. With several documents, ask first « Quel document ignorer ? » (the file names as options, another in « Autre »). Then run `link` again (the same `--proposed` file) and ask the question again with the new figures. No document left: go on with the lots.
+- « Ignorer ce document »: `ignore <id>`. With several documents, ask first « Quel document ignorer ? » (the file names as options, another in « Autre »). Then run `link` again (the same `--proposed` file): it recomputes and removes `links.md`, so the corrections the lead had made in it are lost; say so, and the lead asks for « Voir le détail » again if they still want the detail. Ask the question again with the new figures. No document left: go on with the lots.
 
 ## 6. Verdicts, then the lots
 
