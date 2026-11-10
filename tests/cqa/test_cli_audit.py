@@ -4515,7 +4515,9 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         self.assertEqual((lot["refs"], lot["document_refs"]), ([112, 113, 114], [112, 113]))
         hints = self.hints("code-accessibilite")
         self.assertEqual(hints["lot"], "code-accessibilite")
-        self.assertEqual(list(hints["hints"]), ["114"])
+        self.assertEqual(list(hints["hints"]), ["112", "114"])
+        (judged,) = hints["hints"]["112"]
+        self.assertEqual((judged["doc"], judged["criteria"], judged["priority"]), ("d1", ["1.1"], "Moyen"))
         (hint,) = hints["hints"]["114"]
         self.assertEqual(
             hint,
@@ -4544,10 +4546,11 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         self.lots()
         self.assertFalse(self.hints_path("code-accessibilite").exists())
 
-    def test_no_hint_for_a_lot_that_has_none(self):
+    def test_a_document_row_keeps_its_hint_and_a_lot_without_points_has_no_file(self):
         self.judged()
         self.lots()
-        self.assertFalse((self.run_dir / "context-docs" / "hints").exists())
+        self.assertEqual(list(self.hints("code-accessibilite")["hints"]), ["112"])
+        self.assertFalse(self.hints_path("code-qualite").exists())
 
     def test_lots_writes_document_findings(self):
         self.judged(rows=[(114, ())])
@@ -4693,6 +4696,42 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         )
         code, out, err = self.run_main(["validate", self.run_dir, "code-accessibilite"])
         self.assertEqual((code, json.loads(out)), (0, {"ok": True, "errors": []}))
+
+    def test_validate_refuses_a_first_round_finding_for_a_row_of_a_document(self):
+        self.judged(rows=[(114, ())])
+        self.lots()
+        for followup in (False, True):
+            with self.subTest(followup=followup):
+                name = "code-accessibilite-followup" if followup else "code-accessibilite"
+                self.write_lot_findings(
+                    name, "code-accessibilite", self.skill_finding(112, "ok"), self.skill_finding(114, "ok")
+                )
+                arguments = ["validate", self.run_dir, "code-accessibilite"]
+                code, out, err = self.run_main(arguments + (["--followup"] if followup else []))
+                self.assertEqual(code, 6)
+                errors = json.loads(out)["errors"]
+                self.assertEqual(len(errors), 1)
+                self.assertTrue(errors[0].startswith("constat CQ-112 : ligne jugée d'après un document"))
+                self.assertNotIn(EM_DASH, errors[0])
+
+    def test_the_report_ko_survives_a_skill_ok_written_for_a_row_of_a_document(self):
+        self.judged(rows=[(114, ())])
+        for ref in (112, 113, 114):
+            self.edit_row(self.run_dir, ref, status="À traiter", last_edited_by_bot=True)
+        self.lots()
+        self.write_lot_findings(
+            "code-accessibilite",
+            "code-accessibilite",
+            self.skill_finding(112, "ok"),
+            self.skill_finding(114, "ok"),
+        )
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
+        self.assertEqual(after[112], "À traiter")
+        self.assertEqual(after[114], "Ok / Recetté")
+        comments = {op["ref"]: op["text"] for op in plan["ops"] if op["kind"] == "comment"}
+        self.assertIn("Rapport d1 : critères 1.1", comments[112])
 
     def test_validate_asks_for_every_row_the_document_does_not_cover(self):
         self.judged(rows=[(114, ()), (116, ())])

@@ -17,7 +17,7 @@ from typing import Optional
 
 from cqa import context_docs, docs_link
 from cqa.findings import MAX_FIELD_LENGTH, MAX_SUMMARY_LENGTH, VERDICTS, worst
-from cqa.lots import DOCUMENT_LOT_ID, lot_document_refs
+from cqa.lots import DOCUMENT_LOT_ID
 from cqa.notion_read import write_json
 
 VERDICTS_FILE = "verdicts.json"
@@ -243,11 +243,12 @@ def write_findings(run_dir: Path, kept_refs: set) -> int:
 
 
 def write_hints(run_dir: Path, lots: list) -> int:
-    """Write context-docs/hints/<lot>.json: the points linked to the rows the skill still audits.
+    """Write context-docs/hints/<lot>.json: the points linked to the rows of each lot.
 
-    The file is {"lot", "hints": {"<ref>": [hint, ...]}}, for each row of the lot that has no
-    verdict of a document (not in the document_refs of the lot) and at least one ko or info point
-    linked to it by the validated links; ko points come first, ten at most per row. A hint is
+    The file is {"lot", "hints": {"<ref>": [hint, ...]}}, for each row of the lot that has at
+    least one ko or info point linked to it by the validated links, the rows judged from a
+    document (the document_refs of the lot) included: a rerun or a recette judges them again
+    and the report is then only a hint. ko points come first, ten at most per row. A hint is
     {doc, label, date, source, criteria, scopes, priority, summary, fix_hint, owner, elements},
     its texts cleaned and capped again. A lot without any hint gets no file, and the files of an
     earlier call are removed. Returns the number of rows that have hints. The auditors read
@@ -263,11 +264,10 @@ def write_hints(run_dir: Path, lots: list) -> int:
         lot_id = lot.get("id") if isinstance(lot, dict) else None
         if not (isinstance(lot_id, str) and _LOT_ID.fullmatch(lot_id)):
             continue
-        covered = set(lot_document_refs(lot))
         refs = lot.get("refs") if isinstance(lot.get("refs"), list) else []
         hints: dict = {}
         for ref in refs:
-            if ref in covered or not points.get(ref):
+            if not points.get(ref):
                 continue
             chosen = sorted(points[ref], key=lambda point: point.get("verdict") != "ko")
             hints[str(ref)] = [_hint(point) for point in chosen[:MAX_HINTS]]

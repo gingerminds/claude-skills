@@ -994,11 +994,11 @@ class HintsTest(VerdictCase):
 
     def test_a_row_the_skill_audits_gets_the_points_linked_to_it(self):
         self.setup_document([self.info(2)], {"d1-002": [130]})
-        self.assertEqual(write_hints(self.run_dir, [self.lot()]), 1)
+        self.assertEqual(write_hints(self.run_dir, [self.lot(document_refs=())]), 3)
         document = self.hints()
         self.assertEqual(list(document), ["lot", "hints"])
         self.assertEqual(document["lot"], "code-accessibilite")
-        self.assertEqual(list(document["hints"]), ["130"])
+        self.assertEqual(list(document["hints"]), ["112", "113", "130"])
         (hint,) = document["hints"]["130"]
         self.assertEqual(set(hint), self.KEYS)
         self.assertEqual(
@@ -1011,10 +1011,19 @@ class HintsTest(VerdictCase):
         self.assertEqual(hint["scopes"], ["transverse"])
         self.assertEqual((hint["criteria"], hint["elements"]), ([], ["header"]))
 
-    def test_a_row_judged_from_a_document_gets_no_hint(self):
+    def test_a_row_judged_from_a_document_gets_its_hints_too(self):
         self.setup_document([self.info(2)], {"d1-002": [130]})
-        write_hints(self.run_dir, [self.lot()])
-        self.assertEqual(set(self.hints()["hints"]), {"130"})
+        self.assertEqual(write_hints(self.run_dir, [self.lot()]), 3)
+        hints = self.hints()["hints"]
+        self.assertEqual(set(hints), {"112", "113", "130"})
+        (hint,) = hints["112"]
+        self.assertEqual((hint["doc"], hint["summary"]), ("d1", "Script sans alternative"))
+        self.assertEqual(hint["criteria"], ["7.3"])
+
+    def test_a_row_judged_from_a_document_without_a_point_gets_no_hint(self):
+        self.setup_document([self.info(2)], {"d1-002": [130]})
+        self.assertEqual(write_hints(self.run_dir, [self.lot(refs=(112, 130, 140), document_refs=(140,))]), 2)
+        self.assertEqual(set(self.hints()["hints"]), {"112", "130"})
 
     def test_a_ko_point_linked_to_a_row_that_is_not_judged_is_a_hint_too(self):
         self.setup_document()
@@ -1034,13 +1043,13 @@ class HintsTest(VerdictCase):
 
     def test_the_count_is_the_number_of_rows_with_hints(self):
         self.setup_document([self.info(2), self.info(3)], {"d1-002": [130], "d1-003": [130]})
-        self.assertEqual(write_hints(self.run_dir, [self.lot()]), 1)
+        self.assertEqual(write_hints(self.run_dir, [self.lot(refs=(130,), document_refs=())]), 1)
 
     def test_no_hint_writes_no_file_and_removes_the_files_of_an_earlier_call(self):
         self.setup_document([self.info(2)], {"d1-002": [130]})
         write_hints(self.run_dir, [self.lot(), self.lot("code-autre", refs=(5,), document_refs=())])
         self.assertTrue(self.hints_path().is_file())
-        self.assertEqual(write_hints(self.run_dir, [self.lot(refs=(112, 113), document_refs=(112, 113))]), 0)
+        self.assertEqual(write_hints(self.run_dir, [self.lot(refs=(140,), document_refs=(140,))]), 0)
         self.assertEqual(list((self.run_dir / "context-docs" / "hints").glob("*")), [])
 
     def test_there_is_one_file_per_lot_with_its_own_rows(self):
@@ -1049,8 +1058,8 @@ class HintsTest(VerdictCase):
             self.lot("code-a", refs=(112, 130), document_refs=(112,)),
             self.lot("code-b", refs=(113,), document_refs=()),
         ]
-        self.assertEqual(write_hints(self.run_dir, lots), 2)
-        self.assertEqual(set(self.hints("code-a")["hints"]), {"130"})
+        self.assertEqual(write_hints(self.run_dir, lots), 3)
+        self.assertEqual(set(self.hints("code-a")["hints"]), {"112", "130"})
         self.assertEqual(set(self.hints("code-b")["hints"]), {"113"})
 
     def test_a_lot_without_document_refs_key_is_read_as_older_lots_json(self):

@@ -136,6 +136,11 @@ class LatestFindingsTest(RerunCase):
         self.assertEqual(latest[1]["verdict"], "ok")
 
 
+def bare(ref, verdict="ok"):
+    """A finding without evidence, which holds against a run without repos."""
+    return finding(ref, verdict, evidence=[])
+
+
 class DocumentFindingsTest(RerunCase):
     """The findings of the context documents come first, a later file of the lot prevails."""
 
@@ -169,9 +174,57 @@ class DocumentFindingsTest(RerunCase):
         self.findings("code-securite-rerun-01", finding(2, "ok"))
         self.assertEqual(rerun.latest_findings(self.run_dir, self.lots)[2]["verdict"], "ok")
 
-    def test_the_first_round_file_of_the_lot_prevails_too(self):
-        self.first_round(finding(1, "ok"), finding(2, "partial"), finding(3, "ok"), fill=False)
-        self.assertEqual(rerun.latest_findings(self.run_dir, self.lots)[2]["verdict"], "partial")
+    def test_the_first_round_file_never_replaces_the_verdict_of_a_document(self):
+        self.first_round(bare(1, "ok"), bare(2, "ok"), bare(3, "ok"), fill=False)
+        latest = rerun.latest_findings(self.run_dir, self.lots)
+        self.assertEqual(latest[2]["verdict"], "ko")
+        self.assertEqual((latest[1]["verdict"], latest[3]["verdict"]), ("ok", "ok"))
+
+    def test_the_follow_up_file_never_replaces_the_verdict_of_a_document(self):
+        self.findings("code-securite-followup", bare(2, "ok"), bare(1, "partial"))
+        latest = rerun.latest_findings(self.run_dir, self.lots)
+        self.assertEqual(latest[2]["verdict"], "ko")
+        self.assertEqual(latest[1]["verdict"], "partial")
+
+    def test_the_filter_does_not_depend_on_the_reader(self):
+        self.first_round(bare(1, "ok"), bare(2, "ok"), bare(3, "ok"), fill=False)
+
+        def unfiltered(lot, name):
+            try:
+                document = json.loads((self.run_dir / "findings" / name).read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return None
+            return document["findings"], []
+
+        self.assertEqual(rerun.latest_findings(self.run_dir, self.lots, unfiltered)[2]["verdict"], "ko")
+
+    def test_a_rerun_file_prevails_over_the_document_even_after_a_first_round_one(self):
+        self.first_round(bare(1, "ok"), bare(2, "partial"), bare(3, "ok"), fill=False)
+        self.findings("code-securite-rerun-01", bare(2, "ok"))
+        self.assertEqual(rerun.latest_findings(self.run_dir, self.lots)[2]["verdict"], "ok")
+
+    def test_the_first_round_file_reports_a_finding_for_a_document_row(self):
+        self.first_round(bare(1, "ok"), bare(2, "ok"), bare(3, "ok"), fill=False)
+        for read in (rerun._default_reader, self.grounded):
+            with self.subTest(read=getattr(read, "__name__", "grounded")):
+                valid, errors = read(self.run_dir, self.lots[0], "code-securite.json")
+                self.assertEqual([item["ref"] for item in valid], [1, 3])
+                self.assertEqual(len(errors), 1)
+                self.assertTrue(errors[0].startswith("constat CQ-2 : ligne jugée d'après un document"))
+
+    def test_the_follow_up_file_reports_it_too(self):
+        self.findings("code-securite-followup", bare(2, "ok"))
+        valid, errors = self.grounded(self.run_dir, self.lots[0], "code-securite-followup.json")
+        self.assertEqual(valid, [])
+        self.assertTrue(errors[0].startswith("constat CQ-2 : ligne jugée d'après un document"))
+
+    def test_a_rerun_file_may_give_a_document_row(self):
+        self.findings("code-securite-rerun-01", bare(2, "ok"))
+        for read in (rerun._default_reader, self.grounded):
+            with self.subTest(read=getattr(read, "__name__", "grounded")):
+                valid, errors = read(self.run_dir, self.lots[0], "code-securite-rerun-01.json")
+                self.assertEqual([item["ref"] for item in valid], [2])
+                self.assertFalse([error for error in errors if "CQ-2" in error])
 
     def test_a_lot_without_document_refs_ignores_a_stale_context_docs_file(self):
         self.lots[0]["document_refs"] = []

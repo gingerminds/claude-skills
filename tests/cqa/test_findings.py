@@ -248,6 +248,31 @@ class ValidateDocumentTest(unittest.TestCase):
         self.assertEqual([item["ref"] for item in valid], [79])
         self.assertEqual(errors, ["constat CQ-999 : Réf hors du lot"])
 
+    def test_a_forbidden_ref_is_an_error_and_never_valid(self):
+        document = make_document(make_finding(ref=79), make_finding(ref=80))
+        valid, errors = validate_document(
+            document, {79, 80}, optional_refs=frozenset({80}), forbidden_refs=frozenset({80})
+        )
+        self.assertEqual([item["ref"] for item in valid], [79])
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("constat CQ-80 : ligne jugée d'après un document"))
+        self.assertNotIn(EM_DASH, errors[0])
+
+    def test_a_forbidden_ref_the_file_does_not_give_is_no_error(self):
+        valid, errors = validate_document(
+            make_document(make_finding(ref=79)),
+            {79, 80},
+            optional_refs=frozenset({80}),
+            forbidden_refs=frozenset({80}),
+        )
+        self.assertEqual((errors, [item["ref"] for item in valid]), ([], [79]))
+
+    def test_no_forbidden_ref_by_default(self):
+        valid, errors = validate_document(
+            make_document(make_finding(ref=79), make_finding(ref=80)), {79, 80}
+        )
+        self.assertEqual((errors, len(valid)), ([], 2))
+
     def test_optional_refs_default_to_none(self):
         valid, errors = validate_document(make_document(make_finding(ref=79)), {79, 80})
         self.assertEqual(errors, ["constat manquant : CQ-80"])

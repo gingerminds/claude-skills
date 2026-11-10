@@ -3635,6 +3635,31 @@ class DocumentHintsContract(unittest.TestCase):
                 self.assertIn("except its `document_refs`", _section(text, "Follow-up"))
                 self.assertIn("`document_refs`", _section(text, "Rerun"))
 
+    def test_the_agents_know_that_validate_refuses_a_finding_for_a_document_row(self):
+        for path in (AUDITOR, BROWSER):
+            with self.subTest(agent=path.name):
+                self.assertIn(
+                    "`validate` refuses a finding of the first round or of the follow-up for such a row",
+                    _section(_text(path), "Inputs"),
+                )
+        lots = _text(REFERENCES / "lots.md")
+        self.assertIn("a first-round or follow-up finding given for one is an error", lots)
+        self.assertIn("Only a rerun file (`--rerun`) may give them.", lots)
+        self.assertNotIn("a finding given for one is checked like any other", lots)
+
+    def test_the_hints_exist_for_the_document_rows_too(self):
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            with self.subTest(agent=path.name):
+                self.assertIn("(the rows of `document_refs` too,", _section(text, "Inputs"))
+                self.assertNotIn("rows of your lot that you evaluate:", _section(text, "Inputs"))
+                self.assertIn(
+                    "lists what the report pointed at for such a row", _section(text, "Rerun")
+                )
+        lots = _text(REFERENCES / "lots.md")
+        self.assertIn("(the rows of `document_refs` included:", lots)
+        self.assertNotIn("that the skill still audits (not in `document_refs`)", lots)
+
     def test_a_rerun_evaluates_the_document_rows_it_lists(self):
         for path in (AUDITOR, BROWSER):
             rerun = _section(_text(path), "Rerun")

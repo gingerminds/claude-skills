@@ -248,7 +248,7 @@ Before each browser lot (steps 3 and 5), call `tabs_context_mcp`. If it fails, a
 
 « Continuer quand même » and « Continuer sans navigateur » hold for the rest of the run, unless the lead says otherwise: at the next waves, ask again only for a change the lead has not answered yet, and after « Continuer sans navigateur » give every later browser lot to `gm:cqa-auditor` without a new check.
 
-Rows judged from a context document: `lots` keeps them in their natural lot and lists them in its `document_refs`; their findings are in `findings/context-docs.json`. A first-round agent evaluates the rows of its lot without its `document_refs`, so the lot file has no finding for them, and `validate` accepts that. A lot whose `documents` equals its `rows` (every row is judged from a document) is not dispatched, in steps 3 to 6: nothing is left to evaluate, and `cqa_plan.py validate "$RUN" <lot>` on it answers `skipped`.
+Rows judged from a context document: `lots` keeps them in their natural lot and lists them in its `document_refs`; their findings are in `findings/context-docs.json`. A first-round agent evaluates the rows of its lot without its `document_refs`, so the lot file has no finding for them, and `validate` accepts that; a finding written for one of them is an error that sends the agent back to remove it (the verdict of the document stays, only a rerun judges these rows again). A lot whose `documents` equals its `rows` (every row is judged from a document) is not dispatched, in steps 3 to 6: nothing is left to evaluate, and `cqa_plan.py validate "$RUN" <lot>` on it answers `skipped`.
 
 **Autonomous mode** (`mode` is `autonome`): never ask the lead anything in this section. Set aside what would have needed them, with one call per entry, and go on:
 

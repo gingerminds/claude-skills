@@ -28,8 +28,22 @@ def _default_reader(run_dir: Path, lot: dict, name: str) -> Optional[tuple]:
     except (OSError, ValueError) as error:
         return [], [f"findings/{name} est illisible : {error}"]
     return validate_document(
-        document, set(lot["refs"]), optional_refs=frozenset(lot_document_refs(lot))
+        document,
+        set(lot["refs"]),
+        optional_refs=frozenset(lot_document_refs(lot)),
+        forbidden_refs=_document_refs_of_round(lot, name),
     )
+
+
+def _document_refs_of_round(lot: dict, name: str) -> frozenset:
+    """Return the rows of the lot judged from a document that the file name must not give.
+
+    A first-round or follow-up file never judges them (the report of the document does); a
+    rerun file may.
+    """
+    if _RERUN_NAME.fullmatch(name):
+        return frozenset()
+    return frozenset(lot_document_refs(lot))
 
 
 def read_grounded_findings(run_dir: Path, context: dict, lot: dict, name: str) -> Optional[tuple]:
@@ -51,6 +65,7 @@ def read_grounded_findings(run_dir: Path, context: dict, lot: dict, name: str) -
         set(lot["refs"]),
         app_path=app_path(context),
         optional_refs=frozenset(lot_document_refs(lot)),
+        forbidden_refs=_document_refs_of_round(lot, name),
     )
     repos = context.get("repos") if isinstance(context.get("repos"), list) else []
     roots = {
@@ -153,8 +168,9 @@ def latest_findings(
     read(lot, name) gives (valid findings, errors) of a findings file, or None when it does
     not exist; it defaults to the structural validation of the document. A row a later file
     does not give, or gives invalid, keeps its previous finding. The virtual lot of the context
-    documents (document_lot) is read before the others: a file of the lot of the row, a
-    rerun for instance, prevails over the finding of its document.
+    documents (document_lot) is read before the others: a rerun file of the lot of the row
+    prevails over the finding of its document. A first-round or follow-up file never does,
+    whatever read gives: its findings for the document_refs of the lot are ignored.
     """
     reader = read or (lambda lot, name: _default_reader(run_dir, lot, name))
     latest = {}
@@ -162,8 +178,10 @@ def latest_findings(
     for lot in ([documents] if documents else []) + list(lots):
         for name in finding_files(run_dir, lot["id"]):
             found = reader(lot, name)
+            skipped = _document_refs_of_round(lot, name)
             for item in found[0] if found else []:
-                latest[item["ref"]] = item
+                if item["ref"] not in skipped:
+                    latest[item["ref"]] = item
     return latest
 
 
