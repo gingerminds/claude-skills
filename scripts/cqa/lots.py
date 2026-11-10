@@ -47,6 +47,7 @@ _BUCKETS = {
     "phase": "deferred",
     "no_tools": "not_evaluable",
 }
+DOCUMENT_LOT_ID = "context-docs"
 _NON_SLUG = re.compile(r"[^a-z0-9]+")
 _TEST_ACCOUNTS = "Comptes de test"
 _BACKOFFICE_SECTION = re.compile(r"^(back|bo$)", re.IGNORECASE)
@@ -64,6 +65,7 @@ def select_rows(
     available_tools: list[str],
     phase_filter: Optional[str],
     category_filter: Optional[list] = None,
+    document_refs: frozenset = frozenset(),
 ) -> tuple[list[dict], list[dict]]:
     """Split rows into the rows to audit and the rows excluded before any evaluation.
 
@@ -71,13 +73,17 @@ def select_rows(
     no tool. A row without phase never counts as deferred. With a phase_filter, only the rows
     that contain that phase are kept; with a category_filter (Notion names), only the rows of
     those categories, and the two filters intersect. "Intervention humaine" is not a tool: a
-    row that asks for nothing else is kept. An excluded entry is
+    row that asks for nothing else is kept. A row that has a verdict of a context document
+    (its ref is in document_refs) and passed the rules before the tools is kept whatever
+    tools it asks for: the report replaces them. An excluded entry is
     {ref, page_id, reason, verdict, detail, tools}; tools lets coverage count the rows a
     missing tool would bring back.
     """
     kept, excluded = [], []
     for row in rows:
-        found = _exclusion(row, technos, set(available_tools), phase_filter, category_filter)
+        found = _exclusion(
+            row, technos, set(available_tools), phase_filter, category_filter, document_refs
+        )
         if found is None:
             kept.append(row)
             continue
@@ -95,7 +101,12 @@ def select_rows(
     return kept, excluded
 
 
-def coverage(kept: list[dict], excluded: list[dict], available_tools: list[str]) -> dict:
+def coverage(
+    kept: list[dict],
+    excluded: list[dict],
+    available_tools: list[str],
+    document_refs: frozenset = frozenset(),
+) -> dict:
     """Count the rows by what the lead's workstation lets the skill do, and the gains.
 
     total is every row of the scope, including those without fiche, which belong to no other
@@ -104,6 +115,10 @@ def coverage(kept: list[dict], excluded: list[dict], available_tools: list[str])
     partial holds the kept rows with a missing tool. not_evaluable, deferred, na and standby
     are the rows excluded for no_tools, phase, techno and standby. out_of_scope holds the
     rows of the other categories (category_filter): they are not in total.
+
+    A kept row that has a verdict of a document (document_refs) lacks no tool: it counts as
+    evaluable and never feeds gains. documents, present only when it is not 0, is the number
+    of those rows (a part of evaluable).
 
     gains lists each unavailable tool with the number of rows, kept or excluded for no_tools,
     that require it, most rows first (ties in TOOLS order). Tools no row requires are left
@@ -122,15 +137,20 @@ def coverage(kept: list[dict], excluded: list[dict], available_tools: list[str])
         "out_of_scope": 0,
     }
     needed = Counter()
+    documents = 0
     for row in kept:
         required = _required(row)
-        if available.issuperset(required):
+        judged = row.get("ref") in document_refs
+        if judged or available.issuperset(required):
             counts["evaluable"] += 1
             if _HUMAN in (row.get("tools") or []):
                 counts["evaluable_human"] += 1
         else:
             counts["partial"] += 1
-        needed.update(set(required))
+        if judged:
+            documents += 1
+        else:
+            needed.update(set(required))
     for entry in excluded:
         bucket = _BUCKETS.get(entry["reason"])
         if bucket:
@@ -138,6 +158,8 @@ def coverage(kept: list[dict], excluded: list[dict], available_tools: list[str])
         if entry["reason"] == "no_tools":
             needed.update(set(_required(entry)))
     counts["total"] = len(kept) + len(excluded) - counts["out_of_scope"]
+    if documents:
+        counts["documents"] = documents
     gains = [
         {"tool": tool, "action": TOOL_ACTIONS[tool], "rows": needed[tool]}
         for tool in TOOLS
@@ -148,11 +170,15 @@ def coverage(kept: list[dict], excluded: list[dict], available_tools: list[str])
     return counts
 
 
-def build_lots(kept: list[dict], max_size: int = 20) -> list[dict]:
+def build_lots(
+    kept: list[dict], max_size: int = 20, document_refs: frozenset = frozenset()
+) -> list[dict]:
     """Group the kept rows into lots, one per sub-agent, in dispatch order.
 
-    A lot is {id, kind, needs_toolbox, needs_server_facts, needs_session, refs}, refs in
-    ascending order.
+    A lot is {id, kind, needs_toolbox, needs_server_facts, needs_session, refs,
+    document_refs}, refs in ascending order. document_refs holds, in ascending order, the refs
+    of the lot that have a verdict of a context document: they stay in their natural lot, but
+    the sub-agent does not evaluate them (a lot made of them only is not dispatched).
     Rows are routed by the tools they ask for, whether those tools are available or not:
     browser lots (accessibility apart, no size limit), a server lot, then code lots of at
     most max_size rows (a category group is split by sub-category, then into balanced
@@ -184,9 +210,9 @@ def build_lots(kept: list[dict], max_size: int = 20) -> list[dict]:
         needing = [row for row in lot_rows if _needs_toolbox(row)]
         others = [row for row in lot_rows if not _needs_toolbox(row)]
         if others:
-            plain.append(_lot(lot_id, kind, others, needs_toolbox=False))
+            plain.append(_lot(lot_id, kind, others, False, document_refs))
         if needing:
-            with_toolbox.append(_lot(f"{lot_id}-outils", kind, needing, needs_toolbox=True))
+            with_toolbox.append(_lot(f"{lot_id}-outils", kind, needing, True, document_refs))
     return plain + with_toolbox
 
 
@@ -195,7 +221,15 @@ def lot_needs_session(lot: dict) -> bool:
     return lot.get("needs_session") is True
 
 
-def _exclusion(row, technos, available, phase_filter, category_filter=None):
+def lot_document_refs(lot: dict) -> list:
+    """Read document_refs of a lot entry, sorted; a lots.json of an older run has none: []."""
+    value = lot.get("document_refs") if isinstance(lot, dict) else None
+    if not isinstance(value, list):
+        return []
+    return sorted({ref for ref in value if isinstance(ref, int) and not isinstance(ref, bool)})
+
+
+def _exclusion(row, technos, available, phase_filter, category_filter=None, document_refs=()):
     if not in_scope(row, category_filter):
         return "category", "skip", f"catégorie hors du périmètre ({', '.join(category_filter)})"
     if row.get("status") == STATUS_STANDBY:
@@ -212,6 +246,8 @@ def _exclusion(row, technos, available, phase_filter, category_filter=None):
             return "phase", "skip", f"tâche hors de la phase demandée ({phase_filter})"
     elif phases and set(phases) <= _DEFERRED_PHASES:
         return "phase", "skip", f"tâche reportée à {' + '.join(phases)}"
+    if row.get("ref") in document_refs:
+        return None
     required = _required(row)
     if required and available.isdisjoint(required):
         return "no_tools", "unknown", f"outils indisponibles : {', '.join(required)}"
@@ -245,7 +281,7 @@ def _needs_session(row):
     )
 
 
-def _lot(lot_id, kind, rows, needs_toolbox):
+def _lot(lot_id, kind, rows, needs_toolbox, document_refs):
     server_facts = kind == "browser" and any(
         tool in (row.get("tools") or []) for row in rows for tool in _SERVER_TOOLS
     )
@@ -256,6 +292,7 @@ def _lot(lot_id, kind, rows, needs_toolbox):
         "needs_server_facts": server_facts,
         "needs_session": any(_needs_session(row) for row in rows) if kind == "browser" else False,
         "refs": [row["ref"] for row in rows],
+        "document_refs": sorted(row["ref"] for row in rows if row["ref"] in document_refs),
     }
 
 

@@ -228,6 +228,30 @@ class ValidateDocumentTest(unittest.TestCase):
         self.assertEqual(errors, ["constat manquant : CQ-3", "constat manquant : CQ-12"])
         self.assertEqual([item["ref"] for item in valid], [79])
 
+    def test_optional_refs_are_not_reported_missing(self):
+        document = make_document(make_finding(ref=79))
+        valid, errors = validate_document(document, {79, 80}, optional_refs=frozenset({80}))
+        self.assertEqual((errors, [item["ref"] for item in valid]), ([], [79]))
+        valid, errors = validate_document(document, {79, 80, 81}, optional_refs=frozenset({80}))
+        self.assertEqual(errors, ["constat manquant : CQ-81"])
+
+    def test_an_optional_ref_given_by_the_file_is_validated_like_any_other(self):
+        document = make_document(make_finding(ref=79), make_finding(ref=80, confidence="sure"))
+        valid, errors = validate_document(document, {79, 80}, optional_refs=frozenset({80}))
+        self.assertEqual([item["ref"] for item in valid], [79])
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("constat CQ-80 : confiance"))
+
+    def test_optional_refs_do_not_widen_the_lot(self):
+        document = make_document(make_finding(ref=79), make_finding(ref=999))
+        valid, errors = validate_document(document, {79}, optional_refs=frozenset({999}))
+        self.assertEqual([item["ref"] for item in valid], [79])
+        self.assertEqual(errors, ["constat CQ-999 : Réf hors du lot"])
+
+    def test_optional_refs_default_to_none(self):
+        valid, errors = validate_document(make_document(make_finding(ref=79)), {79, 80})
+        self.assertEqual(errors, ["constat manquant : CQ-80"])
+
     def test_empty_findings_report_every_row(self):
         valid, errors = validate(lot_refs={80, 79})
         self.assertEqual(valid, [])

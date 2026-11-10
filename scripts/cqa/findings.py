@@ -64,12 +64,14 @@ def worst(verdicts: Iterable[str]) -> str:
 
 
 def validate_document(
-    doc: dict, lot_refs: set[int], *, app_path: str = ""
+    doc: dict, lot_refs: set[int], *, app_path: str = "", optional_refs: frozenset = frozenset()
 ) -> tuple[list[dict], list[str]]:
     """Return (valid findings, errors in French) for a findings/<lot>.json document.
 
     app_path is the path the application is served under, for the PHP rule of needs_probes
-    (see requests_php_file).
+    (see requests_php_file). optional_refs are rows of the lot that the file need not give (the
+    rows judged from a context document): one is never reported missing, but a finding the
+    file gives for it is validated like any other.
 
     Every problem of the document is reported in one pass, because the sub-agent gets to fix
     its file once. A finding is returned (as a deep copy) only when it has no problem. A ref
@@ -114,7 +116,9 @@ def validate_document(
             seen.add(ref)
         if not problems and not duplicate:
             valid.append(copy.deepcopy(item))
-    errors.extend(f"constat manquant : {ref_label(ref)}" for ref in sorted(lot_refs - seen))
+    errors.extend(
+        f"constat manquant : {ref_label(ref)}" for ref in sorted(lot_refs - seen - optional_refs)
+    )
     return valid, errors
 
 

@@ -15,7 +15,8 @@ from unittest import mock
 from urllib.parse import urljoin, urlsplit
 
 import cqa_plan as cqa_plan_module
-from cqa import context_docs, docs_link, docs_read, docs_verdicts, fix_state, probes, report
+from cqa import context_docs, docs_link, docs_read, docs_verdicts, fix_state, probes, report, rerun
+from cqa.checklist import STATUS_STANDBY
 from cqa.notion_write import apply_plan, text_digest, validate_plan
 from cqa.plan import operation_key
 from tests.cqa.fakes import apply_report
@@ -3696,8 +3697,8 @@ class FixPlanCommandTest(FixPlanCase):
         self.assertEqual(self.apply(client)["skipped"], 10)
 
 
-class ContextDocsCommandTest(AuditCase):
-    """cqa_plan.py context-docs: copy, read, merge and check the context documents of a run."""
+class ContextDocsFixtures:
+    """A run with a context document: import, link, verdicts (helpers of the tests that follow)."""
 
     STAMP = datetime(2026, 10, 1, 12, 0).timestamp()
     KEY = "AKIA" + "ABCDEFGHIJKLMNOP"
@@ -3734,6 +3735,47 @@ class ContextDocsCommandTest(AuditCase):
         self.docs_json("add", self.workbook())
         self.write_import()
         return self.docs_json("merge", "d1")
+
+    ACCESS = "ACCESSIBILITÉ"
+
+    def link_rows(self):
+        """Rows 112 and 113 (ACCESSIBILITÉ) cite 1.1 and 7.3; 120 (QUALITÉ) cites 1.1."""
+        rows = [make_row(112, self.ACCESS), make_row(113, self.ACCESS), make_row(120, "QUALITÉ")]
+        for ref, criteria in ((112, ("1.1",)), (113, ("7.3",)), (120, ("1.1",))):
+            (self.run_dir / "fiches" / f"CQ-{ref}.md").write_text(
+                fiche_text(*criteria), encoding="utf-8"
+            )
+        self.edit(self.run_dir, "rows.json", lambda document: document["rows"].extend(rows))
+
+    def linkable(self):
+        self.imported()
+        self.link_rows()
+
+    def proposal(self, value, name="proposed.json"):
+        path = self.files / name
+        path.write_text(
+            value if isinstance(value, str) else json.dumps(value), encoding="utf-8"
+        )
+        return path
+
+    def links(self):
+        return self.read(self.run_dir, "context-docs/links.json")
+
+    def links_md(self):
+        return self.run_dir / "context-docs" / "links.md"
+
+    def verdictable(self):
+        """Merged document, rows 112, 113 and 120, links validated: 112 is ko, 113 is ok."""
+        self.linkable()
+        self.docs_json("link")
+        self.docs_json("link", "--accept")
+
+    def stored_verdicts(self):
+        return self.read(self.run_dir, "context-docs/verdicts.json")["verdicts"]
+
+
+class ContextDocsCommandTest(ContextDocsFixtures, AuditCase):
+    """cqa_plan.py context-docs: copy, read, merge and check the context documents of a run."""
 
     def test_add_copies_each_file_into_the_run_and_lists_its_sheets(self):
         result = self.docs_json("add", self.workbook())
@@ -4085,34 +4127,6 @@ class ContextDocsCommandTest(AuditCase):
             json.loads(out)["found"], [{"path": "findings/x.json", "label": "aws_key"}]
         )
 
-    ACCESS = "ACCESSIBILITÉ"
-
-    def link_rows(self):
-        """Rows 112 and 113 (ACCESSIBILITÉ) cite 1.1 and 7.3; 120 (QUALITÉ) cites 1.1."""
-        rows = [make_row(112, self.ACCESS), make_row(113, self.ACCESS), make_row(120, "QUALITÉ")]
-        for ref, criteria in ((112, ("1.1",)), (113, ("7.3",)), (120, ("1.1",))):
-            (self.run_dir / "fiches" / f"CQ-{ref}.md").write_text(
-                fiche_text(*criteria), encoding="utf-8"
-            )
-        self.edit(self.run_dir, "rows.json", lambda document: document["rows"].extend(rows))
-
-    def linkable(self):
-        self.imported()
-        self.link_rows()
-
-    def proposal(self, value, name="proposed.json"):
-        path = self.files / name
-        path.write_text(
-            value if isinstance(value, str) else json.dumps(value), encoding="utf-8"
-        )
-        return path
-
-    def links(self):
-        return self.read(self.run_dir, "context-docs/links.json")
-
-    def links_md(self):
-        return self.run_dir / "context-docs" / "links.md"
-
     def test_link_lists_what_to_propose_before_the_proposals(self):
         self.linkable()
         result = self.docs_json("link")
@@ -4341,15 +4355,6 @@ class ContextDocsCommandTest(AuditCase):
         self.assertEqual(code, 2)
         self.assertIn("rows.json", err)
 
-    def verdictable(self):
-        """Merged document, rows 112, 113 and 120, links validated: 112 is ko, 113 is ok."""
-        self.linkable()
-        self.docs_json("link")
-        self.docs_json("link", "--accept")
-
-    def stored_verdicts(self):
-        return self.read(self.run_dir, "context-docs/verdicts.json")["verdicts"]
-
     def test_verdicts_writes_the_findings_and_prints_the_counts(self):
         self.verdictable()
         code, out, err = self.docs("verdicts")
@@ -4436,6 +4441,290 @@ class ContextDocsCommandTest(AuditCase):
         self.write(self.run_dir, "rows.json", {"rows": [], "missing_in_copy": []})
         (self.run_dir / "context.json").unlink()
         self.assertEqual(self.docs("verdicts")[0], 6)
+
+
+class DocumentLotsTest(ContextDocsFixtures, AuditCase):
+    """lots, coverage, validate and plan with the verdicts of a context document.
+
+    The document is the one of ContextDocsFixtures: once the links are validated, row 112 is ko
+    (point d1-001, criterion 1.1) and row 113 is ok (criterion 7.3); row 120 is QUALITÉ, so it
+    is never judged. A row added with add_row is ACCESSIBILITÉ: without a criterion (114) the
+    skill still audits it; citing 1.1 and 7.3 (115) it is partial.
+    """
+
+    def judged(self, rows=(), proposed=None):
+        """Merge, link, validate the links and write the verdicts; return the verdicts summary."""
+        self.linkable()
+        for ref, criteria in rows:
+            self.add_row(ref, *criteria)
+        arguments = ["--proposed", self.proposal(proposed)] if proposed else []
+        self.docs_json("link", *arguments)
+        self.docs_json("link", "--accept")
+        return self.docs_json("verdicts")
+
+    def add_row(self, ref, *criteria, category="ACCESSIBILITÉ", **changes):
+        (self.run_dir / "fiches" / f"CQ-{ref}.md").write_text(fiche_text(*criteria), encoding="utf-8")
+        row = {**make_row(ref, category), **changes}
+        self.edit(self.run_dir, "rows.json", lambda document: document["rows"].append(row))
+
+    def lots(self):
+        return self.run_json(["lots", self.run_dir])
+
+    def stored_lots(self):
+        return self.read(self.run_dir, "lots.json")
+
+    def lot(self, lot_id):
+        return next(lot for lot in self.stored_lots()["lots"] if lot["id"] == lot_id)
+
+    def document_refs_of_lots(self):
+        return {lot["id"]: lot["document_refs"] for lot in self.stored_lots()["lots"]}
+
+    def findings_path(self):
+        return self.run_dir / "findings" / "context-docs.json"
+
+    def skill_finding(self, ref, verdict):
+        return {
+            "ref": ref,
+            "verdict": verdict,
+            "confidence": "high",
+            "summary": "Constat du skill.",
+            "evidence": [
+                {"type": "file", "repo": "laravel", "path": "app/Http/Kernel.php", "line": 1}
+            ],
+            "todo": None if verdict == "ok" else "À corriger.",
+            "human_check": None,
+            "divergence": None,
+            "needs_probes": [],
+        }
+
+    def write_lot_findings(self, name, lot, *items):
+        self.write(self.run_dir, f"findings/{name}.json", {"lot": lot, "findings": list(items)})
+
+    def test_lots_writes_document_findings(self):
+        self.judged(rows=[(114, ())])
+        summary = self.lots()
+        document = self.read(self.run_dir, "findings/context-docs.json")
+        self.assertEqual(document["lot"], "context-docs")
+        self.assertEqual(
+            [(item["ref"], item["verdict"]) for item in document["findings"]],
+            [(112, "ko"), (113, "ok")],
+        )
+        verdicts = self.read(self.run_dir, "context-docs/verdicts.json")["verdicts"]
+        self.assertEqual(document["findings"][0], verdicts["112"]["finding"])
+        lot = self.lot("code-accessibilite")
+        self.assertEqual((lot["refs"], lot["document_refs"]), ([112, 113, 114], [112, 113]))
+        self.assertEqual(self.lot("code-qualite")["document_refs"], [])
+        self.assertEqual(self.stored_lots()["coverage"]["documents"], 2)
+        self.assertEqual(summary["coverage"]["documents"], 2)
+        by_id = {item["id"]: item for item in summary["lots"]}
+        self.assertEqual(
+            (by_id["code-accessibilite"]["rows"], by_id["code-accessibilite"]["documents"]), (3, 2)
+        )
+        self.assertNotIn("document_refs", by_id["code-accessibilite"])
+        self.assertEqual(by_id["code-qualite"]["documents"], 0)
+
+    def test_the_document_findings_pass_the_validation_of_their_virtual_lot(self):
+        self.judged(rows=[(114, ())])
+        self.lots()
+        virtual = rerun.document_lot(self.stored_lots()["lots"])
+        found = rerun.read_grounded_findings(
+            self.run_dir, {}, virtual, "context-docs.json"
+        )
+        self.assertEqual(found[1], [])
+        self.assertEqual([item["ref"] for item in found[0]], [112, 113])
+
+    def test_lots_without_a_document_writes_no_document_file(self):
+        run_dir = self.make_run()
+        summary = self.run_json(["lots", run_dir])
+        self.assertFalse((run_dir / "findings" / "context-docs.json").exists())
+        self.assertNotIn("documents", summary["coverage"])
+        self.assertEqual([lot["documents"] for lot in summary["lots"]], [0, 0])
+        self.assertEqual(
+            [lot["document_refs"] for lot in self.read(run_dir, "lots.json")["lots"]], [[], []]
+        )
+
+    def test_lots_removes_the_document_findings_of_an_earlier_call(self):
+        self.judged(rows=[(114, ())])
+        self.lots()
+        self.assertTrue(self.findings_path().is_file())
+        self.docs_json("link")
+        self.docs_json("verdicts")
+        summary = self.lots()
+        self.assertFalse(self.findings_path().exists())
+        self.assertEqual(self.lot("code-accessibilite")["document_refs"], [])
+        self.assertNotIn("documents", summary["coverage"])
+
+    def test_lots_writes_the_findings_of_the_kept_rows_only(self):
+        self.judged(rows=[(114, ())])
+        self.edit_row(self.run_dir, 113, status=STATUS_STANDBY)
+        summary = self.lots()
+        findings = self.read(self.run_dir, "findings/context-docs.json")["findings"]
+        self.assertEqual([item["ref"] for item in findings], [112])
+        self.assertEqual(self.lot("code-accessibilite")["document_refs"], [112])
+        self.assertEqual(summary["coverage"]["documents"], 1)
+        self.assertEqual(summary["excluded"].get("standby"), 1)
+
+    def test_lots_ignores_an_unreadable_verdicts_file(self):
+        self.judged(rows=[(114, ())])
+        (self.run_dir / "context-docs" / "verdicts.json").write_text("{", encoding="utf-8")
+        code, out, err = self.run_main(["lots", self.run_dir])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(set(map(tuple, self.document_refs_of_lots().values())), {()})
+        self.assertFalse(self.findings_path().exists())
+        self.assertNotIn("documents", json.loads(out)["coverage"])
+
+    def test_lots_ignores_a_verdicts_file_of_an_unexpected_shape(self):
+        self.judged(rows=[(114, ())])
+        for text in ("[]", '{"verdicts": []}', '{"verdicts": {"112": "ko"}}', ""):
+            with self.subTest(text=text):
+                (self.run_dir / "context-docs" / "verdicts.json").write_text(text, encoding="utf-8")
+                self.assertEqual(self.run_main(["lots", self.run_dir])[0], 0)
+                self.assertEqual(set(map(tuple, self.document_refs_of_lots().values())), {()})
+
+    def test_lots_without_any_verdicts_file_changes_nothing(self):
+        self.linkable()
+        self.assertFalse((self.run_dir / "context-docs" / "verdicts.json").exists())
+        summary = self.lots()
+        self.assertEqual(set(map(tuple, self.document_refs_of_lots().values())), {()})
+        self.assertNotIn("documents", summary["coverage"])
+
+    def test_a_document_row_is_kept_even_without_its_tools(self):
+        self.judged(rows=[(114, ())])
+        self.edit_row(self.run_dir, 112, tools=["Navigateur"])
+        self.edit_row(self.run_dir, 114, tools=["Navigateur"])
+        summary = self.lots()
+        lot = self.lot("browser-accessibilite")
+        self.assertEqual((lot["refs"], lot["document_refs"]), ([112], [112]))
+        excluded = {entry["ref"]: entry["reason"] for entry in self.stored_lots()["excluded"]}
+        self.assertEqual(excluded[114], "no_tools")
+        self.assertNotIn(112, excluded)
+        self.assertEqual(summary["coverage"]["documents"], 2)
+
+    def test_a_row_judged_by_a_document_is_neither_partial_nor_a_tool_gain(self):
+        self.judged(rows=[(114, ())])
+        self.edit_row(self.run_dir, 112, tools=["Navigateur"])
+        self.edit_row(self.run_dir, 114, tools=["Navigateur"])
+        found = self.run_json(["coverage", self.run_dir])
+        self.assertEqual(found["documents"], 2)
+        self.assertEqual(found["partial"], 0)
+        self.assertEqual(found["not_evaluable"], 2)
+        self.assertEqual({gain["tool"]: gain["rows"] for gain in found["gains"]}, {"Navigateur": 2})
+        self.assertEqual(self.lots()["coverage"], found)
+
+    def test_validate_skips_a_lot_fully_covered_by_a_document(self):
+        self.judged()
+        self.lots()
+        code, out, err = self.run_main(["validate", self.run_dir, "code-accessibilite"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            json.loads(out), {"ok": True, "errors": [], "skipped": "lot couvert par un document"}
+        )
+        code, out, err = self.run_main(
+            ["validate", self.run_dir, "code-accessibilite", "--followup"]
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("skipped", json.loads(out))
+
+    def test_validate_still_checks_a_lot_that_has_a_row_to_audit(self):
+        self.judged(rows=[(114, ())])
+        self.lots()
+        code, out, err = self.run_main(["validate", self.run_dir, "code-accessibilite"])
+        self.assertEqual(code, 6)
+        self.assertEqual(
+            json.loads(out)["errors"],
+            [
+                "findings/code-accessibilite.json est introuvable : "
+                "le sous-agent n'a pas écrit son fichier."
+            ],
+        )
+        self.write_lot_findings(
+            "code-accessibilite", "code-accessibilite", self.skill_finding(114, "ok")
+        )
+        code, out, err = self.run_main(["validate", self.run_dir, "code-accessibilite"])
+        self.assertEqual((code, json.loads(out)), (0, {"ok": True, "errors": []}))
+
+    def test_validate_asks_for_every_row_the_document_does_not_cover(self):
+        self.judged(rows=[(114, ()), (116, ())])
+        self.lots()
+        self.write_lot_findings(
+            "code-accessibilite", "code-accessibilite", self.skill_finding(114, "ok")
+        )
+        code, out, err = self.run_main(["validate", self.run_dir, "code-accessibilite"])
+        self.assertEqual(code, 6)
+        self.assertEqual(json.loads(out)["errors"], ["constat manquant : CQ-116"])
+
+    def test_validate_of_a_rerun_does_not_skip_a_lot_covered_by_a_document(self):
+        self.judged()
+        self.lots()
+        arguments = ["validate", self.run_dir, "code-accessibilite", "--rerun", "1", "--rows", "112"]
+        code, out, err = self.run_main(arguments)
+        self.assertEqual(code, 6)
+        self.assertNotIn("skipped", json.loads(out))
+        self.write_lot_findings(
+            "code-accessibilite-rerun-01", "code-accessibilite", self.skill_finding(112, "ok")
+        )
+        code, out, err = self.run_main(arguments)
+        self.assertEqual((code, json.loads(out)), (0, {"ok": True, "errors": []}))
+
+    def test_plan_uses_the_document_findings(self):
+        self.judged(rows=[(114, ()), (115, ("1.1", "7.3"))])
+        for ref in (112, 113, 114, 115):
+            self.edit_row(self.run_dir, ref, status="À traiter", last_edited_by_bot=True)
+        verdicts = self.read(self.run_dir, "context-docs/verdicts.json")["verdicts"]
+        self.assertEqual(
+            {ref: entry["verdict"] for ref, entry in verdicts.items()},
+            {"112": "ko", "113": "ok", "115": "partial"},
+        )
+        self.lots()
+        self.write_lot_findings(
+            "code-accessibilite", "code-accessibilite", self.skill_finding(114, "ok")
+        )
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        after = {state["ref"]: state["after"] for state in plan["rows"] if 112 <= state["ref"] < 120}
+        self.assertEqual(
+            after,
+            {
+                112: "À traiter",
+                113: "Ok / Recetté",
+                114: "Ok / Recetté",
+                115: "Mise en place partielle",
+            },
+        )
+        comments = {op["ref"]: op["text"] for op in plan["ops"] if op["kind"] == "comment"}
+        self.assertIn("Rapport d1 : critères 1.1", comments[112])
+        self.assertIn("Rapport d1 : critères 7.3", comments[113])
+        self.assertIn("Rapport d1 : critères 1.1, 7.3", comments[115])
+        self.assertNotIn(112, plan["summary"]["unknown"])
+        validate_plan(plan)
+
+    def test_the_skill_finding_of_a_rerun_replaces_the_one_of_the_document(self):
+        self.judged(rows=[(114, ())])
+        for ref in (112, 113, 114):
+            self.edit_row(self.run_dir, ref, status="À traiter", last_edited_by_bot=True)
+        self.lots()
+        self.write_lot_findings(
+            "code-accessibilite", "code-accessibilite", self.skill_finding(114, "ok")
+        )
+        self.write_lot_findings(
+            "code-accessibilite-rerun-01", "code-accessibilite", self.skill_finding(112, "ok")
+        )
+        self.write(self.run_dir, "reruns.json", {"closed": ["01"], "dates": {"01": "2026-10-21"}})
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
+        self.assertEqual(after[112], "Ok / Recetté")
+
+    def test_a_missing_lot_file_leaves_the_document_row_judged_and_the_other_unknown(self):
+        self.judged(rows=[(114, ())])
+        for ref in (112, 113, 114):
+            self.edit_row(self.run_dir, ref, status="À traiter", last_edited_by_bot=True)
+        self.lots()
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        self.assertEqual(plan["summary"]["unknown"], [104, 106, 114, 120])
+        after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
+        self.assertEqual((after[112], after[113]), ("À traiter", "Ok / Recetté"))
 
 
 class RegistrationTest(AuditCase):

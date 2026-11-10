@@ -17,9 +17,11 @@ from typing import Optional
 
 from cqa import context_docs, docs_link
 from cqa.findings import MAX_FIELD_LENGTH, MAX_SUMMARY_LENGTH, VERDICTS, worst
+from cqa.lots import DOCUMENT_LOT_ID
 from cqa.notion_read import write_json
 
 VERDICTS_FILE = "verdicts.json"
+FINDINGS_FOLDER = "findings"
 SOURCE = "context_doc"
 CONFIDENCE = "high"
 MAX_REF_LENGTH = 200
@@ -217,6 +219,24 @@ def read_verdicts(run_dir: Path) -> dict:
 def document_refs(run_dir: Path) -> frozenset:
     """Return the refs of the rows that have a verdict of a document."""
     return frozenset(read_verdicts(run_dir))
+
+
+def write_findings(run_dir: Path, kept_refs: set) -> int:
+    """Write findings/context-docs.json with the findings of the rows kept in the audit.
+
+    The file is {"lot": "context-docs", "findings": [...]}, the findings of verdicts.json whose
+    ref is in kept_refs, in the order of the refs. Without any, a file of an earlier call is
+    removed. Returns the number of findings written.
+    """
+    verdicts = read_verdicts(run_dir)
+    findings = [verdicts[ref]["finding"] for ref in sorted(verdicts) if ref in kept_refs]
+    path = Path(run_dir) / FINDINGS_FOLDER / f"{DOCUMENT_LOT_ID}.json"
+    if not findings:
+        path.unlink(missing_ok=True)
+        return 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, {"lot": DOCUMENT_LOT_ID, "findings": findings})
+    return len(findings)
 
 
 def _documents(run_dir: Path):

@@ -43,7 +43,7 @@ from cqa.git_tools import (
     repo_state,
     same_gitlab_group,
 )
-from cqa.lots import TOOLS, build_lots, coverage, select_rows
+from cqa.lots import TOOLS, build_lots, coverage, lot_document_refs, select_rows
 from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
 from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_digest
@@ -1001,20 +1001,28 @@ def _cmd_crawl_estimate(args, services) -> int:
 
 
 def _cmd_coverage(args, services) -> int:
-    context, kept, excluded = _selection(args.run_dir)
-    _emit(coverage(kept, excluded, context["available_tools"]))
+    refs = docs_verdicts.document_refs(args.run_dir)
+    context, kept, excluded = _selection(args.run_dir, refs)
+    _emit(coverage(kept, excluded, context["available_tools"], document_refs=refs))
     return EXIT_OK
 
 
 def _cmd_lots(args, services) -> int:
-    context, kept, excluded = _selection(args.run_dir)
-    lots = build_lots(kept)
-    counts = coverage(kept, excluded, context["available_tools"])
-    write_json(args.run_dir / "lots.json", {"lots": lots, "excluded": excluded, "coverage": counts})
+    run_dir = args.run_dir
+    refs = docs_verdicts.document_refs(run_dir)
+    context, kept, excluded = _selection(run_dir, refs)
+    lots = build_lots(kept, document_refs=refs)
+    counts = coverage(kept, excluded, context["available_tools"], document_refs=refs)
+    docs_verdicts.write_findings(run_dir, {row["ref"] for row in kept if row["ref"] in refs})
+    write_json(run_dir / "lots.json", {"lots": lots, "excluded": excluded, "coverage": counts})
     _emit(
         {
             "lots": [
-                {**{key: lot[key] for key in lot if key != "refs"}, "rows": len(lot["refs"])}
+                {
+                    **{key: lot[key] for key in lot if key not in ("refs", "document_refs")},
+                    "rows": len(lot["refs"]),
+                    "documents": len(lot["document_refs"]),
+                }
                 for lot in lots
             ],
             "excluded": dict(Counter(entry["reason"] for entry in excluded)),
@@ -1263,6 +1271,9 @@ def _cmd_validate(args, services) -> int:
     if lot is None:
         known = ", ".join(item["id"] for item in lots) or "aucun"
         raise UsageError(f"Le lot « {args.lot_id} » est absent de lots.json (lots : {known}).")
+    if args.rerun is None and lot["refs"] and set(lot["refs"]) <= set(lot_document_refs(lot)):
+        _emit({"ok": True, "errors": [], "skipped": "lot couvert par un document"})
+        return EXIT_OK
     if args.rerun is not None:
         name = f"{lot['id']}-rerun-{args.rerun:02d}.json"
         rows = _parse_rows(args.rows) if args.rows is not None else None
@@ -2625,8 +2636,12 @@ def _read_lots(run_dir: Path) -> dict:
     return document
 
 
-def _selection(run_dir: Path) -> tuple:
-    """Return (context, kept rows, excluded entries) for the rows of the run."""
+def _selection(run_dir: Path, document_refs: Optional[frozenset] = None) -> tuple:
+    """Return (context, kept rows, excluded entries) for the rows of the run.
+
+    document_refs are the refs of the rows judged from a context document (read from
+    context-docs/verdicts.json when not given; absent or unreadable, none).
+    """
     context = _checked_context(run_dir)
     rows, _ = _read_rows(run_dir)
     kept, excluded = select_rows(
@@ -2635,6 +2650,7 @@ def _selection(run_dir: Path) -> tuple:
         context["available_tools"],
         context["phase_filter"],
         context.get("category_filter"),
+        document_refs=docs_verdicts.document_refs(run_dir) if document_refs is None else document_refs,
     )
     for row in kept:
         if not _is_ref(row.get("ref")):
