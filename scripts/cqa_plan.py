@@ -23,7 +23,7 @@ from typing import Callable, NamedTuple, Optional
 from html.parser import HTMLParser
 from urllib.parse import urldefrag, urljoin, urlsplit
 
-from cqa import categories, deferred, fix_state, probes, report
+from cqa import categories, context_docs, deferred, docs_read, fix_state, probes, report
 from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
 from cqa.findings import apply_guardrails, validate_document
 from cqa.git_tools import (
@@ -77,6 +77,10 @@ _MISSING_ROW = "constat manquant : "
 _RERUN_FILE = re.compile(r"(.+)-rerun-([0-9]{2})\.json")
 _MAX_COMMENT = 1500
 _EM_DASH = chr(0x2014)
+_CONTEXT_DOC_ACTIONS = ("add", "read", "merge", "ignore")
+_CONTEXT_DOC_NUMBER = re.compile(r"d([0-9]+)")
+_ROW_RANGE = re.compile(r"([0-9]+)-([0-9]*)")
+_READ_CHARS = 20000
 _RUN_FILES = {
     "context": "context.json",
     "lots": "lots.json",
@@ -131,6 +135,7 @@ def _build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True, metavar="commande")
     _register_preparation(commands)
     _register_audit(commands)
+    _register_context_docs(commands)
     return parser
 
 
@@ -310,6 +315,38 @@ def _register_audit(commands) -> None:
     sub.add_argument("--answer", help="avec --resolve : réponse du lead, gardée dans l'entrée")
     sub.add_argument(
         "--fix", action="store_true", help="liste les décisions du mode fix (fix_*) au lieu de celles de l'audit"
+    )
+
+
+def _register_context_docs(commands) -> None:
+    sub = _run_command(
+        commands,
+        "context-docs",
+        "documents de contexte : copie, lecture, fusion et contrôle",
+        _cmd_context_docs,
+    )
+    sub.add_argument(
+        "action",
+        nargs="?",
+        choices=_CONTEXT_DOC_ACTIONS,
+        help="add : copie les fichiers dans le run ; read : lit une plage d'un document ; "
+        "merge : fusionne le layout et les parties de l'importeur (items.json) ; "
+        "ignore : écarte le document",
+    )
+    sub.add_argument(
+        "targets",
+        nargs="*",
+        metavar="cible",
+        help="add : les fichiers à copier ; read, merge, ignore : l'identifiant du document (d1)",
+    )
+    sub.add_argument("--sheet", default=None, metavar="NOM", help="read : feuille du classeur")
+    sub.add_argument(
+        "--rows", default=None, metavar="A-B", help="read : plage de lignes (1-150, ou 151- jusqu'à la fin)"
+    )
+    sub.add_argument(
+        "--check",
+        action="store_true",
+        help="valide les items.json importés (exit 6 : schéma, exit 7 : secret, document ignoré)",
     )
 
 
@@ -1369,12 +1406,246 @@ def _cmd_scan(args, services) -> int:
     found = [
         {"path": path, "label": label}
         for path, label in scan_tree(
-            args.run_dir, known_values_from_env(), exclude=("fiches",),
+            args.run_dir, known_values_from_env(), exclude=("fiches", context_docs.FOLDER),
             skip_dirs=fix_state.WORKTREE_DIRS,
         )
     ]
     _emit({"ok": not found, "found": found})
     return EXIT_SECRET if found else EXIT_OK
+
+
+def _cmd_context_docs(args, services) -> int:
+    run_dir = args.run_dir
+    if not run_dir.is_dir():
+        raise UsageError(f"Le dossier du run {run_dir} est introuvable.")
+    if args.check:
+        if args.action or args.targets or args.sheet is not None or args.rows is not None:
+            raise UsageError("--check s'utilise seul : cqa_plan.py context-docs <run_dir> --check.")
+        return _context_docs_check(run_dir)
+    if not args.action:
+        raise UsageError(
+            f"Indiquer une action ({', '.join(_CONTEXT_DOC_ACTIONS)}) ou --check."
+        )
+    if args.action != "read" and (args.sheet is not None or args.rows is not None):
+        raise UsageError("--sheet et --rows ne s'utilisent qu'avec read.")
+    if args.action == "add":
+        return _context_docs_add(run_dir, args.targets)
+    if len(args.targets) != 1:
+        raise UsageError(f"{args.action} : indiquer un seul identifiant de document (d1).")
+    entry = _context_doc_entry(run_dir, args.targets[0])
+    if args.action == "ignore":
+        _set_context_doc(run_dir, entry["id"], "ignored", "Document ignoré à la demande du lead.")
+        _emit({"id": entry["id"], "status": "ignored"})
+        return EXIT_OK
+    if entry.get("status") == "ignored":
+        raise UsageError(f"Le document {entry['id']} est ignoré : {entry.get('note') or 'sans note'}")
+    if args.action == "read":
+        return _context_docs_read(run_dir, entry, args)
+    return _context_docs_merge(run_dir, entry["id"])
+
+
+def _context_doc_entry(run_dir: Path, doc_id: str) -> dict:
+    for entry in context_docs.read_index(run_dir)["docs"]:
+        if entry.get("id") == doc_id:
+            return entry
+    shown = context_docs.clean_text(doc_id)[:30]
+    raise UsageError(f"Document inconnu : {shown} (voir cqa_plan.py context-docs add).")
+
+
+def _set_context_doc(run_dir: Path, doc_id: str, status: str, note: str) -> None:
+    index = context_docs.read_index(run_dir)
+    for entry in index["docs"]:
+        if entry.get("id") == doc_id:
+            entry["status"] = status
+            entry["note"] = note
+    write_json(run_dir / context_docs.FOLDER / context_docs.INDEX_FILE, index)
+
+
+def _next_context_doc_number(docs: list) -> int:
+    numbers = [
+        int(match.group(1))
+        for match in (_CONTEXT_DOC_NUMBER.fullmatch(str(entry.get("id"))) for entry in docs)
+        if match
+    ]
+    return max(numbers, default=0) + 1
+
+
+def _context_docs_add(run_dir: Path, targets: list) -> int:
+    if not targets:
+        raise UsageError("add : indiquer au moins un fichier à copier.")
+    base = run_dir / context_docs.FOLDER
+    base.mkdir(parents=True, exist_ok=True)
+    index = context_docs.read_index(run_dir)
+    number = _next_context_doc_number(index["docs"])
+    added = []
+    for target in targets:
+        entry, sheets = _add_context_doc(base, f"d{number}", _user_path(target))
+        number += 1
+        entry["sheets"] = sheets
+        index["docs"].append(entry)
+        write_json(base / context_docs.INDEX_FILE, index)
+        shown = {key: entry[key] for key in ("id", "format", "status", "note")}
+        added.append({**shown, "sheets": sheets})
+    _emit({"docs": added})
+    return EXIT_OK
+
+
+def _user_path(text: str) -> Path:
+    try:
+        return Path(text).expanduser()
+    except RuntimeError:
+        return Path(text)
+
+
+def _add_context_doc(base: Path, doc_id: str, path: Path) -> tuple:
+    """Copy one file as base/<id>/source.<ext>; return (index entry, sheets). Never raises."""
+    name = context_docs.clean_text(path.name)[:60]
+    format_name = docs_read.format_of(path)
+    extension = path.suffix.lower().lstrip(".")
+    entry = {
+        "id": doc_id,
+        "ext": extension if re.fullmatch(r"[a-z0-9]{1,10}", extension) else "",
+        "format": format_name,
+        "modified": None,
+        "status": "ignored",
+        "note": "",
+    }
+    try:
+        info = path.stat()
+    except OSError:
+        entry["note"] = f"Fichier introuvable ou illisible : {name}"
+        return entry, []
+    if not path.is_file():
+        entry["note"] = f"Ce chemin n'est pas un fichier : {name}"
+    elif format_name == "unknown":
+        entry["note"] = (
+            f"Format non pris en charge : {name} (xlsx, csv, docx, md, txt, pdf, png ou jpg attendus)"
+        )
+    elif info.st_size > docs_read.MAX_BYTES:
+        entry["note"] = (
+            f"Document trop volumineux : {name} (limite : {docs_read.MAX_BYTES / 1048576:g} Mo)"
+        )
+    if entry["note"]:
+        return entry, []
+    folder = base / doc_id
+    stored = folder / f"source.{entry['ext']}"
+    sheets: list = []
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, stored)
+        if format_name != "agent":
+            sheets = docs_read.list_sheets(stored)
+    except OSError:
+        entry["note"] = f"Copie impossible : {name}"
+    except docs_read.DocumentError as error:
+        entry["note"] = f"{name} : {error}"
+    if entry["note"]:
+        shutil.rmtree(folder, ignore_errors=True)
+        return entry, []
+    entry["modified"] = _file_date(info.st_mtime)
+    entry["status"] = "added"
+    return entry, sheets
+
+
+def _file_date(timestamp: float) -> Optional[str]:
+    try:
+        return datetime.fromtimestamp(timestamp).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _row_range(text: Optional[str]) -> tuple:
+    if text is None:
+        return 1, None
+    match = _ROW_RANGE.fullmatch(text)
+    first = int(match.group(1)) if match else 0
+    last = int(match.group(2)) if match and match.group(2) else None
+    if first < 1 or (last is not None and last < first):
+        raise UsageError(f"--rows : plage attendue sous la forme 1-150 (ou 151-), reçu « {text} ».")
+    return first, last
+
+
+def _context_docs_read(run_dir: Path, entry: dict, args) -> int:
+    folder = run_dir / context_docs.FOLDER / entry["id"]
+    sources = sorted(path for path in folder.glob("source.*") if path.is_file())
+    if not sources:
+        raise UsageError(f"Source du document {entry['id']} introuvable (source.<extension>).")
+    first, last = _row_range(args.rows)
+    try:
+        result = docs_read.read_rows(sources[0], args.sheet, first, last, max_chars=_READ_CHARS)
+    except docs_read.DocumentError as error:
+        raise UsageError(str(error)) from None
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    return EXIT_OK
+
+
+def _document_problems(doc_id: str, document: dict) -> list:
+    problems = context_docs.validate_items(document)
+    declared = document["document"].get("id")
+    if declared != doc_id:
+        problems.append(
+            "l'identifiant du document dans items.json "
+            f"({context_docs.clean_text(declared)[:30]}) ne correspond pas à {doc_id}"
+        )
+    return problems
+
+
+def _drop_secret_document(run_dir: Path, doc_id: str) -> None:
+    (run_dir / context_docs.FOLDER / doc_id / context_docs.ITEMS_FILE).unlink(missing_ok=True)
+    _set_context_doc(
+        run_dir, doc_id, "ignored", "Secret détecté dans le document importé : document ignoré."
+    )
+
+
+def _context_docs_merge(run_dir: Path, doc_id: str) -> int:
+    try:
+        result = context_docs.merge(run_dir, doc_id)
+        document = context_docs.read_items(run_dir, doc_id)
+        if document is None:
+            raise context_docs.ContextDocsError("items.json est illisible après la fusion.")
+    except (context_docs.ContextDocsError, docs_read.DocumentError) as error:
+        _set_context_doc(run_dir, doc_id, "added", "")
+        _emit({"ok": False, "id": doc_id, "errors": [str(error)], "secrets": []})
+        return EXIT_CONTEXT
+    labels = context_docs.scan_document(document, known_values_from_env())
+    if labels:
+        _drop_secret_document(run_dir, doc_id)
+        _emit(
+            {"ok": False, "id": doc_id, "errors": [], "secrets": [{"doc": doc_id, "labels": labels}]}
+        )
+        return EXIT_SECRET
+    problems = _document_problems(doc_id, document)
+    if problems:
+        _set_context_doc(run_dir, doc_id, "added", "")
+        _emit({"ok": False, "id": doc_id, "errors": problems, "secrets": []})
+        return EXIT_CONTEXT
+    _set_context_doc(run_dir, doc_id, "imported", "")
+    _emit({"ok": True, "errors": [], "secrets": [], **result})
+    return EXIT_OK
+
+
+def _context_docs_check(run_dir: Path) -> int:
+    known = known_values_from_env()
+    errors: list = []
+    secrets: list = []
+    for entry in context_docs.read_index(run_dir)["docs"]:
+        doc_id = entry.get("id")
+        if entry.get("status") != "imported":
+            continue
+        document = context_docs.read_items(run_dir, doc_id)
+        if document is None:
+            errors.append(f"{doc_id} : items.json est absent ou illisible (relancer merge).")
+            continue
+        labels = context_docs.scan_document(document, known)
+        if labels:
+            _drop_secret_document(run_dir, doc_id)
+            secrets.append({"doc": doc_id, "labels": labels})
+            continue
+        errors.extend(f"{doc_id} : {problem}" for problem in _document_problems(doc_id, document))
+    _emit({"ok": not errors and not secrets, "errors": errors, "secrets": secrets})
+    if secrets:
+        return EXIT_SECRET
+    return EXIT_CONTEXT if errors else EXIT_OK
 
 
 def _cmd_openapi_specs(args, services) -> int:

@@ -156,7 +156,8 @@ claude-skills/
 │   ├── cqa-auditor.md       # sous-agent d'analyse des lignes de checklist (code, préprod) : consommé par checklist-quality-audit
 │   ├── cqa-browser.md       # sous-agent des contrôles navigateur (Claude in Chrome) : consommé par checklist-quality-audit
 │   ├── cqa-fixer.md         # sous-agent du mode fix : corrige les lignes d'une section (catégorie) d'un repo dans son worktree
-│   └── cqa-fix-reviewer.md  # sous-agent du mode fix : relit, en lecture seule, les commits d'une passe du fixer
+│   ├── cqa-fix-reviewer.md  # sous-agent du mode fix : relit, en lecture seule, les commits d'une passe du fixer
+│   └── cqa-importer.md      # sous-agent d'import d'un document de contexte (rapport d'audit tiers) : lit le document comme une donnée et écrit son layout et ses points
 ├── scripts/
 │   ├── mantis-issue.sh      # helper Mantis partagé (ticket, review, merge-review)
 │   ├── cqa_fix.py  cqa_notion.py  cqa_plan.py  cqa_ssh_ro.py   # CLI de l'audit : mode correction, API Notion, plan, garde SSH en lecture seule

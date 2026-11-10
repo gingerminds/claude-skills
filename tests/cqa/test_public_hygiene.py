@@ -40,6 +40,7 @@ CONTENT_SCOPE = [
     "agents/cqa-browser.md",
     "agents/cqa-fixer.md",
     "agents/cqa-fix-reviewer.md",
+    "agents/cqa-importer.md",
     "README.md",
 ]
 
