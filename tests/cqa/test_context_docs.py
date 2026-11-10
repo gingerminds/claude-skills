@@ -342,6 +342,73 @@ class MergeTest(ContextDocsCase):
         self.assertEqual(coverage["3.1"]["undetermined"], 1)
         self.assertEqual(coverage["7.3"]["undetermined"], 1)
 
+    def neutral_layout(self, *texts):
+        layout = copy.deepcopy(LAYOUT)
+        layout["status_values"]["undetermined"] = []
+        layout["status_values"]["neutral"] = list(texts)
+        return layout
+
+    def test_a_neutral_status_is_counted_in_none_of_the_counters(self):
+        self.grille(layout=self.neutral_layout("Indéterminé"))
+        context_docs.merge(self.run_dir, "d1")
+        coverage = self.items()["coverage"]
+        self.assertEqual(
+            coverage["1.2"], {"ok": 1, "na": 1, "ko": 0, "undetermined": 0, "points": []}
+        )
+
+    def test_a_criterion_whose_lines_are_all_neutral_has_no_counter(self):
+        sheets = list(SHEETS)
+        sheets[1] = ("Transverses", TRANSVERSES + row(5, "4.1", "Medias", "Indéterminé"))
+        self.grille(layout=self.neutral_layout("Indéterminé"), sheets=sheets)
+        result = context_docs.merge(self.run_dir, "d1")
+        self.assertNotIn("4.1", self.items()["coverage"])
+        self.assertEqual(result["criteria"], 4)
+        self.assertEqual(context_docs.validate_items(self.items()), [])
+
+    def test_a_neutral_status_compares_without_accent_nor_case(self):
+        self.grille(layout=self.neutral_layout("  INDETERMINE "))
+        context_docs.merge(self.run_dir, "d1")
+        self.assertEqual(self.items()["coverage"]["1.2"]["undetermined"], 0)
+
+    def test_a_text_that_is_in_no_list_is_still_undetermined_with_a_neutral_list(self):
+        self.grille(layout=self.neutral_layout("A confirmer"))
+        context_docs.merge(self.run_dir, "d1")
+        self.assertEqual(self.items()["coverage"]["1.2"]["undetermined"], 1)
+
+    def test_ko_prevails_over_a_neutral_text_listed_twice(self):
+        layout = self.neutral_layout("Indéterminé", "Invalidé")
+        self.grille(layout=layout)
+        context_docs.merge(self.run_dir, "d1")
+        self.assertEqual(self.items()["coverage"]["1.1"]["ko"], 1)
+
+    def test_undetermined_prevails_over_a_neutral_text_listed_twice(self):
+        layout = self.neutral_layout("Indéterminé")
+        layout["status_values"]["undetermined"] = ["Indéterminé"]
+        self.grille(layout=layout)
+        context_docs.merge(self.run_dir, "d1")
+        self.assertEqual(self.items()["coverage"]["1.2"]["undetermined"], 1)
+
+    def test_without_a_neutral_list_the_counts_are_the_ones_of_before(self):
+        self.grille()
+        context_docs.merge(self.run_dir, "d1")
+        before = self.items()
+        for neutral in ({}, {"neutral": []}):
+            with self.subTest(neutral=neutral):
+                layout = copy.deepcopy(LAYOUT)
+                layout["status_values"].update(neutral)
+                self.grille(layout=layout)
+                context_docs.merge(self.run_dir, "d1")
+                self.assertEqual(self.items(), before)
+        self.assertEqual(before["coverage"]["1.2"]["undetermined"], 1)
+
+    def test_a_neutral_list_that_is_not_a_list_is_refused(self):
+        layout = copy.deepcopy(LAYOUT)
+        layout["status_values"]["neutral"] = "Indéterminé"
+        self.grille(layout=layout)
+        with self.assertRaises(ContextDocsError) as raised:
+            context_docs.merge(self.run_dir, "d1")
+        self.assertIn("« neutral » doit être une liste de textes", str(raised.exception))
+
     def test_a_status_listed_twice_counts_as_ko(self):
         layout = copy.deepcopy(LAYOUT)
         layout["status_values"]["undetermined"].append("Invalidé")

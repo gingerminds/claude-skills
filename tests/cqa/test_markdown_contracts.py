@@ -1588,7 +1588,9 @@ class ImporterAgentTest(unittest.TestCase):
         self.assertEqual(
             set(layout["document"]), set(context_docs._DOCUMENT_KEYS) - {"id"}
         )
-        self.assertEqual(set(layout["status_values"]), {"ok", "ko", "na", "undetermined"})
+        self.assertEqual(
+            set(layout["status_values"]), {"ok", "ko", "na", "undetermined", "neutral"}
+        )
         self.assertEqual(
             {role for sheet in layout["sheets"] for role in [sheet["role"]]}, set(context_docs.ROLES)
         )
@@ -1700,6 +1702,55 @@ class ImporterAgentTest(unittest.TestCase):
         self.assertEqual(context_docs.validate_items(document), [])
         self.assertEqual(document["items"][0]["id"], "d1-001")
         self.assertEqual(context_docs.scan_document(document, []), [])
+
+    def test_the_example_puts_the_indeterminate_status_of_a_transverse_sheet_in_neutral(self):
+        layout, _ = self._examples()
+        self.assertEqual(layout["status_values"]["neutral"], ["Indéterminé"])
+        self.assertNotIn("Indéterminé", layout["status_values"]["undetermined"])
+        self.assertNotIn("Indéterminé", layout["status_values"]["na"])
+        layout_text = _section(self.text, "Step layout")
+        for needle in (
+            "`neutral`",
+            "« not invalidated here, decided elsewhere »",
+            "non invalidé : la justification dit conforme ou non applicable",
+            "counts it in none of the counters",
+            "never in `undetermined`",
+            "never in `na`",
+            "in none of the five lists counts as undetermined",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, layout_text)
+        self.assertNotIn("four statuses", self.text)
+
+    def test_the_example_neutral_text_is_counted_in_no_counter_by_the_code(self):
+        layout, _ = self._examples()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "context-docs" / "d1"
+            (folder / "parts").mkdir(parents=True)
+            sheets = []
+            for sheet in layout["sheets"]:
+                if sheet["role"] == "transverse":
+                    status = layout["status_values"]["neutral"][0]
+                elif sheet["role"] == "page":
+                    status = layout["status_values"]["ok"][0]
+                else:
+                    sheets.append((sheet["name"], row(1, "x")))
+                    continue
+                cells = [None] * 5
+                cells[ord(sheet["criterion_col"]) - 65] = "1.1"
+                cells[ord(sheet["status_col"]) - 65] = status
+                sheets.append((sheet["name"], row(sheet["header_row"] + 1, *cells)))
+            make_xlsx(folder / "source.xlsx", sheets)
+            (folder / "layout.json").write_text(json.dumps(layout), encoding="utf-8")
+            for rank, sheet in enumerate(layout["sheets"], 1):
+                if sheet["role"] != "skip":
+                    body = {"sheet": sheet["name"], "points": []}
+                    (folder / "parts" / f"{rank:02d}.json").write_text(json.dumps(body), encoding="utf-8")
+            context_docs.merge(Path(tmp), "d1")
+            coverage = context_docs.read_items(Path(tmp), "d1")["coverage"]
+        self.assertEqual(
+            coverage["1.1"], {"ok": 1, "na": 0, "ko": 0, "undetermined": 0, "points": []}
+        )
 
     def test_cited_plugin_paths_exist_and_no_em_dash(self):
         for cited in _PLUGIN_PATH.findall(self.text):
@@ -3856,6 +3907,16 @@ class ContextDocumentsInstructionsTest(unittest.TestCase):
         self.assertIn("Corriger ces erreurs de validation", _text(IMPORTER))
         for role in context_docs.ROLES:
             self.assertIn(f"`{role}`", self.documents)
+
+    def test_documents_reference_says_a_neutral_line_counts_for_nothing(self):
+        for needle in (
+            "`neutral`",
+            "« not invalidated, decided elsewhere »",
+            "counted in none of the counters",
+            "whose every line is `neutral`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.documents)
 
     def test_a_sheet_name_is_never_placed_raw_in_a_dispatch_line(self):
         for name, text in (("documents.md", self.documents), ("cqa-importer.md", _text(IMPORTER))):

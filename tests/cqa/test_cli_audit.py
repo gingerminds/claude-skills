@@ -21,7 +21,7 @@ from cqa.notion_write import apply_plan, text_digest, validate_plan
 from cqa.plan import operation_key
 from tests.cqa.fakes import apply_report
 from tests.cqa import test_cli_prepare as prepare
-from tests.cqa.test_context_docs import LAYOUT, PARTS, SHEETS
+from tests.cqa.test_context_docs import LAYOUT, PARTS, SHEETS, TRANSVERSES, raw_point, row
 from tests.cqa.test_docs_link import fiche_text, make_row
 from tests.cqa.test_docs_read import inline, make_xlsx
 from tests.cqa.test_findings import (
@@ -4460,6 +4460,64 @@ class ContextDocsCommandTest(ContextDocsFixtures, AuditCase):
         self.write(self.run_dir, "rows.json", {"rows": [], "missing_in_copy": []})
         (self.run_dir / "context.json").unlink()
         self.assertEqual(self.docs("verdicts")[0], 6)
+
+
+class NeutralStatusTest(ContextDocsFixtures, AuditCase):
+    """The « Indéterminé » of a transverse sheet, which means « not invalidated », end to end.
+
+    Row 113 cites criterion 7.3, which the pages validate (p01) or leave out (p02) and which
+    the transverse sheet writes « Indéterminé ». Row 112 cites 1.1 (the transverse sheet and the
+    pages do not agree on it, a ko point is attached) and row 120 is of another category.
+    """
+
+    def judge(self, *, neutral, ko_on_7_3=False):
+        sheets = list(SHEETS)
+        sheets[1] = ("Transverses", TRANSVERSES + row(5, "7.3", "Scripts", "Indéterminé"))
+        path = self.files / "grille.xlsx"
+        make_xlsx(path, sheets)
+        self.docs_json("add", path)
+        layout = copy.deepcopy(LAYOUT)
+        if neutral:
+            layout["status_values"]["undetermined"] = []
+            layout["status_values"]["neutral"] = ["Indéterminé"]
+        self.write(self.run_dir, "context-docs/d1/layout.json", layout)
+        parts = copy.deepcopy(PARTS)
+        if ko_on_7_3:
+            parts["02"]["points"].append(
+                raw_point(
+                    source="Transverses, critère 7.3", criteria=["7.3"], summary="Script bloquant"
+                )
+            )
+        for number, part in parts.items():
+            self.write(self.run_dir, f"context-docs/d1/parts/{number}.json", part)
+        self.docs_json("merge", "d1")
+        self.link_rows()
+        self.docs_json("link")
+        self.docs_json("link", "--accept")
+        return self.docs_json("verdicts")
+
+    def coverage(self, criterion):
+        return self.read(self.run_dir, "context-docs/d1/items.json")["coverage"][criterion]
+
+    def test_a_neutral_transverse_line_leaves_the_criterion_to_the_pages(self):
+        summary = self.judge(neutral=True)
+        self.assertEqual(
+            self.coverage("7.3"), {"ok": 1, "na": 1, "ko": 0, "undetermined": 0, "points": []}
+        )
+        self.assertEqual(self.stored_verdicts()["113"]["verdict"], "ok")
+        self.assertEqual(self.stored_verdicts()["112"]["verdict"], "ko")
+        self.assertEqual(summary["by_verdict"], {"ko": 1, "ok": 1})
+
+    def test_a_ko_point_attached_to_that_criterion_makes_the_row_ko(self):
+        self.judge(neutral=True, ko_on_7_3=True)
+        self.assertEqual(self.coverage("7.3")["points"], ["d1-003"])
+        self.assertEqual(self.stored_verdicts()["113"]["verdict"], "ko")
+
+    def test_listed_as_undetermined_the_same_line_keeps_the_row_for_the_skill(self):
+        self.judge(neutral=False)
+        self.assertEqual(self.coverage("7.3")["undetermined"], 1)
+        self.assertNotIn("113", self.stored_verdicts())
+        self.assertEqual(self.stored_verdicts()["112"]["verdict"], "ko")
 
 
 class DocumentLotsTest(ContextDocsFixtures, AuditCase):

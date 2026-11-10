@@ -72,7 +72,8 @@ Look at the document before you describe it: the first rows of each sheet (`--ro
     "ok": ["Validé"],
     "ko": ["Invalidé"],
     "na": ["NA"],
-    "undetermined": ["Indéterminé"]
+    "undetermined": [],
+    "neutral": ["Indéterminé"]
   },
   "sheets": [
     {"name": "Lisez-moi", "role": "skip"},
@@ -88,7 +89,7 @@ Look at the document before you describe it: the first rows of each sheet (`--ro
 - `kind`: `grille` when the document gives a status (valid, invalid, not applicable) to each criterion of a framework, page by page or for the whole site; `constats` when it is a list of findings (pentest, review) without a "compliant" verdict. A PDF, an image, a docx or a text is `constats` unless it is a grid.
 - `categories`: the checklist categories the document covers, at most those its subject justifies (an accessibility report: the accessibility category; a pentest: the security category), with the `name` of `categories` as printed. The lead validates them in one question.
 - `framework`: the framework or standard the criteria come from (`RGAA 4.1.2`, `OWASP Top 10`), `""` when there is none.
-- `status_values` (`grille` only): for each of the four statuses, the texts the document writes in the status column of its page and transverse sheets, as written (the code compares them without accent nor case). Take them from the legend and check them on the rows you read: a text of the status column that is in none of the four lists counts as undetermined.
+- `status_values` (`grille` only): the texts the document writes in the status column of its page and transverse sheets, as written (the code compares them without accent nor case), under `ok`, `ko`, `na`, `undetermined` and `neutral` (a status without text: `[]`). Take them from the legend and check them on the rows you read: a text of the status column that is in none of the five lists counts as undetermined. `undetermined` is for a text that says nobody could judge the criterion (« Non testé », « À vérifier »). `neutral` is for a text that the document explains as « not invalidated here, decided elsewhere » (the « Indéterminé » of a transverse sheet, which means « non invalidé : la justification dit conforme ou non applicable »): the code counts it in none of the counters, so that it neither validates nor blocks the criterion, which the pages decide. Put such a text in `neutral`, never in `undetermined` (every criterion that carries it would stay uncovered) and never in `na` (nothing says the criterion does not apply). A text listed in two lists counts as `ko` first.
 - `sheets`: every sheet of the document in the order of `index.json`, with its exact `name`. The rank of a sheet in this list names its part (`parts/<NN>.json`). Its `role`:
   - `page`: the grid of one audited page (one row per criterion); `scope` is that page (its URL path or title).
   - `transverse`: the grid of the criteria that apply to the whole site; `scope` is `transverse`.

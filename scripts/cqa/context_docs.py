@@ -567,11 +567,16 @@ def _fold(text: str) -> str:
 
 
 def _status_table(values) -> dict:
-    """Return {folded text: status}; a text listed under several statuses counts as ko first."""
+    """Return {folded text: status}; a text listed under several statuses counts as ko first.
+
+    The statuses are ko, ok, na, undetermined and neutral (optional): neutral is a text that the
+    document explains as "not invalidated, decided elsewhere"; it is counted in none of the
+    counters of the coverage. A text listed under neutral and another status keeps the other.
+    """
     if not isinstance(values, dict):
         raise ContextDocsError("Layout invalide : « status_values » doit être un objet JSON")
     table = {}
-    for status in ("undetermined", "na", "ok", "ko"):
+    for status in ("neutral", "undetermined", "na", "ok", "ko"):
         texts = values.get(status, [])
         if not isinstance(texts, list):
             raise ContextDocsError(
@@ -623,6 +628,8 @@ def _count_sheet(source: Path, sheet: dict, table: dict, coverage: dict) -> None
             continue
         text = cells[status_at] if len(cells) > status_at else ""
         status = table.get(_fold(text), "undetermined")
+        if status == "neutral":
+            continue
         entry = coverage.setdefault(
             criterion, {"ok": 0, "na": 0, "ko": 0, "undetermined": 0, "points": []}
         )

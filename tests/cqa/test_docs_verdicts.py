@@ -576,6 +576,17 @@ class DocumentVerdictsTest(VerdictCase):
         self.assertNotIn("in_repo", finding)
         self.assertIsNone(finding["todo"])
 
+    def test_a_criterion_with_no_counter_is_not_covered_and_a_ko_point_makes_it_ko(self):
+        for coverage, expected in (
+            (counts(), None),
+            (counts(points=["d1-001"]), "ko"),
+            (counts(ok=1), "ok"),
+            (counts(na=1), "na"),
+        ):
+            with self.subTest(coverage=coverage):
+                self.assertEqual(criterion_verdict("7.3", {"coverage": {"7.3": coverage}}), expected)
+        self.assertIsNone(criterion_verdict("7.3", {"coverage": {}}))
+
     def test_a_criterion_left_undetermined_keeps_the_row_for_the_skill(self):
         rows = self.standard_rows()
         self.add_document(

@@ -141,7 +141,7 @@
         "ok": {"type": "integer", "minimum": 0, "description": "Rows of the criterion that are compliant."},
         "na": {"type": "integer", "minimum": 0, "description": "Rows of the criterion that are not applicable."},
         "ko": {"type": "integer", "minimum": 0, "description": "Rows of the criterion that are not compliant, including an inherited ko that has no point."},
-        "undetermined": {"type": "integer", "minimum": 0, "description": "Rows of the criterion that are undetermined or whose status is not a known one."},
+        "undetermined": {"type": "integer", "minimum": 0, "description": "Rows of the criterion that are undetermined or whose status is not a known one. A row whose status the layout lists as neutral (not invalidated, decided elsewhere) is counted in none of the counters."},
         "points": {
           "type": "array",
           "items": {"type": "string"},
