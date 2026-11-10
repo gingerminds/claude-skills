@@ -7,7 +7,8 @@ error the base does not have fails.
 
 The commands of the project (install, build, lint, test) run one by one in disposable containers
 (cqa-toolbox.sh exec) on the same worktree, which is put back as it was after each of them. Only
-a failure the base does not have fails; an error of the environment is never a failure.
+a failure the base does not have fails; an error of the environment is never a failure. The install
+a fixer asks for runs alone (run_install), keeping the manifest and the lock file it changed.
 """
 import json
 import os
@@ -223,37 +224,84 @@ def run_project_commands(run, launcher: Path, worktree: Path, commands: list, lo
 
 def _execute(run, launcher: Path, worktree: Path, item: dict, folder: str, log: Path,
              changed: set) -> dict:
-    install = item["kind"] == "install"
     log.unlink(missing_ok=True)
     try:
-        done = run(
-            ["bash", str(launcher), "exec", str(worktree), str(log), item["image"], item["dir"],
-             "on" if install else "off", str(INSTALL_TIMEOUT if install else COMMAND_TIMEOUT), "--",
-             shell_command(item)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
+        done = _launch(run, launcher, worktree, item, log)
     except OSError as error:
         return _result(item, folder, "not_run", f"{LAUNCHER_FAILED} : {error}")
     finally:
         modified = restore_worktree(worktree, run)
+    failure = _failure(item, folder, done, log)
+    if failure is not None:
+        return failure
+    if item["kind"] == "lint" and modified:
+        inside = [path for path in modified if path in changed]
+        if inside:
+            return _result(item, folder, "failed", f"{REFORMATTED} : {listed(inside)}",
+                           files=inside, log=log, exact=True)
+        return _result(item, folder, "already_broken",
+                       f"{REFORMATTED}, hors des fichiers de la passe : {listed(modified)}",
+                       log=log)
+    return _result(item, folder, "ok", log=log)
+
+
+def _launch(run, launcher: Path, worktree: Path, item: dict, log: Path):
+    """Run the command in a disposable container (cqa-toolbox.sh exec): the network is open for an
+    install only, and the timeout follows the kind."""
+    install = item["kind"] == "install"
+    return run(
+        ["bash", str(launcher), "exec", str(worktree), str(log), item["image"], item["dir"],
+         "on" if install else "off", str(INSTALL_TIMEOUT if install else COMMAND_TIMEOUT), "--",
+         shell_command(item)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+
+
+def _failure(item: dict, folder: str, done, log: Path) -> Optional[dict]:
+    """Return the result of a command that did not exit 0 (None when it did): a timeout and a
+    refusal of the launcher are not_run, any other code is a failure with the end of its log."""
     code = done.returncode
+    if code == 0:
+        return None
     if code == 124:
         return _result(item, folder, "not_run", TIMED_OUT, log=log)
     if code == 2 and not log.exists():
         # A refusal of the launcher (image absent, Docker down) comes before the log is made.
         lines = [line.strip() for line in (done.stderr or "").splitlines() if line.strip()]
         return _result(item, folder, "not_run", lines[-1][:300] if lines else LAUNCHER_FAILED)
-    if code == 0:
-        if item["kind"] == "lint" and modified:
-            inside = [path for path in modified if path in changed]
-            if inside:
-                return _result(item, folder, "failed", f"{REFORMATTED} : {_listed(inside)}",
-                               files=inside, log=log, exact=True)
-            return _result(item, folder, "already_broken",
-                           f"{REFORMATTED}, hors des fichiers de la passe : {_listed(modified)}",
-                           log=log)
-        return _result(item, folder, "ok", log=log)
     return _result(item, folder, "failed", log_tail(_read_log(log)), log=log)
+
+
+def run_install(run, launcher: Path, worktree: Path, item: dict, log: Path,
+                allowed: tuple) -> dict:
+    """Run one install command (kind install) in worktree and keep what it changed in allowed.
+
+    Returns the result of run_project_commands for it (status ok, failed or not_run) with two more
+    fields: changed, the files of allowed it modified or created, and stray, every other file of
+    the worktree it touched (modified, deleted or untracked and not ignored; ignored files, such as
+    node_modules, are left). The changes of allowed stay in the worktree, uncommitted, only when
+    the command succeeded, touched nothing else and changed something: in every other case, and
+    when the run is interrupted, the worktree is put back as it was (restore_worktree).
+    """
+    worktree = Path(worktree)
+    folder = fix_commands.start_dir(item)
+    log.unlink(missing_ok=True)
+    changed, stray, keep = [], [], False
+    try:
+        try:
+            done = _launch(run, launcher, worktree, item, log)
+        except OSError as error:
+            result = _result(item, folder, "not_run", f"{LAUNCHER_FAILED} : {error}")
+        else:
+            result = _failure(item, folder, done, log) or _result(item, folder, "ok", log=log)
+        dirty = dirty_files(worktree, run)
+        changed = [path for path in dirty if path in allowed]
+        stray = [path for path in dirty if path not in allowed]
+        keep = result["status"] == "ok" and bool(changed) and not stray
+    finally:
+        if not keep:
+            restore_worktree(worktree, run)
+    return {**result, "changed": changed, "stray": stray}
 
 
 def _result(item: dict, folder: str, status: str, detail: str = "", files=(), log=None,
@@ -267,7 +315,7 @@ def _slug(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower()[:40] or "command"
 
 
-def _listed(paths: list) -> str:
+def listed(paths: list) -> str:
     shown = ", ".join(paths[:MAX_DETAIL])
     more = len(paths) - MAX_DETAIL
     return shown + (f" et {more} autre(s)" if more > 0 else "")

@@ -43,6 +43,26 @@ def ref_of_subject(subject: str) -> Optional[int]:
     return parsed[1] if parsed else None
 
 
+def install_subject(alias: str, ref: int, form: str, names: list, packages: list) -> str:
+    """Return the subject of the commit of a dependency the orchestrator installed for a row.
+
+    form is that of fix_commands.allowed_install: dev ("add <names> as a dev dependency"), exact
+    ("pin <name> to <version>") or lock ("update the lock file"). A subject over SUBJECT_MAX
+    counts the packages instead.
+    """
+    prefix = f"chore({alias} CQ-{ref}): "
+    if form == "lock":
+        return prefix + "update the lock file"
+    if form == "exact":
+        subject = (f"pin {names[0]} to {packages[0].rsplit('@', 1)[1]}" if len(packages) == 1
+                   else "")
+        fallback = "pin a dependency to an exact version"
+    else:
+        subject = f"add {', '.join(names)} as a dev dependency"
+        fallback = f"add {len(names)} package{'s' if len(names) != 1 else ''} as a dev dependency"
+    return prefix + (subject if subject and len(prefix + subject) <= SUBJECT_MAX else fallback)
+
+
 def is_documentation(path: str) -> bool:
     """Return True for a *.md, *.rst or *.adoc file (robots.txt, llms.txt... never are)."""
     return path.casefold().endswith(DOC_SUFFIXES)

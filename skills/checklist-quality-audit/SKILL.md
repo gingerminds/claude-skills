@@ -938,6 +938,16 @@ python3 "$S/cqa_fix.py" check "$RUN" "<repo>"
 
 It runs the syntax checks (nginx and Varnish included) and stylelint on the files changed in `<start_sha>..HEAD`, writes `checks.json` and prints `{"checks", "not_run", "failed_refs"}`: `failed_refs` are the rows whose commits touch a failed file.
 
+A fixer never runs anything: a row it reports as `needs_command` (a development dependency its fix needs) is answered here, once its report is validated:
+
+```bash
+S="${CLAUDE_SKILL_DIR}/../../scripts"
+RUN="<run_dir>"
+python3 "$S/cqa_fix.py" install "$RUN" "<repo>" --ref CQ-<n>
+```
+
+It runs only the allowed forms (`npm install --save-dev`, `composer require --dev`, `yarn add --dev`, `pnpm add -D`...), rebuilt, in a container, and commits the manifest and the lock file (`chore(<alias> CQ-n): add <packages> as a dev dependency`); the row goes back to `pending` for a correction pass. Exit 5: nothing installed and nothing changed (form refused, other files changed, failure, guard): set the row aside. Exit 2: environment or dirty worktree.
+
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"

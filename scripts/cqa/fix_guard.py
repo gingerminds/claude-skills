@@ -23,7 +23,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-from cqa import fix_git, fix_names, fix_state
+from cqa import fix_commands, fix_git, fix_names, fix_state
 from cqa.checklist import ref_label
 from cqa.secrets import scan_lines, scan_spans
 
@@ -75,13 +75,18 @@ DEPENDENCY_FILES = (
     "**/composer.json", "**/composer.lock", "**/package.json", "**/package-lock.json",
     "**/npm-shrinkwrap.json", "**/yarn.lock", "**/pnpm-lock.yaml",
 )
+# The manifests and lock files an install the orchestrator ran for a row may commit (see
+# without_dependency_files); the paths of DEPENDENCY_FILES, by file name.
+INSTALL_FILES = ("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+                 "composer.json", "composer.lock")
 SUBMODULE_FILES = ("**/.gitmodules",)
 MINIFIED_FILES = ("**/*.min.*",)
 
-REPORT_OUTCOMES = ("fixed", "skipped", "question")
+REPORT_OUTCOMES = ("fixed", "skipped", "question", "needs_command")
 VERDICTS = ("ok", "blocking")
 MAX_TEXT = 600
 MAX_REASON = 300
+MAX_COMMAND = fix_commands.MAX_INSTALL
 MAX_NOTE = 400
 MAX_OPTION = 200
 MAX_REMAINING = 300
@@ -252,6 +257,15 @@ def unwaived(problems: list, waivers: list, blob_of) -> list:
     return kept
 
 
+def without_dependency_files(problems: list, allowed) -> list:
+    """Return problems less the dependency-file problem (DEPENDENCIES) of a manifest or lock
+    file that allowed(problem) accepts: a commit the orchestrator made when it installed what a
+    fixer asked for may change them, no other commit may. Any other problem of those files stays."""
+    return [item for item in problems
+            if not (item["reason"] == DEPENDENCIES and item["path"] is not None
+                    and item["path"].rsplit("/", 1)[-1] in INSTALL_FILES and allowed(item))]
+
+
 def review_scope(worktree: Path, run, base: str) -> dict:
     """Return {"light", "lines", "files"} for the diff base..HEAD that the review of a pass reads.
 
@@ -300,7 +314,9 @@ def validate_report(document, *, key: str, number: int, rows: dict, commits: lis
     of a row is reported in one pass, because the fixer rewrites its file once. The rows come
     back only when there is no error, each as {"ref", "outcome", "reason", "commits" (full
     SHAs), "attention", "remaining"}; a question keeps its text in reason, and remaining (what
-    is left to do after a partial fix) is None but for a fixed row.
+    is left to do after a partial fix) is None but for a fixed row. A needs_command row (a dev
+    dependency the fix needs; no commit of the row on the branch) keeps its request {"command",
+    "dir", "reason"} under "needs_command" and its reason in reason; the shape only is checked here.
     """
     if not isinstance(document, dict):
         return [], ['le rapport doit être un objet JSON {"key", "pass", "rows"}']
@@ -677,7 +693,8 @@ def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
     outcome = item.get("outcome")
     if outcome not in REPORT_OUTCOMES:
         return [
-            f"« outcome » inconnu : {_shown(outcome)} (attendu : fixed, skipped ou question)"
+            f"« outcome » inconnu : {_shown(outcome)} "
+            "(attendu : fixed, skipped, question ou needs_command)"
         ], None
     attention = item.get("attention")
     problems = _attention(attention, "attention")
@@ -693,7 +710,7 @@ def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
     elif covered is not None and (not _is_int(covered) or covered not in known or covered == ref):
         problems.append("« covered_by » doit être la Réf d'une autre ligne de la clé")
         covered = None
-    shas, reason = [], None
+    shas, reason, request = [], None, None
     if outcome == "fixed":
         problems += _text(item.get("change"), "change", MAX_TEXT)
         problems += _text(item.get("uat"), "uat", MAX_TEXT)
@@ -702,6 +719,10 @@ def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
     elif outcome == "skipped":
         reason = item.get("reason")
         problems += _text(reason, "reason", MAX_REASON)
+    elif outcome == "needs_command":
+        request = item.get("needs_command")
+        problems += _request(request)
+        reason = request.get("reason") if isinstance(request, dict) else None
     else:
         question = item.get("question")
         problems += _question(question)
@@ -710,6 +731,8 @@ def _report_row(item: dict, ref: int, known: set, subjects: dict) -> tuple:
         problems.append("commit sur la branche pour une ligne non corrigée")
     entry = {"ref": ref, "outcome": outcome, "reason": reason, "commits": shas,
              "attention": attention, "remaining": remaining}
+    if outcome == "needs_command":
+        entry["needs_command"] = request
     return problems, entry
 
 
@@ -759,6 +782,27 @@ def _question(value) -> list:
             for option in options if _AS_IS.search(option)
         ]
     return problems
+
+
+def _request(value) -> list:
+    """Check the dependency a fixer asks for: the shape only. Its form is judged when the
+    orchestrator runs it (fix_commands.allowed_install), never here."""
+    if not isinstance(value, dict):
+        return ['« needs_command » doit être un objet {"command", "dir", "reason"}']
+    problems = [f"« needs_command » : champ inconnu « {name} » (attendu : command, dir, reason)"
+                for name in value if name not in ("command", "dir", "reason")]
+    command = value.get("command")
+    if not isinstance(command, str) or not command.strip():
+        problems.append("« needs_command.command » est obligatoire : la commande d'installation, "
+                        f"{MAX_COMMAND} caractères au plus")
+    elif len(command) > MAX_COMMAND:
+        problems.append(f"« needs_command.command » dépasse {MAX_COMMAND} caractères "
+                        f"({len(command)})")
+    folder = value.get("dir")
+    if not isinstance(folder, str) or fix_commands.clean_dir(folder) != folder:
+        problems.append("« needs_command.dir » doit être un dossier du repo : chemin relatif, "
+                        'sans « .. » ni « / » final, "" pour la racine')
+    return problems + _text(value.get("reason"), "needs_command.reason", MAX_REASON)
 
 
 def _attention(value, name: str) -> list:

@@ -40,6 +40,39 @@ class ParseSubjectTest(unittest.TestCase):
         self.assertIsNone(fix_names.ref_of_subject("feat(seo): x"))
 
 
+class InstallSubjectTest(unittest.TestCase):
+    def subject(self, form, packages, alias="securite", ref=3):
+        names = [item.rsplit("@", 1)[0] if item.rfind("@") > 0 else item for item in packages]
+        return fix_names.install_subject(alias, ref, form, names, packages)
+
+    def test_install_subjects_follow_the_guard_convention(self):
+        for found, expected in (
+            (self.subject("dev", ["stylelint"]),
+             "chore(securite CQ-3): add stylelint as a dev dependency"),
+            (self.subject("dev", ["stylelint@16.0.0", "@scope/tool@^1"]),
+             "chore(securite CQ-3): add stylelint, @scope/tool as a dev dependency"),
+            (self.subject("exact", ["lodash@4.17.21"]), "chore(securite CQ-3): pin lodash to 4.17.21"),
+            (self.subject("lock", []), "chore(securite CQ-3): update the lock file"),
+        ):
+            self.assertEqual(found, expected)
+            self.assertTrue(fix_names.SUBJECT.match(found), found)
+            self.assertEqual(fix_names.parse_subject(found), ("securite", 3))
+
+    def test_a_long_list_of_packages_is_counted_to_stay_within_the_limit(self):
+        names = [f"a-rather-long-package-name-{number}" for number in range(4)]
+        found = fix_names.install_subject("accessibilite", 12345, "dev", names, names)
+        self.assertEqual(found, "chore(accessibilite CQ-12345): add 4 packages as a dev dependency")
+        self.assertLessEqual(len(found), fix_names.SUBJECT_MAX)
+        found = fix_names.install_subject("securite", 3, "exact", ["x" * 80],
+                                          ["x" * 80 + "@1.0.0"])
+        self.assertEqual(found, "chore(securite CQ-3): pin a dependency to an exact version")
+        for alias, ref in (("a", 1), ("accessibilite", 99999)):
+            for form in ("dev", "exact", "lock"):
+                found = fix_names.install_subject(alias, ref, form, names, [f"{n}@1" for n in names])
+                self.assertLessEqual(len(found), fix_names.SUBJECT_MAX, found)
+                self.assertTrue(fix_names.SUBJECT.match(found), found)
+
+
 class DocumentationTest(unittest.TestCase):
     def test_documentation_files(self):
         for path in ("README.md", "docs/guide.rst", "docs/intro.adoc", "CHANGELOG.MD"):

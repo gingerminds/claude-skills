@@ -249,6 +249,23 @@ Written in the instructions of the sub-agents, and checked in code: `cqa_fix.py 
       "question": null,
       "covered_by": null,
       "attention": null
+    },
+    {
+      "ref": 114,
+      "outcome": "needs_command",
+      "change": null,
+      "uat": null,
+      "remaining": null,
+      "commits": [],
+      "reason": null,
+      "question": null,
+      "needs_command": {
+        "command": "npm install --save-dev stylelint",
+        "dir": "web/themes/site",
+        "reason": "La règle demande stylelint, absent des dépendances de développement du thème."
+      },
+      "covered_by": null,
+      "attention": null
     }
   ]
 }

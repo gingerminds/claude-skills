@@ -960,7 +960,8 @@ class ValidateTest(GitCase):
         code, result, err = self.validate("report")
         self.assertEqual(code, 0, err)
         self.assertEqual((result["ok"], result["errors"]), (True, []))
-        self.assertEqual(result["rows"], {"fixed": [3], "skipped": [5], "question": []})
+        self.assertEqual(result["rows"], {"fixed": [3], "skipped": [5], "question": [],
+                                          "needs_command": []})
         key = self.key()
         self.assertEqual(key["rows"]["3"], {
             "outcome": "fixed", "reason": None, "commits": [fixed], "pass": 1,
@@ -1061,6 +1062,99 @@ class ValidateTest(GitCase):
                 self.assertTrue(any("CQ-5" in error and f"({outcome})" in error
                                     for error in result["errors"]), result)
         self.assertEqual(self.key()["rows"]["3"]["outcome"], "pending")
+
+    def needs_command(self, ref=3, **change):
+        request = {"command": "npm install --save-dev stylelint", "dir": "web",
+                   "reason": "La règle demande stylelint, absent du projet."}
+        request.update(change)
+        return {"ref": ref, "outcome": "needs_command", "needs_command": request}
+
+    def test_report_accepts_needs_command_without_commits(self):
+        self.started()
+        asked = self.needs_command()
+        self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [
+            asked, {"ref": 5, "outcome": "skipped", "reason": "Hors du repo."}]})
+        code, result, err = self.validate("report")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((result["ok"], result["errors"]), (True, []))
+        self.assertEqual(result["rows"], {"fixed": [], "skipped": [5], "question": [],
+                                          "needs_command": [3]})
+        key = self.key()
+        self.assertEqual(key["rows"]["3"], {
+            "outcome": "pending", "reason": "La règle demande stylelint, absent du projet.",
+            "commits": [], "pass": 1, "attention": None, "remaining": None,
+            "section": "securite", "needs_command": asked["needs_command"],
+        })
+        self.assertEqual((key["step"], key["pass"]), ("fixed", 1))
+        # The row waits for its dependency: the key is not reviewed while it is pending.
+        self.write_doc("review-1.json", {"key": KEY, "pass": 1, "attention": [], "rows": []})
+        self.assertEqual(self.validate("review")[0], 0)
+        self.assertEqual(self.key()["step"], "fixed")
+
+    def test_report_refuses_a_needs_command_that_is_not_a_request(self):
+        self.started()
+        skipped = {"ref": 5, "outcome": "skipped", "reason": "Hors du repo."}
+        asked = self.needs_command()["needs_command"]
+        missing = {key: value for key, value in asked.items() if key != "command"}
+        for expected, request in (
+            ("« needs_command » doit être un objet", None),
+            ("« needs_command » doit être un objet", "npm install -D stylelint"),
+            ("« needs_command.command » est obligatoire", {**asked, "command": " "}),
+            ("« needs_command.command » est obligatoire", missing),
+            ("« needs_command.command » dépasse 500 caractères (501)",
+             {**asked, "command": "x" * 501}),
+            ("« needs_command.dir » doit être un dossier du repo", {**asked, "dir": "../web"}),
+            ("« needs_command.dir » doit être un dossier du repo", {**asked, "dir": "/web"}),
+            ("« needs_command.dir » doit être un dossier du repo", {**asked, "dir": None}),
+            ("« needs_command.dir » doit être un dossier du repo", {**asked, "dir": "web/"}),
+            ("« needs_command.reason » est obligatoire", {**asked, "reason": ""}),
+            ("« needs_command.reason » dépasse 300 caractères (301)",
+             {**asked, "reason": "r" * 301}),
+            ("« needs_command » : champ inconnu « extra » (attendu : command, dir, reason)",
+             {**asked, "extra": "x"}),
+        ):
+            with self.subTest(expected=expected, request=request):
+                row = {"ref": 3, "outcome": "needs_command", "needs_command": request}
+                self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [row, skipped]})
+                code, result, err = self.validate("report")
+                self.assertEqual(code, 6, err)
+                self.assertTrue(any(error.startswith("ligne CQ-3 : " + expected)
+                                    for error in result["errors"]), result)
+                self.assertNotIn("needs_command", self.key()["rows"]["3"])
+        self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [
+            {"ref": 3, "outcome": "needs_command"}, skipped]})
+        code, result, err = self.validate("report")
+        self.assertEqual(code, 6, err)
+        self.assertIn('ligne CQ-3 : « needs_command » doit être un objet {"command", "dir", '
+                      '"reason"}', result["errors"])
+        self.assertEqual(self.key()["rows"]["3"]["outcome"], "pending")
+
+    def test_a_needs_command_row_has_no_commit_on_the_branch(self):
+        self.started()
+        self.fixer_commit(self.worktree, "a.php", "fix(securite CQ-3): start something")
+        self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [
+            self.needs_command(), {"ref": 5, "outcome": "skipped", "reason": "Hors du repo."}]})
+        code, result, err = self.validate("report")
+        self.assertEqual(code, 6, err)
+        self.assertIn("ligne CQ-3 : commit sur la branche pour une ligne non corrigée",
+                      result["errors"])
+        self.assertNotIn("needs_command", self.key()["rows"]["3"])
+
+    def test_a_new_report_of_the_row_drops_its_request(self):
+        self.started()
+        self.write_doc("report-1.json", {"key": KEY, "pass": 1, "rows": [
+            self.needs_command(), {"ref": 5, "outcome": "skipped", "reason": "Hors du repo."}]})
+        self.assertEqual(self.validate("report")[0], 0)
+        self.write_doc("review-1.json", {"key": KEY, "pass": 1, "attention": [], "rows": []})
+        self.assertEqual(self.validate("review")[0], 0)
+        self.pass_start(2)
+        self.write_doc("report-2.json", {"key": KEY, "pass": 2, "rows": [
+            {"ref": 3, "outcome": "skipped", "reason": "Le linter reste à la charge des devs."}]})
+        code, result, err = self.validate("report", 2)
+        self.assertEqual(code, 0, err)
+        row = self.key()["rows"]["3"]
+        self.assertEqual((row["outcome"], row["pass"]), ("skipped", 2))
+        self.assertNotIn("needs_command", row)
 
     def test_validate_review_judges_fixed_rows_only(self):
         self.started()
@@ -1918,7 +2012,8 @@ class SettledRowsTest(GitCase):
         self.write_report(1, [])
         result = self.main_ok("validate", KEY, "report", "--pass", "1")
         self.assertEqual((result["ok"], result["errors"]), (True, []))
-        self.assertEqual(result["rows"], {"fixed": [], "skipped": [], "question": []})
+        self.assertEqual(result["rows"], {"fixed": [], "skipped": [], "question": [],
+                                          "needs_command": []})
         key = self.key()
         self.assertEqual((key["step"], key["pass"]), ("reviewed", 1))
         self.assertEqual(key["rows"]["3"]["outcome"], "done_before")
@@ -2022,6 +2117,31 @@ class ValidateReportTest(unittest.TestCase):
             "ligne CQ-11 : Réf hors de cette clé",
         ])
 
+    def test_needs_command_entry_carries_the_request(self):
+        rows = {"3": {"outcome": "pending"}}
+        request = {"command": "composer require --dev phpstan/phpstan", "dir": "",
+                   "reason": "La règle demande phpstan."}
+        document = {"key": KEY, "pass": 1, "rows": [
+            {"ref": 3, "outcome": "needs_command", "needs_command": request,
+             "attention": "Vérifier la version."}]}
+        entries, errors = fix_guard.validate_report(
+            document, key=KEY, number=1, rows=rows, commits=[])
+        self.assertEqual(errors, [])
+        self.assertEqual(entries, [{
+            "ref": 3, "outcome": "needs_command", "reason": request["reason"], "commits": [],
+            "attention": "Vérifier la version.", "remaining": None, "needs_command": request}])
+        self.assertEqual(fix_guard.REPORT_OUTCOMES,
+                         ("fixed", "skipped", "question", "needs_command"))
+        stray = {**document["rows"][0], "remaining": "Tout.", "covered_by": 3}
+        entries, errors = fix_guard.validate_report(
+            {**document, "rows": [stray]}, key=KEY, number=1, rows=rows, commits=[])
+        self.assertEqual(errors, [
+            "ligne CQ-3 : « remaining » ne sert qu'à une ligne corrigée (fixed)",
+            "ligne CQ-3 : « covered_by » ne sert qu'à une ligne corrigée (fixed)"])
+        entries, errors = fix_guard.validate_report(
+            document, key=KEY, number=1, rows=rows, commits=[{"sha": "a" * 40, "ref": 3}])
+        self.assertEqual(errors, ["ligne CQ-3 : commit sur la branche pour une ligne non corrigée"])
+
     def test_every_problem_of_a_row_is_reported_in_one_run(self):
         first, second = "a" * 40, "b" * 40
         rows = {"3": {"outcome": "fixed", "commits": [first], "pass": 1},
@@ -2057,6 +2177,30 @@ class ValidateReportTest(unittest.TestCase):
         self.assertEqual((errors, len(entries)), ([], 2))
 
 
+class DependencyFilesTest(unittest.TestCase):
+    def test_only_the_dependency_problem_of_an_allowed_path_is_dropped(self):
+        sha = "a" * 40
+        manifest = problem(sha, 3, "web/package.json", DEPENDENCIES, "content")
+        lock = problem(sha, 3, "web/package-lock.json", DEPENDENCIES, "content")
+        other = problem(sha, 3, "composer.json", DEPENDENCIES, "content")
+        later = problem("b" * 40, 4, "web/package.json", DEPENDENCIES, "content")
+        kept = [
+            problem(sha, 3, "web/package.json", THIRD_PARTY, "content"),
+            secret(sha, 3, "web/package-lock.json", "private_key", 1),
+            problem(sha, 3, None, "message de commit hors convention", "form"),
+        ]
+        problems = [manifest, *kept, lock, other, later]
+        allowed = {sha: {"web/package.json", "web/package-lock.json"}}
+        found = fix_guard.without_dependency_files(
+            problems, lambda item: item["path"] in allowed.get(item["sha"], ()))
+        self.assertEqual(found, [*kept, other, later])
+        self.assertEqual(fix_guard.without_dependency_files(problems, lambda item: False),
+                         problems)
+        self.assertEqual(fix_guard.INSTALL_FILES, (
+            "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "composer.json",
+            "composer.lock"))
+
+
 class ValidateReviewTest(unittest.TestCase):
     """fix_guard.validate_review alone: review N judges the rows fixed in pass N only."""
 
@@ -2080,6 +2224,12 @@ class SchemaTest(unittest.TestCase):
         report = json.loads((SCHEMAS / "fix-report.schema.json").read_text(encoding="utf-8"))
         row = report["$defs"]["row"]["properties"]
         self.assertEqual(row["outcome"]["enum"], list(fix_guard.REPORT_OUTCOMES))
+        needs = report["$defs"]["needs_command"]
+        self.assertEqual(needs["required"], ["command", "dir", "reason"])
+        self.assertEqual(needs["additionalProperties"], False)
+        self.assertEqual(needs["properties"]["command"]["maxLength"], fix_guard.MAX_COMMAND)
+        self.assertEqual(needs["properties"]["reason"]["maxLength"], fix_guard.MAX_REASON)
+        self.assertEqual(row["needs_command"]["oneOf"][1], {"$ref": "#/$defs/needs_command"})
         self.assertEqual(row["change"]["maxLength"], fix_guard.MAX_TEXT)
         self.assertEqual(row["uat"]["maxLength"], fix_guard.MAX_TEXT)
         self.assertEqual(row["reason"]["maxLength"], fix_guard.MAX_REASON)

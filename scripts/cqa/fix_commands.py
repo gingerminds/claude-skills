@@ -15,6 +15,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
@@ -64,6 +65,17 @@ _NODE_LOCKFILES = (("package-lock.json", "npm ci", "npm ci"),
 _NODE_SCRIPTS = (("build", "build"), ("production", "build"), ("lint", "lint"), ("test", "test"))
 _COMPOSER_SCRIPTS = (("phpstan", "lint"), ("phpcs", "lint"), ("test", "test"))
 COMPOSER_INSTALL = "composer install --no-interaction --no-progress --no-scripts"
+MAX_INSTALL = 500
+MAX_INSTALL_PACKAGES = 10
+MAX_PACKAGE_NAME = 214
+MAX_VERSION = 64
+_NPM_NAME = r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*"
+_COMPOSER_NAME = r"[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*"
+# A version or a range of one token: no space, no "/", ":", "*", comparison sign or URL.
+_VERSION = r"[\^~]?[A-Za-z0-9][A-Za-z0-9._+-]*"
+_NPM_PACKAGE = re.compile(rf"({_NPM_NAME})(?:@({_VERSION}))?")
+_COMPOSER_PACKAGE = re.compile(rf"({_COMPOSER_NAME})(?::({_VERSION}))?")
+_NODE_LOCKS = {"npm": "package-lock.json", "yarn": "yarn.lock", "pnpm": "pnpm-lock.yaml"}
 
 
 class _Unreadable(Exception):
@@ -109,6 +121,105 @@ def valid_command(item) -> bool:
                 and "\0" not in value for key, value in env.items())
         and isinstance(item.get("private"), bool)
     )
+
+
+def allowed_install(command, manager_files) -> Optional[dict]:
+    """Return what the orchestrator may run for the install a fixer asks for, or None.
+
+    Only these forms, written with single spaces: npm install --save-dev|-D <p>[@v]..., npm
+    install --save-exact <p>@<v>, npm install --package-lock-only, composer require --dev
+    <vendor/p>[:v]..., composer update --lock, yarn add --dev <p>, pnpm add -D <p>. A package
+    is a name of the public registry (no URL, path, git+ or scope other than @scope/), a version
+    one token without space, "/", ":" or "*". Nothing else passes: no other option, no "--", no
+    repeated option or package, no shell metacharacter, no capital outside a version, nothing
+    but printable ASCII. manager_files are the names of the files of the folder: it must hold the
+    manifest of the manager and no lock file of another node manager.
+
+    The result is {"manager", "form" (dev, exact or lock), "packages" (as given, with their
+    version), "names", "files" ([manifest, lock file]), "command"}. command is rebuilt from
+    these parts, never the text given: the options of the manager are fixed here, and the
+    scripts and plugins of what it installs are cut (--ignore-scripts, --no-scripts and
+    --no-plugins).
+    """
+    if (not isinstance(command, str) or not 0 < len(command) <= MAX_INSTALL
+            or not command.isascii() or not command.isprintable()):
+        return None
+    try:
+        present = {name for name in manager_files if isinstance(name, str)}
+    except TypeError:
+        return None
+    words = command.split(" ")
+    if "" in words:
+        return None
+    parsed = _install_form(words)
+    if parsed is None:
+        return None
+    manager, form, specs, argv = parsed
+    names = []
+    for spec in specs:
+        found = (_COMPOSER_PACKAGE if manager == "composer" else _NPM_PACKAGE).fullmatch(spec)
+        version = found.group(2) if found else None
+        if (found is None or len(found.group(1)) > MAX_PACKAGE_NAME
+                or len(version or "") > MAX_VERSION
+                or (form == "exact" and version is None)
+                or (manager in ("yarn", "pnpm") and version is not None)):
+            return None
+        names.append(found.group(1))
+    if len(specs) > MAX_INSTALL_PACKAGES or len(set(names)) != len(names):
+        return None
+    manifest = "composer.json" if manager == "composer" else "package.json"
+    lock = "composer.lock" if manager == "composer" else _NODE_LOCKS[manager]
+    others = {name for each, name in _NODE_LOCKS.items() if each != manager}
+    if manifest not in present or (manager != "composer" and others & present):
+        return None
+    return {"manager": manager, "form": form, "packages": specs, "names": names,
+            "files": [manifest, lock], "command": shlex.join(argv + specs)}
+
+
+def _install_form(words: list) -> Optional[tuple]:
+    """Return (manager, form, package words, fixed words of the command rebuilt) for the words
+    of an allowed form, else None. The packages are not checked here."""
+    manager, rest = words[0], words[1:]
+    if manager == "npm" and rest[:1] == ["install"]:
+        rest = rest[1:]
+        if rest == ["--package-lock-only"]:
+            return manager, "lock", [], ["npm", "install", "--package-lock-only", "--ignore-scripts"]
+        if len(rest) > 1 and rest[0] in ("--save-dev", "-D"):
+            return (manager, "dev", rest[1:],
+                    ["npm", "install", "--save-dev", "--ignore-scripts"])
+        if len(rest) == 2 and rest[0] == "--save-exact":
+            return (manager, "exact", rest[1:],
+                    ["npm", "install", "--save-exact", "--ignore-scripts"])
+    elif manager == "composer":
+        options = ["--no-scripts", "--no-plugins", "--no-interaction"]
+        if len(rest) > 2 and rest[:2] == ["require", "--dev"]:
+            return manager, "dev", rest[2:], ["composer", "require", "--dev"] + options
+        if rest == ["update", "--lock"]:
+            return manager, "lock", [], ["composer", "update", "--lock"] + options
+    elif manager == "yarn" and len(rest) == 3 and rest[:2] == ["add", "--dev"]:
+        return manager, "dev", rest[2:], ["yarn", "add", "--dev", "--ignore-scripts"]
+    elif manager == "pnpm" and len(rest) == 3 and rest[:2] == ["add", "-D"]:
+        return manager, "dev", rest[2:], ["pnpm", "add", "--save-dev", "--ignore-scripts"]
+    return None
+
+
+def install_target(manager: str, repo_dir: Path, folder: str, commands: list) -> dict:
+    """Return {"image", "private"} for an install of manager in folder of the repo: those of the
+    install command the lead validated for that folder (its work folder, after a leading cd), else
+    the image the manifests give (the Node of .nvmrc or engines, composer:2); private is true when
+    the dependencies of the folder need a credential that is never passed to a container."""
+    pattern = re.compile(rf"(?<![\w-]){re.escape(manager)}(?![\w-])")
+    for item in commands:
+        if (isinstance(item, dict) and item.get("kind") == "install"
+                and _start_dir(item) == folder and pattern.search(str(item.get("command")))):
+            return {"image": item["image"], "private": bool(item.get("private"))}
+    repo = Path(repo_dir)
+    if manager == "composer":
+        document = _read_json(repo / folder / "composer.json")
+        return {"image": COMPOSER_IMAGE, "private": _composer_private(document, _auth_ignored(repo))}
+    document = _read_json(repo / folder / "package.json")
+    image, _ = _node_image(repo, folder, document if isinstance(document, dict) else {}, "")
+    return {"image": image, "private": False}
 
 
 def detect(repo_dir: Path, ci: Optional[dict], skip: tuple = ()) -> dict:

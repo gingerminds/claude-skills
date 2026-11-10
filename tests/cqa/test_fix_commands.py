@@ -1,4 +1,5 @@
 import json
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -666,6 +667,363 @@ class ShapeTest(unittest.TestCase):
         self.assertEqual(fix_commands.clean_dir("web//assets"), "web/assets")
         for bad in ("../x", "a/../../x", "/x", "a:b", "a\\b", "a\nb"):
             self.assertIsNone(fix_commands.clean_dir(bad), bad)
+
+
+NODE_FILES = {"package.json", "package-lock.json"}
+YARN_FILES = {"package.json", "yarn.lock"}
+PNPM_FILES = {"package.json", "pnpm-lock.yaml"}
+PHP_FILES = {"composer.json", "composer.lock"}
+NPM_FILES = ["package.json", "package-lock.json"]
+
+
+def files_of(command):
+    """The files of a folder where the manager of the command works."""
+    words = command.split() if isinstance(command, str) else []
+    return {"yarn": YARN_FILES, "pnpm": PNPM_FILES, "composer": PHP_FILES}.get(
+        words[0] if words else "", NODE_FILES)
+
+
+# Forms the fixer may not use, grouped by what makes them refused.
+REFUSED = {
+    "no development flag, or another manager": (
+        "npm install lodash", "npm install", "npm install --save-dev", "npm install -D",
+        "composer require vendor/p", "composer require --dev", "composer update",
+        "composer install", "yarn add eslint", "yarn add --dev", "pnpm add eslint", "pnpm add -D",
+        "yarn install", "npm ci", "npm i -D lodash", "npm add -D lodash", "npm uninstall lodash",
+        "npm install --dev lodash", "pip install requests", "bun add -d lodash", "npx lodash",
+        "composer global require --dev vendor/p", "yarn global add --dev eslint",
+        "pnpm install -D eslint", "npm install --save lodash", "npm install -S lodash",
+        "npm install --save-prod lodash", "npm install -P lodash", "npm install --save-optional lodash",
+        "npm install -O lodash", "npm install --save-peer lodash", "npm install --no-save lodash",
+        "npm install --save-bundle lodash", "npm install --dry-run", "npm install --save-dev-exact lodash",
+    ),
+    "a package outside the public registry": (
+        "npm install git+https://example.org/x.git", "npm install -D git+https://example.org/x.git",
+        "npm install -D git+ssh://git@example.org/x.git", "npm install -D https://example.org/x.tgz",
+        "npm install -D http://example.org/x.tgz", "npm install ../x", "npm install -D ../x",
+        "npm install -D ./x", "npm install -D /tmp/x", "npm install -D ~/x", "npm install -D .",
+        "npm install -D file:../x", "npm install -D github:user/repo", "npm install -D user/repo",
+        "npm install -D lodash@file:../x", "npm install -D lodash@npm:other",
+        "npm install -D lodash@git+https://example.org/x.git", "npm install -D lodash@user/repo",
+        "npm install -D lodash@https://example.org/x.tgz", "npm install -D lodash@latest@2",
+        "composer require --dev ../x", "composer require --dev vendor/p:../x",
+        "composer require --dev https://example.org/x.zip", "composer require --dev ./vendor/p",
+        "composer require --dev vendor/p:dev-main#abc", "composer require --dev vendor/p@dev",
+        "composer require --dev vendor/p:1.0:2", "composer require --dev vendor/p:git://x/y",
+        "composer require --dev vendor/p/q", "composer require --dev lodash",
+        "composer require --dev vendor/", "composer require --dev /p",
+        "yarn add --dev git+https://example.org/x.git", "yarn add --dev ../x",
+        "yarn add --dev file:../x", "pnpm add -D ../x", "pnpm add -D link:../x",
+        "pnpm add -D https://example.org/x.tgz",
+    ),
+    "shell metacharacters, quotes, control characters": (
+        "npm install -D lodash; rm -rf /", "npm install -D lodash;rm -rf /",
+        "npm install -D lodash && rm -rf /", "npm install -D lodash || true",
+        "npm install -D lodash | sh", "npm install -D lodash &", "npm install -D $(id)",
+        "npm install -D `id`", "npm install -D ${HOME}", "npm install -D $HOME",
+        "npm install -D lodash\nrm -rf /", "npm install -D lodash\r", "npm install -D lodash\n",
+        "npm install -D lodash\t", "npm install -D\tlodash", "npm install -D lodash > x",
+        "npm install -D lodash < x", "npm install -D 'lodash'", 'npm install -D "lodash"',
+        "npm install -D lodash # comment", "npm install -D lodash\\", "npm install -D lo*",
+        "npm install -D lo?", "npm install -D {a,b}", "npm install -D lodash!", "npm install -D (a)",
+        "npm install -D lodash\x00", "npm install -D lodash\x1b[0m", "; npm install -D lodash",
+        "npm install -D lodash@1.0 && id", "npm install -D lodash@$(id)",
+        "npm install -D lodash@`id`", "composer require --dev vendor/p; id",
+        "composer require --dev vendor/p:$(id)", "composer require --dev vendor/p\nid",
+        "composer require --dev vendor/p:^1.0|id", "yarn add --dev eslint; id",
+        "pnpm add -D eslint && id", "yarn add --dev $(id)",
+    ),
+    "spaces that are not one between two words": (
+        " npm install -D lodash", "npm install -D lodash ", "npm  install -D lodash",
+        "npm install  -D lodash", "npm install -D  lodash", "npm install -D lodash@1.0 .0",
+        "npm install -D lodash@ 1.0", "composer require --dev vendor/p:1.0 .0",
+        "composer require --dev vendor/p: 1.0", "composer require  --dev vendor/p", "", " ", "npm",
+        "npm install -D lodash ", "npm install -D lodash",
+    ),
+    "capitals out of the forms, look-alike characters": (
+        "NPM install -D lodash", "npm INSTALL -D lodash", "npm install -d lodash",
+        "npm install --SAVE-DEV lodash", "npm install -D Lodash", "npm install -D LODASH",
+        "npm install -D @Scope/tool", "npm install -D @scope/Tool",
+        "composer require --dev Vendor/p", "composer require --dev vendor/P",
+        "composer require --DEV vendor/p", "Composer require --dev vendor/p",
+        "yarn add --dev ESLint", "pnpm add -D ESLint", "npm install -D lodаsh",
+        "npm install -D lodash​", "npm install -D ｌodash",
+    ),
+    "an empty or malformed package or version": (
+        "npm install -D @", "npm install -D @/x", "npm install -D @scope/", "npm install -D @scope",
+        "npm install -D @@scope/x", "npm install -D -lodash", "npm install -D .lodash",
+        "npm install -D _lodash", "npm install -D lodash@", "npm install -D @scope/x@",
+        "npm install -D lodash@-1", "npm install -D lodash@.1", "npm install -D lodash@^",
+        "npm install -D lodash@^^1", "npm install -D lodash@>=1.0.0", "npm install -D lodash@*",
+        "npm install -D lodash@1.*", "npm install -D lodash@1 || 2", "npm install -D lodash@@1",
+        "composer require --dev vendor/p:", "composer require --dev vendor/p:^",
+        "composer require --dev vendor/p:*", "composer require --dev vendor/p:>=1.0",
+        "composer require --dev vendor/p:-1", "composer require --dev vendor/p:.1",
+        "composer require --dev vendor/p:1.0.0 vendor/q:", "yarn add --dev @scope/",
+    ),
+    "a repeated option, an unknown option, an option of another form, -- and --registry": (
+        "npm install -D -D lodash", "npm install --save-dev --save-dev lodash",
+        "npm install --save-dev -D lodash", "npm install -D --save-dev lodash",
+        "npm install -D lodash -D", "npm install lodash -D", "npm install lodash --save-dev",
+        "npm install -D lodash --save-dev", "npm install -D --save-exact lodash@1.0.0",
+        "npm install --save-exact -D lodash@1.0.0", "npm install --save-exact --save-exact lodash@1.0.0",
+        "npm install -D --ignore-scripts lodash", "npm install -D lodash --ignore-scripts",
+        "npm install -D --no-ignore-scripts lodash", "npm install -D --foreground-scripts lodash",
+        "npm install -D --registry=https://example.org/ lodash",
+        "npm install -D --registry https://example.org/ lodash",
+        "npm install -D lodash --registry=https://example.org/",
+        "npm install -D lodash --registry https://example.org/",
+        "npm install -D --@scope:registry=https://example.org/ lodash",
+        "npm install -D --userconfig=x lodash", "npm install -D --prefix=/ lodash",
+        "npm install -D --prefix .. lodash", "npm install -D --global lodash",
+        "npm install -D -g lodash", "npm install -g -D lodash", "npm install -D --force lodash",
+        "npm install -D --legacy-peer-deps lodash", "npm install -D --cache=/ lodash",
+        "npm install -D --script-shell=sh lodash", "npm install -D --", "npm install -D -- lodash",
+        "npm install -- -D lodash", "npm install -D lodash --",
+        "npm install -D lodash -- --registry=https://example.org/", "npm install -D -",
+        "npm install -D --lodash", "npm install --save-exact lodash",
+        "npm install --save-exact lodash@1.0.0 other@2.0.0", "npm install --save-exact",
+        "npm install --save-exact -D lodash@1.0.0", "npm install --package-lock-only lodash",
+        "npm install --package-lock-only -D lodash", "npm install --package-lock-only --package-lock-only",
+        "npm install --package-lock-only --ignore-scripts",
+        "npm install --package-lock-only --registry=https://example.org/",
+        "composer require --dev --dev vendor/p", "composer require --dev vendor/p --dev",
+        "composer require vendor/p --dev", "composer require --dev --no-scripts vendor/p",
+        "composer require --dev --no-plugins vendor/p", "composer require --dev -W vendor/p",
+        "composer require --dev --with-all-dependencies vendor/p",
+        "composer require --dev --ignore-platform-reqs vendor/p",
+        "composer require --dev --prefer-source vendor/p",
+        "composer require --dev --repository=https://example.org vendor/p",
+        "composer require --dev -- vendor/p", "composer require --dev --",
+        "composer require --dev vendor/p --", "composer update --lock vendor/p",
+        "composer update --lock --with-all-dependencies", "composer update --lock --lock",
+        "composer update --lock --no-scripts", "composer update --lock --",
+        "composer update --lock --dev", "composer update --no-scripts --lock",
+        "composer update vendor/p --lock", "yarn add --dev eslint@8.0.0", "yarn add -D eslint",
+        "yarn add --dev eslint prettier", "yarn add --dev --registry=https://example.org/ eslint",
+        "yarn add --dev eslint --registry https://example.org/", "yarn add --dev --",
+        "yarn add --dev -- eslint", "yarn add --dev --dev eslint", "yarn add --dev --ignore-scripts eslint",
+        "pnpm add --save-dev eslint", "pnpm add -D eslint@8.0.0", "pnpm add -D eslint prettier",
+        "pnpm add -D --registry=https://example.org/ eslint", "pnpm add -D -- eslint",
+        "pnpm add -D -D eslint", "pnpm add -D eslint --ignore-scripts", "pnpm add -g -D eslint",
+        "pnpm add -D --filter x eslint",
+    ),
+    "a package given twice": (
+        "npm install -D lodash lodash", "npm install -D lodash@1.0.0 lodash@2.0.0",
+        "npm install -D lodash lodash@1.0.0", "composer require --dev vendor/p vendor/p",
+        "composer require --dev vendor/p:1.0 vendor/p:2.0",
+    ),
+}
+
+
+class AllowedInstallTest(unittest.TestCase):
+    def allowed(self, command, files=NODE_FILES):
+        return fix_commands.allowed_install(command, set(files))
+
+    def test_allowed_install_forms(self):
+        accepted = (
+            ("npm install --save-dev lodash", NODE_FILES,
+             ("npm", "dev", ["lodash"], ["lodash"], NPM_FILES,
+              "npm install --save-dev --ignore-scripts lodash")),
+            ("npm install -D stylelint", NODE_FILES,
+             ("npm", "dev", ["stylelint"], ["stylelint"], NPM_FILES,
+              "npm install --save-dev --ignore-scripts stylelint")),
+            ("npm install --save-dev lodash@4.17.21 @types/node@^20.1.0 left-pad", NODE_FILES,
+             ("npm", "dev", ["lodash@4.17.21", "@types/node@^20.1.0", "left-pad"],
+              ["lodash", "@types/node", "left-pad"], NPM_FILES,
+              "npm install --save-dev --ignore-scripts lodash@4.17.21 '@types/node@^20.1.0' "
+              "left-pad")),
+            ("npm install -D @scope/tool@~2.0 a.b_c-d@1.0.0-RC.1+build", NODE_FILES,
+             ("npm", "dev", ["@scope/tool@~2.0", "a.b_c-d@1.0.0-RC.1+build"],
+              ["@scope/tool", "a.b_c-d"], NPM_FILES,
+              "npm install --save-dev --ignore-scripts '@scope/tool@~2.0' "
+              "a.b_c-d@1.0.0-RC.1+build")),
+            ("npm install --save-exact lodash@4.17.21", NODE_FILES,
+             ("npm", "exact", ["lodash@4.17.21"], ["lodash"], NPM_FILES,
+              "npm install --save-exact --ignore-scripts lodash@4.17.21")),
+            ("npm install --package-lock-only", NODE_FILES,
+             ("npm", "lock", [], [], NPM_FILES,
+              "npm install --package-lock-only --ignore-scripts")),
+            ("composer require --dev phpstan/phpstan", PHP_FILES,
+             ("composer", "dev", ["phpstan/phpstan"], ["phpstan/phpstan"],
+              ["composer.json", "composer.lock"],
+              "composer require --dev --no-scripts --no-plugins --no-interaction phpstan/phpstan")),
+            ("composer require --dev phpstan/phpstan:^1.10 squizlabs/php_codesniffer:3.7.2",
+             PHP_FILES,
+             ("composer", "dev", ["phpstan/phpstan:^1.10", "squizlabs/php_codesniffer:3.7.2"],
+              ["phpstan/phpstan", "squizlabs/php_codesniffer"],
+              ["composer.json", "composer.lock"],
+              "composer require --dev --no-scripts --no-plugins --no-interaction "
+              "'phpstan/phpstan:^1.10' squizlabs/php_codesniffer:3.7.2")),
+            ("composer update --lock", PHP_FILES,
+             ("composer", "lock", [], [], ["composer.json", "composer.lock"],
+              "composer update --lock --no-scripts --no-plugins --no-interaction")),
+            ("yarn add --dev eslint", YARN_FILES,
+             ("yarn", "dev", ["eslint"], ["eslint"], ["package.json", "yarn.lock"],
+              "yarn add --dev --ignore-scripts eslint")),
+            ("pnpm add -D @scope/eslint", PNPM_FILES,
+             ("pnpm", "dev", ["@scope/eslint"], ["@scope/eslint"],
+              ["package.json", "pnpm-lock.yaml"],
+              "pnpm add --save-dev --ignore-scripts @scope/eslint")),
+        )
+        for command, files, expected in accepted:
+            with self.subTest(command=command):
+                found = self.allowed(command, files)
+                self.assertIsNotNone(found)
+                manager, form, packages, names, locked, rebuilt = expected
+                self.assertEqual(
+                    {key: found[key] for key in ("manager", "form", "packages", "names", "files",
+                                                 "command")},
+                    {"manager": manager, "form": form, "packages": packages, "names": names,
+                     "files": locked, "command": rebuilt})
+        for why, commands in REFUSED.items():
+            for command in commands:
+                with self.subTest(why=why, refused=command):
+                    self.assertIsNone(self.allowed(command, files_of(command)))
+
+    def test_the_manager_files_of_the_folder_decide(self):
+        self.assertIsNone(self.allowed("npm install -D lodash", set()))
+        self.assertIsNone(self.allowed("npm install -D lodash", {"package-lock.json"}))
+        self.assertIsNone(self.allowed("npm install -D lodash", PHP_FILES))
+        self.assertIsNone(self.allowed("composer require --dev vendor/p", {"package.json"}))
+        self.assertIsNone(self.allowed("composer require --dev vendor/p", {"composer.lock"}))
+        self.assertIsNone(self.allowed("yarn add --dev eslint", {"composer.json"}))
+        self.assertIsNone(self.allowed("pnpm add -D eslint", set()))
+        self.assertIsNotNone(self.allowed("npm install -D lodash", {"package.json"}))
+        self.assertIsNotNone(self.allowed("composer require --dev vendor/p", {"composer.json"}))
+        self.assertIsNotNone(self.allowed("yarn add --dev eslint", {"package.json"}))
+        self.assertIsNotNone(self.allowed("npm install -D lodash", {"package.json", "README.md"}))
+        # A folder that another manager already owns is never given a second lock file.
+        self.assertIsNone(self.allowed("npm install -D lodash", YARN_FILES))
+        self.assertIsNone(self.allowed("npm install -D lodash", PNPM_FILES))
+        self.assertIsNone(self.allowed("yarn add --dev eslint", NODE_FILES))
+        self.assertIsNone(self.allowed("yarn add --dev eslint", PNPM_FILES))
+        self.assertIsNone(self.allowed("pnpm add -D eslint", NODE_FILES))
+        self.assertIsNone(self.allowed("pnpm add -D eslint", YARN_FILES))
+        self.assertIsNotNone(fix_commands.allowed_install("npm install -D lodash", ["package.json"]))
+        self.assertIsNone(fix_commands.allowed_install("npm install -D lodash", None))
+
+    def test_not_a_text_or_out_of_bounds_is_refused(self):
+        for command in (None, 3, b"npm install -D lodash", ["npm", "install", "-D", "lodash"], {}):
+            with self.subTest(command=command):
+                self.assertIsNone(self.allowed(command))
+        many = " ".join(f"p{number}" for number in range(fix_commands.MAX_INSTALL_PACKAGES))
+        self.assertIsNotNone(self.allowed(f"npm install -D {many}"))
+        self.assertIsNone(self.allowed(f"npm install -D {many} one-more"))
+        self.assertIsNotNone(self.allowed("npm install -D " + "a" * 214))
+        self.assertIsNone(self.allowed("npm install -D " + "a" * 215))
+        self.assertIsNotNone(self.allowed("npm install -D lodash@" + "1" * 64))
+        self.assertIsNone(self.allowed("npm install -D lodash@" + "1" * 65))
+        long_but_valid = " ".join(chr(97 + number) * 100 for number in range(6))
+        self.assertGreater(len(long_but_valid), fix_commands.MAX_INSTALL - 20)
+        self.assertIsNone(self.allowed(f"npm install -D {long_but_valid}"))
+
+    def test_the_command_is_rebuilt_from_validated_parts_never_the_text_given(self):
+        for command, files, argv in (
+            ("npm install -D lodash@4.17.21", NODE_FILES,
+             ["npm", "install", "--save-dev", "--ignore-scripts", "lodash@4.17.21"]),
+            ("npm install --save-dev a b@^1.2.3", NODE_FILES,
+             ["npm", "install", "--save-dev", "--ignore-scripts", "a", "b@^1.2.3"]),
+            ("composer require --dev a/b c/d:^1.0", PHP_FILES,
+             ["composer", "require", "--dev", "--no-scripts", "--no-plugins", "--no-interaction",
+              "a/b", "c/d:^1.0"]),
+            ("yarn add --dev eslint", YARN_FILES,
+             ["yarn", "add", "--dev", "--ignore-scripts", "eslint"]),
+            ("pnpm add -D eslint", PNPM_FILES,
+             ["pnpm", "add", "--save-dev", "--ignore-scripts", "eslint"]),
+        ):
+            with self.subTest(command=command):
+                found = self.allowed(command, files)
+                self.assertEqual(shlex.split(found["command"]), argv)
+                self.assertNotEqual(found["command"], command)
+        # Every option a manager gets is fixed here and cuts the scripts of what it installs.
+        for command, flags in (
+            ("npm install -D lodash", ("--ignore-scripts",)),
+            ("npm install --save-exact lodash@1.0.0", ("--ignore-scripts",)),
+            ("npm install --package-lock-only", ("--ignore-scripts",)),
+            ("yarn add --dev eslint", ("--ignore-scripts",)),
+            ("pnpm add -D eslint", ("--ignore-scripts",)),
+            ("composer require --dev a/b", ("--no-scripts", "--no-plugins", "--no-interaction")),
+            ("composer update --lock", ("--no-scripts", "--no-plugins", "--no-interaction")),
+        ):
+            with self.subTest(command=command):
+                words = shlex.split(self.allowed(command, files_of(command))["command"])
+                for flag in flags:
+                    self.assertEqual(words.count(flag), 1)
+
+    def test_package_names_and_versions_are_checked_by_their_own_patterns(self):
+        for command in (
+            "npm install -D a", "npm install -D a0", "npm install -D a.b", "npm install -D a_b",
+            "npm install -D a-b", "npm install -D @a/b", "npm install -D @a-b/c.d",
+            "npm install -D 0a", "npm install -D a@latest", "npm install -D a@next",
+            "npm install -D a@1.x", "npm install -D a@^1", "npm install -D a@~1.2",
+            "npm install -D a@1.0.0-beta.2", "composer require --dev a/b",
+            "composer require --dev a.b/c_d", "composer require --dev a-b/c-d:^1.2",
+            "composer require --dev a/b:dev-main", "composer require --dev a/b:1.0.0-RC1",
+        ):
+            with self.subTest(accepted=command):
+                self.assertIsNotNone(self.allowed(command, files_of(command)))
+        for command in (
+            "npm install -D a/b", "npm install -D @a", "npm install -D @a/b/c",
+            "npm install -D a@1/2", "npm install -D a@1:2", "npm install -D a@b@c",
+            "composer require --dev a", "composer require --dev a/b/c",
+            "composer require --dev @a/b", "composer require --dev a/b:1/2",
+            "composer require --dev a/b:1:2", "composer require --dev a/b@1",
+        ):
+            with self.subTest(refused=command):
+                self.assertIsNone(self.allowed(command, files_of(command)))
+
+
+class InstallTargetTest(unittest.TestCase):
+    def install(self, command, image, dir="web", private=False):
+        return {"name": f"{command} ({dir})", "dir": dir, "image": image, "kind": "install",
+                "command": command, "env": {}, "source": "package.json", "private": private}
+
+    def test_the_image_is_the_one_of_the_install_command_of_the_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            commands = [
+                self.install("npm ci", "node:18-alpine"),
+                self.install("composer install", "composer:2", dir=""),
+                self.install("cd web/theme && npm ci", "node:16-alpine", dir=""),
+                {**self.install("npm run build", "node:20-alpine"), "kind": "build"},
+            ]
+            self.assertEqual(fix_commands.install_target("npm", Path(tmp), "web", commands),
+                             {"image": "node:18-alpine", "private": False})
+            self.assertEqual(fix_commands.install_target("yarn", Path(tmp), "web", commands)["image"],
+                             fix_commands.DEFAULT_NODE)
+            self.assertEqual(
+                fix_commands.install_target("npm", Path(tmp), "web/theme", commands)["image"],
+                "node:16-alpine")
+            self.assertEqual(fix_commands.install_target("composer", Path(tmp), "", commands),
+                             {"image": "composer:2", "private": False})
+
+    def test_a_private_install_is_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            commands = [self.install("composer install", "php:8.2-cli", dir="", private=True)]
+            self.assertEqual(fix_commands.install_target("composer", Path(tmp), "", commands),
+                             {"image": "php:8.2-cli", "private": True})
+
+    def test_without_a_command_the_image_comes_from_the_manifests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write(tmp, "web/package.json", {"engines": {"node": ">=18"}})
+            write(tmp, "composer.json", {"require": {}})
+            self.assertEqual(fix_commands.install_target("npm", Path(tmp), "web", []),
+                             {"image": "node:18-alpine", "private": False})
+            self.assertEqual(fix_commands.install_target("pnpm", Path(tmp), "web", [])["image"],
+                             "node:18-alpine")
+            self.assertEqual(fix_commands.install_target("composer", Path(tmp), "", []),
+                             {"image": fix_commands.COMPOSER_IMAGE, "private": False})
+            write(tmp, "composer.json", {"repositories": [{"type": "composer",
+                                                           "url": "https://packages.example.org"}]})
+            self.assertTrue(fix_commands.install_target("composer", Path(tmp), "", [])["private"])
+            write(tmp, "other/package.json", {})
+            self.assertEqual(fix_commands.install_target("npm", Path(tmp), "other", [])["image"],
+                             fix_commands.DEFAULT_NODE)
+            self.assertEqual(fix_commands.install_target("npm", Path(tmp), "absent", [])["image"],
+                             fix_commands.DEFAULT_NODE)
+            for target in (fix_commands.install_target("npm", Path(tmp), "web", []),
+                           fix_commands.install_target("composer", Path(tmp), "", [])):
+                self.assertTrue(fix_commands.valid_image(target["image"]))
 
 
 if __name__ == "__main__":

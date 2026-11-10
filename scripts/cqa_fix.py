@@ -10,6 +10,7 @@ import argparse
 import functools
 import json
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -53,6 +54,12 @@ LINKS_FILE = "fix/mr-links.json"
 STACK_CORE_FILE = "fix/stack-core.json"
 COMMANDS_FILE = "fix/commands.json"
 BASELINE_FILE = "baseline.json"
+INSTALLED = "dépendance installée : reprendre le correctif"
+NOT_ALLOWED = ("Installation refusée : commande hors des formes autorisées (ou dossier sans le "
+               "manifeste du gestionnaire), rien n'a été lancé, la ligne reste en l'état.")
+# Files that steer a package manager (registry, plugins, hooks that run code): an install never
+# runs when the pass changed one, since a fixer could then pair them with its request.
+PACKAGE_MANAGER_CONFIG = (".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmrc", ".pnpmfile.cjs")
 ADD_FORMAT = "--add attend « <repo>|<dossier>|<image>|<type>|<commande> » (type : install, build, lint ou test)."
 DOCKER_UNCHECKED = "Docker ne répond pas : présence des images non vérifiée."
 KEY_HELP = "clé de la passe : le nom du repo (fix/candidates.json)"
@@ -216,6 +223,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = _command(commands, "check", "contrôles des fichiers corrigés et commandes du projet", _cmd_check)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help=KEY_HELP)
+    sub = _command(commands, "install",
+                   "installe la dépendance de développement qu'un correctif demande (needs_command), "
+                   "formes autorisées seulement, et la commite", _cmd_install)
+    sub.add_argument("run_dir", type=Path, help="dossier du run")
+    sub.add_argument("key", help=KEY_HELP)
+    sub.add_argument("--ref", required=True, help="Réf de la ligne qui demande la dépendance (CQ-12)")
     sub = _command(commands, "mr-body", "titre et description de la MR d'une clé", _cmd_mr_body)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help=KEY_HELP)
@@ -1196,13 +1209,21 @@ def _cmd_validate(args, services: Services) -> int:
             if entry["outcome"] == "fixed":
                 previous = row.get("commits") or []
                 commits = previous + [sha for sha in entry["commits"] if sha not in previous]
+            elif entry["outcome"] == "needs_command":
+                commits = list(row.get("commits") or [])
+            # A row that asks for a dependency stays pending until install and its correction pass.
             row.update(
-                outcome=entry["outcome"], reason=entry["reason"], commits=commits,
+                outcome="pending" if entry["outcome"] == "needs_command" else entry["outcome"],
+                reason=entry["reason"], commits=commits,
                 attention=entry["attention"], remaining=entry["remaining"],
                 **{"pass": args.number},
             )
             # The texts of a new report replace those an earlier review corrected.
             row.pop("corrections", None)
+            if entry["outcome"] == "needs_command":
+                row["needs_command"] = entry["needs_command"]
+            else:
+                row.pop("needs_command", None)
             summary[entry["outcome"]].append(entry["ref"])
         key["step"] = "fixed"
         key["pass"] = max(key.get("pass") or 0, args.number)
@@ -1455,7 +1476,8 @@ def _cmd_check(args, services: Services) -> int:
     return EXIT_OK
 
 
-def _refuse_dirty(worktree: Path, run) -> None:
+def _refuse_dirty(worktree: Path, run, refused: str = "Contrôle refusé",
+                  again: str = "cqa_fix.py check") -> None:
     """Exit 2 when the worktree has changes that are not committed: the commands put it back as
     it was after each run, which would destroy what the fixer left. Nothing is touched."""
     try:
@@ -1465,8 +1487,8 @@ def _refuse_dirty(worktree: Path, run) -> None:
     if dirty:
         shown = ", ".join(dirty[:5]) + (f" et {len(dirty) - 5} autre(s)" if len(dirty) > 5 else "")
         raise UsageError(
-            f"Contrôle refusé : modifications non commitées dans le worktree {worktree} ({shown}). "
-            "Commitez-les ou retirez-les, puis relancez cqa_fix.py check. Rien n'a été nettoyé."
+            f"{refused} : modifications non commitées dans le worktree {worktree} ({shown}). "
+            f"Commitez-les ou retirez-les, puis relancez {again}. Rien n'a été nettoyé."
         )
 
 
@@ -1517,6 +1539,162 @@ def _read_baseline(check_dir: Path) -> Optional[dict]:
                     for item in document["results"])):
         return document
     return None
+
+
+def _cmd_install(args, services: Services) -> int:
+    """Install the development dependency a fixer asked for (a needs_command row) and commit it.
+
+    Only the forms of fix_commands.allowed_install run, rebuilt from their validated parts, in a
+    container with the network and the worktree of the key (cqa-toolbox.sh exec): the fixer never
+    runs anything. Only the manifest and the lock file of the folder may change, else everything is
+    put back (exit 5). They go through the guard, then into one commit
+    chore(<alias> CQ-n): add <packages> as a dev dependency; the row goes back to pending, with the
+    commit among its commits, for a correction pass of the fixer. A refusal changes nothing (exit 5:
+    form, files, failure, private dependencies, guard; exit 2: environment, a dirty worktree).
+    """
+    run_dir = args.run_dir.resolve()
+    refs = parse_refs(args.ref)
+    if len(refs) != 1:
+        raise UsageError("--ref : une seule Réf est attendue (CQ-12).")
+    ref = refs[0]
+    state = _pass_state(run_dir)
+    key = _started_key(state, args.key)
+    _not_left(key, args.key, "install")
+    started = _pass_in_progress(key)
+    if started is not None:
+        raise UsageError(f"La passe {started} est commencée sans rapport validé : validez-le "
+                         "avant d'installer une dépendance.")
+    row = key["rows"].get(str(ref))
+    if not isinstance(row, dict):
+        raise UsageError(f"Réf absente de la clé {args.key} : {ref_label(ref)}.")
+    request = row.get("needs_command")
+    if not isinstance(request, dict):
+        raise UsageError(f"La ligne {ref_label(ref)} ne demande aucune dépendance : le dernier "
+                         "rapport validé ne la rend pas en needs_command.")
+    worktree = _key_worktree(run_dir, key, services.run)
+    found = _install_form(worktree, request)
+    if found is None:
+        return _install_refused(ref, "form", NOT_ALLOWED)
+    folder, allowed = request["dir"], found["files"]
+    _refuse_dirty(worktree, services.run, "Installation refusée", "cqa_fix.py install")
+    try:
+        touched = [path for path in fix_checks.changed_files(worktree, key["start_sha"], services.run)
+                   if _manager_config(path)]
+    except ValueError as error:
+        raise UsageError(str(error))
+    if touched:
+        return _install_refused(ref, "config", (
+            f"Configuration du gestionnaire de paquets modifiée par la passe ({', '.join(touched)}) "
+            ": installation refusée, rien n'a été lancé."))
+    target = fix_commands.install_target(
+        found["manager"], worktree, folder, fix_state.check_commands(state, key["repo"]))
+    if target["private"]:
+        return _install_refused(ref, "private", f"{fix_checks.PRIVATE_DEPENDENCIES} : installation "
+                                                "impossible, rien n'a été lancé.")
+    item = {"name": f"{found['manager']} (CQ-{ref})", "dir": folder, "image": target["image"],
+            "kind": "install", "command": found["command"], "env": {},
+            "source": "cqa_fix.py install", "private": False}
+    if not fix_commands.valid_command(item):
+        raise UsageError(f"Installation refusée : l'image {target['image']} ne convient pas au "
+                         "lanceur.")
+    paths = tuple(posixpath.join(folder, name) for name in allowed)
+    log = _key_folder(run_dir, key) / "install" / f"CQ-{ref}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    result = fix_checks.run_install(services.run, LAUNCHER, worktree, item, log, paths)
+    if result["status"] == "not_run":
+        return _install_refused(ref, "not_run", f"Installation non lancée : {result['detail']}. "
+                                                "Rien n'a changé.")
+    if result["status"] == "failed":
+        return _install_refused(ref, "failed", f"Installation échouée : {result['detail']}\n"
+                                               "Rien n'est commité, le worktree est remis en l'état.")
+    if result["stray"]:
+        return _install_refused(ref, "files", (
+            "Fichiers modifiés hors du manifeste et du lockfile : "
+            f"{fix_checks.listed(result['stray'])}. Tout est restauré, rien n'est commité."))
+    if not result["changed"]:
+        return _install_refused(ref, "unchanged", (
+            "L'installation n'a rien changé au manifeste ni au lockfile (dépendance déjà "
+            "présente ?) : rien à commiter."))
+    committed = [path for path in paths if path in result["changed"]]
+    subject = fix_names.install_subject(
+        row.get("section"), ref, found["form"], found["names"], found["packages"])
+    message = f"{subject}\n\nInstalled by the orchestrator in a disposable container: " \
+              f"{found['command']}"
+    scanner = fix_gitleaks.Gitleaks(services.run, LAUNCHER)
+    done = False
+    try:
+        _git_ok(worktree, services.run, "git add", "--literal-pathspecs", "add", "--", *committed)
+        problems = fix_guard.without_dependency_files(
+            _staged_problems(run_dir, key, worktree, message, services.run, gitleaks=scanner),
+            lambda problem: problem["path"] in committed)
+        problems = _unwaived(key, worktree, services.run, problems, staged=True)
+        _note(scanner)
+        if problems:
+            return _install_refused(ref, "guard", (
+                f"Garde-fou : {len(problems)} problème(s) dans le manifeste ou le lockfile "
+                "installés, détail dans « problems » : rien n'est commité, tout est restauré."),
+                problems=problems)
+        _git_ok(worktree, services.run, "git commit", "commit", "-q", "-m", subject, "-m",
+                message.split("\n\n", 1)[1])
+        done = True
+    finally:
+        if not done:
+            _git_ok(worktree, services.run, "git reset", "reset", "-q")
+            fix_checks.restore_worktree(worktree, services.run)
+    head = fix_git.rev(worktree, services.run, "HEAD")
+    row.update(outcome="pending", reason=INSTALLED, commits=[*(row.get("commits") or []), head])
+    row.pop("needs_command", None)
+    row["installs"] = [*(row.get("installs") or []), {"commit": head, "files": committed}]
+    if key.get("step") in ("checked", "reviewed"):
+        key["step"] = "fixed"
+    fix_state.save(run_dir, state)
+    _emit({"installed": True, "ref": ref, "commit": head, "packages": found["packages"],
+           "files": committed, "command": found["command"],
+           "log": log.relative_to(run_dir).as_posix()})
+    return EXIT_OK
+
+
+def _manager_config(path: str) -> bool:
+    """True for a file of PACKAGE_MANAGER_CONFIG, or one below a .yarn folder (plugins, releases)."""
+    parts = path.split("/")
+    return parts[-1] in PACKAGE_MANAGER_CONFIG or ".yarn" in parts[:-1]
+
+
+def _install_form(worktree: Path, request: dict) -> Optional[dict]:
+    """Return fix_commands.allowed_install for the request of a row in worktree, None when its text
+    or its folder is not acceptable: the folder must be a plain relative one of the worktree (no
+    link on the way), holding the manifest of the manager as a regular file."""
+    folder = request.get("dir")
+    if not isinstance(folder, str) or fix_commands.clean_dir(folder) != folder:
+        return None
+    base = Path(os.path.realpath(worktree))
+    directory = base.joinpath(*folder.split("/")) if folder else base
+    if Path(os.path.realpath(worktree / folder)) != directory:
+        return None
+    try:
+        names = [entry.name for entry in os.scandir(directory)
+                 if entry.is_file(follow_symlinks=False)]
+    except OSError:
+        return None
+    return fix_commands.allowed_install(request.get("command"), names)
+
+
+def _install_refused(ref: int, kind: str, reason: str, problems: Optional[list] = None) -> int:
+    """Say that nothing was installed or committed: the result on stdout, the reason on stderr.
+    An error of the environment (kind not_run) is exit 2, any other refusal exit 5."""
+    result = {"installed": False, "ref": ref, "kind": kind, "reason": reason}
+    if problems is not None:
+        result["problems"] = problems
+    _emit(result)
+    print(reason, file=sys.stderr)
+    return EXIT_USAGE if kind == "not_run" else EXIT_REFUSED
+
+
+def _git_ok(worktree: Path, run, label: str, *args: str) -> None:
+    """Run git in worktree; raise GitRefused with its message when it fails."""
+    result = fix_names.git(worktree, run, *args)
+    if result.returncode != 0:
+        raise fix_git.GitRefused(f"{label} a échoué dans {worktree} : {result.stderr.strip()}")
 
 
 def _third_party(repo: dict) -> list:
@@ -1640,8 +1818,8 @@ def _range_shas(worktree: Path, run, key: dict) -> list:
 
 
 def _remap(worktree: Path, run, key: dict, before: list, rewritten: dict) -> None:
-    """Point the SHAs that the key records at its rewritten branch: the commits of the rows,
-    the bases of the passes and the head of a taken-over branch (_remapped).
+    """Point the SHAs that the key records at its rewritten branch: the commits of the rows and
+    their installs, the bases of the passes and the head of a taken-over branch (_remapped).
 
     before lists <start_sha>..HEAD before the rewrite. start_sha never moves; reviews hold
     refs only, and secret waivers are keyed on blobs: neither changes. The stamp of the MR
@@ -1650,6 +1828,9 @@ def _remap(worktree: Path, run, key: dict, before: list, rewritten: dict) -> Non
     for row in key["rows"].values():
         if isinstance(row, dict):
             row["commits"] = [rewritten.get(sha, sha) for sha in row.get("commits") or []]
+            for install in row.get("installs") or []:
+                if isinstance(install, dict) and isinstance(install.get("commit"), str):
+                    install["commit"] = rewritten.get(install["commit"], install["commit"])
     bases, taken = _recorded(key, "bases"), key.get("taken_head")
     if not bases and not fix_git.is_sha(taken):
         return
@@ -2433,10 +2614,25 @@ def _guard_problems(run_dir: Path, key: dict, worktree: Path, run, *,
         worktree, key["start_sha"], _row_sections(key), repo, known_values_from_env(), run,
         gitleaks=gitleaks,
     )
+    problems = fix_guard.without_dependency_files(problems, _installed(key))
     inherited = _inherited_commits(worktree, key, run)
     problems = [problem for problem in problems
                 if not (problem["reason"] == fix_guard.OUT_OF_KEY and problem["sha"] in inherited)]
     return _unwaived(key, worktree, run, problems) if waivers else problems
+
+
+def _installed(key: dict):
+    """Return the test of a problem that the install of a dependency answers: its commit is one
+    that the orchestrator made (key rows' installs) and its path one of the files it committed."""
+    allowed = {}
+    for row in key["rows"].values():
+        for install in (row.get("installs") if isinstance(row, dict) else None) or []:
+            files = install.get("files") if isinstance(install, dict) else None
+            if isinstance(install, dict) and isinstance(install.get("commit"), str) \
+                    and isinstance(files, list):
+                allowed.setdefault(install["commit"], set()).update(
+                    path for path in files if isinstance(path, str))
+    return lambda problem: problem["path"] in allowed.get(problem["sha"], ())
 
 
 def _inherited_commits(worktree: Path, key: dict, run) -> set:

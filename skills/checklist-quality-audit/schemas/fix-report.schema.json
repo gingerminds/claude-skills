@@ -31,8 +31,8 @@
           "description": "Ref of the checklist row, as an integer (107 for CQ-107)."
         },
         "outcome": {
-          "enum": ["fixed", "skipped", "question"],
-          "description": "fixed: corrected by commits of the branch (a row given up after its commits stays fixed, with an attention starting with « Abandon : »). skipped: not attempted, with the reason; no commit of the row on the branch. question: a decision is missing, the row waits for the answer; no commit of the row on the branch."
+          "enum": ["fixed", "skipped", "question", "needs_command"],
+          "description": "fixed: corrected by commits of the branch (a row given up after its commits stays fixed, with an attention starting with « Abandon : »). skipped: not attempted, with the reason; no commit of the row on the branch. question: a decision is missing, the row waits for the answer; no commit of the row on the branch. needs_command: the fix needs a development dependency; the orchestrator installs it if the command has an allowed form (cqa_fix.py install) and commits its manifest and lock file, then the row is reported again in a correction pass; no commit of the row on the branch."
         },
         "change": {
           "type": ["string", "null"],
@@ -63,6 +63,10 @@
         "question": {
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/question"}],
           "description": "Required for question."
+        },
+        "needs_command": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/needs_command"}],
+          "description": "Required for needs_command."
         },
         "covered_by": {
           "type": ["integer", "null"],
@@ -99,8 +103,38 @@
             "required": ["question"],
             "properties": {"question": {"$ref": "#/$defs/question"}}
           }
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "needs_command"}}},
+          "then": {
+            "required": ["needs_command"],
+            "properties": {"needs_command": {"$ref": "#/$defs/needs_command"}}
+          }
         }
       ]
+    },
+    "needs_command": {
+      "type": "object",
+      "required": ["command", "dir", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "The install command, exactly one of: npm install --save-dev|-D <package>[@<version>]..., npm install --save-exact <package>@<version>, npm install --package-lock-only, composer require --dev <vendor/package>[:<version>]..., composer update --lock, yarn add --dev <package>, pnpm add -D <package>. Single spaces, public registry names only (no URL, path or git+), no other option, no shell character. The fixer never runs it: the orchestrator rebuilds it from these parts, and refuses any other text (exit 5)."
+        },
+        "dir": {
+          "type": "string",
+          "description": "The folder of the repo that holds the manifest (package.json or composer.json), relative, without .. or a trailing /, an empty text for the root."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "Why the fix needs this dependency, in French, 1 to 300 characters. Kept as the reason of the row in the state."
+        }
+      }
     },
     "question": {
       "type": "object",
