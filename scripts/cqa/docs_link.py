@@ -22,6 +22,7 @@ MARKDOWN_FILE = "links.md"
 MAX_PROPOSED = 5
 HOWS = ("criterion", "proposed")
 FIXER_OWNERS = ("dev", "inconnu")
+REPORT_FIELDS = ("id", "doc", "label", "date", "source", "criteria", "summary", "owner")
 
 _FICHES = "fiches"
 _PRIORITY_RANKS = {
@@ -387,6 +388,63 @@ def fixer_points(run_dir: Path) -> dict:
     return found
 
 
+def report_points(run_dir: Path) -> dict:
+    """Return {ref: [point]}: every ko point linked to a row, whatever its owner.
+
+    They are the points the merge request and the synthesis speak of, from the validated links
+    and the imported documents only; {} when there is nothing, or when the files cannot be read.
+    A point keeps REPORT_FIELDS only (its reference, its summary and its owner, cleaned and
+    capped again), never the suggested fix, the elements or any other text of the document. An
+    owner that is not a known one is "inconnu".
+    """
+    return {
+        ref: [_report_point(point) for point in points]
+        for ref, points in points_by_ref(run_dir, ("ko",)).items()
+    }
+
+
+def document_summaries(run_dir: Path) -> list:
+    """Return one entry per imported document that has ko points, once the links are validated.
+
+    {"id", "label", "date", "categories", "points", "linked", "unlinked"}: the number of ko
+    points, how many of them are linked to a row, and the others as report points (REPORT_FIELDS
+    plus "categories", the Notion categories of the document). [] without validated links; a
+    document added after the validation, or whose items cannot be read, is left out.
+    """
+    links = read_links(run_dir)
+    found: list = []
+    if not links:
+        return found
+    limits = context_docs.LIMITS
+    for doc_id, document in _imported(run_dir):
+        categories = links["categories"].get(doc_id)
+        meta = document["document"]
+        points = [point for point in _points(document) if point.get("verdict") == "ko"]
+        if categories is None or not points:
+            continue
+        label, date = _text(meta.get("label"), limits["label"]), _text(meta.get("date"), 10)
+        unlinked = [
+            {
+                **_report_point({**point, "doc": doc_id, "label": label, "date": date}),
+                "categories": list(categories),
+            }
+            for point in sorted(points, key=lambda item: item["id"])
+            if point["id"] not in links["links"]
+        ]
+        found.append(
+            {
+                "id": doc_id,
+                "label": label,
+                "date": date,
+                "categories": list(categories),
+                "points": len(points),
+                "linked": len(points) - len(unlinked),
+                "unlinked": unlinked,
+            }
+        )
+    return found
+
+
 def imported_points(run_dir: Path) -> dict:
     """Return {doc: [points]} of the imported documents whose items.json can be read."""
     return {doc_id: _points(document) for doc_id, document in _imported(run_dir)}
@@ -426,6 +484,12 @@ def _fixer_point(point: dict) -> dict:
         "owner": "dev",
         "elements": _texts(point.get("elements"), limits["element"], context_docs.MAX_ELEMENTS),
     }
+
+
+def _report_point(point: dict) -> dict:
+    full = _fixer_point(point)
+    full["owner"] = _owner(point)
+    return {name: full[name] for name in REPORT_FIELDS}
 
 
 def _text(value, limit: int) -> str:

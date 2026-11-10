@@ -7,7 +7,7 @@ import re
 from datetime import date
 from typing import Optional
 
-from cqa import fix_checks, fix_names, fix_rows
+from cqa import context_docs, fix_checks, fix_names, fix_rows
 from cqa.checklist import ref_label
 from cqa.report import run_start
 
@@ -40,6 +40,16 @@ COVERED = "couverte par le correctif de {ref}"
 _ALERT_NOTICE = re.compile(
     r"Alerte de secret à confirmer par le lead : (?P<path>\S.*?), ligne (?P<line>[0-9]+)(?![0-9])")
 WAIVED_ALERT = "Alerte de secret levée par le lead : {path}, ligne {line}"
+# The lines about a context document (a third-party report) name it, its date, the references of
+# its points and their counts; the text of a point is never copied, but the summary of a point no
+# row holds, in « Hors-scope ».
+REPORT_LINE = "Rapport {name} : {fixed}, {ok}, {left} ; références : {refs}"
+ALREADY_OK = "{ref} : le rapport {label} signale {refs}, mais le code est déjà conforme."
+NOT_FOUND = ("{ref} : le rapport {label} signale {refs}, mais l'élément n'a pas été retrouvé "
+             "dans le code.")
+_MAX_REFS = 12
+_FALLBACK_REF = "un point"
+_DISAGREEMENTS = {"already_ok": ALREADY_OK, "not_found": NOT_FOUND}
 
 
 def title(count: int, sections: int) -> str:
@@ -70,12 +80,13 @@ def notion_url(page_id) -> Optional[str]:
 
 def body(*, run_id: str, copy_url: Optional[str], fixed: list, checks, not_run: list,
          attention: list, waiting: list, left: list, earlier: list = (), covered: list = (),
-         sections: list = (), reorder_conflicts: list = (), category: Optional[str] = None) -> str:
+         sections: list = (), reorder_conflicts: list = (), category: Optional[str] = None,
+         unlinked: list = ()) -> str:
     """Return the description of a new MR; empty sections are left out.
 
     fixed: [{"ref", "title", "url", "semi_auto", "human_check", "summary", "change", "uat",
-    "commits", "remaining", "section"}]; checks: the entries of checks.json (None when it is
-    missing); not_run: [{"name", "command"}]; attention: remarks, {"section", "text"} or plain
+    "commits", "remaining", "section", "report"}]; checks: the entries of checks.json (None when
+    it is missing); not_run: [{"name", "command"}]; attention: remarks, {"section", "text"} or plain
     texts; waiting: [{"ref", "title", "text", "url"}]; left: [{"ref", "title", "reason", "url",
     "section"}]; earlier: [{"ref", "title"}], the fixes the branch carried before this pass;
     covered: [{"ref", "title", "by", "url", "section"}], the rows the commit of row "by" also
@@ -84,7 +95,9 @@ def body(*, run_id: str, copy_url: Optional[str], fixed: list, checks, not_run: 
     « Hors-scope » give the rows of each under « ### <CATÉGORIE> » (an item of no listed
     section comes first, ungrouped); a failed section says why in « Hors-scope ».
     reorder_conflicts: the subjects of the commits a reorder left in place. category names the
-    scope without sections. Raises ValueError for a run id that is no date.
+    scope without sections. unlinked: the points of a context document that no row holds (see
+    hors_scope). A fixed row's "report" (document_lines) is a list of lines, absent without
+    document. Raises ValueError for a run id that is no date.
     """
     started = run_start(run_id)
     names = [_name(section) for section in sections] or ([category] if category else [])
@@ -104,7 +117,7 @@ def body(*, run_id: str, copy_url: Optional[str], fixed: list, checks, not_run: 
     parts = [("Contexte", "\n\n".join(context))]
     parts += _sections(2, fixed, covered, checks, not_run, attention, waiting, verify=True,
                        sections=sections, conflicts=reorder_conflicts)
-    out = hors_scope(left, sections)
+    out = hors_scope(left, sections, unlinked)
     if out:
         parts.append((HORS_SCOPE, out))
     parts.append(("Suite", SUITE))
@@ -113,7 +126,7 @@ def body(*, run_id: str, copy_url: Optional[str], fixed: list, checks, not_run: 
 
 def addition(*, fixed: list, checks, not_run: list, attention: list, waiting: list, left: list,
              earlier: list = (), covered: list = (), sections: list = (),
-             reorder_conflicts: list = ()) -> str:
+             reorder_conflicts: list = (), unlinked: list = ()) -> str:
     """Return the text of mr-addition.md: the new sub-sections, then the « ## Hors-scope » list.
 
     The checks are shown only with new fixed rows. Sections group the rows as in body.
@@ -122,7 +135,7 @@ def addition(*, fixed: list, checks, not_run: list, attention: list, waiting: li
     parts = _sections(3, fixed, covered, checks, not_run, attention, waiting, verify=bool(fixed),
                       sections=sections, conflicts=reorder_conflicts)
     text = _render(3, parts).rstrip("\n") if parts else ""
-    out = hors_scope(left, sections)
+    out = hors_scope(left, sections, unlinked)
     if out:
         text = (text + "\n\n" if text else "") + f"## {HORS_SCOPE}\n\n{out}"
     return _clean(text + "\n") if text else ""
@@ -145,15 +158,21 @@ def split_addition(text: str) -> tuple:
     return text[:found.start()].strip("\n"), text[found.end():].strip("\r\n")
 
 
-def hors_scope(left: list, sections: list = ()) -> str:
+def hors_scope(left: list, sections: list = (), unlinked: list = ()) -> str:
     """Return the « Hors-scope » list: « - CQ-40 : <titre> : <raison> ([Notion](<url>)) ».
 
     The rows of each section come under « ### <CATÉGORIE> », in the order of sections, and a
     failed section first says « Section non aboutie : <raison> »; a row of no listed section
-    comes first, ungrouped. Empty when there is nothing to list.
+    comes first, ungrouped. unlinked, the points of a context document that no row holds
+    ({"label", "categories", "source", "criteria", "summary", "owner"}), come after those rows,
+    ungrouped: « - Rapport <label> : <références> : <résumé> (<propriétaire>) », for the points
+    whose document has a category in common with a section (none without sections), once each.
+    Empty when there is nothing to list.
     """
     loose, groups = _grouped(left, sections)
-    blocks = ["\n".join(_listed(item, item.get("reason")) for item in loose)] if loose else []
+    lines = [_listed(item, item.get("reason")) for item in loose]
+    lines += _unlinked_lines(unlinked, sections)
+    blocks = ["\n".join(lines)] if lines else []
     for section, items in groups:
         failed = section.get("state") == "failed"
         if not items and not failed:
@@ -266,8 +285,83 @@ def remaining_of(row: dict) -> Optional[str]:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def document_lines(points: list, outcomes: list) -> list:
+    """Return one line per document for the points linked to a fixed row.
+
+    « Rapport <label> (<date>) : <n> point(s) corrigé(s), <n> déjà conforme(s) dans le code,
+    <n> laissé(s) (<propriétaires>) ; références : <critères, sinon source> ». points is every
+    ko point linked to the row, whatever its owner (id, doc, label, date, criteria, source,
+    owner); outcomes the fixer's context_items of the row ({"id", "outcome"}). A point counts
+    as fixed or already conform by its outcome; every other one is left: not_found, left, and a
+    point the fixer was never given (an owner other than the devs). The owners are those of the
+    left points, in the order of context_docs.OWNERS. Only the name and the date of the
+    document, its counts and the references of its points are written: never the summary of a
+    point, never a note of the fixer.
+    """
+    results = _results(outcomes)
+    documents: dict = {}
+    for point in _valid_points(points):
+        documents.setdefault(point.get("doc") or point.get("label") or "", []).append(point)
+    lines = []
+    for group in documents.values():
+        fixed = sum(1 for point in group if results.get(point["id"]) == "fixed")
+        conform = sum(1 for point in group if results.get(point["id"]) == "already_ok")
+        left = [point for point in group if results.get(point["id"]) not in ("fixed", "already_ok")]
+        owners = {_owner_of(point) for point in left}
+        left_text = f"{len(left)} {'laissé' if len(left) <= 1 else 'laissés'}"
+        if left:
+            left_text += f" ({', '.join(name for name in context_docs.OWNERS if name in owners)})"
+        lines.append(REPORT_LINE.format(
+            name=_document_name(group[0]),
+            fixed=f"{fixed} {'point corrigé' if fixed <= 1 else 'points corrigés'}",
+            ok=f"{conform} {'déjà conforme' if conform <= 1 else 'déjà conformes'} dans le code",
+            left=left_text, refs=_references(group)))
+    return lines
+
+
+def document_disagreements(ref: int, points: list, outcomes: list) -> list:
+    """Return the remarks for the disagreements between a report and the code, for a fixed row.
+
+    A point the fixer found already conform, or whose element it could not find, gives
+    « CQ-112 : le rapport <label> signale 7.3, mais le code est déjà conforme. » or « ..., mais
+    l'élément n'a pas été retrouvé dans le code. », once each. They go under « Points d'attention »
+    of the merge request: a disagreement is never a question for the lead.
+    """
+    results = _results(outcomes)
+    lines: list = []
+    for point in _valid_points(points):
+        template = _DISAGREEMENTS.get(results.get(point["id"]))
+        if template is None:
+            continue
+        line = template.format(ref=ref_label(ref), label=_label_of(point),
+                               refs=_references([point]))
+        if line not in lines:
+            lines.append(line)
+    return lines
+
+
+def count_disagreements(rows: dict) -> int:
+    """Return how many report points the fixer found already conform or could not find, in the
+    fixed rows of a key (rows is rows of fix/state.json)."""
+    count = 0
+    for row in rows.values() if isinstance(rows, dict) else ():
+        if not isinstance(row, dict) or row.get("outcome") != "fixed":
+            continue
+        count += sum(1 for item in row.get("context_items") or []
+                     if isinstance(item, dict) and item.get("outcome") in _DISAGREEMENTS)
+    return count
+
+
+def field_text(value, limit: int) -> str:
+    """Return a text of a context document for a description: one line, cleaned, cut to limit
+    characters, without backtick."""
+    text = context_docs.clean_text(value).replace("`", "'")
+    return text if len(text) <= limit else text[:max(limit - 1, 0)].rstrip() + "…"
+
+
 def material(key: dict, candidates: dict, notion_rows: list, reports: list, reviews: list,
-             checks, changed: list, branch_refs: set, *, since: int = 0, order=()) -> dict:
+             checks, changed: list, branch_refs: set, *, since: int = 0, order=(),
+             unlinked: list = (), linked: Optional[dict] = None) -> dict:
     """Return the values of body and addition for a key, from what the run holds.
 
     reports and reviews are [(N, document)]; checks is checks.json (None when missing);
@@ -280,6 +374,13 @@ def material(key: dict, candidates: dict, notion_rows: list, reports: list, revi
     others, in the key's order), and the fixed rows of a section in the order of theirs. The
     text corrections of a review (rows[ref]["corrections"]) replace those of the report; the
     remarks of a failed section are left out, its reason and state go with it.
+
+    The points of a context document (a third-party report): linked is {ref: [point]}, every
+    point linked to a row whatever its owner (docs_link.report_points); a point the candidate
+    row gives (its "context_items") that linked lacks is added. A fixed row whose state holds
+    the outcomes of its points gets "report", the lines of document_lines, and the
+    disagreements (already_ok, not_found) join the remarks, after the others. unlinked is given
+    back as it is, for hors_scope. Without document nothing of this shows.
     """
     info = _row_info(key, candidates, notion_rows)
     rows = key["rows"]
@@ -304,6 +405,9 @@ def material(key: dict, candidates: dict, notion_rows: list, reports: list, revi
             "commits": [sha[:_SHORT_SHA] for sha in row.get("commits") or []],
             "remaining": remaining_of(row), "section": row.get("section"),
         })
+    attention = _attention(key, reports, reviews, since)
+    attention += [note for note in _report_notes(fixed, rows, info, linked)
+                  if note not in attention]
     all_fixed = {int(ref) for ref, row in rows.items() if row.get("outcome") == "fixed"}
     titles = {item.get("ref"): item.get("title") for item in candidates.get("left") or []
               if isinstance(item, dict)}
@@ -314,7 +418,7 @@ def material(key: dict, candidates: dict, notion_rows: list, reports: list, revi
         "checks": _current_checks(checks, changed),
         "not_run": [{"name": item.get("name"), "command": item.get("command")}
                     for item in (checks or {}).get("not_run") or [] if isinstance(item, dict)],
-        "attention": _attention(key, reports, reviews, since),
+        "attention": attention,
         "waiting": [
             {"ref": int(ref), "title": info.get(int(ref), {}).get("title"), "text": row.get("reason"),
              "url": notion_url(info.get(int(ref), {}).get("page_id"))}
@@ -328,7 +432,108 @@ def material(key: dict, candidates: dict, notion_rows: list, reports: list, revi
         "sections": _ordered_sections(key, position),
         "reorder_conflicts": [subject for subject in key.get("reorder_conflicts") or []
                               if isinstance(subject, str) and subject.strip()],
+        "unlinked": [dict(item) for item in unlinked or () if isinstance(item, dict)],
     }
+
+
+def _results(outcomes) -> dict:
+    """Return {point id: outcome} of the context_items of a row."""
+    return {item["id"]: item.get("outcome") for item in outcomes or []
+            if isinstance(item, dict) and isinstance(item.get("id"), str)}
+
+
+def _valid_points(points) -> list:
+    return [point for point in points or [] if isinstance(point, dict)
+            and isinstance(point.get("id"), str)]
+
+
+def _owner_of(point: dict) -> str:
+    owner = context_docs.clean_text(point.get("owner")).casefold()
+    return owner if owner in context_docs.OWNERS else "inconnu"
+
+
+def _document_name(point: dict) -> str:
+    """Return « <label> (<date>) » for the line of a document, « <label> » without a date and
+    the id of the document without a label."""
+    label, date = _label_of(point), field_text(point.get("date"), 10)
+    return f"{label} ({date})" if date else label
+
+
+def _label_of(point: dict) -> str:
+    limits = context_docs.LIMITS
+    return field_text(point.get("label"), limits["label"]) or field_text(
+        point.get("doc"), limits["label"]) or "inconnu"
+
+
+def _references(points: list) -> str:
+    """Return the references of the points, once each: the criteria of a point, else its source;
+    the first _MAX_REFS, then « et <n> autres »."""
+    limits = context_docs.LIMITS
+    found: list = []
+    for point in points:
+        criteria = [field_text(item, limits["criterion"]) for item in point.get("criteria") or []
+                    if isinstance(item, str)]
+        for reference in [item for item in criteria if item] or [
+                field_text(point.get("source"), limits["source"])]:
+            if reference and reference not in found:
+                found.append(reference)
+    if not found:
+        return _FALLBACK_REF
+    if len(found) <= _MAX_REFS:
+        return ", ".join(found)
+    return f"{', '.join(found[:_MAX_REFS])} et {len(found) - _MAX_REFS} autres"
+
+
+def _report_points_of(ref: int, about: dict, linked) -> list:
+    """Return the points of a row: the linked ones, then those of its candidate row they lack."""
+    found: list = []
+    for source in ((linked or {}).get(ref), about.get("context_items")):
+        for point in _valid_points(source if isinstance(source, list) else []):
+            if all(point["id"] != item["id"] for item in found):
+                found.append(point)
+    return found
+
+
+def _report_notes(fixed: list, rows: dict, info: dict, linked) -> list:
+    """Give a "report" to the fixed rows whose state holds the outcomes of their points, and
+    return the disagreement remarks [{"section", "text"}] of those rows."""
+    notes = []
+    for item in fixed:
+        outcomes = rows[str(item["ref"])].get("context_items")
+        points = _report_points_of(item["ref"], info.get(item["ref"], {}), linked)
+        if not (isinstance(outcomes, list) and outcomes and points):
+            continue
+        lines = document_lines(points, outcomes)
+        if lines:
+            item["report"] = lines
+        notes += [{"section": item.get("section"), "text": text}
+                  for text in document_disagreements(item["ref"], points, outcomes)]
+    return notes
+
+
+def _unlinked_lines(unlinked, sections) -> list:
+    """Return the « Hors-scope » lines of the points no row holds whose document has a category
+    of one of the sections."""
+    names = {context_docs.clean_text(section.get("category")).casefold()
+             for section in sections or () if isinstance(section, dict)} - {""}
+    limits = context_docs.LIMITS
+    lines: list = []
+    for point in unlinked or ():
+        if not isinstance(point, dict):
+            continue
+        categories = {context_docs.clean_text(name).casefold()
+                      for name in point.get("categories") or () if isinstance(name, str)}
+        if not categories & names:
+            continue
+        line = f"- Rapport {_label_of(point)} : {_references([point])}"
+        summary = field_text(point.get("summary"), limits["summary"])
+        if summary:
+            line += f" : {summary}"
+        owner = _owner_of(point)
+        line += f" ({owner})"
+        if line not in lines:
+            lines.append(line)
+    return lines
 
 
 def _sections(level: int, fixed, covered, checks, not_run, attention, waiting, *,
@@ -409,14 +614,16 @@ def _fix(heading: str, row: dict) -> str:
         lines.append(f"{SEMI_AUTO} À valider : {check}" if check else SEMI_AUTO)
     if row.get("remaining"):
         lines.append(f"{PARTIAL} Reste à faire : {row['remaining']}")
-    fields = [
-        ("Ligne Notion", row.get("url")),
-        ("Constat de l'audit", row.get("summary")),
+    before = [("Ligne Notion", row.get("url")), ("Constat de l'audit", row.get("summary"))]
+    after = [
         ("Changement", row.get("change")),
         ("Commits", ", ".join(row.get("commits") or [])),
         ("UAT", row.get("uat")),
     ]
-    lines.append("\n".join(f"- {label} : {value}" for label, value in fields if value))
+    bullets = [f"- {label} : {value}" for label, value in before if value]
+    bullets += [f"- {line}" for line in row.get("report") or []]
+    bullets += [f"- {label} : {value}" for label, value in after if value]
+    lines.append("\n".join(bullets))
     return "\n\n".join(lines)
 
 

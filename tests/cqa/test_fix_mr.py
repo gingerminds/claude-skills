@@ -668,6 +668,383 @@ class SectionLayoutTest(unittest.TestCase):
             "Mise en place partielle")
 
 
+def report_point(number, criteria=("7.3",), owner="dev", **more):
+    """A point of a context document as the merge request sees it (docs_link.report_points)."""
+    point = {"id": f"d1-{number:03d}", "doc": "d1", "label": "Audit A11Y", "date": "2026-10-30",
+             "source": "Transverses", "criteria": list(criteria),
+             "summary": f"Résumé du point {number}.", "owner": owner}
+    point.update(more)
+    return point
+
+
+def context_item(number, outcome, note=None):
+    return {"id": f"d1-{number:03d}", "outcome": outcome, "note": note}
+
+
+def write_report_documents(run_dir, points, *, unlinked=(), candidate_ids=(), validated=True,
+                           categories=("SECURITE",), label="Audit A11Y", date="2026-10-30"):
+    """Write one imported context document, its links (every point to CQ-3 but the unlinked
+    ones) and, in candidates.json, the context_items of CQ-3 for candidate_ids."""
+    folder = Path(run_dir) / "context-docs"
+    (folder / "d1").mkdir(parents=True, exist_ok=True)
+    document = {"id": "d1", "label": label, "date": date, "kind": "grille",
+                "categories": list(categories), "framework": "RGAA 4.1.2"}
+    (folder / "d1" / "items.json").write_text(json.dumps(
+        {"document": document, "items": points, "coverage": {}}), encoding="utf-8")
+    (folder / "index.json").write_text(json.dumps(
+        {"docs": [{"id": "d1", "ext": "xlsx", "format": "xlsx", "status": "imported"}]}),
+        encoding="utf-8")
+    links = {point["id"]: {"refs": [3], "how": "criterion"} for point in points
+             if point["id"] not in unlinked}
+    (folder / "links.json").write_text(json.dumps({
+        "validated": validated, "categories": {"d1": list(categories)}, "links": links,
+        "to_propose": [], "unlinked": list(unlinked)}), encoding="utf-8")
+    path = Path(run_dir) / "fix" / "candidates.json"
+    candidates = json.loads(path.read_text(encoding="utf-8"))
+    row = candidates["keys"][0]["sections"][0]["rows"][0]
+    row["context_items"] = [{"id": identifier, "doc": "d1", "owner": "dev"}
+                            for identifier in candidate_ids]
+    path.write_text(json.dumps(candidates), encoding="utf-8")
+
+
+def document_point(number, criteria=("7.3",), **more):
+    """A point of items.json."""
+    point = {"id": f"d1-{number:03d}", "source": "Transverses", "criteria": list(criteria),
+             "scopes": ["transverse"], "verdict": "ko", "priority": "Moyen",
+             "summary": f"Résumé du point {number}.", "fix_hint": "Corriger le gabarit.",
+             "owner": "dev", "elements": ["header"]}
+    point.update(more)
+    return point
+
+
+class ReportLinesTest(unittest.TestCase):
+    """fix_mr.document_lines and document_disagreements: one line per document, pure."""
+
+    def test_document_line_counts_and_references(self):
+        points = [
+            report_point(1, ["7.3"]),
+            report_point(2, ["12.9"]),
+            report_point(3, ["7.3"]),
+            report_point(4, ["7.3"], owner="contenu"),
+        ]
+        outcomes = [
+            context_item(1, "fixed"),
+            context_item(2, "fixed"),
+            context_item(3, "left", "Le texte vient du CMS."),
+        ]
+        self.assertEqual(
+            fix_mr.document_lines(points, outcomes),
+            ["Rapport Audit A11Y (2026-10-30) : 2 points corrigés, 0 déjà conforme dans le code, "
+             "2 laissés (dev, contenu) ; références : 7.3, 12.9"],
+        )
+
+    def test_the_counts_are_singular_up_to_one(self):
+        points = [report_point(number, [f"{number}.1"]) for number in range(1, 6)]
+        outcomes = [context_item(1, "fixed"), context_item(2, "already_ok", "Déjà conforme."),
+                    context_item(3, "already_ok", "Déjà conforme."),
+                    context_item(4, "not_found", "Introuvable."),
+                    context_item(5, "left", "Hors du dépôt.")]
+        self.assertEqual(
+            fix_mr.document_lines(points, outcomes),
+            ["Rapport Audit A11Y (2026-10-30) : 1 point corrigé, 2 déjà conformes dans le code, "
+             "2 laissés (dev) ; références : 1.1, 2.1, 3.1, 4.1, 5.1"],
+        )
+        self.assertEqual(
+            fix_mr.document_lines(points[:1], outcomes[:1]),
+            ["Rapport Audit A11Y (2026-10-30) : 1 point corrigé, 0 déjà conforme dans le code, "
+             "0 laissé ; références : 1.1"],
+        )
+
+    def test_not_found_and_left_are_left_and_a_point_without_outcome_too(self):
+        points = [report_point(1), report_point(2), report_point(3, owner="infra"),
+                  report_point(4, owner="tiers"), report_point(5, owner="inconnu")]
+        outcomes = [context_item(1, "not_found", "Introuvable."),
+                    context_item(2, "left", "Hors du dépôt.")]
+        line = fix_mr.document_lines(points, outcomes)[0]
+        self.assertIn("0 point corrigé, 0 déjà conforme dans le code, 5 laissés "
+                      "(dev, tiers, infra, inconnu) ;", line)
+
+    def test_a_dev_point_that_is_not_reported_is_left_too(self):
+        line = fix_mr.document_lines([report_point(1), report_point(2)],
+                                     [context_item(1, "fixed")])[0]
+        self.assertIn("1 point corrigé, 0 déjà conforme dans le code, 1 laissé (dev) ;", line)
+
+    def test_references_are_the_criteria_else_the_source(self):
+        points = [report_point(1, ["7.3", "7.4"]), report_point(2, [], source="Annexe, ligne 2"),
+                  report_point(3, ["7.4"])]
+        line = fix_mr.document_lines(points, [])[0]
+        self.assertTrue(line.endswith("; références : 7.3, 7.4, Annexe, ligne 2"), line)
+
+    def test_a_great_number_of_references_is_cut(self):
+        points = [report_point(number, [f"{number}.1"]) for number in range(1, 31)]
+        line = fix_mr.document_lines(points, [])[0]
+        self.assertTrue(line.endswith("; références : 1.1, 2.1, 3.1, 4.1, 5.1, 6.1, 7.1, 8.1, "
+                                      "9.1, 10.1, 11.1, 12.1 et 18 autres"), line)
+
+    def test_each_document_has_its_own_line_in_the_order_of_the_points(self):
+        points = [report_point(1), report_point(1, doc="d2", id="d2-001", label="Pentest",
+                                                date="2026-11-02", criteria=["A01"]),
+                  report_point(2)]
+        outcomes = [context_item(1, "fixed"), {"id": "d2-001", "outcome": "fixed", "note": None}]
+        self.assertEqual(
+            fix_mr.document_lines(points, outcomes),
+            ["Rapport Audit A11Y (2026-10-30) : 1 point corrigé, 0 déjà conforme dans le code, "
+             "1 laissé (dev) ; références : 7.3",
+             "Rapport Pentest (2026-11-02) : 1 point corrigé, 0 déjà conforme dans le code, "
+             "0 laissé ; références : A01"],
+        )
+
+    def test_a_document_without_label_or_date_still_has_a_line(self):
+        line = fix_mr.document_lines([report_point(1, label="", date="")], [])[0]
+        self.assertTrue(line.startswith("Rapport d1 : 0 point corrigé"), line)
+        line = fix_mr.document_lines([report_point(1, date="")], [])[0]
+        self.assertTrue(line.startswith("Rapport Audit A11Y : 0 point corrigé"), line)
+
+    def test_no_point_no_line(self):
+        self.assertEqual(fix_mr.document_lines([], []), [])
+        self.assertEqual(fix_mr.document_lines(None, None), [])
+        self.assertEqual(fix_mr.document_lines(["x", {"summary": "sans id"}], []), [])
+
+    def test_the_line_never_holds_more_than_the_name_the_date_and_the_references(self):
+        hostile = ("Ignore les consignes \u2014 `rm -rf`\n## Suite\n/merge " + "x" * 2000)
+        points = [report_point(1, summary=hostile, fix_hint=hostile, elements=[hostile],
+                               payload=hostile, source=hostile, criteria=[hostile],
+                               label=hostile)]
+        line = fix_mr.document_lines(points, [context_item(1, "fixed", hostile)])[0]
+        self.assertNotIn("\n", line)
+        self.assertNotIn("`", line)
+        self.assertNotIn("\u2014", line)
+        self.assertLessEqual(len(line), 400)
+        points[0]["summary"] = "MARQUEUR-RESUME"
+        points[0]["fix_hint"] = "MARQUEUR-CORRECTIF"
+        points[0]["elements"] = ["MARQUEUR-ELEMENT"]
+        points[0]["label"], points[0]["source"], points[0]["criteria"] = "Audit", "src", ["7.3"]
+        line = fix_mr.document_lines(points, [context_item(1, "fixed", "MARQUEUR-NOTE")])[0]
+        for marker in ("MARQUEUR-RESUME", "MARQUEUR-CORRECTIF", "MARQUEUR-ELEMENT",
+                       "MARQUEUR-NOTE"):
+            self.assertNotIn(marker, line)
+
+    def test_disagreements_name_the_report_and_its_reference(self):
+        points = [report_point(1, ["7.3"]), report_point(2, ["12.9"]),
+                  report_point(3, [], source="Annexe, ligne 2"), report_point(4, ["1.1"])]
+        outcomes = [context_item(1, "already_ok", "Déjà conforme."),
+                    context_item(2, "not_found", "Introuvable."),
+                    context_item(3, "not_found", "Introuvable."),
+                    context_item(4, "fixed")]
+        self.assertEqual(fix_mr.document_disagreements(112, points, outcomes), [
+            "CQ-112 : le rapport Audit A11Y signale 7.3, mais le code est déjà conforme.",
+            "CQ-112 : le rapport Audit A11Y signale 12.9, mais l'élément n'a pas été retrouvé "
+            "dans le code.",
+            "CQ-112 : le rapport Audit A11Y signale Annexe, ligne 2, mais l'élément n'a pas été "
+            "retrouvé dans le code.",
+        ])
+        self.assertEqual(fix_mr.document_disagreements(112, points, [context_item(4, "left")]), [])
+        self.assertEqual(fix_mr.document_disagreements(112, [], outcomes), [])
+
+    def test_the_disagreements_of_a_state_are_counted(self):
+        rows = {
+            "3": {"outcome": "fixed", "context_items": [context_item(1, "already_ok", "x"),
+                                                        context_item(2, "not_found", "y"),
+                                                        context_item(3, "fixed")]},
+            "4": {"outcome": "dropped", "context_items": [context_item(4, "already_ok", "z")]},
+            "5": {"outcome": "fixed"},
+            "6": "pas une ligne",
+        }
+        self.assertEqual(fix_mr.count_disagreements(rows), 2)
+        self.assertEqual(fix_mr.count_disagreements({}), 0)
+
+
+class ReportMaterialTest(unittest.TestCase):
+    """The lines of a context report in the values of material, body and addition."""
+
+    def setUp(self):
+        self.sha = "0123456789abcdef0123456789abcdef01234567"
+
+        def row(outcome, number=1, **more):
+            return {"outcome": outcome, "reason": None, "commits": [self.sha] * (outcome == "fixed"),
+                    "pass": number, "attention": None, "section": "securite", **more}
+
+        self.items = [context_item(1, "fixed"), context_item(2, "already_ok", "Déjà conforme."),
+                      context_item(3, "not_found", "Introuvable.")]
+        self.key = {"repo": "front", "mr": None,
+                    "sections": [{"category": "SÉCURITÉ", "alias": "securite", "refs": [3, 4],
+                                  "state": "settled", "reason": None}],
+                    "pass_sections": {"1": "securite"},
+                    "rows": {"3": row("fixed", context_items=self.items), "4": row("fixed")}}
+        info = lambda ref, title, **more: {"ref": ref, "title": title, "page_id": f"p{ref}",
+                                           "summary": f"Constat {ref}.", "semi_auto": False,
+                                           "human_check": None, **more}
+        self.candidates = {"keys": [{"key": KEY, "repo": "front", "sections": [
+            {"category": "SÉCURITÉ", "alias": "securite",
+             "rows": [info(3, "Trois", context_items=[{"id": "d1-001"}, {"id": "d1-002"},
+                                                      {"id": "d1-003"}]), info(4, "Quatre")]}]}],
+            "left": []}
+        self.linked = {3: [report_point(1), report_point(2, ["12.9"]), report_point(3, ["5.1"]),
+                           report_point(4, ["7.3"], owner="contenu")]}
+
+    def material(self, **more):
+        return fix_mr.material(self.key, self.candidates, [], [], [], None, [], set(), **more)
+
+    def test_a_fixed_row_gets_the_lines_of_its_report(self):
+        found = self.material(linked=self.linked)
+        rows = {item["ref"]: item for item in found["fixed"]}
+        self.assertEqual(rows[3]["report"], [
+            "Rapport Audit A11Y (2026-10-30) : 1 point corrigé, 1 déjà conforme dans le code, "
+            "2 laissés (dev, contenu) ; références : 7.3, 12.9, 5.1"])
+        self.assertNotIn("report", rows[4])
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
+        fixes = section(text, "Correctifs")
+        self.assertEqual(fixes[:5], [
+            "### SÉCURITÉ", "#### CQ-3 : Trois",
+            "- Ligne Notion : https://www.notion.so/p3",
+            "- Constat de l'audit : Constat 3.",
+            "- Rapport Audit A11Y (2026-10-30) : 1 point corrigé, 1 déjà conforme dans le code, "
+            "2 laissés (dev, contenu) ; références : 7.3, 12.9, 5.1"])
+        self.assertTrue(fixes[5].startswith("- Commits :"), fixes)
+
+    def test_the_points_of_the_candidate_row_are_enough_without_the_linked_ones(self):
+        self.candidates["keys"][0]["sections"][0]["rows"][0]["context_items"] = [
+            report_point(1), report_point(2, ["12.9"]), report_point(3, ["5.1"])]
+        found = self.material()
+        self.assertEqual(found["fixed"][0]["report"], [
+            "Rapport Audit A11Y (2026-10-30) : 1 point corrigé, 1 déjà conforme dans le code, "
+            "1 laissé (dev) ; références : 7.3, 12.9, 5.1"])
+
+    def test_a_row_without_outcomes_in_the_state_has_no_line(self):
+        self.key["rows"]["3"].pop("context_items")
+        found = self.material(linked=self.linked)
+        self.assertTrue(all("report" not in item for item in found["fixed"]))
+        self.assertEqual(found["attention"], [])
+
+    def test_already_ok_and_not_found_are_attention_lines_never_questions(self):
+        found = self.material(linked=self.linked)
+        self.assertEqual(found["waiting"], [])
+        self.assertEqual(found["attention"], [
+            {"section": "securite",
+             "text": "CQ-3 : le rapport Audit A11Y signale 12.9, mais le code est déjà conforme."},
+            {"section": "securite",
+             "text": "CQ-3 : le rapport Audit A11Y signale 5.1, mais l'élément n'a pas été "
+                     "retrouvé dans le code."},
+        ])
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
+        self.assertNotIn("## En attente d'une décision", text)
+        self.assertEqual(section(text, "Points d'attention"), [
+            "### SÉCURITÉ",
+            "- CQ-3 : le rapport Audit A11Y signale 12.9, mais le code est déjà conforme.",
+            "- CQ-3 : le rapport Audit A11Y signale 5.1, mais l'élément n'a pas été retrouvé "
+            "dans le code.",
+        ])
+        added = fix_mr.addition(**{name: value for name, value in found.items()
+                                   if name != "earlier"})
+        self.assertIn("le rapport Audit A11Y signale 12.9", added)
+
+    def test_the_disagreements_keep_the_other_remarks_and_come_after_them(self):
+        reports = [(1, {"rows": [{"ref": 3, "outcome": "fixed", "attention": "Vérifier le cache."}]})]
+        reviews = [(1, {"attention": ["Nommer la constante."]})]
+        found = fix_mr.material(self.key, self.candidates, [], reports, reviews, None, [], set(),
+                                linked=self.linked)
+        self.assertEqual([note["text"] for note in found["attention"]][:2],
+                         ["Nommer la constante.", "CQ-3 : Vérifier le cache."])
+        self.assertEqual(len(found["attention"]), 4)
+
+    def test_the_lines_of_an_earlier_publication_are_not_repeated(self):
+        found = self.material(linked=self.linked, since=1)
+        self.assertEqual(found["fixed"], [])
+        self.assertEqual(found["attention"], [])
+
+    def test_a_row_that_a_failed_section_dropped_has_no_line(self):
+        self.key["rows"]["3"]["outcome"] = "dropped"
+        found = self.material(linked=self.linked)
+        self.assertEqual(found["attention"], [])
+        self.assertTrue(all(item["ref"] != 3 for item in found["fixed"]))
+
+    def unlinked(self, categories, number=1, **more):
+        changes = {"criteria": [], "source": "Annexe, ligne 2", "owner": "contenu",
+                   "categories": list(categories), **more}
+        return report_point(number, **changes)
+
+    def test_unlinked_points_go_to_hors_scope_of_matching_categories_only(self):
+        sections = [{"alias": "securite", "category": "SÉCURITÉ", "state": "settled"},
+                    {"alias": "qualite", "category": "QUALITÉ", "state": "settled"}]
+        unlinked = [self.unlinked(["SÉCURITÉ"], 1), self.unlinked(["ACCESSIBILITÉ"], 2),
+                    self.unlinked(["QUALITÉ", "SÉCURITÉ"], 3, owner="tiers")]
+        text = fix_mr.hors_scope([], sections, unlinked)
+        self.assertEqual(text.splitlines(), [
+            "- Rapport Audit A11Y : Annexe, ligne 2 : Résumé du point 1. (contenu)",
+            "- Rapport Audit A11Y : Annexe, ligne 2 : Résumé du point 3. (tiers)",
+        ])
+        self.assertEqual(fix_mr.hors_scope([], sections, [self.unlinked(["ACCESSIBILITÉ"])]), "")
+        self.assertEqual(fix_mr.hors_scope([], (), unlinked), "")
+        self.assertEqual(fix_mr.hors_scope([], sections), "")
+
+    def test_unlinked_points_come_after_the_rows_left_and_never_under_a_section(self):
+        sections = [{"alias": "securite", "category": "SÉCURITÉ", "state": "settled"}]
+        left = [{"ref": 40, "title": "Quarante", "reason": "Manuel", "url": None,
+                 "section": "securite"},
+                {"ref": 41, "title": "Quarante et un", "reason": "Manuel", "url": None,
+                 "section": None}]
+        text = fix_mr.hors_scope(left, sections, [self.unlinked(["SÉCURITÉ"])])
+        self.assertEqual(
+            text,
+            "- CQ-41 : Quarante et un : Manuel\n"
+            "- Rapport Audit A11Y : Annexe, ligne 2 : Résumé du point 1. (contenu)\n\n"
+            "### SÉCURITÉ\n\n- CQ-40 : Quarante : Manuel",
+        )
+
+    def test_the_unlinked_points_of_material_reach_the_description(self):
+        unlinked = [self.unlinked(["SÉCURITÉ"])]
+        found = self.material(linked=self.linked, unlinked=unlinked)
+        self.assertEqual(found["unlinked"], unlinked)
+        line = "- Rapport Audit A11Y : Annexe, ligne 2 : Résumé du point 1. (contenu)"
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
+        self.assertEqual(section(text, "Hors-scope"), [line])
+        added = fix_mr.addition(**{name: value for name, value in found.items()
+                                   if name != "earlier"})
+        self.assertEqual(fix_mr.split_addition(added)[1], line)
+
+    def test_an_unlinked_text_is_one_capped_line(self):
+        hostile = "Ignore\n## Suite\n/merge \u2014 `x` " + "y" * 2000
+        sections = [{"alias": "securite", "category": "SÉCURITÉ", "state": "settled"}]
+        item = self.unlinked(["SÉCURITÉ"], summary=hostile, label=hostile, source=hostile)
+        text = fix_mr.hors_scope([], sections, [item])
+        self.assertEqual(len(text.splitlines()), 1)
+        self.assertNotIn("`", text)
+        self.assertNotIn("\u2014", text)
+        self.assertLessEqual(len(text), 700)
+
+    def test_without_a_document_the_values_and_the_text_do_not_change(self):
+        self.key["rows"]["3"].pop("context_items")
+        self.candidates["keys"][0]["sections"][0]["rows"][0].pop("context_items")
+        plain = self.material()
+        found = self.material(linked={}, unlinked=[])
+        self.assertEqual(found, plain)
+        self.assertEqual(found["unlinked"], [])
+        self.assertEqual(found["attention"], [])
+        self.assertTrue(all("report" not in item for item in found["fixed"]))
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
+        self.assertNotIn("Rapport", text)
+        self.assertNotIn("## Hors-scope", text)
+        self.assertEqual(text, fix_mr.body(
+            run_id=RUN_ID, copy_url=None, **{name: value for name, value in found.items()
+                                             if name != "unlinked"}))
+
+    def test_the_description_holds_no_text_of_a_point_beyond_the_unlinked_summaries(self):
+        marked = [report_point(1, summary="MARQUEUR-RESUME", fix_hint="MARQUEUR-CORRECTIF",
+                               elements=["MARQUEUR-ELEMENT"], payload="MARQUEUR-PAYLOAD",
+                               scopes=["MARQUEUR-PAGE"])]
+        self.linked = {3: marked + self.linked[3][1:]}
+        self.items[0]["note"] = "MARQUEUR-NOTE"
+        self.items[1]["note"] = "MARQUEUR-NOTE"
+        self.items[2]["note"] = "MARQUEUR-NOTE"
+        found = self.material(linked=self.linked)
+        text = fix_mr.body(run_id=RUN_ID, copy_url=None, **found)
+        for marker in ("MARQUEUR-RESUME", "MARQUEUR-CORRECTIF", "MARQUEUR-ELEMENT",
+                       "MARQUEUR-PAYLOAD", "MARQUEUR-PAGE", "MARQUEUR-NOTE"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, text)
+                self.assertNotIn(marker, json.dumps(found))
+
+
 class MergeDescriptionTest(unittest.TestCase):
     TODAY = date(2026, 10, 30)
     ADDITION = "### Correctifs\n\n#### CQ-12 : Douze\n\n- Changement : x"
@@ -990,6 +1367,136 @@ class MrBodyTest(MrCase):
         self.assertNotIn(AWS, out + err)
         self.assertEqual(self.remote(self.branch), "")
         self.assertEqual(self.glab_args("mr"), [])
+
+
+class ReportMrBodyTest(MrCase):
+    """mr-body with a context document: the lines of the report, the disagreements, the points no
+    row holds; nothing of the document beyond its name, its date, its references and summaries."""
+
+    POINTS = [document_point(1, ["7.3"]), document_point(2, ["12.9"]),
+              document_point(3, ["5.1"]),
+              document_point(4, ["7.3"], owner="contenu"),
+              document_point(5, [], owner="tiers", source="Annexe, ligne 2")]
+    ITEMS = [{"id": "d1-001", "outcome": "fixed", "note": None},
+             {"id": "d1-002", "outcome": "already_ok", "note": "Le lien porte déjà un intitulé."},
+             {"id": "d1-003", "outcome": "not_found", "note": "Le gabarit cité n'existe pas."}]
+
+    def reviewed_with_report(self, points=None, **documents):
+        write_report_documents(self.run_dir, points or self.POINTS, unlinked=("d1-005",),
+                               candidate_ids=("d1-001", "d1-002", "d1-003"), **documents)
+        self.reviewed(context_items=self.ITEMS)
+
+    def mr_body(self):
+        code, out, err = self.cli("mr-body", KEY)
+        self.assertEqual(code, 0, err)
+        return json.loads(out), (self.folder / "mr.md").read_text(encoding="utf-8")
+
+    def test_mr_body_names_the_report_and_its_outcomes(self):
+        self.reviewed_with_report()
+        result, text = self.mr_body()
+        self.assertEqual(result["waiting"], [])
+        fixes = section(text, "Correctifs")
+        self.assertEqual(fixes[:3], [
+            "### SECURITE", "#### CQ-3 : Ligne 3",
+            "- Rapport Audit A11Y (2026-10-30) : 1 point corrigé, 1 déjà conforme dans le "
+            "code, 2 laissés (dev, contenu) ; références : 7.3, 12.9, 5.1"])
+        self.assertEqual(section(text, "Points d'attention"), [
+            "### SECURITE", "- Nommer la constante.", "- CQ-3 : Vérifier le cache du CDN.",
+            "- CQ-3 : le rapport Audit A11Y signale 12.9, mais le code est déjà conforme.",
+            "- CQ-3 : le rapport Audit A11Y signale 5.1, mais l'élément n'a pas été retrouvé "
+            "dans le code."])
+        self.assertNotIn("## En attente d'une décision", text)
+        self.assertEqual(section(text, "Hors-scope"), [
+            "- Rapport Audit A11Y : Annexe, ligne 2 : Résumé du point 5. (tiers)",
+            "### SECURITE", "- CQ-5 : Ligne 5 : Demande une décision de l'équipe UI/UX."])
+
+    def test_the_addition_of_an_update_carries_the_report_too(self):
+        self.open_mr()
+        self.reviewed_with_report()
+        code, out, err = self.cli("mr-body", KEY)
+        self.assertEqual(code, 0, err)
+        addition, hors = fix_mr.split_addition(
+            (self.folder / "mr-addition.md").read_text(encoding="utf-8"))
+        self.assertIn("- Rapport Audit A11Y (2026-10-30) : 1 point corrigé", addition)
+        self.assertIn("le rapport Audit A11Y signale 12.9, mais le code est déjà conforme.", addition)
+        self.assertIn("- Rapport Audit A11Y : Annexe, ligne 2 : Résumé du point 5. (tiers)", hors)
+
+    def test_mr_body_is_unchanged_without_a_readable_document(self):
+        self.reviewed()
+        result, text = self.mr_body()
+        self.assertNotIn("Rapport", text)
+        write_report_documents(self.run_dir, self.POINTS, unlinked=("d1-005",))
+        links = self.run_dir / "context-docs" / "links.json"
+        valid = links.read_text(encoding="utf-8")
+        write_report_documents(self.run_dir, self.POINTS, validated=False)
+        items = self.run_dir / "context-docs" / "d1" / "items.json"
+        broken = ("{", "[]", "null", '{"document": {}, "items": 3}', "")
+        self.assertEqual(self.mr_body(), (result, text))
+        links.write_text(valid, encoding="utf-8")
+        good = items.read_text(encoding="utf-8")
+        for content in broken:
+            with self.subTest(items=content):
+                items.write_text(content, encoding="utf-8")
+                self.assertEqual(self.mr_body(), (result, text))
+        items.write_text(good, encoding="utf-8")
+        for content in ("{", "[]", "null"):
+            with self.subTest(links=content):
+                links.write_text(content, encoding="utf-8")
+                self.assertEqual(self.mr_body(), (result, text))
+        links.write_text(valid, encoding="utf-8")
+        (self.run_dir / "context-docs" / "index.json").write_text("{", encoding="utf-8")
+        self.assertEqual(self.mr_body(), (result, text))
+        for name in ("index.json", "links.json"):
+            (self.run_dir / "context-docs" / name).unlink()
+        self.assertEqual(self.mr_body(), (result, text))
+
+    def test_the_description_never_holds_an_extract_of_the_document(self):
+        points = [document_point(
+            1, ["7.3"], summary="MARQUEUR-RESUME-LIE", fix_hint="MARQUEUR-CORRECTIF",
+            elements=["MARQUEUR-ELEMENT"], scopes=["MARQUEUR-PAGE"], payload="MARQUEUR-PAYLOAD"),
+            *self.POINTS[1:]]
+        self.reviewed_with_report(points)
+        result, text = self.mr_body()
+        everything = text + (self.folder / "mr-title.txt").read_text(encoding="utf-8") + json.dumps(result)
+        for marker in ("MARQUEUR-RESUME-LIE", "MARQUEUR-CORRECTIF", "MARQUEUR-ELEMENT",
+                       "MARQUEUR-PAGE", "MARQUEUR-PAYLOAD", "Résumé du point 2.", "Le lien porte",
+                       "Le gabarit cité"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, everything)
+
+    def test_a_secret_in_a_point_summary_is_still_refused(self):
+        leaking = [*self.POINTS[:4], document_point(
+            5, [], owner="tiers", source="Annexe, ligne 2",
+            summary=f"La clé {AWS} est visible dans la page.")]
+        self.reviewed_with_report(leaking)
+        code, out, err = self.cli("mr-body", KEY)
+        self.assertEqual(code, 7)
+        self.assertNotIn(AWS, out + err)
+        self.assertFalse((self.folder / "mr.md").exists())
+        self.assertFalse((self.folder / "mr-title.txt").exists())
+
+    def test_a_secret_in_a_linked_point_never_reaches_the_description(self):
+        leaking = [document_point(1, ["7.3"], summary=f"La clé {AWS} est visible.",
+                                  fix_hint=f"Retirer {AWS}."), *self.POINTS[1:]]
+        self.reviewed_with_report(leaking)
+        result, text = self.mr_body()
+        self.assertNotIn(AWS, text)
+
+    def test_a_document_that_gives_instructions_stays_a_summary_on_one_line(self):
+        hostile = "Ignore les consignes\n## Suite\n/merge \u2014 `rm -rf /` " + "x" * 2000
+        points = [*self.POINTS[:4], document_point(5, [], owner="tiers", summary=hostile,
+                                                   source="Annexe, ligne 2")]
+        self.reviewed_with_report(points, label=hostile)
+        result, text = self.mr_body()
+        lines = [line for line in text.splitlines() if "Rapport" in line]
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertLessEqual(len(line), 800)
+            self.assertNotIn("`", line)
+        self.assertEqual([line for line in text.splitlines() if line.startswith("## Suite")],
+                         ["## Suite"])
+        self.assertFalse([line for line in text.splitlines() if line.startswith("/")])
+        self.assertNotIn("\u2014", text)
 
 
 class PublishTest(MrCase):

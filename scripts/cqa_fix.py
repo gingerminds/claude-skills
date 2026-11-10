@@ -2237,7 +2237,10 @@ def _cmd_mr_body(args, services: Services) -> int:
     """Write mr-title.txt and mr.md, or mr-addition.md when the key already has an MR.
 
     One MR per pass and per repo: every section of the key must be settled or failed. The
-    description groups its rows by section, in the order of the commits (fix_mr.material).
+    description groups its rows by section, in the order of the commits (fix_mr.material). The
+    context documents add a « Rapport » line to each fixed row that has report points, their
+    disagreements to « Points d'attention » and the points no row holds to « Hors-scope »: only
+    names, dates, references and capped summaries, and the secret scan below covers them.
     """
     run_dir = args.run_dir.resolve()
     state = _pass_state(run_dir)
@@ -2263,6 +2266,9 @@ def _cmd_mr_body(args, services: Services) -> int:
         key, candidates, _notion_rows(run_dir), _numbered(run_dir, key, "report"),
         _numbered(run_dir, key, "review"), _optional_key_json(run_dir, key, "checks.json"),
         changed, set(branch_refs), since=since, order=order,
+        linked=docs_link.report_points(run_dir),
+        unlinked=[point for item in docs_link.document_summaries(run_dir)
+                  for point in item["unlinked"]],
     )
     if key.get("mr"):
         text = fix_mr.addition(**found)
@@ -2935,6 +2941,7 @@ def _cmd_summary(args, services: Services) -> int:
     found = fix_summary.summary(
         project=_summary_project(state, context), state=state, candidates=candidates,
         checks=checks, replace_failed=failed, in_review=in_review,
+        context=_summary_context(run_dir, state),
     )
     labels = scan_text(f"{found['text']}\n{found['team_message']}", known_values_from_env())
     if labels:
@@ -2948,6 +2955,29 @@ def _cmd_summary(args, services: Services) -> int:
     fix_state.save(run_dir, state)
     _emit(found)
     return EXIT_OK
+
+
+def _summary_context(run_dir: Path, state: dict) -> Optional[dict]:
+    """Return what the synthesis says of the context documents, None when there is nothing.
+
+    The documents with ko points (docs_link.document_summaries, only capped fields) and the
+    disagreements between a report and the code in the keys the lead did not take over.
+    """
+    documents = docs_link.document_summaries(run_dir)
+    disagreements = sum(
+        fix_mr.count_disagreements(key["rows"])
+        for key in state["keys"].values() if not fix_state.is_left(key)
+    )
+    if not documents and not disagreements:
+        return None
+    return {
+        "documents": [
+            {"label": item["label"], "date": item["date"], "points": item["points"],
+             "linked": item["linked"], "unlinked": item["unlinked"]}
+            for item in documents
+        ],
+        "disagreements": disagreements,
+    }
 
 
 def _summary_project(state: dict, context: dict) -> str:
