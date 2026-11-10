@@ -56,6 +56,10 @@ _ZIP_ERRORS = (
 _LINE = re.compile(r"[^\r\n]*(?:\r\n|\n|\r)|[^\r\n]+")
 _CONTROL = {code: None for code in (*range(0, 32), *range(127, 160)) if code not in (9, 10)}
 _CELL_REF = re.compile(r"([A-Za-z]{1,3})[0-9]*")
+# What Excel itself refuses in a sheet name (so a real workbook never has it): the name is data
+# that reaches the dispatch lines of the sub-agents, a forged one must not get through.
+_MAX_SHEET_NAME = 31
+_SHEET_NAME_FORBIDDEN = re.compile(r"[\\/?*\[\]:\x00-\x1f\x7f-\x9f]")
 _XML_ENCODING = re.compile(rb"""^(?:\xef\xbb\xbf)?\s*<\?xml[^>]*?\sencoding\s*=\s*["']([^"']+)["']""")
 
 
@@ -361,7 +365,8 @@ def _xlsx_book(archive: _Archive) -> tuple:
             relations[relation.get("Id")] = (relation.get("Type", ""), relation.get("Target", ""))
     sheets = []
     for sheet in _complete(archive.read_xml("xl/workbook.xml"), {"sheet"}):
-        name = _clean(sheet.get("name"))
+        raw_name = sheet.get("name")
+        name = _clean(raw_name)
         identifier = next(
             (value for key, value in sheet.attrib.items() if key.startswith("{") and _local(key) == "id"),
             None,
@@ -371,6 +376,11 @@ def _xlsx_book(archive: _Archive) -> tuple:
             continue
         if not name:
             raise DocumentError("Classeur corrompu : feuille sans nom.")
+        if len(raw_name) > _MAX_SHEET_NAME or _SHEET_NAME_FORBIDDEN.search(raw_name):
+            raise DocumentError(
+                "Classeur refusé : le nom d'une feuille n'est pas valide pour Excel "
+                "(31 caractères au plus, ni caractère de contrôle, ni \\ / ? * [ ] :)."
+            )
         if len(sheets) >= _MAX_SHEETS:
             raise DocumentError("Classeur trop volumineux : trop de feuilles.")
         sheets.append((name, _member_path(target)))

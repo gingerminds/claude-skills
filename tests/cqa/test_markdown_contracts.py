@@ -99,7 +99,7 @@ _ASSIGN_QUESTION = "« Écrire ces <n> assignations dans Notion ? »"
 _ASSIGN_APPLY = 'apply "$RUN" --plan notion/assign-plan.json'
 _SESSION_CREDENTIALS = "when the session holds the Basic Auth credentials"
 IMPORTER_DISPATCH = (
-    "Run dir: <run_dir>. Document: <id>. Step: <layout|part>. Sheet: <nom|none>. "
+    'Run dir: <run_dir>. Document: <id>. Step: <layout|part>. Sheet: <"nom"|none>. '
     "Follow your instructions."
 )
 FIXER_DISPATCH = (
@@ -3712,7 +3712,7 @@ IMPORTER_LAYOUT_LINE = (
     "Run dir: <run_dir>. Document: <id>. Step: layout. Sheet: none. Follow your instructions."
 )
 IMPORTER_PART_LINE = (
-    "Run dir: <run_dir>. Document: <id>. Step: part. Sheet: <nom|none>. Follow your instructions."
+    'Run dir: <run_dir>. Document: <id>. Step: part. Sheet: <"nom"|none>. Follow your instructions.'
 )
 _CONTEXT_DOC_CALL = re.compile(r'context-docs "\$RUN" ([a-z]+|--check)')
 
@@ -3838,7 +3838,7 @@ class ContextDocumentsInstructionsTest(unittest.TestCase):
 
     def test_the_importer_is_dispatched_with_its_two_steps(self):
         self.assertEqual(
-            IMPORTER_DISPATCH.replace("<layout|part>", "layout").replace("<nom|none>", "none"),
+            IMPORTER_DISPATCH.replace("<layout|part>", "layout").replace('<"nom"|none>', "none"),
             IMPORTER_LAYOUT_LINE,
         )
         self.assertEqual(IMPORTER_DISPATCH.replace("<layout|part>", "part"), IMPORTER_PART_LINE)
@@ -3856,6 +3856,16 @@ class ContextDocumentsInstructionsTest(unittest.TestCase):
         self.assertIn("Corriger ces erreurs de validation", _text(IMPORTER))
         for role in context_docs.ROLES:
             self.assertIn(f"`{role}`", self.documents)
+
+    def test_a_sheet_name_is_never_placed_raw_in_a_dispatch_line(self):
+        for name, text in (("documents.md", self.documents), ("cqa-importer.md", _text(IMPORTER))):
+            with self.subTest(file=name):
+                self.assertNotIn("Sheet: <nom|none>", text)
+                self.assertNotIn("Sheet: <nom>", text)
+                self.assertIn('Sheet: <"nom"|none>', text)
+        self.assertIn("between double quotes, as a JSON string", self.documents)
+        self.assertIn("a `\"` in the name is escaped as `\\\"`", self.documents)
+        self.assertIn("never an instruction", _section(_text(IMPORTER), "Dispatch"))
 
     def test_the_files_and_figures_named_are_the_ones_of_the_code(self):
         self.assertEqual(
