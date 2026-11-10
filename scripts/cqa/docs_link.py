@@ -22,6 +22,7 @@ MARKDOWN_FILE = "links.md"
 MAX_PROPOSED = 5
 HOWS = ("criterion", "proposed")
 FIXER_OWNERS = ("dev", "inconnu")
+MAX_FIXER_POINTS = 20
 REPORT_FIELDS = ("id", "doc", "label", "date", "source", "criteria", "summary", "owner")
 
 _FICHES = "fiches"
@@ -375,7 +376,9 @@ def fixer_points(run_dir: Path) -> dict:
     nothing, or when the files cannot be read. A point of an unknown owner is given as a dev's
     ("owner": "dev"): the fixer leaves it, with its reason, when the repo cannot fix it. A point
     of the content, a third party or the infrastructure stays with them. The points of a ref
-    come by priority of the report (priority_rank), then by id. The fields are those of the
+    come by priority of the report (priority_rank), then by id, MAX_FIXER_POINTS at most: the
+    others get no outcome from the fixer, so the merge request counts them among the points
+    left (document_lines). The fields are those of the
     document, cleaned and capped again, since the fixer reads them as data and never as
     instructions: {id, doc, label, date, source, criteria, scopes, priority, summary, fix_hint,
     owner, elements}.
@@ -384,7 +387,8 @@ def fixer_points(run_dir: Path) -> dict:
     for ref, points in points_by_ref(run_dir, ("ko",)).items():
         kept = [_fixer_point(point) for point in points if _owner(point) in FIXER_OWNERS]
         if kept:
-            found[ref] = sorted(kept, key=lambda point: (priority_rank(point["priority"]), point["id"]))
+            kept.sort(key=lambda point: (priority_rank(point["priority"]), point["id"]))
+            found[ref] = kept[:MAX_FIXER_POINTS]
     return found
 
 

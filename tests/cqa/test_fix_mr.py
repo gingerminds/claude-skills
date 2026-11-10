@@ -1002,6 +1002,70 @@ class ReportMaterialTest(unittest.TestCase):
                                    if name != "earlier"})
         self.assertEqual(fix_mr.split_addition(added)[1], line)
 
+    def test_unlinked_points_are_capped_at_thirty_then_et_n_autres(self):
+        sections = [{"alias": "securite", "category": "SÉCURITÉ", "state": "settled"}]
+        unlinked = [self.unlinked(["SÉCURITÉ"], number) for number in range(1, 45)]
+        lines = fix_mr.hors_scope([], sections, unlinked).splitlines()
+        self.assertEqual(len(lines), 31)
+        self.assertEqual(lines[0], "- Rapport Audit A11Y : Annexe, ligne 2 : Résumé du point 1. (contenu)")
+        self.assertEqual(lines[29], "- Rapport Audit A11Y : Annexe, ligne 2 : Résumé du point 30. (contenu)")
+        self.assertEqual(lines[30], "- et 14 autres points du rapport sans ligne")
+        self.assertEqual(fix_mr.MAX_UNLINKED, 30)
+
+    def test_thirty_unlinked_points_or_fewer_have_no_et_n_autres(self):
+        sections = [{"alias": "securite", "category": "SÉCURITÉ", "state": "settled"}]
+        unlinked = [self.unlinked(["SÉCURITÉ"], number) for number in range(1, 31)]
+        text = fix_mr.hors_scope([], sections, unlinked)
+        self.assertEqual(len(text.splitlines()), 30)
+        self.assertNotIn("autres", text)
+
+    def test_only_the_points_of_the_sections_count_towards_the_cap(self):
+        sections = [{"alias": "securite", "category": "SÉCURITÉ", "state": "settled"}]
+        unlinked = [self.unlinked(["ACCESSIBILITÉ"], number) for number in range(1, 40)]
+        unlinked += [self.unlinked(["SÉCURITÉ"], 50 + number) for number in range(31)]
+        lines = fix_mr.hors_scope([], sections, unlinked).splitlines()
+        self.assertEqual((len(lines), lines[-1]), (31, "- et 1 autres points du rapport sans ligne"))
+
+    def test_the_points_past_the_cap_are_left_in_the_report_line(self):
+        points = [report_point(number) for number in range(1, 26)]
+        outcomes = [context_item(number, "fixed") for number in range(1, 21)]
+        self.assertEqual(
+            fix_mr.document_lines(points, outcomes),
+            ["Rapport Audit A11Y (2026-10-30) : 20 points corrigés, 0 déjà conforme dans le code, "
+             "5 laissés (dev) ; références : 7.3"],
+        )
+
+    def test_the_markdown_of_a_document_text_is_neutralized(self):
+        cases = {
+            "avant ![suivi](https://tracker.example.org/p.png) après": "avant suivi après",
+            "![](https://tracker.example.org/p.png)seul": "seul",
+            "voir [la doc](https://example.org/doc \"titre\") ici": "voir la doc ici",
+            "ping @camille et @admins.team": "ping camille et admins.team",
+            "écrire à camille@example.org": "écrire à camille@example.org",
+            "adresse https://example.org/page?a=1 brute": "adresse https://example.org/page?a=1 brute",
+            "<img src=\"https://tracker.example.org/p.png\">": "< img src=\"https://tracker.example.org/p.png\">",
+            "@@double": "@@double",
+            "a < b et c > d": "a < b et c > d",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(fix_mr.field_text(text, 200), expected)
+
+    def test_a_neutralized_text_is_still_cut_to_its_limit(self):
+        text = fix_mr.field_text("![x](https://tracker.example.org/p.png) " + "y" * 100, 20)
+        self.assertEqual(len(text), 20)
+        self.assertTrue(text.startswith("x yyy"))
+        self.assertTrue(text.endswith("…"))
+
+    def test_an_unlinked_summary_cannot_load_an_image_link_or_mention(self):
+        sections = [{"alias": "securite", "category": "SÉCURITÉ", "state": "settled"}]
+        hostile = "![p](https://tracker.example.org/p.png) voir [ici](https://example.org/x) @camille"
+        item = self.unlinked(["SÉCURITÉ"], summary=hostile, source=hostile, label=hostile)
+        text = fix_mr.hors_scope([], sections, [item])
+        for forbidden in ("![", "](", "@camille"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn("voir ici camille", text)
+
     def test_an_unlinked_text_is_one_capped_line(self):
         hostile = "Ignore\n## Suite\n/merge \u2014 `x` " + "y" * 2000
         sections = [{"alias": "securite", "category": "SÉCURITÉ", "state": "settled"}]

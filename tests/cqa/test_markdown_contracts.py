@@ -4080,6 +4080,19 @@ class ContextDocumentsInstructionsTest(unittest.TestCase):
             with self.subTest(reference=needle):
                 self.assertIn(needle, reference)
 
+    def test_the_candidates_start_from_the_filter_of_the_run(self):
+        fix = _section(self.skill, "12. Fix")
+        self.assertIn("`candidates` always starts from the `category_filter` of the run", fix)
+        self.assertIn("so the option can only narrow it", fix)
+
+    def test_the_caps_of_the_report_points_are_the_ones_of_the_code(self):
+        fix = _section(self.skill, "12. Fix")
+        self.assertIn(f"{docs_link.MAX_FIXER_POINTS} a row gives the fixer at most", fix)
+        self.assertIn(f"{fix_mr.MAX_UNLINKED} lines at most, then « - et <n> autres points du rapport sans ligne »", fix)
+        self.assertIn(f"{docs_link.MAX_FIXER_POINTS} at most per row", self.documents)
+        self.assertIn(f"A row has {docs_link.MAX_FIXER_POINTS} points at most", _text(FIXER))
+        self.assertIn("flattened to its plain text", fix)
+
     def test_the_exit_codes_table_names_the_documents(self):
         table = self.skill[self.skill.index("## Exit codes"):]
         row = next(line for line in table.splitlines() if line.startswith("| `cqa_plan.py` |"))

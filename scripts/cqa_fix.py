@@ -608,18 +608,22 @@ def _cmd_candidates(args, services: Services) -> int:
 
 
 def _requested_categories(names: list, rows: list, run_filter) -> Optional[frozenset]:
-    """Return the Notion names of the categories asked with --category (None without any).
+    """Return the Notion names of the categories the fix may take (None without a limit).
 
-    A name that is not in the copy is a usage error, and so is a name outside the category
-    filter of the run: the fix may narrow the scope of the audit, never widen it. A name
-    that gives several categories (a shared alias) keeps those of the filter.
+    The base is the category filter of the run, when it has one: a row of another category is
+    never a candidate, whatever lots.json says (a row added or moved in the copy since the
+    audit). --category narrows it: a name that is not in the copy is a usage error, and so is a
+    name outside the filter, since the fix may narrow the scope of the audit, never widen it. A
+    name that gives several categories (a shared alias) keeps those of the filter.
     """
+    scope = [name for name in run_filter if isinstance(name, str)] if isinstance(
+        run_filter, list) else []
+    scope = scope or None
     if not names:
-        return None
+        return frozenset(scope) if scope else None
     _, unknown = categories.resolve(names, rows)
     if unknown:
         raise UsageError(categories.unknown_message(unknown, rows))
-    scope = run_filter if isinstance(run_filter, list) and run_filter else None
     kept = set()
     for name in names:
         found = categories.resolve([name], rows)[0]

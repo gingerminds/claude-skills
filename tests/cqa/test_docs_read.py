@@ -613,6 +613,33 @@ class UnreadableTest(DocsReadTestCase):
             with self.assertRaises(DocumentError):
                 docs_read.list_sheets(path)
 
+    def test_an_archive_with_too_many_entries_is_refused(self):
+        self.assertEqual(docs_read.MAX_ENTRIES, 5000)
+        for kind, make in (("xlsx", self.workbook), ("docx", self.docx)):
+            with self.subTest(kind=kind):
+                path = make(f"padded.{kind}")
+                with zipfile.ZipFile(path, "a") as archive:
+                    for number in range(docs_read.MAX_ENTRIES):
+                        archive.writestr(f"padding/{number}.txt", "")
+                for read in (docs_read.list_sheets, docs_read.read_rows):
+                    with self.assertRaises(DocumentError) as raised:
+                        read(path)
+                    self.assertIn("trop de fichiers", str(raised.exception))
+
+    def test_an_archive_at_the_cap_is_read(self):
+        path = self.workbook("full.xlsx")
+        with zipfile.ZipFile(path) as archive:
+            present = len(archive.namelist())
+        with zipfile.ZipFile(path, "a") as archive:
+            for number in range(docs_read.MAX_ENTRIES - present):
+                archive.writestr(f"padding/{number}.txt", "")
+        self.assertEqual(len(docs_read.list_sheets(path)), 2)
+
+    def docx(self, name):
+        path = self.path(name)
+        make_docx(path, paragraph("Un constat."))
+        return path
+
     def test_total_decompressed_size_is_budgeted(self):
         path = self.path("budget.xlsx")
         make_xlsx(path, [("a", '<row r="1">' + inline("A1", "x" * 300) + "</row>"), ("b", '<row r="1">' + inline("A1", "y" * 300) + "</row>")])

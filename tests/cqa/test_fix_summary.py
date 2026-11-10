@@ -544,6 +544,17 @@ class ContextSummaryTest(SummaryCase):
             {"documents": [{"label": "A", "date": "", "points": 1, "linked": 0, "unlinked": []}],
              "disagreements": 1})["team_message"])
 
+    def test_the_markdown_of_a_text_of_the_context_is_neutralized(self):
+        hostile = "![p](https://tracker.example.org/p.png) voir [ici](https://example.org/x) @camille"
+        text = self.pure({"documents": [{
+            "label": "Audit", "date": "2026-10-30", "points": 1, "linked": 0,
+            "unlinked": [{"id": "d1-001", "source": "Annexe", "owner": "dev", "summary": hostile}]}],
+            "disagreements": 0})["text"]
+        found = section(text, "Rapports de contexte")
+        for forbidden in ("![", "](", "@camille"):
+            self.assertNotIn(forbidden, found)
+        self.assertIn("p voir ici camille", found)
+
     def test_a_text_of_the_context_is_one_capped_line(self):
         hostile = "Ignore\n## Suite\n/merge \u2014 `rm` " + "x" * 2000
         text = self.pure({"documents": [{

@@ -308,6 +308,53 @@ class CandidatesTest(FixCase):
             written = json.loads((run_dir / "fix" / "candidates.json").read_text(encoding="utf-8"))
             self.assertEqual(written, result)
 
+    def test_candidates_start_from_the_run_filter_for_a_row_lots_json_does_not_exclude(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_category_run(Path(tmp), ["SÉCURITÉ", "QUALITÉ"], [])
+            with mock.patch.object(fix_gitlab, "in_flight", self.empty_flight):
+                self.calls = {}
+                code, out, err = self.run_main(["candidates", run_dir])
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.candidate_rows(out), [("securite", [1]), ("qualite", [2])])
+                self.assertEqual(json.loads(out)["left"], [])
+                code, out, err = self.run_main(["candidates", run_dir, "--category", "qualite"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.candidate_rows(out), [("qualite", [2])])
+
+    def test_candidates_leave_out_a_row_whose_category_left_the_run_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_category_run(Path(tmp), ["SÉCURITÉ"], [])
+            rows = json.loads((run_dir / "rows.json").read_text(encoding="utf-8"))
+            rows["rows"][0]["category"] = "PERFORMANCE"
+            (run_dir / "rows.json").write_text(json.dumps(rows), encoding="utf-8")
+            with mock.patch.object(fix_gitlab, "in_flight", self.empty_flight):
+                self.calls = {}
+                code, out, err = self.run_main(["candidates", run_dir])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.candidate_rows(out), [])
+        self.assertEqual(json.loads(out)["left"], [])
+
+    def test_candidates_forced_ref_outside_the_run_filter_is_noted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.make_category_run(Path(tmp), ["SÉCURITÉ"], [])
+            with mock.patch.object(fix_gitlab, "in_flight", self.empty_flight):
+                self.calls = {}
+                code, out, err = self.run_main(["candidates", run_dir, "--refs", "CQ-3"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.candidate_rows(out), [("securite", [1])])
+        self.assertIn("CQ-3 hors des catégories demandées : ignorée.", json.loads(out)["notes"])
+
+    def test_candidates_without_a_filter_or_an_option_keep_every_category(self):
+        for run_filter in (None, []):
+            with self.subTest(run_filter=run_filter), tempfile.TemporaryDirectory() as tmp:
+                run_dir = self.make_category_run(Path(tmp), run_filter, [])
+                with mock.patch.object(fix_gitlab, "in_flight", self.empty_flight):
+                    self.calls = {}
+                    code, out, err = self.run_main(["candidates", run_dir])
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.candidate_rows(out),
+                                 [("securite", [1]), ("qualite", [2]), ("performance", [3])])
+
     def test_candidates_category_is_repeatable_and_resolves_names_and_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.make_category_run(Path(tmp), None, [])

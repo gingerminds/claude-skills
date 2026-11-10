@@ -48,6 +48,11 @@ ALREADY_OK = "{ref} : le rapport {label} signale {refs}, mais le code est déjà
 NOT_FOUND = ("{ref} : le rapport {label} signale {refs}, mais l'élément n'a pas été retrouvé "
              "dans le code.")
 _MAX_REFS = 12
+MAX_UNLINKED = 30
+_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_MENTION = re.compile(r"(?<![\w@])@(?=\w)")
+_HTML_TAG = re.compile(r"<(?=[A-Za-z/!?])")
 _FALLBACK_REF = "un point"
 _DISAGREEMENTS = {"already_ok": ALREADY_OK, "not_found": NOT_FOUND}
 
@@ -354,8 +359,16 @@ def count_disagreements(rows: dict) -> int:
 
 def field_text(value, limit: int) -> str:
     """Return a text of a context document for a description: one line, cleaned, cut to limit
-    characters, without backtick."""
+    characters, without backtick and without the Markdown that a reader would act on: an image
+    ![alt](url) (a tracking pixel) keeps its alt text, a link [text](url) its text, a mention
+    @name loses its arobase, an HTML tag is broken by a space after its "<". A bare URL stays.
+    """
     text = context_docs.clean_text(value).replace("`", "'")
+    text = _IMAGE.sub(r"\1", text)
+    text = _LINK.sub(r"\1", text)
+    text = _MENTION.sub("", text)
+    text = _HTML_TAG.sub("< ", text)
+    text = context_docs.clean_text(text)
     return text if len(text) <= limit else text[:max(limit - 1, 0)].rstrip() + "…"
 
 
@@ -533,6 +546,9 @@ def _unlinked_lines(unlinked, sections) -> list:
         line += f" ({owner})"
         if line not in lines:
             lines.append(line)
+    if len(lines) > MAX_UNLINKED:
+        others = len(lines) - MAX_UNLINKED
+        lines = lines[:MAX_UNLINKED] + [f"- et {others} autres points du rapport sans ligne"]
     return lines
 
 

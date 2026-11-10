@@ -2,8 +2,8 @@
 
 A document is untrusted data. Nothing in it is executed or interpreted: formulas, macros, links
 and XML entities are never followed, and a cell holds only the text stored in the file. The
-sizes are capped (file, archive member, archive total, cell, rows, output) and a corrupted or
-oversized document raises DocumentError, with a message in French for the lead.
+sizes are capped (file, archive entries, archive member, archive total, cell, rows, output) and
+a corrupted or oversized document raises DocumentError, with a message in French for the lead.
 """
 import csv
 import io
@@ -23,6 +23,7 @@ MAX_CELL = 2000
 MAX_ROWS = 20000
 MAX_CHARS = 40000
 
+MAX_ENTRIES = 5000
 _MAX_COLUMNS = 16384
 _MAX_SHEETS = 256
 _MAX_STRINGS = 1000000
@@ -294,9 +295,13 @@ def _too_big() -> DocumentError:
 
 def _open_archive(path: Path) -> _Archive:
     try:
-        return _Archive(zipfile.ZipFile(path))
+        archive = zipfile.ZipFile(path)
     except _ZIP_ERRORS as error:
         raise DocumentError("Archive du document illisible ou corrompue.") from error
+    if len(archive.infolist()) > MAX_ENTRIES:
+        archive.close()
+        raise DocumentError("Document refusé : l'archive contient trop de fichiers.")
+    return _Archive(archive)
 
 
 def _check_xml(data: bytes) -> None:

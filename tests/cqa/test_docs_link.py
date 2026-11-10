@@ -708,6 +708,30 @@ class FixerPointsTest(LinkCase):
             [point["id"] for point in found], ["d1-002", "d1-005", "d1-003", "d1-004", "d1-001"]
         )
 
+    def test_a_row_gets_twenty_points_at_most_the_most_urgent_first(self):
+        points = [make_point(number, priority="Faible") for number in range(1, 26)]
+        points[24] = make_point(25, priority="Critique")
+        points[22] = make_point(23, priority="Bloquant")
+        self.prepare(points, {point["id"]: [112] for point in points})
+        found = docs_link.fixer_points(self.run_dir)[112]
+        self.assertEqual(len(found), docs_link.MAX_FIXER_POINTS)
+        self.assertEqual(docs_link.MAX_FIXER_POINTS, 20)
+        ids = [point["id"] for point in found]
+        self.assertEqual(ids[:2], ["d1-023", "d1-025"])
+        self.assertEqual(ids[2:], [f"d1-{number:03d}" for number in range(1, 19)])
+
+    def test_the_cap_is_per_row_and_the_report_points_are_not_capped(self):
+        points = [make_point(number) for number in range(1, 26)]
+        self.prepare(points, {point["id"]: [112, 113] for point in points[:22]})
+        found = docs_link.fixer_points(self.run_dir)
+        self.assertEqual([len(found[ref]) for ref in (112, 113)], [20, 20])
+        self.assertEqual(len(docs_link.report_points(self.run_dir)[112]), 22)
+
+    def test_twenty_points_or_fewer_are_all_given(self):
+        points = [make_point(number) for number in range(1, 21)]
+        self.prepare(points, {point["id"]: [112] for point in points})
+        self.assertEqual(len(docs_link.fixer_points(self.run_dir)[112]), 20)
+
     def test_fixer_points_carry_the_fields_of_the_document_only(self):
         point = make_point(
             1, ["7.3"], scopes=["accueil", "contact"], elements=["header", "footer"],
