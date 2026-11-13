@@ -175,6 +175,41 @@ class CoverageAndLotsTest(AuditCase):
         self.assertEqual(summary["excluded"], {"techno": 1, "no_tools": 1})
         self.assertEqual(summary["coverage"], expected["coverage"])
 
+    def test_lots_routes_a_row_by_its_fiche(self):
+        run_dir = self.make_run()
+        fiche = run_dir / "fiches" / "CQ-101.md"
+        fiche.write_text(
+            "# Titre\n\n## Comment tester\n\nOuvrir la page à 320 px de large.\n\n"
+            "## À faire\n\nx\n",
+            encoding="utf-8",
+        )
+        (run_dir / "fiches" / "CQ-103.md").unlink()
+        (run_dir / "fiches" / "CQ-104.md").write_bytes(b"\xff\xfe")
+        summary = self.run_json(["lots", run_dir])
+        self.assertEqual(
+            [lot["id"] for lot in summary["lots"]],
+            ["code-performance", "code-securite", "code-performance-outils"],
+        )
+        self.assertEqual([lot["rows"] for lot in summary["lots"]], [1, 2, 1])
+        self.assertEqual(
+            [lot["needs_toolbox"] for lot in summary["lots"]], [False, False, True]
+        )
+        stored = self.read(run_dir, "lots.json")["lots"]
+        self.assertEqual(stored[2]["refs"], [101])
+        self.assertEqual(stored[0]["refs"], [102])
+        self.assertEqual(stored[1]["refs"], [103, 104])
+
+    def test_lots_reads_the_term_in_the_tooling_hint_without_any_fiche(self):
+        run_dir = self.make_run()
+        for fiche in (run_dir / "fiches").glob("CQ-*.md"):
+            fiche.unlink()
+        self.edit_row(run_dir, 102, tooling_hint="Navigateur piloté (touche Échap)")
+        summary = self.run_json(["lots", run_dir])
+        self.assertEqual(
+            [lot["id"] for lot in summary["lots"]],
+            ["code-performance", "code-securite", "code-performance-outils"],
+        )
+
     def test_lots_follow_the_selection_of_the_context(self):
         run_dir = self.make_run()
         self.edit(run_dir, "context.json", lambda context: context.update(phase_filter="MEL J0"))

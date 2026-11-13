@@ -1023,7 +1023,7 @@ def _cmd_lots(args, services) -> int:
     run_dir = args.run_dir
     refs = docs_verdicts.document_refs(run_dir)
     context, kept, excluded = _selection(run_dir, refs)
-    lots = build_lots(kept, document_refs=refs)
+    lots = build_lots(kept, document_refs=refs, run_dir=run_dir)
     counts = coverage(kept, excluded, context["available_tools"], document_refs=refs)
     docs_verdicts.write_findings(run_dir, {row["ref"] for row in kept if row["ref"] in refs})
     docs_verdicts.write_hints(run_dir, lots)

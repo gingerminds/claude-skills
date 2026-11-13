@@ -320,6 +320,62 @@ class CandidatesTest(RerunCase):
         self.assertIn("CQ-7", result["notes"][0])
         self.assertIn("nouveau run", result["notes"][0])
 
+    def write_fiche(self, ref, how):
+        folder = self.run_dir / "fiches"
+        folder.mkdir(exist_ok=True)
+        (folder / f"CQ-{ref:03d}.md").write_text(
+            f"# Titre\n\n## Comment tester\n\n{how}\n\n## À faire\n\nx\n", encoding="utf-8"
+        )
+
+    def test_placement_uses_the_fiche_text(self):
+        self.exclude(7, ["HTTP"])
+        self.rows[-1]["fiche_path"] = "fiches/CQ-007.md"
+        self.write_rows()
+        self.write_fiche(7, "Tester la page à 320 px de large.")
+        lots_without_outils = list(self.lots)
+        row = self.rows[-1]
+        rows = {item["ref"]: item for item in self.rows}
+        self.assertEqual(
+            rerun._placement(row, lots_without_outils, rows, self.run_dir), None
+        )
+        self.assertEqual(rerun._placement(row, lots_without_outils, rows), "code-securite")
+        self.lots.append(
+            {"id": "code-securite-outils", "kind": "code", "needs_toolbox": True, "refs": []}
+        )
+        self.write_lots()
+        self.assertEqual(
+            rerun._placement(row, self.lots, rows, self.run_dir), "code-securite-outils"
+        )
+        self.write_fiche(7, "Requêter la page.")
+        self.assertEqual(rerun._placement(row, self.lots, rows, self.run_dir), "code-securite")
+
+    def test_candidates_place_an_excluded_row_by_its_fiche(self):
+        self.lots.append(
+            {"id": "code-securite-outils", "kind": "code", "needs_toolbox": True, "refs": []}
+        )
+        self.exclude(7, ["HTTP"])
+        self.rows[-1]["fiche_path"] = "fiches/CQ-007.md"
+        self.write_rows()
+        self.write_fiche(7, "Presser Échap puis lire aria-expanded.")
+        result = self.candidates()
+        self.assertEqual(result["candidates"][0]["lot"], "code-securite-outils")
+        self.assertEqual(result["lots"], ["code-securite-outils"])
+        self.assertEqual(result["notes"], [])
+        self.write_fiche(7, "Requêter la page.")
+        result = self.candidates()
+        self.assertEqual(result["candidates"][0]["lot"], "code-securite")
+
+    def test_a_broken_fiche_never_stops_the_placement(self):
+        self.exclude(7, ["HTTP"])
+        self.rows[-1]["fiche_path"] = "fiches/CQ-007.md"
+        self.write_rows()
+        result = self.candidates()
+        self.assertEqual(result["candidates"][0]["lot"], "code-securite")
+        (self.run_dir / "fiches").mkdir()
+        (self.run_dir / "fiches" / "CQ-007.md").write_bytes(b"\xff\xfe")
+        result = self.candidates()
+        self.assertEqual(result["candidates"][0]["lot"], "code-securite")
+
     def test_excluded_row_missing_from_rows_has_no_lot_and_a_note(self):
         self.exclude(7, ["HTTP"])
         self.rows.pop()
