@@ -179,8 +179,8 @@ class CoverageAndLotsTest(AuditCase):
         run_dir = self.make_run()
         fiche = run_dir / "fiches" / "CQ-101.md"
         fiche.write_text(
-            "# Titre\n\n## Comment tester\n\nOuvrir la page à 320 px de large.\n\n"
-            "## À faire\n\nx\n",
+            "### À faire\n\nx\n\n### Comment tester\n\nOuvrir la page à 320 px de large.\n\n"
+            "### Par techno\n\nRien.\n",
             encoding="utf-8",
         )
         (run_dir / "fiches" / "CQ-103.md").unlink()

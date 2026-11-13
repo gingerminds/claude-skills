@@ -3627,7 +3627,8 @@ class MobileInstructionsTest(unittest.TestCase):
                 self.assertIn(f"`{term}`", lots)
         for needle in (
             "`MOBILE_TERMS`", "« Comment tester »", "`tooling_hint`", "without case and accent",
-            "word boundaries", "`Tab`", "`clavier`", "`focus`",
+            "word boundaries", "`Tab`", "`clavier`", "`focus`", "`### Comment tester`",
+            "`## Comment tester`", "next title of the same level or a higher one",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, lots)

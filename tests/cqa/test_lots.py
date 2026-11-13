@@ -1052,10 +1052,20 @@ class SessionLotsTest(unittest.TestCase):
 
 
 def fiche_text(how, todo="Une exigence.", before=""):
-    """A fiche as the Notion export writes it: a title, then the sections."""
+    """A fiche as notion_read.write_fiches writes it: sections of level 3, no title."""
     return (
-        f"# Titre de la ligne\n\n{before}## Comment tester\n\n{how}\n\n"
-        f"## À faire\n\n{todo}\n\n## Par techno\n\nRien.\n"
+        f"### Pourquoi\n\nUne raison.\n\n{before}### À faire\n\n- {todo}\n\n"
+        f"### Comment tester\n\n{how}\n\n### Par techno\n\n- **Nuxt** : rien.\n\n"
+        "### Critères RGAA 4.1.2\n\n- [1.1](https://example.org/1.1) : Une question ?\n\n"
+        "### Ressources\n\n- [Une page](https://example.org/)\n"
+    )
+
+
+def fiche_text_level_2(how, todo="Une exigence."):
+    """The same fiche with sections of level 2 and a title of level 1."""
+    return (
+        f"# Titre de la ligne\n\n## À faire\n\n{todo}\n\n## Comment tester\n\n{how}\n\n"
+        "## Par techno\n\nRien.\n"
     )
 
 
@@ -1091,7 +1101,10 @@ class MobileTermsTest(FicheCase):
                 "burger",
                 "menu mobile",
                 "tactile",
-                "piège",
+                "piège au focus",
+                "piège au clavier",
+                "piège clavier",
+                "piège de focus",
                 "focus trap",
                 "inert",
                 "aria-expanded",
@@ -1114,8 +1127,8 @@ class MobileTermsTest(FicheCase):
 
     def test_terms_are_read_without_case_and_without_accent(self):
         for text in (
-            "ECHAP", "echap", "Échap", "ÉCHAP", "touche Echap", "PIEGE de focus", "piege",
-            "Piège", "Menu  Mobile", "menu\u00a0mobile", "Focus\nTrap", "ARIA-EXPANDED",
+            "ECHAP", "echap", "Échap", "ÉCHAP", "touche Echap", "PIEGE de focus", "piege au clavier",
+            "Piège  au\nFocus", "PIÈGE CLAVIER", "Menu  Mobile", "menu\u00a0mobile", "Focus\nTrap", "ARIA-EXPANDED",
             "Aria-Expanded", "en PAYSAGE", "Landscape", "TACTILE", "Burger", "INERT",
         ):
             with self.subTest(text=text):
@@ -1128,7 +1141,8 @@ class MobileTermsTest(FicheCase):
             "Tab", "clavier", "focus", "échappement des sorties", "Échappement", "3200",
             "13200 pixels", "1320", "inertie du scroll", "escaped", "tactiles", "paysages",
             "landscaped", "burgers", "x320", "xaria-expanded", "focus traps", "menu mobiles",
-            "1,320 euros", "1.320", "320,5", "320.5 px", "pièges",
+            "1,320 euros", "1.320", "320,5", "320.5 px", "pièges", "pièges au focus",
+            "piège clavierx", "un piège de focusx",
         ):
             with self.subTest(text=text):
                 self.assertEqual(self.routed(make_row(1), fiche_text(text)), ["code-qualite"])
@@ -1146,6 +1160,8 @@ class MobileTermsTest(FicheCase):
             "échappement des sorties",
             "3200",
             "Tab, clavier, focus",
+            "Envoyer un fichier au nom piégé → refusé.",
+            "piège", "Piège", "un piège",
         ):
             with self.subTest(text=text):
                 self.assertEqual(self.routed(make_row(1), fiche_text(text)), ["code-qualite"])
@@ -1158,12 +1174,46 @@ class MobileTermsTest(FicheCase):
         self.assertEqual(self.routed(make_row(1), text), ["code-qualite"])
 
     def test_a_subsection_of_comment_tester_counts(self):
-        text = fiche_text("Intro.\n\n### Mobile\n\nTester à 320 px.")
+        text = fiche_text("Intro.\n\n#### Mobile\n\nTester à 320 px.")
         self.assertEqual(self.routed(make_row(1), text), ["code-qualite-outils"])
+        text = fiche_text_level_2("Intro.\n\n### Mobile\n\nTester à 320 px.")
+        self.assertEqual(self.routed(make_row(2), text), ["code-qualite-outils"])
 
     def test_the_last_section_counts_too(self):
-        text = "# Titre\n\n## À faire\n\nx\n\n## Comment tester\n\nEn paysage."
+        text = "### À faire\n\nx\n\n### Comment tester\n\nEn paysage."
         self.assertEqual(self.routed(make_row(1), text), ["code-qualite-outils"])
+        text = "# Titre\n\n## À faire\n\nx\n\n## Comment tester\n\nEn paysage."
+        self.assertEqual(self.routed(make_row(2), text), ["code-qualite-outils"])
+
+    def test_a_fiche_as_the_notion_export_writes_it_is_routed_by_its_level_3_section(self):
+        # The real fiches carry "### Comment tester" followed by bullets and a shell block, and
+        # the words of the other sections must not count.
+        text = (
+            "### Pourquoi\n\nUn clavier, des popins et Échap partout.\n\n"
+            "### À faire\n\n- Gérer l'Échap, aria-expanded et 320 px.\n\n"
+            "### Comment tester\n\n"
+            "- Ouvrir la confirmation au clavier → le focus est dans la boîte, Échap la ferme.\n"
+            "- Rechercher les écouteurs :\n```bash\ngrep -rnE 'touchstart' .\n```\n\n"
+            "### Par techno\n\n- **Nuxt** : burger.\n\n### Ressources\n\n- paysage\n"
+        )
+        self.assertEqual(self.routed(make_row(1), text), ["code-qualite-outils"])
+        other = text.replace("Échap la ferme", "Entrée la ferme")
+        self.assertEqual(self.routed(make_row(2), other), ["code-qualite"])
+
+    def test_a_row_whose_fiche_says_nothing_mobile_stays_in_its_lot(self):
+        text = (
+            "### Pourquoi\n\nPour la sécurité.\n\n### Comment tester\n\n"
+            "Sur la préprod, via le formulaire concerné :\n"
+            "- Envoyer un fichier à double extension (`test.php.jpg`) ou au nom piégé → refusé.\n"
+            "- Envoyer un SVG contenant un script → refusé.\n\n### Par techno\n\nRien.\n"
+        )
+        self.assertEqual(self.routed(make_row(1), text), ["code-qualite"])
+
+    def test_a_keyboard_trap_is_still_routed(self):
+        text = fiche_text("- Sur chaque composant, essayer d'en sortir avec Tab → aucun piège clavier.")
+        self.assertEqual(self.routed(make_row(1), text), ["code-qualite-outils"])
+        text = fiche_text("- Aucun piège au focus dans les modales.")
+        self.assertEqual(self.routed(make_row(2), text), ["code-qualite-outils"])
 
     def test_tooling_hint_alone_routes(self):
         row = make_row(1, tooling_hint="Navigateur piloté (parcours Tab, touche Échap)")
@@ -1277,11 +1327,44 @@ class HowToTestTest(FicheCase):
         self.write_fiche(1, text)
         self.assertEqual(how_to_test(self.run_dir, make_row(1)), "A.\n\n### Détail\n\nB.")
 
+    def test_it_reads_the_level_3_title_of_the_real_fiches(self):
+        self.write_fiche(1, fiche_text("- Ouvrir la page.\n- Fermer avec Échap."))
+        self.assertEqual(
+            how_to_test(self.run_dir, make_row(1)), "- Ouvrir la page.\n- Fermer avec Échap."
+        )
+
+    def test_a_level_3_section_runs_to_the_next_title_of_level_3_or_less(self):
+        for after in ("### Par techno", "## Autre", "# Autre"):
+            with self.subTest(after=after):
+                self.write_fiche(1, f"### Comment tester\n\nA.\n\n#### Détail\n\nB.\n\n{after}\n\nZ.\n")
+                self.assertEqual(how_to_test(self.run_dir, make_row(1)), "A.\n\n#### Détail\n\nB.")
+
+    def test_a_level_2_section_runs_to_the_next_title_of_level_2_or_less(self):
+        for after, kept in (("## Autre", True), ("# Autre", True), ("### Détail", False)):
+            with self.subTest(after=after):
+                self.write_fiche(1, f"## Comment tester\n\nA.\n\n{after}\n\nZ.\n")
+                expected = "A." if kept else "A.\n\n### Détail\n\nZ."
+                self.assertEqual(how_to_test(self.run_dir, make_row(1)), expected)
+
     def test_the_title_is_read_without_case_and_with_spaces(self):
-        for title in ("## comment tester", "##   Comment   Tester  ", "## COMMENT TESTER"):
+        for title in (
+            "## comment tester", "##   Comment   Tester  ", "## COMMENT TESTER",
+            "### comment tester", "###   Comment   Tester  ", "### COMMENT TESTER",
+        ):
             with self.subTest(title=title):
                 self.write_fiche(1, f"# T\n\n{title}\n\nA.\n\n## B\n\nZ.\n")
                 self.assertEqual(how_to_test(self.run_dir, make_row(1)), "A.")
+
+    def test_a_shell_block_of_the_real_fiches_does_not_end_the_section(self):
+        text = (
+            "### Comment tester\n\n- Chercher :\n```bash\n# ## ### not a title\n"
+            "grep -rn x .\n```\n- Fin.\n\n### Par techno\n\nZ.\n"
+        )
+        self.write_fiche(1, text)
+        self.assertEqual(
+            how_to_test(self.run_dir, make_row(1)),
+            "- Chercher :\n```bash\n# ## ### not a title\ngrep -rn x .\n```\n- Fin.",
+        )
 
     def test_a_title_in_a_code_block_does_not_end_the_section(self):
         text = "# T\n\n## Comment tester\n\nA.\n\n```\n## not a title\n```\n\nB.\n\n## C\n\nZ.\n"
@@ -1291,7 +1374,11 @@ class HowToTestTest(FicheCase):
         )
 
     def test_a_similar_title_is_not_the_section(self):
-        for title in ("## Comment tester ?", "### Comment tester", "## Comment tester plus", "Comment tester"):
+        for title in (
+            "## Comment tester ?", "### Comment tester plus", "## Comment tester plus",
+            "Comment tester", "#### Comment tester", "# Comment tester", "###Comment tester",
+            "####### Comment tester",
+        ):
             with self.subTest(title=title):
                 self.write_fiche(1, f"# T\n\n{title}\n\nA 320.\n")
                 self.assertEqual(how_to_test(self.run_dir, make_row(1)), "")

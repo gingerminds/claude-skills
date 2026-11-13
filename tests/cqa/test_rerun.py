@@ -324,7 +324,8 @@ class CandidatesTest(RerunCase):
         folder = self.run_dir / "fiches"
         folder.mkdir(exist_ok=True)
         (folder / f"CQ-{ref:03d}.md").write_text(
-            f"# Titre\n\n## Comment tester\n\n{how}\n\n## À faire\n\nx\n", encoding="utf-8"
+            f"### À faire\n\nx\n\n### Comment tester\n\n{how}\n\n### Par techno\n\nRien.\n",
+            encoding="utf-8",
         )
 
     def test_placement_uses_the_fiche_text(self):

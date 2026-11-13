@@ -60,7 +60,8 @@ _TOOLBOX_HINT = re.compile(
 )
 # A row that asks for a test in a narrow window or an interaction of a menu or a panel reads
 # tools/mobile. Narrow on purpose: "Tab", "clavier" and "focus" are everywhere and would make
-# too many rows wait for the toolbox. Searched without case and accent, with word boundaries.
+# too many rows wait for the toolbox, and "piège" alone would catch "un nom piégé". Searched without
+# case and accent, with word boundaries.
 MOBILE_TERMS = (
     "320",
     "paysage",
@@ -70,15 +71,18 @@ MOBILE_TERMS = (
     "burger",
     "menu mobile",
     "tactile",
-    "piège",
+    "piège au focus",
+    "piège au clavier",
+    "piège clavier",
+    "piège de focus",
     "focus trap",
     "inert",
     "aria-expanded",
 )
 _FICHES_DIR = "fiches"
 _HOW_TO_TEST_MAX = 4000
-_HOW_TO_TEST_TITLE = re.compile(r"##[ \t]+comment[ \t]+tester[ \t]*", re.IGNORECASE)
-_TITLE_LEVEL_1_OR_2 = re.compile(r"#{1,2}[ \t]")
+_HOW_TO_TEST_TITLE = re.compile(r"(#{2,3})[ \t]+comment[ \t]+tester[ \t]*", re.IGNORECASE)
+_TITLE = re.compile(r"(#{1,6})[ \t]")
 _CODE_FENCE = re.compile(r"[ \t]*(```|~~~)")
 
 
@@ -299,27 +303,30 @@ def _kind(row):
 def how_to_test(run_dir: Path, row: dict) -> str:
     """Return the "Comment tester" section of the fiche of a row, 4000 characters at most.
 
-    The section runs from its "## Comment tester" title to the next title of level 1 or 2 (the
-    sub-sections belong to it; a line inside a code block is no title). The fiche is
-    fiches/<name of row["fiche_path"]> in the run directory. "" when the row has no fiche, the
-    fiche has no such section or cannot be read: this never raises.
+    The section runs from its "## Comment tester" or "### Comment tester" title (the fiches of
+    notion_read.write_fiches use level 3) to the next title of the same level or a higher one
+    (a deeper title belongs to the section; a line inside a code block is no title). The fiche
+    is fiches/<name of row["fiche_path"]> in the run directory. "" when the row has no fiche,
+    the fiche has no such section or cannot be read: this never raises.
     """
     try:
         name = Path(row["fiche_path"]).name
         text = (Path(run_dir) / _FICHES_DIR / name).read_text(encoding="utf-8")
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return ""
-    lines, inside, fenced = [], False, False
+    lines, level, fenced = [], 0, False
     for line in text.splitlines():
         if _CODE_FENCE.match(line):
             fenced = not fenced
         elif not fenced:
-            if _HOW_TO_TEST_TITLE.fullmatch(line):
-                inside = True
+            found = _HOW_TO_TEST_TITLE.fullmatch(line)
+            if found:
+                level = len(found.group(1))
                 continue
-            if _TITLE_LEVEL_1_OR_2.match(line):
-                inside = False
-        if inside:
+            title = _TITLE.match(line)
+            if title and len(title.group(1)) <= level:
+                level = 0
+        if level:
             lines.append(line)
     return "\n".join(lines).strip()[:_HOW_TO_TEST_MAX]
 
