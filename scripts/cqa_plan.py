@@ -921,6 +921,8 @@ def _cmd_toolbox_env(args, services) -> int:
         origin = _prod_origin(context["target"].get("prod_url"))
         if origin:
             lines.append(f"GM_AUDIT_PROD_ORIGIN={origin}")
+    if probes.is_prod_run(context):
+        lines.append("GM_CQA_PROD_RUN=1")
     _emit_lines(lines)
     return EXIT_OK
 

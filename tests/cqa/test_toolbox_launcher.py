@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -14,6 +15,9 @@ STUBS = Path(__file__).resolve().parent / "stubs"
 RUN_ID = "2026-10-20-1430"
 REGISTRY = "registry.gitlab.gingerminds.fr/gm/tools/checklist-qualite-outillage-audit"
 TARGET = "https://preprod.example.org"
+PROD_TARGET = "https://www.example.org"
+PROD_RUN_REASON = "run de prod : le test mobile ne s'exécute pas sur la prod"
+NEEDS_1_4_REASON = "boîte à outils 1.4 requise : lancez cqa-toolbox.sh pull"
 SECRETS = {
     "GM_AUDIT_AUTH_USER": "cqa-user",
     "GM_AUDIT_AUTH_PASS": "pass-xyz-123",
@@ -32,6 +36,7 @@ ALL_ORDER = [
     ("agence", "lighthouse --pages /in/context.json --form-factor desktop"),
     ("agence", "a11y --pages"),
     ("agence", "viewport --pages"),
+    ("agence", "mobile --pages"),
     ("agence", "nu --pages"),
     ("agence", "yellowlab --pages /in/context.json"),
     ("agence", "yellowlab --pages /in/context.json --device desktop"),
@@ -79,17 +84,24 @@ class LauncherCase(unittest.TestCase):
         (self.laravel / "docs" / "swagger v2.json").write_text("{}", encoding="utf-8")
         self.run_dir = self.make_run()
 
-    def make_run(self, *, target=TARGET, repos=None, parent=None):
+    def make_run(self, *, target=TARGET, repos=None, parent=None, prod=False):
         run_dir = (parent or self.tmp) / RUN_ID
         run_dir.mkdir(parents=True)
         repos = repos or [("laravel", str(self.laravel)), ("nuxt", str(self.nuxt))]
         context = {
-            "target": {"preprod_url": target, "prod_url": None, "prod_live": False},
+            "target": {
+                "preprod_url": target,
+                "prod_url": PROD_TARGET if prod else None,
+                "prod_live": prod,
+            },
             "repos": [{"name": name, "path": path} for name, path in repos],
         }
+        if prod:
+            context["phase_filter"] = "MEL J0"
         (run_dir / "context.json").write_text(json.dumps(context), encoding="utf-8")
         (run_dir / "probes.json").write_text("{}", encoding="utf-8")
         (run_dir / "probes-followup.json").write_text("{}", encoding="utf-8")
+        (run_dir / "scenarios-followup.json").write_text("{}", encoding="utf-8")
         return run_dir
 
     def environment(self, path=None, **extra):
@@ -274,10 +286,14 @@ class ToolCommandsTest(LauncherCase):
         )
         self.assertTrue((self.run_dir / "tools" / "http-followup" / "raw").is_dir())
 
-    def test_followup_only_for_http(self):
-        result = self.run_tool("lighthouse", "--followup")
-        self.assertEqual(2, result.returncode)
-        self.assertEqual([], self.calls())
+    def test_followup_only_for_http_and_mobile(self):
+        for tool in ("lighthouse", "viewport", "assets", "crawl"):
+            with self.subTest(tool=tool):
+                result = self.run_tool(tool, "--followup")
+                self.assertEqual(2, result.returncode)
+                self.assertIn("http", result.stderr)
+                self.assertIn("mobile", result.stderr)
+                self.assertEqual([], self.calls())
 
     def test_pages_tools(self):
         for tool in ("lighthouse", "a11y", "yellowlab"):
@@ -310,6 +326,7 @@ class ToolCommandsTest(LauncherCase):
                 True,
             ),
             ("viewport", ["viewport", "--pages", "/in/context.json"], True),
+            ("mobile", ["mobile", "--pages", "/in/context.json"], True),
             ("stylelint", ["stylelint", "--repos", "/repos", "--context", "/in/context.json"], False),
             ("deps", ["deps", "--repos", "/repos", "--context", "/in/context.json"], False),
         )
@@ -330,6 +347,176 @@ class ToolCommandsTest(LauncherCase):
                     # Project JavaScript configs are executed: no GM_AUDIT_* variable.
                     self.assertEqual(["HOME=/tmp"], env_args(options))
                 self.assertTrue((self.run_dir / "tools" / tool / "raw").is_dir())
+
+    def test_mobile_followup(self):
+        result = self.run_tool("mobile", "--followup")
+        self.assertEqual(0, result.returncode, result.stderr)
+        (_, args), = self.runs_of("agence")
+        self.assertEqual(
+            ["mobile", "--scenarios", "/in/scenarios-followup.json", "--name", "mobile-followup"],
+            args,
+        )
+        self.assertTrue((self.run_dir / "tools" / "mobile-followup" / "raw").is_dir())
+        self.assertFalse((self.run_dir / "tools" / "mobile").exists())
+
+    def test_mobile_followup_needs_the_scenarios_file(self):
+        (self.run_dir / "scenarios-followup.json").unlink()
+        result = self.run_tool("mobile", "--followup")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("scenarios-followup.json", result.stderr)
+        self.assertEqual([], self.tool_runs())
+        self.assertFalse((self.run_dir / "tools" / "mobile").exists())
+
+    def test_mobile_sweep_and_followup_wipe_only_their_own_folder(self):
+        tools = self.run_dir / "tools"
+        for name in ("mobile", "mobile-followup"):
+            (tools / name / "raw").mkdir(parents=True)
+            (tools / name / "raw" / "old.json").write_text("{}", encoding="utf-8")
+            (tools / name / "result.json").write_text('{"status": "ok"}', encoding="utf-8")
+        self.assertEqual(0, self.run_tool("mobile").returncode)
+        self.assertFalse((tools / "mobile" / "raw" / "old.json").exists())
+        self.assertFalse((tools / "mobile" / "result.json").exists())
+        self.assertTrue((tools / "mobile-followup" / "raw" / "old.json").is_file())
+        self.assertTrue((tools / "mobile-followup" / "result.json").is_file())
+        (tools / "mobile" / "result.json").write_text('{"status": "ok"}', encoding="utf-8")
+        self.assertEqual(0, self.run_tool("mobile", "--followup").returncode)
+        self.assertFalse((tools / "mobile-followup" / "raw" / "old.json").exists())
+        self.assertTrue((tools / "mobile" / "result.json").is_file())
+
+    def test_mobile_gate_follows_the_image_version(self):
+        cases = {
+            "1.4.0": True, "1.4.3": True, "1.10.0": True, "2.0.0": True,
+            "1.3.9": False, "1.3.0": False, "1.2.3": False, "1.4.0-rc1": False,
+            "0.0.0-dev": False, "unknown": False,
+        }
+        for version, launched in cases.items():
+            for flags, folder in (((), "mobile"), (("--followup",), "mobile-followup")):
+                with self.subTest(version=version, folder=folder):
+                    if self.log.exists():
+                        self.log.unlink()
+                    shutil.rmtree(self.run_dir / "tools", ignore_errors=True)
+                    result = self.run_tool("mobile", *flags, CQA_STUB_VERSION=version)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual(1 if launched else 0, len(self.runs_of("agence")))
+                    if not launched:
+                        found = self.read_json(f"tools/{folder}/result.json")
+                        self.assertEqual("skipped", found["status"])
+                        self.assertEqual(NEEDS_1_4_REASON, found["reason"])
+
+    def test_mobile_is_skipped_when_the_agence_image_is_absent(self):
+        for flags, folder in (((), "mobile"), (("--followup",), "mobile-followup")):
+            with self.subTest(folder=folder):
+                result = self.run_tool("mobile", *flags, CQA_STUB_MISSING="agence")
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual([], self.tool_runs())
+                found = self.read_json(f"tools/{folder}/result.json")
+                self.assertEqual(NEEDS_1_4_REASON, found["reason"])
+
+    def test_old_image_followup_writes_in_mobile_followup_only(self):
+        result = self.run_tool("mobile", "--followup", CQA_STUB_VERSION="1.3.0")
+        self.assertEqual(0, result.returncode, result.stderr)
+        found = self.read_json("tools/mobile-followup/result.json")
+        self.assertEqual("skipped", found["status"])
+        self.assertEqual(NEEDS_1_4_REASON, found["reason"])
+        self.assertFalse((self.run_dir / "tools" / "mobile").exists())
+        self.assertEqual([], self.tool_runs())
+
+    def test_old_image_skips_the_followup_before_reading_its_file(self):
+        (self.run_dir / "scenarios-followup.json").unlink()
+        result = self.run_tool("mobile", "--followup", CQA_STUB_VERSION="1.3.0")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("skipped", self.read_json("tools/mobile-followup/result.json")["status"])
+
+    def test_prod_run_skips_mobile_and_its_followup(self):
+        self.run_dir = self.make_run(parent=self.tmp / "prod", prod=True)
+        context = self.read_json("context.json")
+        self.assertEqual("MEL J0", context["phase_filter"])
+        self.assertTrue(context["target"]["prod_live"])
+        for flags, folder in (((), "mobile"), (("--followup",), "mobile-followup")):
+            with self.subTest(folder=folder):
+                result = self.run_tool("mobile", *flags)
+                self.assertEqual(0, result.returncode, result.stderr)
+                found = self.read_json(f"tools/{folder}/result.json")
+                self.assertEqual("skipped", found["status"])
+                self.assertEqual(PROD_RUN_REASON, found["reason"])
+                self.assertIn(PROD_RUN_REASON, result.stderr)
+        self.assertEqual([], self.tool_runs())
+
+    def test_prod_run_reason_wins_over_the_version_gate(self):
+        self.run_dir = self.make_run(parent=self.tmp / "prod", prod=True)
+        result = self.run_tool("mobile", CQA_STUB_VERSION="1.3.0")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(PROD_RUN_REASON, self.read_json("tools/mobile/result.json")["reason"])
+        self.assertFalse(any(call[:2] == ["image", "inspect"] for call in self.calls()))
+
+    def test_prod_run_skips_the_followup_without_its_file(self):
+        self.run_dir = self.make_run(parent=self.tmp / "prod", prod=True)
+        (self.run_dir / "scenarios-followup.json").unlink()
+        result = self.run_tool("mobile", "--followup")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("skipped", self.read_json("tools/mobile-followup/result.json")["status"])
+
+    def test_the_prod_flag_comes_from_the_run_not_from_the_environment(self):
+        result = self.run_tool("mobile", GM_CQA_PROD_RUN="1")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(1, len(self.runs_of("agence")))
+        self.assertFalse((self.run_dir / "tools" / "mobile" / "result.json").exists())
+
+    def test_other_tools_still_run_on_a_prod_run(self):
+        self.run_dir = self.make_run(parent=self.tmp / "prod", prod=True)
+        for tool in ("viewport", "a11y"):
+            with self.subTest(tool=tool):
+                self.assertEqual(0, self.run_tool(tool).returncode)
+        self.assertEqual(
+            [["viewport", "--pages", "/in/context.json"], ["a11y", "--pages", "/in/context.json"]],
+            [args for _, args in self.runs_of("agence")],
+        )
+
+    def test_mobile_credentials_travel_by_name_only(self):
+        token = base64.b64encode(
+            f"{SECRETS['GM_AUDIT_AUTH_USER']}:{SECRETS['GM_AUDIT_AUTH_PASS']}".encode()
+        ).decode()
+        for flags in ((), ("--followup",)):
+            with self.subTest(flags=flags):
+                if self.log.exists():
+                    self.log.unlink()
+                result = self.run_tool("mobile", *flags, **SECRETS)
+                self.assertEqual(0, result.returncode, result.stderr)
+                (options, args), = self.runs_of("agence")
+                self.assertTrue(has_pair(options, "--env", "GM_AUDIT_AUTH_USER"))
+                self.assertTrue(has_pair(options, "--env", "GM_AUDIT_AUTH_PASS"))
+                text = self.log.read_text(encoding="utf-8") + result.stdout + result.stderr
+                for secret in (*SECRETS.values(), token):
+                    self.assertNotIn(secret, text)
+                    self.assertFalse(any(secret in arg for arg in args), secret)
+        for path in self.run_dir.rglob("*"):
+            if path.is_file():
+                content = path.read_text(encoding="utf-8", errors="replace")
+                for secret in (*SECRETS.values(), token):
+                    self.assertNotIn(secret, content, str(path))
+
+    def test_budget_variable_is_passed_by_name_only(self):
+        result = self.run_tool("mobile", "--followup", GM_AUDIT_MOBILE_BUDGET_S="9876")
+        self.assertEqual(0, result.returncode, result.stderr)
+        (options, args), = self.runs_of("agence")
+        self.assertTrue(has_pair(options, "--env", "GM_AUDIT_MOBILE_BUDGET_S"))
+        everything = [arg for call in self.calls() for arg in call]
+        self.assertNotIn("9876", everything)
+        self.assertFalse(any("GM_AUDIT_MOBILE_BUDGET_S=" in arg for arg in everything))
+        self.assertNotIn("9876", result.stdout + result.stderr)
+        self.log.unlink()
+        self.run_tool("mobile", "--followup")
+        (options, _), = self.runs_of("agence")
+        self.assertNotIn("GM_AUDIT_MOBILE_BUDGET_S", env_args(options))
+        self.log.unlink()
+        self.run_tool("mobile", "--followup", GM_AUDIT_MOBILE_BUDGET_S="")
+        (options, _), = self.runs_of("agence")
+        self.assertNotIn("GM_AUDIT_MOBILE_BUDGET_S", env_args(options))
+
+    def test_budget_variable_stays_out_of_the_other_environments(self):
+        self.run_tool("assets", GM_AUDIT_MOBILE_BUDGET_S="9876")
+        (options, _), = self.runs_of("agence")
+        self.assertEqual(["HOME=/tmp"], env_args(options))
 
     def test_assets(self):
         self.run_tool("assets")
@@ -681,9 +868,54 @@ class AllTest(LauncherCase):
     def test_unknown_image_label_skips_the_new_tools(self):
         self.check_new_tools_skipped("unknown")
 
+    def test_toolbox_1_3_skips_mobile_only(self):
+        result = self.launch("all", str(self.run_dir), CQA_STUB_VERSION="1.3.0")
+        self.assertEqual(0, result.returncode, result.stderr)
+        found = self.read_json("tools/mobile/result.json")
+        self.assertEqual("skipped", found["status"])
+        self.assertEqual("boîte à outils 1.4 requise : lancez cqa-toolbox.sh pull", found["reason"])
+        self.assertFalse((self.run_dir / "tools" / "mobile-followup").exists())
+        runs = [args for _, _, args in self.tool_runs()]
+        self.assertNotIn("mobile", [args[0] for args in runs])
+        for expected in (
+            ["viewport", "--pages", "/in/context.json"],
+            ["stylelint", "--repos", "/repos", "--context", "/in/context.json"],
+            ["deps", "--repos", "/repos", "--context", "/in/context.json"],
+            ["lighthouse", "--pages", "/in/context.json", "--form-factor", "desktop",
+             "--name", "lighthouse-desktop"],
+            ["yellowlab", "--pages", "/in/context.json", "--device", "desktop",
+             "--name", "yellowlab-desktop"],
+        ):
+            self.assertIn(expected, runs)
+        for tool in ("viewport", "stylelint", "deps", "lighthouse-desktop", "yellowlab-desktop"):
+            self.assertFalse((self.run_dir / "tools" / tool / "result.json").exists(), tool)
+
+    def test_all_runs_the_mobile_sweep_and_never_its_followup(self):
+        result = self.launch("all", str(self.run_dir))
+        self.assertEqual(0, result.returncode, result.stderr)
+        mobile = [args for _, _, args in self.tool_runs() if args[:1] == ["mobile"]]
+        self.assertEqual([["mobile", "--pages", "/in/context.json"]], mobile)
+        self.assertFalse((self.run_dir / "tools" / "mobile-followup").exists())
+
+    def test_all_on_a_prod_run_skips_mobile_only(self):
+        self.run_dir = self.make_run(parent=self.tmp / "prod", prod=True)
+        result = self.launch("all", str(self.run_dir))
+        self.assertEqual(0, result.returncode, result.stderr)
+        found = self.read_json("tools/mobile/result.json")
+        self.assertEqual("skipped", found["status"])
+        self.assertEqual("run de prod : le test mobile ne s'exécute pas sur la prod", found["reason"])
+        runs = [args for _, _, args in self.tool_runs()]
+        self.assertNotIn("mobile", [args[0] for args in runs])
+        self.assertIn(["viewport", "--pages", "/in/context.json"], runs)
+        self.assertIn(["a11y", "--pages", "/in/context.json"], runs)
+        self.assertFalse((self.run_dir / "tools" / "mobile-followup").exists())
+
     def check_new_tools_skipped(self, version):
         result = self.launch("all", str(self.run_dir), CQA_STUB_VERSION=version)
         self.assertEqual(0, result.returncode, result.stderr)
+        found = self.read_json("tools/mobile/result.json")
+        self.assertEqual("skipped", found["status"])
+        self.assertEqual("boîte à outils 1.4 requise : lancez cqa-toolbox.sh pull", found["reason"])
         new_tools = ("stylelint", "deps", "lighthouse-desktop", "viewport", "yellowlab-desktop")
         for tool in new_tools:
             with self.subTest(tool=tool):
@@ -694,7 +926,7 @@ class AllTest(LauncherCase):
                 )
         runs = [args for _, _, args in self.tool_runs()]
         for args in runs:
-            self.assertNotIn(args[0], ("viewport", "stylelint", "deps"), args)
+            self.assertNotIn(args[0], ("viewport", "mobile", "stylelint", "deps"), args)
             self.assertNotIn("--form-factor", args)
             self.assertNotIn("--device", args)
         self.assertIn(["lighthouse", "--pages", "/in/context.json"], runs)
@@ -1321,6 +1553,54 @@ class ImagePresentTest(LauncherCase):
         self.assertIn("Docker", result.stderr)
 
 
+class ProdFlagTest(LauncherCase):
+    """load_run reads GM_CQA_PROD_RUN from toolbox-env: a faked cqa_plan.py gives it any value."""
+
+    FAKE_PLAN = (
+        "import os, sys\n"
+        "with open(os.environ['FAKE_PLAN_LOG'], 'a') as log:\n"
+        "    log.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if sys.argv[1] == 'toolbox-env':\n"
+        "    print('GM_AUDIT_TARGET=https://preprod.example.org')\n"
+        "    print(os.environ.get('FAKE_PLAN_EXTRA', ''))\n"
+    )
+
+    def setUp(self):
+        super().setUp()
+        folder = self.tmp / "launcher"
+        folder.mkdir()
+        shutil.copy(SCRIPT, folder / "cqa-toolbox.sh")
+        (folder / "cqa_plan.py").write_text(self.FAKE_PLAN, encoding="utf-8")
+        self.fake = folder / "cqa-toolbox.sh"
+        self.plan_log = self.tmp / "plan.log"
+
+    def run_mobile(self, extra):
+        return self.launch(
+            "run", str(self.run_dir), "mobile", script=self.fake,
+            FAKE_PLAN_LOG=str(self.plan_log), FAKE_PLAN_EXTRA=extra,
+        )
+
+    def test_the_prod_flag_skips_mobile_with_its_reason(self):
+        result = self.run_mobile("GM_CQA_PROD_RUN=1")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], self.tool_runs())
+        lines = self.plan_log.read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"skip {self.run_dir} mobile {PROD_RUN_REASON}", lines)
+
+    def test_without_the_flag_mobile_runs(self):
+        result = self.run_mobile("")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(1, len(self.runs_of("agence")))
+
+    def test_an_unexpected_flag_value_is_refused(self):
+        for value in ("0", "yes", "", "1 "):
+            with self.subTest(value=value):
+                result = self.run_mobile(f"GM_CQA_PROD_RUN={value}")
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn("GM_CQA_PROD_RUN", result.stderr)
+                self.assertEqual([], self.tool_runs())
+
+
 class RefusalsTest(LauncherCase):
     def test_usage_errors(self):
         for args in (
@@ -1413,7 +1693,8 @@ class DoctorTest(LauncherCase):
     def test_report_without_run_directory(self):
         report = self.doctor()
         self.assertEqual(
-            {"docker", "docker_version", "registry_login", "images", "agence_crawl", "agence_1_2", "arch"},
+            {"docker", "docker_version", "registry_login", "images", "agence_crawl", "agence_1_2",
+             "agence_1_4", "arch"},
             set(report),
         )
         self.assertIs(True, report["docker"])
@@ -1421,9 +1702,10 @@ class DoctorTest(LauncherCase):
         self.assertIs(True, report["registry_login"])
         self.assertIs(True, report["agence_crawl"])
         self.assertIs(True, report["agence_1_2"])
+        self.assertIs(True, report["agence_1_4"])
         self.assertIn(report["arch"], ("amd64", "arm64"))
         self.assertEqual(IMAGES, list(report["images"]))
-        self.assertEqual({"1.2.3"}, set(report["images"].values()))
+        self.assertEqual({"1.4.0"}, set(report["images"].values()))
         calls = self.calls()
         self.assertIn(["manifest", "inspect", f"{REGISTRY}/agence:1"], calls)
         self.assertTrue(
@@ -1437,7 +1719,7 @@ class DoctorTest(LauncherCase):
         images = self.doctor(CQA_STUB_MISSING="nu,testssl")["images"]
         self.assertIsNone(images["nu"])
         self.assertIsNone(images["testssl"])
-        self.assertEqual("1.2.3", images["agence"])
+        self.assertEqual("1.4.0", images["agence"])
 
     def test_daemon_down(self):
         report = self.doctor(CQA_STUB_NO_DAEMON="1")
@@ -1459,6 +1741,19 @@ class DoctorTest(LauncherCase):
                 self.assertIs(expected, self.doctor(CQA_STUB_VERSION=version)["agence_1_2"])
         self.assertIs(False, self.doctor(CQA_STUB_MISSING="agence")["agence_1_2"])
 
+    def test_doctor_agence_1_4(self):
+        cases = {"1.4.0": True, "1.4.3": True, "1.10.0": True, "2.0.0": True, "1.3.9": False,
+                 "1.2.3": False, "1.4.0-rc1": False, "0.0.0-dev": False, "unknown": False}
+        for version, expected in cases.items():
+            with self.subTest(version=version):
+                self.assertIs(expected, self.doctor(CQA_STUB_VERSION=version)["agence_1_4"])
+        self.assertIs(False, self.doctor(CQA_STUB_MISSING="agence")["agence_1_4"])
+        self.assertEqual(
+            {"docker", "docker_version", "registry_login", "images", "agence_crawl", "agence_1_2",
+             "agence_1_4", "arch"},
+            set(self.doctor()),
+        )
+
     def test_registry_and_tag_overrides(self):
         self.doctor(GM_CQA_REGISTRY="registry.example.org/team", GM_CQA_TOOLBOX_TAG="3")
         self.assertIn(["manifest", "inspect", "registry.example.org/team/agence:3"], self.calls())
@@ -1475,6 +1770,7 @@ class DoctorTest(LauncherCase):
         self.assertEqual({None}, set(report["images"].values()))
         self.assertIs(False, report["agence_crawl"])
         self.assertIs(False, report["agence_1_2"])
+        self.assertIs(False, report["agence_1_4"])
 
 
 class PullTest(LauncherCase):

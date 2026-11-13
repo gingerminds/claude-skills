@@ -24,10 +24,15 @@ S="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_REGISTRY="registry.gitlab.gingerminds.fr/gm/tools/checklist-qualite-outillage-audit"
 AGENCY_IMAGES="registry.gitlab.gingerminds.fr/gm/docker-images"
 IMAGES=(agence nu testssl gitleaks redocly schemathesis nginx varnish)
-ALL_TOOLS=(http gitleaks assets stylelint deps lighthouse lighthouse-desktop a11y viewport nu yellowlab yellowlab-desktop testssl redocly schemathesis crawl)
+ALL_TOOLS=(http gitleaks assets stylelint deps lighthouse lighthouse-desktop a11y viewport mobile nu yellowlab yellowlab-desktop testssl redocly schemathesis crawl)
 NEEDS_1_2_REASON="boîte à outils 1.2 requise : lancez cqa-toolbox.sh pull"
-# Version gate: "unset" until read, then 0 or 1 (once per launcher call).
+NEEDS_1_4_REASON="boîte à outils 1.4 requise : lancez cqa-toolbox.sh pull"
+PROD_RUN_REASON="run de prod : le test mobile ne s'exécute pas sur la prod"
+# Version gates: "unset" until read, then 0 or 1 (once per launcher call).
 AGENCE_1_2="unset"
+AGENCE_1_4="unset"
+# 1 when toolbox-env flags the run as a prod run (set by load_run, never read from the environment).
+PROD_RUN=0
 # Schemathesis probes undeclared methods (TRACE, PUT, ...) despite --include-method, and
 # --exclude-checks only hides their verdict: this filter is what stops the requests.
 UNSAFE_METHODS_REGEX='^(?!(GET|HEAD|OPTIONS)$)'
@@ -104,6 +109,7 @@ load_run() {
 
   CRAWL_MINUTES=30
   CRAWL_MAX_URLS=2000
+  PROD_RUN=0
   env_lines="$(python3 "$S/cqa_plan.py" toolbox-env "$RUN_DIR")" || exit 2
   while IFS='=' read -r key value; do
     case "$key" in
@@ -112,6 +118,10 @@ load_run() {
         ;;
       GM_CQA_CRAWL_MINUTES) CRAWL_MINUTES="$value" ;;
       GM_CQA_CRAWL_MAX_URLS) CRAWL_MAX_URLS="$value" ;;
+      GM_CQA_PROD_RUN)
+        [ "$value" = "1" ] || die "toolbox-env a renvoyé une valeur inattendue pour GM_CQA_PROD_RUN."
+        PROD_RUN=1
+        ;;
       "") ;;
       *) die "toolbox-env a renvoyé une variable inattendue : $key" ;;
     esac
@@ -170,7 +180,7 @@ docker_tool() {
     shift
   fi
   case "$envset" in
-    web) names=(GM_AUDIT_TARGET GM_AUDIT_RATE GM_AUDIT_USER_AGENT GM_AUDIT_ROBOTS GM_AUDIT_AUTH_USER GM_AUDIT_AUTH_PASS) ;;
+    web) names=(GM_AUDIT_TARGET GM_AUDIT_RATE GM_AUDIT_USER_AGENT GM_AUDIT_ROBOTS GM_AUDIT_AUTH_USER GM_AUDIT_AUTH_PASS GM_AUDIT_MOBILE_BUDGET_S) ;;
     crawl) names=(GM_AUDIT_TARGET GM_AUDIT_ROBOTS GM_AUDIT_RATE GM_AUDIT_USER_AGENT GM_AUDIT_AUTH_USER GM_AUDIT_AUTH_PASS GM_AUDIT_PROD_ORIGIN) ;;
     *) names=() ;;
   esac
@@ -244,6 +254,20 @@ agence_supports_1_2() {
   [ "$AGENCE_1_2" = "1" ]
 }
 
+# True when the local agence image is toolbox 1.4.0 or later (keep in sync with agence_1_4 in doctor).
+agence_supports_1_4() {
+  local label
+  if [ "$AGENCE_1_4" = "unset" ]; then
+    AGENCE_1_4=0
+    if label="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$(image_ref agence)" 2>/dev/null </dev/null)"; then
+      if printf '%s' "$label" | grep -Eq '^([2-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$|^1\.([4-9]|[1-9][0-9]+)\.[0-9]+$'; then
+        AGENCE_1_4=1
+      fi
+    fi
+  fi
+  [ "$AGENCE_1_4" = "1" ]
+}
+
 # tool_desktop <name> <subcommand> <flag> <value>
 tool_desktop() {
   if ! agence_supports_1_2; then
@@ -261,6 +285,35 @@ tool_viewport() {
   fi
   prepare_tool viewport || return 1
   docker_tool agence web -- viewport --pages /in/context.json
+}
+
+# tool_mobile <0|1>: the mobile sweep (0) or its follow-up (1), in that order of checks: prod run,
+# toolbox version, input file of the follow-up, launch. A skip is written in the folder of the
+# tool that was asked for.
+tool_mobile() {
+  local name=mobile
+  if [ "$1" -eq 1 ]; then
+    name=mobile-followup
+  fi
+  if [ "$PROD_RUN" = "1" ]; then
+    skip_tool "$name" "$PROD_RUN_REASON"
+    return
+  fi
+  if ! agence_supports_1_4; then
+    skip_tool "$name" "$NEEDS_1_4_REASON"
+    return
+  fi
+  if [ "$1" -eq 1 ]; then
+    if [ ! -f "$RUN_DIR/scenarios-followup.json" ]; then
+      say "mobile : scenarios-followup.json est introuvable, lancez d'abord cqa_plan.py scenarios --followup."
+      return 2
+    fi
+    prepare_tool mobile-followup || return 1
+    docker_tool agence web -- mobile --scenarios /in/scenarios-followup.json --name mobile-followup
+  else
+    prepare_tool mobile || return 1
+    docker_tool agence web -- mobile --pages /in/context.json
+  fi
 }
 
 tool_repos_1_2() {
@@ -402,6 +455,7 @@ run_tool() {
     lighthouse-desktop) tool_desktop lighthouse-desktop lighthouse --form-factor desktop ;;
     yellowlab-desktop) tool_desktop yellowlab-desktop yellowlab --device desktop ;;
     viewport) tool_viewport ;;
+    mobile) tool_mobile "$2" ;;
     stylelint | deps) tool_repos_1_2 "$1" ;;
     assets) tool_assets ;;
     nu) tool_nu ;;
@@ -424,8 +478,8 @@ cmd_run() {
     followup=1
   fi
   is_tool "$2" || die "Outil inconnu : $2 (outils : ${ALL_TOOLS[*]})."
-  if [ "$followup" -eq 1 ] && [ "$2" != "http" ]; then
-    die "--followup ne s'applique qu'à l'outil http."
+  if [ "$followup" -eq 1 ] && [ "$2" != "http" ] && [ "$2" != "mobile" ]; then
+    die "--followup ne s'applique qu'aux outils http et mobile."
   fi
   require_docker
   load_run "$1"
@@ -540,6 +594,8 @@ report = {
     "agence_crawl": bool(match) and (int(match[1]), int(match[2])) >= (1, 1),
     # Keep in sync with agence_supports_1_2.
     "agence_1_2": bool(match) and (int(match[1]), int(match[2])) >= (1, 2),
+    # Keep in sync with agence_supports_1_4.
+    "agence_1_4": bool(match) and (int(match[1]), int(match[2])) >= (1, 4),
     "arch": arch,
 }
 print(json.dumps(report, indent=2, ensure_ascii=False))

@@ -1688,6 +1688,37 @@ class ToolboxEnvTest(RunDirCase):
         )
         self.assertFalse(any(line.startswith("GM_AUDIT_PROD_ORIGIN") for line in lines))
 
+    def test_toolbox_env_flags_a_prod_run(self):
+        for phase in ("MEL J0", "Post-MEL J+7"):
+            with self.subTest(phase=phase):
+                lines = self.env_lines(
+                    phase_filter=phase,
+                    target__prod_url="https://www.example.org",
+                    target__prod_live=True,
+                )
+                self.assertEqual(lines[-1], "GM_CQA_PROD_RUN=1")
+                self.assertEqual(lines.count("GM_CQA_PROD_RUN=1"), 1)
+        for label, changes in {
+            "preprod": {},
+            "phase without live prod": {
+                "phase_filter": "MEL J0",
+                "target__prod_url": "https://www.example.org",
+                "target__prod_live": False,
+            },
+            "live prod without phase": {
+                "target__prod_url": "https://www.example.org",
+                "target__prod_live": True,
+            },
+            "other phase": {
+                "phase_filter": "Build",
+                "target__prod_url": "https://www.example.org",
+                "target__prod_live": True,
+            },
+        }.items():
+            with self.subTest(label):
+                lines = self.env_lines(**changes)
+                self.assertFalse(any(line.startswith("GM_CQA_PROD_RUN") for line in lines), lines)
+
     def test_toolbox_env_phase_prod(self):
         for phase in ("MEL J0", "Post-MEL J+7", "J0", "J+7"):
             with self.subTest(phase=phase):
