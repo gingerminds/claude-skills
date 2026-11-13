@@ -47,7 +47,14 @@ from cqa.git_tools import (
 from cqa.lots import TOOLS, build_lots, coverage, lot_document_refs, select_rows
 from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
-from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_digest
+from cqa.plan import (
+    build_plan,
+    consented_plan,
+    filter_plan,
+    load_history,
+    operation_key,
+    plan_digest,
+)
 from cqa.rerun import (
     comment_dates,
     latest_findings,
@@ -296,7 +303,13 @@ def _register_audit(commands) -> None:
         default=None,
         help="plan d'une recette : NN est le numéro de la relance qui a jugé les lignes de "
         "notion/recette.json ; celles qui sont « Mis en place » et jugées peuvent changer "
-        "ce statut posé par un dev",
+        "ce statut posé par un dev. Sans cette option, le plan reprend la recette du "
+        "notion/plan.json existant",
+    )
+    sub.add_argument(
+        "--no-recette",
+        action="store_true",
+        help="plan sans recette, même si le notion/plan.json existant en porte une",
     )
     _run_command(commands, "manifest", "résultats des outils (tools/manifest.json)", _cmd_manifest)
     _run_command(commands, "synthesis", "synthese.md et commentaire de la page", _cmd_synthesis)
@@ -1335,9 +1348,29 @@ def _cmd_plan(args, services) -> int:
             "--recette demande le numéro de la relance qui a jugé les lignes (par exemple "
             "--recette 01) : celle que rerun-close vient de clore."
         )
-    if args.recette is not None:
-        _check_closed(run_dir, args.recette)
-        recette = _recette_scope(run_dir, context, lots["lots"], rows, args.recette)
+    if args.recette is not None and args.no_recette:
+        raise UsageError("--recette et --no-recette ne se combinent pas.")
+    number = args.recette
+    inherited = number is None and not args.no_recette
+    if inherited:
+        number = _recette_of(_read_json_object(run_dir / "notion" / "plan.json"))
+    if number is not None:
+        try:
+            _check_closed(run_dir, number)
+            recette = _recette_scope(run_dir, context, lots["lots"], rows, number)
+        except UsageError as error:
+            if not inherited:
+                raise
+            raise UsageError(
+                f"{error} Ce plan reprend la recette (relance {number:02d}) du notion/plan.json "
+                "existant : --no-recette construit un plan sans recette."
+            ) from None
+        if inherited:
+            print(
+                f"Recette reprise du notion/plan.json existant (relance {number:02d}) : "
+                "--no-recette construit un plan sans recette.",
+                file=sys.stderr,
+            )
     plan = build_plan(
         rows=rows,
         findings=findings,
@@ -1352,18 +1385,27 @@ def _cmd_plan(args, services) -> int:
         recette_refs=recette["refs"],
         comment_dates=_comment_dates(run_dir, sources),
     )
-    if args.recette is not None:
-        plan["recette"] = {**recette, "rerun": f"{args.recette:02d}"}
+    if number is not None:
+        plan["recette"] = {**recette, "rerun": f"{number:02d}"}
         plan["recette"]["refs"] = sorted(recette["refs"])
     built = plan
     plan = filter_plan(plan, skip_human_overrides=args.skip_human_overrides)
-    if args.recette is not None:
+    if number is not None:
         plan["recette"]["kept"] = _kept_human_statuses(built, plan)
     plan["plan_id"] = plan_digest(plan)
     (run_dir / "notion").mkdir(exist_ok=True)
     write_json(run_dir / "notion" / "plan.json", plan)
     _emit(plan["summary"])
     return EXIT_OK
+
+
+def _recette_of(plan: dict) -> Optional[int]:
+    """Return the number of the rerun a plan was built as a recette of, None when it was not."""
+    recette = plan.get("recette")
+    number = recette.get("rerun") if isinstance(recette, dict) else None
+    if isinstance(number, str) and re.fullmatch(r"[0-9]+", number) and int(number) >= 1:
+        return int(number)
+    return None
 
 
 def _comment_dates(run_dir: Path, sources: dict) -> dict:
@@ -2157,6 +2199,8 @@ def _write_pending(run_dir: Path) -> bool:
     It catches a rerun or a recette whose write stopped (exit 3) in a run already done. A key
     counts as written only when the journal holds it under the plan_id of notion/plan.json, as
     apply skips it; an operation blocked by a safety gate is never journaled and keeps it true.
+    The operations are those apply writes: without the statuses set by a person when the
+    consent of the run keeps them.
     """
     plan = _read_json_object(run_dir / "notion" / "plan.json")
     ops = plan.get("ops")
@@ -2165,6 +2209,11 @@ def _write_pending(run_dir: Path) -> bool:
     context = _read_json_object(run_dir / "context.json")
     if context.get("notion_write") == "none" or context.get("dry_run") is True:
         return False
+    try:
+        plan = consented_plan(plan, context)
+    except (KeyError, TypeError, AttributeError):
+        pass
+    ops = plan["ops"]
     journal = _read_json_object(run_dir / "notion" / "applied.json").get("applied")
     plan_id = plan.get("plan_id")
     written = {

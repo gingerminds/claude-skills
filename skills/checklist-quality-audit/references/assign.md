@@ -7,7 +7,8 @@ The lead runs `/gm:checklist-quality-audit assign` after reviewing the statuses 
 1. `cqa_plan.py project "$PWD"` for the slug, then `cqa_plan.py runs "<slug>"`.
 2. Take the most recent run whose `context` is true, preferably with `applied` true (the audit that wrote the statuses). Ask « Utiliser le run <run_id> ? » with « Oui » and « Préparer un nouveau run ».
 3. New run, or no run: create the folder as in SKILL.md section 3, then only steps 1 (repos) and 2 (Notion, lead and team) of `references/context.md`. Write `context.json` as in `references/context.md` step 7, with the other sections empty (`target` with `null` URLs and access and `prod_live` false, `ssh` `{"alias": null, "app_dirs": {}}`, `test_accounts` both false, `key_pages` and `available_tools` empty), then `cqa_plan.py context "$RUN" --check`.
-4. Show the team of `context.json` (name, role, option): « Équipe : <nom> (<rôle>, « <option> »), ... Est-ce à jour ? » with « Oui » and « Annuler »; the changes in « Autre ». A change: run `cqa_plan.py team` again, or edit `team` in `context.json`, then check it. Never create an option.
+4. Write the current `dry_run` in `context.json` (true with `--dry-run`, false without): `cqa_notion.py apply` refuses to write while the file holds `true`, whatever an earlier invocation stored.
+5. Show the team of `context.json` (name, role, option): « Équipe : <nom> (<rôle>, « <option> »), ... Est-ce à jour ? » with « Oui » and « Annuler »; the changes in « Autre ». A change: run `cqa_plan.py team` again, or edit `team` in `context.json`, then check it. Never create an option.
 
 ## Proposal
 

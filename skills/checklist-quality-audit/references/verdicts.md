@@ -345,10 +345,10 @@ What the lead sees, in French:
 
 ### Confirmation
 
-The consent is given at launch (`notion_write` in `context.json`, SKILL.md section 4): when it is set, the question is not asked and the matching choice below applies (`all`, `keep_human`, `none`). In autonomous mode the summary above is not shown before the write but as a recap after it. Only when `notion_write` is `null`, one question, « Écrire le plan dans la copie Notion ? »:
+The consent is given at launch (`notion_write` in `context.json`, SKILL.md section 4): when it is set, the write question is not asked and the matching choice below applies (`all`, `keep_human`, `none`). `cqa_notion.py apply` holds that consent itself, so no option has to be repeated: it refuses `none` and a run with `dry_run` true (exit 2), and with `keep_human` it leaves alone the pages whose status a human set, whether or not the plan was rebuilt. With `all`, a plan that would replace statuses set by a human is confirmed first in interactive mode (SKILL.md section 7, step 1); in autonomous mode `all` is applied as `keep_human`, the kept statuses go to the recap and to « Remarques », and `apply` counts the operations it left out in `kept_human`. In autonomous mode the summary above is not shown before the write but as a recap after it. Only when `notion_write` is `null`, one question, « Écrire le plan dans la copie Notion ? »:
 
-- « Tout écrire »: statuses, assignments of the lead and comments, the human statuses listed included.
-- « Sans toucher aux statuts posés par un humain »: offered only when `human_overrides` is not empty. Those pages are left as they are, comments included. Keep the list shown above: the rebuilt plan no longer holds it, and SKILL.md section 8, step 3, adds it to `remarques.md`, which the synthesis injects as « Remarques ». Rebuild the plan first, so that the synthesis describes what is written, then apply with the same option:
+- « Tout écrire »: statuses, assignments of the lead and comments, the human statuses listed included (not in autonomous mode, where it is applied as the next choice).
+- « Sans toucher aux statuts posés par un humain »: offered only when `human_overrides` is not empty. Those pages are left as they are, comments included. Keep the list shown above: the rebuilt plan no longer holds it, and SKILL.md section 8, step 3, adds it to `remarques.md`, which the synthesis injects as « Remarques ». Rebuild the plan first, so that the synthesis describes what is written, then apply (`apply` leaves those pages alone by itself):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -360,7 +360,7 @@ python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
 
 ### Exit codes of `cqa_notion.py apply`
 
-`apply` prints `{"done", "skipped", "blocked": [{"key", "labels"}], "errors": [{"key", "message"}]}`. `done` and `skipped` are numbers: operations written now, and operations already written (listed in `notion/applied.json`, or a comment already on the page). It prints one French line per operation on stderr. The `key` of an operation is in `notion/plan.json`, with its `ref` and `kind`.
+`apply` prints `{"done", "skipped", "blocked": [{"key", "labels"}], "errors": [{"key", "message"}]}`, plus `kept_human` (the operations left out to keep the statuses set by a human) when there are some. `done` and `skipped` are numbers: operations written now, and operations already written (listed in `notion/applied.json`, or a comment already on the page). It prints one French line per operation on stderr. The `key` of an operation is in `notion/plan.json`, with its `ref` and `kind`.
 
 | Exit | Meaning | What to tell the lead |
 |---|---|---|
@@ -368,7 +368,7 @@ python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
 | exit 7 | at least one operation blocked, without any request; the others are written | for each entry of `blocked`, from its labels (`blocked[].labels`): « CQ-<ref> (<kind>) non écrit : <raison> », reasons below |
 | exit 3 | stopped on a network or Notion API error, or an operation refused by Notion; wins over 7 | « Écriture interrompue (<message>). Relancer : la reprise saute ce qui est déjà écrit. » Run the same command once more, only once the cause is fixed: `notion/applied.json` makes it resume where it stopped. Still exit 3: stop, without synthesis; the run stays resumable at section 7. An operation refused by Notion skips the later operations of the same page. |
 | exit 8 | the plan targets the reference template (its data source, or its page for a comment) | « Écriture refusée : la cible est le modèle de référence. » Nothing is written: stop; a new run with the URL of the copy. |
-| exit 2 | plan or `context.json` unreadable or invalid, environment variable missing | show the message, fix, run again |
+| exit 2 | plan or `context.json` unreadable or invalid, environment variable missing, `dry_run` true or `notion_write` `none` (nothing is written) | show the message, fix, run again |
 
 Labels of `blocked[].labels`:
 

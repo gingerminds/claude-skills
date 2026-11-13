@@ -23,6 +23,7 @@ from unittest import mock
 import cqa_plan
 from cqa import target
 from cqa.lots import TOOLS
+from cqa.plan import filter_plan, plan_digest
 from cqa.version import plugin_version
 from tests.cqa import test_git_tools as git_fixtures
 
@@ -1962,6 +1963,46 @@ class RunsCommandTest(CliCase):
                 shutil.rmtree(self.base, ignore_errors=True)
                 self.pending_run(**options)
                 self.assertFalse(self.runs()["runs"][0]["write_pending"])
+
+    def test_write_pending_counts_only_what_the_consent_lets_apply_write(self):
+        run_dir = self.make_run("2026-10-20-1000", "done.json")
+        ops = [
+            {"key": "k1", "kind": "status", "page_id": "p1", "ref": 1, "before": "Mis en place",
+             "after": "À traiter", "human_override": True},
+            {"key": "k2", "kind": "comment", "page_id": "p1", "ref": 1, "before": None,
+             "after": None, "human_override": False},
+            {"key": "k3", "kind": "status", "page_id": "p2", "ref": 2, "before": "À traiter",
+             "after": "Ok / Recetté", "human_override": False},
+        ]
+        plan = {
+            "ops": ops,
+            "rows": [
+                {"page_id": "p1", "ref": 1, "blocking": False, "before": "Mis en place",
+                 "after": "À traiter"},
+                {"page_id": "p2", "ref": 2, "blocking": False, "before": "À traiter",
+                 "after": "Ok / Recetté"},
+            ],
+            "summary": {
+                "by_status_after": {}, "blocking_non_conform": [], "unknown": [],
+                "human_overrides": [], "deferred": [], "missing_in_copy": [],
+            },
+        }
+        plan["plan_id"] = plan_digest(plan)
+        self.write(run_dir, "notion/plan.json", plan)
+        written = filter_plan(plan, skip_human_overrides=True)
+        self.assertEqual([op["key"] for op in written["ops"]], ["k3"])
+        self.write(run_dir, "notion/applied.json",
+                   {"applied": [{"key": "k3", "plan_id": written["plan_id"]}]})
+        for context, pending in (
+            ({"notion_write": "keep_human"}, False),
+            ({"notion_write": "all", "mode": "autonome"}, False),
+            ({"notion_write": "all", "mode": "interactif"}, True),
+            ({"notion_write": "all"}, True),
+            ({"notion_write": None, "mode": "autonome"}, True),
+        ):
+            with self.subTest(context=context):
+                self.write(run_dir, "context.json", {"dry_run": False, **context})
+                self.assertEqual(self.runs()["runs"][0]["write_pending"], pending)
 
     def test_write_pending_without_journal_or_with_a_legacy_plan(self):
         run_dir = self.pending_run()

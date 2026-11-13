@@ -2305,8 +2305,85 @@ class RecetteTest(AuditCase):
         self.assertEqual(
             recette, {"rerun": "01", "refs": [102], "judged": [102], "unjudged": [], "kept": []}
         )
-        self.run_json(["plan", run_dir, "--skip-human-overrides"])
+        self.run_json(["plan", run_dir, "--no-recette", "--skip-human-overrides"])
         self.assertNotIn(102, self.status_ops(run_dir))
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+
+    def test_plan_reuses_recette_from_existing_plan(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        first = self.read(run_dir, "notion/plan.json")
+        code, out, err = self.run_main(["plan", run_dir, "--skip-human-overrides"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("01", err)
+        self.assertIn("--no-recette", err)
+        again = self.read(run_dir, "notion/plan.json")
+        self.assertEqual(again["recette"], first["recette"])
+        self.assertEqual(again["plan_id"], first["plan_id"])
+        self.assertEqual(self.status_ops(run_dir)[102], "Ok / Recetté")
+
+    def test_plan_reuses_recette_when_the_rebuild_drops_the_human_filter_too(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01"])
+        self.run_json(["plan", run_dir])
+        self.assertEqual(self.read(run_dir, "notion/plan.json")["recette"]["rerun"], "01")
+
+    def test_explicit_recette_wins_over_the_one_of_the_existing_plan(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.write(run_dir, "reruns.json", {"closed": ["01", "02"]})
+        self.run_json(["plan", run_dir, "--recette", "01"])
+        code, out, err = self.run_main(["plan", run_dir, "--recette", "02"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(run_dir, "notion/plan.json")["recette"]["rerun"], "02")
+        self.assertNotIn("reprise", err)
+
+    def test_plan_no_recette_drops_it(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.run_json(["plan", run_dir, "--no-recette", "--skip-human-overrides"])
+        plan = self.read(run_dir, "notion/plan.json")
+        self.assertNotIn("recette", plan)
+        self.assertNotIn(102, self.status_ops(run_dir))
+        self.run_json(["plan", run_dir])
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+
+    def test_plan_no_recette_cannot_be_combined_with_recette(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        code, out, err = self.run_main(["plan", run_dir, "--recette", "01", "--no-recette"])
+        self.assertEqual(code, 2)
+        self.assertIn("--no-recette", err)
+        self.assertFalse((run_dir / "notion" / "plan.json").exists())
+
+    def test_plan_without_an_earlier_recette_is_a_plain_plan(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir])
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+        self.run_json(["plan", run_dir])
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+
+    def test_plan_cannot_reuse_a_recette_whose_rerun_is_not_closed(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01"])
+        before = self.read(run_dir, "notion/plan.json")
+        self.write(run_dir, "reruns.json", {"closed": []})
+        code, out, err = self.run_main(["plan", run_dir])
+        self.assertEqual(code, 2)
+        self.assertIn("relance close", err)
+        self.assertIn("--no-recette", err)
+        self.assertEqual(self.read(run_dir, "notion/plan.json"), before)
+        self.run_json(["plan", run_dir, "--no-recette"])
+
+    def test_plan_ignores_a_damaged_recette_of_the_existing_plan(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir])
+        for damaged in ("x", "", 1, "00", None, ["01"]):
+            with self.subTest(rerun=damaged):
+                self.edit(run_dir, "notion/plan.json",
+                          lambda plan: plan.update(recette={"rerun": damaged}))
+                self.run_json(["plan", run_dir])
+                self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+        self.write(run_dir, "notion/plan.json", ["not", "a", "plan"])
+        self.run_json(["plan", run_dir])
         self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
 
     def test_recette_ref_without_a_new_finding_stays_protected(self):

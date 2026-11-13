@@ -212,6 +212,30 @@ def filter_plan(plan: dict, *, skip_human_overrides: bool) -> dict:
     return result
 
 
+def keeps_human_statuses(context) -> bool:
+    """True when the consent of the run forbids replacing a status a person set.
+
+    notion_write "keep_human" says it; "all" says it in autonomous mode too, where nobody
+    sees the list before the write. A run without the consent (null or absent) keeps the old
+    behavior.
+    """
+    if not isinstance(context, dict):
+        return False
+    write = context.get("notion_write")
+    return write == "keep_human" or (write == "all" and context.get("mode") == "autonome")
+
+
+def consented_plan(plan: dict, context) -> dict:
+    """Return the plan the consent of the run allows to write.
+
+    The plan without the pages whose status a person set when the consent keeps them, else
+    the plan itself (also when no operation is such a status: nothing to leave out).
+    """
+    if keeps_human_statuses(context) and any(op.get("human_override") for op in plan["ops"]):
+        return filter_plan(plan, skip_human_overrides=True)
+    return plan
+
+
 def _finding_operations(row, finding, common, followup_done, visible_verdicts, history, recette=False):
     ref = row["ref"]
     if finding is None:

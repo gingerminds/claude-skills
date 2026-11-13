@@ -627,12 +627,56 @@ class SkillTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, section)
 
-    def test_every_rebuild_of_a_recette_plan_keeps_the_recette_option(self):
+    def test_every_rebuild_of_a_recette_plan_keeps_the_recette_by_itself(self):
         text = _text(SKILL)
-        self.assertIn("every rebuild of the plan keeps `--recette <NN>`", _section(text, "11. Recette").replace("Every", "every"))
-        self.assertIn("`--recette <NN>`", _section(text, "7. Plan and confirmation"))
-        self.assertIn("`--recette <that NN>`", _section(text, "3. Resume"))
-        self.assertIn("Statut humain conservé", _section(text, "11. Recette"))
+        recette = _section(text, "11. Recette")
+        self.assertIn("every rebuild after it", recette)
+        self.assertIn("keeps it by itself, without the option", recette)
+        self.assertIn("keeps its recette in the rebuild by itself", _section(text, "7. Plan and confirmation"))
+        self.assertIn("keeps the recette of `notion/plan.json`", _section(text, "3. Resume"))
+        self.assertIn("Statut humain conservé", recette)
+
+    def test_a_rerun_plan_is_built_without_the_recette_of_an_earlier_one(self):
+        section = _section(_text(SKILL), "10. Rerun")
+        step = section.split("\n11. ")[1].split("\n12. ")[0]
+        self.assertIn('cqa_plan.py" plan "$RUN" --no-recette', step)
+        self.assertIn("A rerun is never a recette", step)
+        recette = _section(_text(SKILL), "11. Recette")
+        self.assertIn('cqa_plan.py" plan "$RUN" --recette <NN>', recette)
+        self.assertIn("build the plan with `--no-recette` (no rerun of this recette is closed", recette)
+
+    def test_scripts_hold_the_notion_consents_so_no_option_is_repeated(self):
+        skill = _text(SKILL)
+        rules = _section(skill, "1. Imperative rules")
+        for needle in ("`dry_run` is true", "`notion_write` is `none`", "`keep_human`",
+                       "`all` in autonomous mode"):
+            with self.subTest(rules=needle):
+                self.assertIn(needle, rules)
+        writing = _section(skill, "8. Writing and synthesis")
+        step = writing[writing.index("**1. Apply**"):writing.index("**2. Synthesis**")]
+        for needle in ("takes no option for it", "`kept_human`", "`dry_run` is true"):
+            with self.subTest(apply=needle):
+                self.assertIn(needle, step)
+        for path in _skill_files():
+            for block in _BASH_BLOCK.findall(_text(path)):
+                if _NOTION_WRITE.search(block):
+                    with self.subTest(file=path.name, block=block.splitlines()[-1]):
+                        self.assertNotIn("--skip-human-overrides", block)
+        verdicts = _text(VERDICTS_MD)
+        for needle in ("`kept_human`", "`dry_run` true", "applied as `keep_human`"):
+            with self.subTest(verdicts=needle):
+                self.assertIn(needle, verdicts)
+        context = _text(REFERENCES / "context.md")
+        self.assertIn("refuse to write (exit 2) while it is true", context)
+        self.assertIn("holds `notion_write`", context)
+
+    def test_assign_writes_its_dry_run_before_it_can_write(self):
+        skill = _section(_text(SKILL), "9. Assignment")
+        self.assertIn("Write the current `dry_run` in `context.json` first", skill)
+        self.assertIn("refuses to write while the file holds `true`", skill)
+        assign = _text(REFERENCES / "assign.md")
+        self.assertIn("Write the current `dry_run` in `context.json`", assign)
+        self.assertLess(assign.index("Write the current `dry_run`"), assign.index(_ASSIGN_QUESTION))
 
     def test_toolbox_1_2_gate_is_documented(self):
         diagnostic = _text(REFERENCES / "diagnostic.md")
@@ -693,15 +737,17 @@ class SkillTest(unittest.TestCase):
         step4 = recette.split("\n4. ")[1].split("\n5. ")[0]
         self.assertIn("keep only the candidates whose reasons include `lead`", step4)
 
-    def test_rerun_and_recette_never_replace_human_statuses_unasked(self):
+    def test_no_run_replaces_human_statuses_unasked(self):
         plan = _section(_text(SKILL), "7. Plan and confirmation")
         step1 = plan.split("\n1. ")[1].split("\n2. ")[0]
         for needle in (
-            "In a rerun or a recette",
+            "Whenever `notion_write` is `all` (audit, rerun or recette)",
+            "in interactive mode, after that list, ask once",
             "« <n> statuts posés par un humain seront remplacés (liste ci-dessus). Continuer ? »",
             "« Continuer »", "« Sans toucher aux statuts posés par un humain »", "« Annuler »",
-            "`keep_human`", "`--skip-human-overrides`", "`--recette <NN>`",
-            "never writes a status set by a human",
+            "`keep_human`",
+            "In autonomous mode no run ever writes a status set by a human",
+            "`kept_human`",
             "« Statut humain conservé »",
         ):
             with self.subTest(needle=needle):
@@ -733,7 +779,8 @@ class SkillTest(unittest.TestCase):
                         end.index('cqa_plan.py" rerun-candidates "$RUN" --refs'))
         self.assertIn('cqa_plan.py" rerun-close "$RUN" <NN> --rows CQ-3,CQ-12', end)
         self.assertIn("« aucun fichier de la relance NN »", end)
-        self.assertIn("in a recette, pass `--recette <recette.rerun of notion/plan.json>`", end)
+        self.assertIn("a recette plan keeps its recette", end)
+        self.assertNotIn("--recette", end)
 
     def test_held_lots_of_a_rerun_join_the_rerun_of_the_end_block(self):
         end = self._end_block()
@@ -971,14 +1018,13 @@ class SkillTest(unittest.TestCase):
             "`all`",
             "`keep_human`",
             "`none`",
-            "`--skip-human-overrides`",
-            "`--recette <NN>`",
+            'cqa_plan.py" plan "$RUN" --skip-human-overrides',
             "`mode` is `autonome`",
             "no presentation",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, section)
-        self.assertIn("Never ask when `notion_write` is set", section)
+        self.assertIn("Never ask the write question when `notion_write` is set", section)
         self.assertIn("current invocation", section)
         self.assertIn("never counts", section)
 
