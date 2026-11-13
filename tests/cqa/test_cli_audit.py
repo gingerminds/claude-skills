@@ -15,7 +15,17 @@ from unittest import mock
 from urllib.parse import urljoin, urlsplit
 
 import cqa_plan as cqa_plan_module
-from cqa import context_docs, docs_link, docs_read, docs_verdicts, fix_state, probes, report, rerun
+from cqa import (
+    context_docs,
+    docs_link,
+    docs_read,
+    docs_verdicts,
+    fix_state,
+    probes,
+    report,
+    rerun,
+    scenarios,
+)
 from cqa.checklist import STATUS_STANDBY
 from cqa.notion_write import apply_plan, text_digest, validate_plan
 from cqa.plan import operation_key
@@ -26,6 +36,7 @@ from tests.cqa.test_docs_link import fiche_text, make_row
 from tests.cqa.test_docs_read import inline, make_xlsx
 from tests.cqa.test_findings import (
     APP_PATH,
+    make_scenario,
     PHP_ALLOWED_PATHS,
     PHP_ALLOWED_UNDER_APP,
     PHP_FILE_ERROR,
@@ -915,6 +926,137 @@ class FollowupProbesTest(AuditCase):
         self.assertIn("lots.json", err)
 
 
+class FollowupScenariosTest(AuditCase):
+    def ask(self, run_dir, lot, ref, *needs):
+        self.edit_finding(run_dir, lot, ref, needs_scenarios=list(needs))
+
+    def test_scenarios_followup_always_writes_its_file(self):
+        run_dir = self.make_run()
+        result = self.run_json(["scenarios", run_dir, "--followup"])
+        self.assertEqual(
+            self.read(run_dir, "scenarios-followup.json"),
+            {"base_url": BASE, "scenarios": [], "lots": [], "discarded": []},
+        )
+        self.assertEqual(
+            result,
+            {
+                "file": "scenarios-followup.json",
+                "base_url": BASE,
+                "count": 0,
+                "lots": [],
+                "discarded": [],
+            },
+        )
+        self.assertFalse((run_dir / "probes-followup.json").exists())
+
+    def test_scenarios_followup_writes_the_contract_file_and_reports_the_rest(self):
+        run_dir = self.make_run()
+        far = make_scenario(id="far", url="https://other.example.net/p")
+        self.ask(run_dir, "code-securite", 103, make_scenario(), make_scenario(id="menu-2"), far)
+        result = self.run_json(["scenarios", run_dir, "--followup"])
+        document = self.read(run_dir, "scenarios-followup.json")
+        self.assertEqual(set(document), {"base_url", "scenarios", "lots", "discarded"})
+        self.assertEqual(
+            document["scenarios"],
+            [
+                make_scenario(id="code-securite:menu-burger"),
+                make_scenario(id="code-securite:menu-2"),
+            ],
+        )
+        self.assertEqual(document["lots"], ["code-securite"])
+        self.assertEqual(result["file"], "scenarios-followup.json")
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["lots"], ["code-securite"])
+        self.assertEqual(result["discarded"], document["discarded"])
+        self.assertEqual(
+            [(item["lot"], item["ref"], item["id"], item["url"]) for item in result["discarded"]],
+            [("code-securite", 103, "far", "https://other.example.net/p")],
+        )
+        self.assertFalse((run_dir / "probes-followup.json").exists())
+        self.assertFalse((run_dir / "probes.json").exists())
+
+    def test_scenarios_followup_discards_action_urls_with_their_reason(self):
+        run_dir = self.make_run()
+        self.ask(
+            run_dir,
+            "code-securite",
+            103,
+            make_scenario(id="out", url=f"{BASE}/user/logout"),
+            make_scenario(id="trash", url=f"{BASE}/?action=trash"),
+        )
+        result = self.run_json(["scenarios", run_dir, "--followup"])
+        self.assertEqual((result["count"], result["lots"]), (0, []))
+        self.assertEqual(self.read(run_dir, "scenarios-followup.json")["scenarios"], [])
+        self.assertEqual(
+            [(item["id"], item["url"], item["reason"]) for item in result["discarded"]],
+            [
+                ("out", f"{BASE}/user/logout", "URL d'action refusée"),
+                ("trash", f"{BASE}/?action=trash", "URL d'action refusée"),
+            ],
+        )
+
+    def test_scenarios_followup_ignores_invalid_findings(self):
+        run_dir = self.make_run()
+        self.ask(run_dir, "code-securite", 104, make_scenario(id="hidden"))
+        result = self.run_json(["scenarios", run_dir, "--followup"])
+        self.assertEqual((result["count"], result["lots"], result["discarded"]), (0, [], []))
+
+    def test_scenarios_followup_target_is_the_prod_on_a_prod_phase(self):
+        run_dir = self.make_run()
+
+        def change(context):
+            context["phase_filter"] = "MEL J0"
+            context["target"].update(prod_url="https://www.example.org", prod_live=True)
+
+        self.edit(run_dir, "context.json", change)
+        self.ask(run_dir, "code-securite", 103, make_scenario(url="https://www.example.org/a"))
+        self.run_json(["scenarios", run_dir, "--followup"])
+        document = self.read(run_dir, "scenarios-followup.json")
+        self.assertEqual(document["base_url"], "https://www.example.org")
+        self.assertEqual([item["url"] for item in document["scenarios"]], ["https://www.example.org/a"])
+
+    def test_scenarios_requires_followup(self):
+        run_dir = self.make_run()
+        code, out, err = self.run_main(["scenarios", run_dir])
+        self.assertEqual(code, 2)
+        self.assertIn("--followup", err)
+        self.assertFalse((run_dir / "scenarios-followup.json").exists())
+
+    def test_scenarios_needs_lots_json(self):
+        run_dir = self.make_run()
+        (run_dir / "lots.json").unlink()
+        code, out, err = self.run_main(["scenarios", run_dir, "--followup"])
+        self.assertEqual(code, 2)
+        self.assertIn("lots.json", err)
+        self.assertFalse((run_dir / "scenarios-followup.json").exists())
+
+    def test_scenarios_refuses_a_target_with_a_query(self):
+        run_dir = self.make_run()
+        self.edit(
+            run_dir,
+            "context.json",
+            lambda context: context["target"].update(preprod_url=f"{BASE}/?token=abc"),
+        )
+        code, out, err = self.run_main(["scenarios", run_dir, "--followup"])
+        self.assertEqual(code, 2)
+        self.assertNotIn("abc", err)
+
+    def test_scenarios_refuses_an_unusable_context(self):
+        run_dir = self.make_run()
+        self.edit(run_dir, "context.json", lambda context: context.pop("lead"))
+        code, out, err = self.run_main(["scenarios", run_dir, "--followup"])
+        self.assertEqual(code, 6)
+        self.assertFalse((run_dir / "scenarios-followup.json").exists())
+
+    def test_scenarios_followup_keeps_a_previous_file_out_of_the_collection(self):
+        run_dir = self.make_run()
+        self.ask(run_dir, "code-securite", 103, make_scenario())
+        self.run_json(["scenarios", run_dir, "--followup"])
+        self.ask(run_dir, "code-securite", 103)
+        self.run_json(["scenarios", run_dir, "--followup"])
+        self.assertEqual(self.read(run_dir, "scenarios-followup.json")["scenarios"], [])
+
+
 class ValidateTest(AuditCase):
     def test_valid_lot(self):
         run_dir = self.make_run()
@@ -1379,6 +1521,102 @@ class PlanTest(AuditCase):
         summary = self.plan(run_dir)
         self.assertNotIn(102, summary["unknown"])
         self.assertEqual(self.ops(run_dir)[(102, "status")]["after"], "Ok / Recetté")
+
+    def waiting_for_scenarios(self, run_dir, **changes):
+        """102 asks for a scenario and nothing else asks for anything, probes included."""
+        self.edit_finding(run_dir, "code-performance", 101, needs_probes=[])
+        changes.setdefault("needs_scenarios", [make_scenario()])
+        self.edit_finding(run_dir, "code-performance", 102, **changes)
+        self.edit_finding(run_dir, "code-securite", 103, needs_probes=[])
+
+    def test_collect_findings_counts_a_lot_waiting_for_scenarios_as_followup_done(self):
+        run_dir = self.make_run()
+        self.waiting_for_scenarios(run_dir)
+        self.run_json(["probes", run_dir, "--followup"])
+        self.run_json(["scenarios", run_dir, "--followup"])
+        self.assertFalse((run_dir / "findings" / "code-performance-followup.json").exists())
+        summary = self.plan(run_dir)
+        self.assertIn(102, summary["unknown"])
+        self.assertNotIn((102, "status"), self.ops(run_dir))
+        self.assertEqual(self.ops(run_dir)[(102, "comment")]["verdict"], "unknown")
+
+    def test_a_lot_that_waited_only_for_scenarios_is_capped_when_only_the_probes_succeeded(self):
+        run_dir = self.make_run()
+        self.waiting_for_scenarios(
+            run_dir, verdict="ok_human", human_check="Tester la navigation au clavier en paysage."
+        )
+        self.run_json(["probes", run_dir, "--followup"])
+        self.run_json(["scenarios", run_dir, "--followup"])
+        self.plan(run_dir)
+        self.assertEqual(self.ops(run_dir)[(102, "comment")]["verdict"], "unknown")
+
+    def test_a_lot_waiting_for_scenarios_is_not_capped_before_the_followup_was_collected(self):
+        run_dir = self.make_run()
+        self.waiting_for_scenarios(run_dir)
+        self.run_json(["probes", run_dir, "--followup"])
+        self.assertNotIn(102, self.plan(run_dir)["unknown"])
+        self.assertEqual(self.ops(run_dir)[(102, "status")]["after"], "Ok / Recetté")
+
+    def test_the_scenarios_file_alone_does_not_cap_a_lot_that_asked_for_probes_only(self):
+        run_dir = self.make_run()
+        self.discard_everything_but_one_ok_probe(run_dir)
+        self.run_json(["scenarios", run_dir, "--followup"])
+        self.assertNotIn(102, self.plan(run_dir)["unknown"])
+        self.assertEqual(self.ops(run_dir)[(102, "status")]["after"], "Ok / Recetté")
+
+    def test_the_probes_file_alone_does_not_cap_a_lot_that_asked_for_scenarios_only(self):
+        run_dir = self.make_run()
+        self.waiting_for_scenarios(run_dir)
+        self.run_json(["probes", run_dir, "--followup"])
+        self.assertFalse((run_dir / "scenarios-followup.json").exists())
+        self.assertNotIn(102, self.plan(run_dir)["unknown"])
+        self.assertEqual(self.ops(run_dir)[(102, "status")]["after"], "Ok / Recetté")
+
+    def test_a_relaunched_lot_that_no_longer_asks_is_not_capped(self):
+        run_dir = self.make_run()
+        self.waiting_for_scenarios(run_dir)
+        self.run_json(["scenarios", run_dir, "--followup"])
+        followup = self.read(run_dir, "findings/code-performance.json")
+        followup["findings"][1].pop("needs_scenarios")
+        self.write(run_dir, "findings/code-performance-followup.json", followup)
+        self.assertNotIn(102, self.plan(run_dir)["unknown"])
+        self.assertEqual(self.ops(run_dir)[(102, "status")]["after"], "Ok / Recetté")
+
+    def test_a_relaunched_lot_that_still_asks_stays_capped(self):
+        run_dir = self.make_run()
+        self.waiting_for_scenarios(run_dir)
+        self.run_json(["scenarios", run_dir, "--followup"])
+        followup = self.read(run_dir, "findings/code-performance.json")
+        self.write(run_dir, "findings/code-performance-followup.json", followup)
+        self.assertIn(102, self.plan(run_dir)["unknown"])
+
+    def test_probe_only_lots_are_unchanged(self):
+        run_dir = self.make_run()
+        self.discard_everything_but_one_ok_probe(run_dir)
+        self.run_json(["probes", run_dir, "--followup"])
+        self.run_json(["scenarios", run_dir, "--followup"])
+        summary = self.plan(run_dir)
+        self.assertIn(102, summary["unknown"])
+        self.assertNotIn((102, "status"), self.ops(run_dir))
+
+    def test_the_cap_of_the_scenarios_covers_only_the_lots_that_asked(self):
+        run_dir = self.make_run()
+        self.waiting_for_scenarios(run_dir)
+        self.edit_finding(run_dir, "code-securite", 103, verdict="ok", todo=None)
+        self.run_json(["scenarios", run_dir, "--followup"])
+        summary = self.plan(run_dir)
+        self.assertNotIn(103, summary["unknown"])
+        self.assertEqual(self.ops(run_dir)[(103, "status")]["after"], "Ok / Recetté")
+
+    def test_collect_findings_reports_the_refs_of_the_lots_that_went_through_a_followup(self):
+        run_dir = self.make_run()
+        self.waiting_for_scenarios(run_dir)
+        context = cqa_plan_module._checked_context(run_dir)
+        lots = self.read(run_dir, "lots.json")["lots"]
+        self.assertEqual(cqa_plan_module._collect_findings(run_dir, context, lots)[1], set())
+        self.run_json(["scenarios", run_dir, "--followup"])
+        self.assertEqual(cqa_plan_module._collect_findings(run_dir, context, lots)[1], {101, 102})
+        self.assertEqual(scenarios.pending_lots(run_dir, lots), ["code-performance"])
 
     def test_followup_findings_replace_the_first_round(self):
         run_dir = self.make_run()
@@ -5065,6 +5303,7 @@ class RegistrationTest(AuditCase):
             "lots",
             "categories",
             "probes",
+            "scenarios",
             "validate",
             "plan",
             "manifest",
