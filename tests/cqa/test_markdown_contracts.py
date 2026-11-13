@@ -741,8 +741,8 @@ class SkillTest(unittest.TestCase):
         for needle in ("Held lots of an audit (no `findings/<lot_id>.json` yet)",
                        "Held lots of a rerun or a recette", "never as first-round lots",
                        "join the rerun below", "`--refs`",
-                       "only the held lots among the union of the `lots` of the follow-ups "
-                       "that succeeded"):
+                       "only the held lots among the `lots` of the probes follow-up if it "
+                       "succeeded"):
             with self.subTest(login=needle):
                 self.assertIn(needle, login)
         skill = _text(SKILL)
@@ -3775,8 +3775,22 @@ class MobileInstructionsTest(unittest.TestCase):
         ):
             with self.subTest(lots=needle):
                 self.assertIn(needle, section6)
+
+    def test_the_second_pass_of_the_held_lots_runs_the_probes_follow_up_only(self):
+        # `scenarios --followup` would collect and replay every lot again, replace
+        # tools/mobile-followup and, past 20 requests, take the slots of the lots already followed.
         login = self._end_block()
-        self.assertIn(UNION_SENTENCE, login)
+        login = login[login.index("- `login`:") : login.index("- `ssh_refused`:")]
+        for needle in (
+            "run only the probes follow-up of section 6, step 8", "`probes --followup`",
+            "never the scenario follow-up", "`scenarios --followup`", "`run mobile --followup`",
+            "`tools/mobile-followup`", "past 20 requests", "its `needs_session` is true",
+            "the toolbox has no session",
+            "only the held lots among the `lots` of the probes follow-up if it succeeded",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, login)
+        self.assertNotIn(UNION_SENTENCE, login)
 
     def _end_block(self):
         writing = _section(_text(SKILL), "8. Writing and synthesis")
@@ -3841,6 +3855,48 @@ class MobileInstructionsTest(unittest.TestCase):
         self.assertIn('run "$RUN" mobile --followup', step7)
         lots = _text(REFERENCES / "lots.md")
         self.assertIn("a rerun or a recette", _section_of(lots, "## 6. Follow-ups"))
+
+    def test_the_agents_aim_a_tap_or_a_select_at_a_control_that_reads_only(self):
+        # The tool lets the GET requests of the page through: a button that calls fetch() on a
+        # tap acts on the preprod, so the choice of the target is the only barrier.
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            rule = next(
+                line for line in text.splitlines()
+                if line.startswith("- Never aim a scenario step (`tap`, `select`) at a control that acts")
+            )
+            for needle in (
+                "add to cart", "delete", "like", "subscribe", "log in", "log out", "validate",
+                "any button whose label or behaviour does something", "even a `button` outside a form",
+                "lets the GET requests of the page through", "`fetch('/cart/add/12')`",
+                "a menu, the trigger of an accordion or of a panel (`aria-expanded`), a tab, "
+                "a list of choices without effect",
+            ):
+                with self.subTest(agent=path.name, needle=needle):
+                    self.assertIn(needle, rule)
+            bullet = next(
+                line for line in text.splitlines()
+                if line.lstrip().startswith("- Scenario (`needs_scenarios`)")
+            )
+            for needle in (
+                "only at a control that merely reads", "never at one that acts",
+                "lets the GET requests of the page through", "see the hard rule above",
+                "`needs_session` is true, ask for no scenario",
+            ):
+                with self.subTest(agent=path.name, bullet=needle):
+                    self.assertIn(needle, bullet)
+            self.assertIn("check that its `id` field is `<lot>:<id>`", text)
+        section = _section(_text(VERDICTS_MD), NEEDS_SCENARIOS)
+        for needle in (
+            "only at a control that merely reads", "Never at a control that acts",
+            "even a `button` outside a form", "it lets the GET requests of the page through",
+            "`fetch('/cart/add/12')`", "`?add-to-cart=12`", "only your choice of the target",
+            "`needs_session` is true, ask for no scenario",
+            "with no line under your `<lot>:<id>` was not played",
+        ):
+            with self.subTest(verdicts=needle):
+                self.assertIn(needle, section)
+        self.assertNotIn("Nothing types text, sends a form, follows a link or runs JavaScript.", section)
 
     def test_the_hard_rules_forbid_a_state_changing_url_in_a_scenario(self):
         text = _text(BROWSER)
