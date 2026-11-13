@@ -3586,6 +3586,7 @@ MOBILE_RULES = (
 MOBILE_NOTES = (
     "no-trigger", "background-not-inert", "escape-did-not-close", "consent-banner-blocked",
     "navigation-blocked", "method-blocked", "consent-host-blocked", "step-failed",
+    "focus-in-iframe",
 )
 UNION_SENTENCE = "union of the `lots` of the follow-ups that succeeded"
 NEEDS_SCENARIOS = "Missing scenario results: `needs_scenarios`"
@@ -3897,6 +3898,66 @@ class MobileInstructionsTest(unittest.TestCase):
             with self.subTest(verdicts=needle):
                 self.assertIn(needle, section)
         self.assertNotIn("Nothing types text, sends a form, follows a link or runs JavaScript.", section)
+
+    def test_the_documents_follow_the_toolbox_fixes(self):
+        # Toolbox 1.4.0 after its fix round: budget 420 s checked before every scenario and every
+        # step, focus-in-iframe, download links refused, every navigation aborted, 30x limit.
+        lots = _text(REFERENCES / "lots.md")
+        launch = lots[lots.index("Otherwise, when the toolbox is ready, in the foreground") :].splitlines()[0]
+        for needle in (
+            "420 by default", "before every scenario and every step",
+            "the remaining steps of a scenario in progress", "never interrupts a step already started",
+        ):
+            with self.subTest(lots=needle):
+                self.assertIn(needle, launch)
+        after = lots[lots.index("- Exit 0 with a `result.json` whose `status` `ok`") :].splitlines()[0]
+        self.assertIn("non exécutée (budget de durée atteint)", after)
+        self.assertNotIn("480", launch)
+        for text in (_text(ROOT / "README.md"), lots, _text(VERDICTS_MD), _text(SKILL),
+                     _text(AUDITOR), _text(BROWSER)):
+            self.assertNotIn("480 s", text)
+            self.assertNotIn("480 by default", text)
+        readme = _text(ROOT / "README.md")
+        self.assertIn("420 s par défaut", readme)
+        self.assertIn("aucune navigation après le chargement (iframes compris)", readme)
+        verdicts = _section(_text(VERDICTS_MD), NEEDS_SCENARIOS)
+        for needle in (
+            "aborts every navigation after the load, of the page or of an iframe",
+            "an iframe loaded afterwards stays empty", "non exécutée (budget de durée atteint)",
+            "a download link (`a[download]` or `area[download]`", "« refusé : lien de téléchargement »",
+        ):
+            with self.subTest(verdicts=needle):
+                self.assertIn(needle, verdicts)
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            notes = next(
+                line for line in text.splitlines()
+                if line.lstrip().startswith("- What needs your judgment is in `notes`")
+            )
+            limits = next(
+                line for line in text.splitlines() if line.lstrip().startswith("- Limits, to say in")
+            )
+            scenario = next(
+                line for line in text.splitlines()
+                if line.lstrip().startswith("- Scenario (`needs_scenarios`)")
+            )
+            with self.subTest(agent=path.name):
+                for needle in (
+                    "`focus-in-iframe`", "`selector`", "`presses`", "`left`",
+                    "the tool does not follow the focus inside an iframe",
+                    "`REFUSED_DOWNLOAD`",
+                ):
+                    self.assertIn(needle, notes)
+                for needle in (
+                    "a redirection (30x) of a resource of the site to a consent host",
+                    "the consent host receives the request", "neither `input` nor `textarea`",
+                ):
+                    self.assertIn(needle, limits)
+                for needle in (
+                    "a download link", "`a[download]`", "« refusé : lien de téléchargement »",
+                    "never a `tap` on",
+                ):
+                    self.assertIn(needle, scenario)
 
     def test_the_hard_rules_forbid_a_state_changing_url_in_a_scenario(self):
         text = _text(BROWSER)

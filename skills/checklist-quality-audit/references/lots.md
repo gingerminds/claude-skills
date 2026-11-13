@@ -174,7 +174,7 @@ python3 "$S/cqa_plan.py" scenarios "$RUN" --followup
 - `count` 0: no scenario follow-up, nothing to run.
 - The command never fails on the content of a finding. Exit other than 0 (`context.json` or `lots.json` missing or unreadable, the same cause as for the probes): no scenario follow-up; go on with the probes follow-up and tell the lead.
 
-Otherwise, when the toolbox is ready, in the foreground and with the Bash `timeout` at its maximum (600000 ms: the tool starts no new scenario once `GM_AUDIT_MOBILE_BUDGET_S` seconds have passed, 480 by default, and never interrupts a scenario already started), with the credentials inline only when the session holds the Basic Auth credentials:
+Otherwise, when the toolbox is ready, in the foreground and with the Bash `timeout` at its maximum (600000 ms: the tool compares the time spent with `GM_AUDIT_MOBILE_BUDGET_S` seconds, 420 by default, before every scenario and every step; once it is reached it starts no new scenario, the remaining steps of a scenario in progress are not played, and it never interrupts a step already started, so a run can overrun the budget by that one step), with the credentials inline only when the session holds the Basic Auth credentials:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -183,7 +183,7 @@ GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' bash "$S/
 ```
 
 - The tool is called `mobile-followup`: it writes in `tools/mobile-followup/` only (`result.json`, `summary.json` with one line per step, `raw/<lot>-<id>-<profile>.json`, captures), never in `tools/mobile`.
-- Exit 0 with a `result.json` whose `status` `ok`: this follow-up succeeded and its `lots` are relaunched below (a budget reached is still `ok`: the scenarios not played say « non exécuté (budget de durée atteint) »).
+- Exit 0 with a `result.json` whose `status` `ok`: this follow-up succeeded and its `lots` are relaunched below (a budget reached is still `ok`: the scenarios not played say « non exécuté (budget de durée atteint) » and the remaining steps of a scenario in progress, `skipped`, say « non exécutée (budget de durée atteint) »).
 - Exit 0 with `skipped` (no valid scenario, a toolbox older than 1.4.0, a prod run: its `reason` says which), exit 1 or 3 (`failed`), exit 2 (`scenarios-followup.json` missing): this follow-up did not succeed. Tell the lead its reason.
 
 ### Relaunch, once
