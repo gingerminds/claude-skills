@@ -10,7 +10,7 @@ The contract is the JSON Schema `skills/checklist-quality-audit/schemas/finding.
 - Shape: `{"lot": "<lot id>", "findings": [<finding>, ...]}`, valid JSON in UTF-8.
 - Always one finding for every row of the lot: every ref of the lot entry in `lots.json`, no other ref, never the same ref twice. A ref outside the lot or given twice is rejected, and the row counts as not evaluated.
 - The follow-up file is a complete lot document too, with one finding for every row of the lot. Copy unchanged the first-round finding of every row that asked for no probe.
-- Every finding has the nine keys below, none missing, no other key.
+- Every finding has the nine keys below, none missing, and no other key than the optional `needs_scenarios` (and the keys the agents' own instructions name).
 
 | Key | Type | Rule |
 |---|---|---|
@@ -23,6 +23,7 @@ The contract is the JSON Schema `skills/checklist-quality-audit/schemas/finding.
 | `human_check` | text of 400 characters at most, or `null` | What a human must validate, and where. `null` when nothing. |
 | `divergence` | text of 400 characters at most, or `null` | Difference between the code and the preprod. See "Code and preprod". |
 | `needs_probes` | list of `{"url", "method"}` | HTTP answers you still need. `[]` when none. See "Missing HTTP answers". |
+| `needs_scenarios` | optional list of `{"id", "url", "profile", "steps"}` | Interaction scenarios you still need on a touch screen of 320 px. Absent or `[]` when none. See "Missing scenario results: `needs_scenarios`". |
 
 ## Texts
 
@@ -233,6 +234,36 @@ A row can concern several repos (Laravel back-office and Nuxt front, for example
 {"needs_probes": [{"url": "https://preprod.example.org/.well-known/security.txt", "method": "GET"}, {"url": "https://preprod.example.org/sitemap.xml", "method": "HEAD"}]}
 ```
 
+## Missing scenario results: `needs_scenarios`
+
+Use it when the verdict of a row depends on what a menu, a panel or the focus does on a small touch screen (320 px wide, landscape) and `tools/mobile` does not show it: a component without ARIA (a clickable `div` menu, which the sweep does not find as a trigger), a particular panel, the focus order inside a menu. It is optional: absent, or `[]`, when nothing is needed.
+
+- A scenario is data, never code. It is checked against a closed list and caps, and a finding that breaks a rule is invalid (the lot is relaunched once with the errors, `references/lots.md`, section 5).
+- Ask for a scenario only when you already know the selectors: read from the DOM in Chrome (browser lot), or from the templates of the repos (auditor). Never to look for them and never a guess: a selector that matches nothing answers « élément introuvable », which proves nothing. A selector is a CSS selector resolved by `document.querySelector`: `xpath=`, `text=` and `>>` are not CSS and answer « sélecteur invalide ».
+- The page is loaded by a GET before any guard acts: never a URL that changes a state (`logout`, `/user/logout`, delete, trash, publish, cron, cache clearing, a token, a nonce, `action=trash`), never a PHP file outside the public entry points of the application (the rule of the agents' hard rules). The tool refuses such a URL with its reason, but its list is closed: the rule is yours first.
+- Caps: 3 scenarios per finding, 15 steps per scenario, selectors and values of 200 characters at most, without control characters. The run plays 20 scenarios at most: the others are dropped with their reason, and the findings that still wait for them stay capped at `unknown`.
+- A scenario has these four keys and no other:
+  - `id`: `^[a-z0-9-]{1,40}$`, chosen by you, unique in the lot (a second finding of the lot that takes it invalidates both), never with a lot prefix: the collection writes `<lot>:<id>`.
+  - `url`: absolute, on the origin of the target, 2000 characters at most. It need not be a key page.
+  - `profile`: `portrait` (320 x 640) or `paysage` (640 x 320), a touch screen at scale 2.
+  - `steps`: 1 to 15 steps, played in order on the page loaded afresh. A step that fails stops the scenario.
+- A step has a `type` among these six and only the keys listed:
+  - `tab`: `count` (1 to 30, 1 by default) and `shift` (`false` by default); presses Tab (or Shift+Tab) and notes the focus at each press.
+  - `press`: `key`, one of `Escape`, `Tab`, `Shift+Tab`, `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Home`, `End` (never Enter nor Space).
+  - `tap`: `selector`; taps the element.
+  - `select`: `selector` and `value`; picks an option of a list, the form is never sent.
+  - `state`: `selector`; reads the attributes, role, size and focus of an element.
+  - `capture`: no key; takes a picture of the page.
+- Nothing types text, sends a form, follows a link or runs JavaScript. The tool refuses a submit control and a consent banner, aborts every navigation after the load and every request that is not a GET, a HEAD or an OPTIONS.
+- A finding that lists scenarios is never `ok`, `ok_human` or `na`: give `unknown`, or `ko` or `partial` when your evidence already establishes it.
+- The orchestrator plays the scenarios once, in an emulation of Chromium (no Safari iOS, a tap and no other gesture, no virtual keyboard, a site seen without its consent banner: say it in `summary` or `human_check` when it matters). The answers land in `tools/mobile-followup/`, one line per step, found by `<lot>:<id>` (your lot id, a colon, the `id` you chose). Then it relaunches the lot once with `Follow-up: yes` (that one relaunch also serves the probes of the lot).
+- Follow-up round: judge again with the steps of each scenario and cite them as `{"type": "tool", "tool": "mobile-followup", "ref": "summary.json#<lot>:<id>"}`. Remove a scenario whose steps ran (one that stopped on a `failed` step answers up to that step: judge with what ran). Keep a scenario that proved nothing: not played (a refusal, a page not opened, a budget reached), or whose steps are `refused`, `selector-invalid` or `not-found`. A finding that still lists scenarios after the follow-up is capped at `unknown` (`ko` and `partial` stay), like one that still lists probes.
+- Never ask for a scenario in a rerun or a recette: a rerun has no follow-up.
+
+```json
+{"needs_scenarios": [{"id": "menu-burger", "url": "https://preprod.example.org/", "profile": "portrait", "steps": [{"type": "tap", "selector": "#menu-toggle"}, {"type": "state", "selector": "#menu"}, {"type": "tab", "count": 3}, {"type": "press", "key": "Escape"}, {"type": "capture"}]}]}
+```
+
 ## Guardrails of the merge script
 
 `cqa_plan.py plan` applies these rules, in this order, each on the verdict left by the previous one. Write the right verdict yourself: a lowered verdict is a finding the lead has to correct.
@@ -240,7 +271,7 @@ A row can concern several repos (Laravel back-office and Nuxt front, for example
 1. `ok` without evidence, or with a confidence other than `high`, becomes `ok_human`.
 2. `ok` on a row whose tools include "Intervention humaine" becomes `ok_human`.
 3. A filled `divergence` turns `ok` and `ok_human` into `partial`.
-4. `needs_probes` still filled after the follow-up turns `ok_human`, `ok` and `na` into `unknown`; `ko` and `partial` stay.
+4. `needs_probes` or `needs_scenarios` still filled after the follow-up turns `ok_human`, `ok` and `na` into `unknown`; `ko` and `partial` stay.
 5. `ok` with a filled `todo` or `human_check` becomes `ok_human`.
 6. `na` with a confidence other than `high` becomes `unknown`.
 

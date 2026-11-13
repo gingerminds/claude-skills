@@ -14,7 +14,7 @@ from cqa import (
     categories, context_docs, docs_link, docs_verdicts, fix_guard, fix_mr, fix_names, fix_state,
     fix_summary, ssh_ro,
 )
-from cqa.lots import DOCUMENT_LOT_ID
+from cqa.lots import DOCUMENT_LOT_ID, MOBILE_TERMS
 from cqa.findings import (
     MAX_SCENARIOS, MAX_SELECTOR, MAX_STEPS, SCENARIO_PRESS_KEYS, SCENARIO_PROFILES,
     SCENARIO_STEP_TYPES, VERDICTS, apply_guardrails, validate_document,
@@ -22,6 +22,7 @@ from cqa.findings import (
 from cqa.plan import STATUS_FOR_VERDICT
 from tests.cqa.test_context_docs import row
 from tests.cqa.test_docs_read import make_xlsx
+from tests.cqa.test_findings import make_finding
 
 ROOT = Path(__file__).resolve().parents[2]
 AUDITOR = ROOT / "agents" / "cqa-auditor.md"
@@ -740,7 +741,8 @@ class SkillTest(unittest.TestCase):
         for needle in ("Held lots of an audit (no `findings/<lot_id>.json` yet)",
                        "Held lots of a rerun or a recette", "never as first-round lots",
                        "join the rerun below", "`--refs`",
-                       "only the held lots among the `lots` that `probes --followup` lists"):
+                       "only the held lots among the union of the `lots` of the follow-ups "
+                       "that succeeded"):
             with self.subTest(login=needle):
                 self.assertIn(needle, login)
         skill = _text(SKILL)
@@ -3576,6 +3578,285 @@ class LotCReadingTest(unittest.TestCase):
                 self.assertIn(needle, text)
         self.assertIn("only when `viewport` is missing, failed or skipped", text)
         self.assertIn("Look at the capture", text)
+
+MOBILE_RULES = (
+    "horizontal-scroll", "overflowing-element", "viewport-meta-missing", "trigger-not-toggling",
+    "focus-lost", "focus-hidden", "mobile-unmeasured",
+)
+MOBILE_NOTES = (
+    "no-trigger", "background-not-inert", "escape-did-not-close", "consent-banner-blocked",
+    "navigation-blocked", "method-blocked", "consent-host-blocked", "step-failed",
+)
+UNION_SENTENCE = "union of the `lots` of the follow-ups that succeeded"
+NEEDS_SCENARIOS = "Missing scenario results: `needs_scenarios`"
+
+
+class MobileInstructionsTest(unittest.TestCase):
+    """The mobile emulation tool of the toolbox 1.4: gate, routing, agents, follow-up, rerun."""
+
+    def test_toolbox_1_4_gate_is_documented(self):
+        diagnostic = _text(REFERENCES / "diagnostic.md")
+        toolbox = _section(diagnostic, "6. Toolbox (tools \"Audit web\" and \"Crawler\")")
+        self.assertIn("`agence_1_4`", toolbox)
+        self.assertIn("antérieure à 1.4.0", toolbox)
+        self.assertIn("1.4.0 or later", toolbox)
+        self.assertIn('"agence_1_4"', toolbox)
+        self.assertIn("`mobile`", toolbox)
+        lots = _text(REFERENCES / "lots.md")
+        self.assertGreaterEqual(lots.count("`mobile`"), 2)
+        self.assertGreaterEqual(lots.count("`mobile-followup`"), 1)
+        self.assertIn("older than 1.4.0, `mobile` is skipped", lots)
+        self.assertIn("run de prod", lots)
+        readme = _text(ROOT / "README.md")
+        self.assertIn("Boîte à outils 1.4", readme)
+        self.assertIn("`mobile`", readme)
+        self.assertIn("`mobile-followup`", readme)
+
+    def test_the_launcher_and_the_doctor_say_what_the_documents_say(self):
+        script = _text(TOOLBOX)
+        self.assertIn("agence_1_4", script)
+        self.assertIn("boîte à outils 1.4 requise : lancez cqa-toolbox.sh pull", script)
+        lots = _text(REFERENCES / "lots.md")
+        self.assertIn("boîte à outils 1.4 requise", lots)
+        self.assertIn('run "$RUN" mobile --followup', lots)
+
+    def test_lots_documents_the_routing_by_the_fiche(self):
+        lots = _text(REFERENCES / "lots.md")
+        for term in MOBILE_TERMS:
+            with self.subTest(term=term):
+                self.assertIn(f"`{term}`", lots)
+        for needle in (
+            "`MOBILE_TERMS`", "« Comment tester »", "`tooling_hint`", "without case and accent",
+            "word boundaries", "`Tab`", "`clavier`", "`focus`",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, lots)
+        skill = _section(_text(SKILL), "6. Audit")
+        step6 = skill[skill.index("\n6. Once the toolbox has finished") : skill.index("\n7. After each lot")]
+        for needle in ("« Comment tester »", "`tools/mobile`", "references/lots.md"):
+            with self.subTest(step6=needle):
+                self.assertIn(needle, step6)
+
+    def test_lots_lists_mobile_among_the_tools_of_the_toolbox(self):
+        lots = _text(REFERENCES / "lots.md")
+        launched = lots[lots.index("- It runs `http`") : lots.index("- The launcher reads")]
+        skipped = lots[lots.index("Do it for `http`") :].splitlines()[0]
+        for text in (launched, skipped):
+            self.assertIn("`viewport`, `mobile`, `nu`", text)
+
+    def test_agents_read_the_mobile_tool(self):
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            with self.subTest(agent=path.name):
+                for needle in (
+                    "`tools/mobile`", "`summary.json`", "`raw/`", "`tool_dates`", "Chromium",
+                    "Safari iOS", "missing, failed or skipped", "`needs_scenarios`",
+                    "ask for no scenario", "`viewport` first, then on `mobile`",
+                    '{"type": "tool", "tool": "mobile", "ref": "summary.json#', "`mobile`",
+                ):
+                    self.assertIn(needle, text)
+        self.assertEqual(_tools(AUDITOR), ["Read", "Grep", "Glob", "Bash", "Write"])
+        self.assertEqual(set(_tools(BROWSER)), {"Read", "Write", "ToolSearch"} | CHROME_TOOLS)
+        self.assertNotIn("Bash", _tools(BROWSER))
+
+    def test_the_browser_falls_back_on_the_current_rule_without_the_mobile_result(self):
+        text = _text(BROWSER)
+        rule = next(line for line in text.splitlines() if "`tools/mobile/result.json`" in line)
+        for needle in ("missing, failed or skipped", "`resize_window`", "`ok_human`", "`human_check`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, rule)
+        self.assertIn("only when `viewport` is missing, failed or skipped", text)
+        auditor = _text(AUDITOR)
+        rule = next(line for line in auditor.splitlines() if "`tools/mobile/result.json`" in line)
+        self.assertIn("missing, failed or skipped", rule)
+        self.assertIn("`unknown`", rule)
+
+    def test_agents_name_the_rules_and_the_notes_of_the_sweep(self):
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            for needle in (*MOBILE_RULES, *MOBILE_NOTES, "`portrait`", "`paysage`", "320 x 640",
+                           "640 x 320"):
+                with self.subTest(agent=path.name, needle=needle):
+                    self.assertIn(needle, text)
+
+    def test_agents_state_the_limits_of_the_emulation(self):
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            with self.subTest(agent=path.name):
+                for needle in (
+                    "emulation of Chromium", "no Safari iOS", "without ARIA",
+                    "without its consent banner", "`navigation-blocked`",
+                    "`consent-banner-blocked`", "never a defect of the site by themselves",
+                    "a missing finding is not a pass",
+                ):
+                    self.assertIn(needle, text)
+
+    def test_agents_ask_for_a_scenario_only_with_known_selectors(self):
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            with self.subTest(agent=path.name):
+                for needle in (
+                    "only when you already know the selectors",
+                    "Never ask for a scenario on a URL that changes a state",
+                    "`document.querySelector`", "never code",
+                    "3 scenarios per finding", "15 steps", "200 characters",
+                    "`^[a-z0-9-]{1,40}$`", "references/verdicts.md",
+                ):
+                    self.assertIn(needle, text)
+                for step in SCENARIO_STEP_TYPES:
+                    self.assertIn(f"`{step}`", text)
+        self.assertIn("read from the DOM in Chrome", _text(BROWSER))
+        self.assertIn("a selector that matches nothing", _text(AUDITOR))
+
+    def test_the_auditor_reads_the_mobile_tool_for_a_browser_row_without_chrome(self):
+        text = _text(AUDITOR)
+        table = next(line for line in text.splitlines() if line.startswith("| Audit web |"))
+        self.assertIn("`mobile`", table)
+        navigator = next(line for line in text.splitlines() if line.startswith("| Navigateur |"))
+        self.assertIn("`tools/mobile`", navigator)
+        self.assertIn("does not need Chrome", text)
+
+    def test_followup_reads_only_the_followups_it_asked(self):
+        for path in (AUDITOR, BROWSER):
+            text = _text(path)
+            follow = _section(text, "Follow-up")
+            with self.subTest(agent=path.name):
+                for needle in (
+                    "only if you listed probes", "only if you listed scenarios",
+                    "add `http-followup` to `tool_dates`",
+                    "add `mobile-followup` to `tool_dates`", "`tools/mobile-followup`",
+                    "`<lot>:<id>`", '"ref": "summary.json#<lot>:<id>"', "`needs_scenarios`",
+                    "refused", "not-found", "`raw/<lot>-<id>-<profile>.json`",
+                    "Ask for no new probe and no new scenario",
+                ):
+                    self.assertIn(needle, follow)
+                self.assertIn("`http-followup`", follow)
+
+    def test_the_agents_read_a_followup_whose_result_is_not_ok_as_no_answer(self):
+        for path in (AUDITOR, BROWSER):
+            follow = _section(_text(path), "Follow-up")
+            with self.subTest(agent=path.name):
+                self.assertIn("is missing, `failed` or `skipped`", follow)
+                self.assertIn("capped at `unknown`", follow)
+
+    def test_the_agents_use_a_followup_only_in_a_rerun_for_what_they_cited(self):
+        for path in (AUDITOR, BROWSER):
+            rerun = _section(_text(path), "Rerun")
+            with self.subTest(agent=path.name):
+                self.assertIn("ask for no scenario", rerun)
+                self.assertIn("`tools/mobile-followup`", rerun)
+
+    def test_orchestrator_relaunches_the_union_of_the_successful_followups(self):
+        skill = _text(SKILL)
+        audit = _section(skill, "6. Audit")
+        step8 = audit[audit.index("\n8. Follow-up"): audit.index("\nBefore each new wave")]
+        lots = _text(REFERENCES / "lots.md")
+        section6 = lots[lots.index("## 6. Follow-ups"):]
+        for label, text, plan_call in (
+            ("SKILL step 8", step8, 'cqa_plan.py scenarios "$RUN" --followup'),
+            ("lots.md section 6", section6, 'cqa_plan.py" scenarios "$RUN" --followup'),
+        ):
+            for needle in (
+                UNION_SENTENCE, plan_call, 'run "$RUN" mobile --followup',
+                "`scenarios-followup.json`", "`Follow-up: yes`", "once",
+            ):
+                with self.subTest(where=label, needle=needle):
+                    self.assertIn(needle, text)
+        for needle in (
+            "`count` 0", "always writes `scenarios-followup.json`", "`discarded`",
+            "URL d'action refusée", "plafond de 20 scénarios", "`GM_AUDIT_MOBILE_BUDGET_S`",
+            "600000", "foreground", "`status` `ok`", "`unknown`",
+            "the lots that waited only for the other follow-up are not relaunched",
+            "reads only the results that exist",
+        ):
+            with self.subTest(lots=needle):
+                self.assertIn(needle, section6)
+        login = self._end_block()
+        self.assertIn(UNION_SENTENCE, login)
+
+    def _end_block(self):
+        writing = _section(_text(SKILL), "8. Writing and synthesis")
+        return writing[writing.index("**5. Deferred") : writing.index("**6. Final scan**")]
+
+    def test_verdicts_documents_needs_scenarios(self):
+        text = _text(VERDICTS_MD)
+        section = _section(text, NEEDS_SCENARIOS)
+        for needle in (
+            "3 scenarios", "15 steps", "200 characters", "`^[a-z0-9-]{1,40}$`", "unique in the lot",
+            "never code", "never a URL that changes a state", "`<lot>:<id>`",
+            '"ref": "summary.json#<lot>:<id>"', "mobile-followup", "capped at `unknown`",
+            "Never ask for a scenario in a rerun", "a rerun has no follow-up",
+            "never a PHP file", "`portrait`", "`paysage`", "emulation of Chromium",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        for step in SCENARIO_STEP_TYPES:
+            with self.subTest(step=step):
+                self.assertIn(f"`{step}`", section)
+        for key in SCENARIO_PRESS_KEYS:
+            with self.subTest(key=key):
+                self.assertIn(f"`{key}`", section)
+        for number in (MAX_SCENARIOS, MAX_STEPS, MAX_SELECTOR):
+            self.assertIn(str(number), section)
+        self.assertRegex(text, r"(?m)^\| `needs_scenarios` \|")
+        self.assertIn("the optional `needs_scenarios`", text)
+        guardrail = text[text.index("4. `needs_probes`") :].splitlines()[0]
+        self.assertIn("`needs_scenarios`", guardrail)
+        self.assertIn("`ko` and `partial` stay", guardrail)
+
+    def test_the_example_scenario_request_is_valid(self):
+        section = _section(_text(VERDICTS_MD), NEEDS_SCENARIOS)
+        blocks = [json.loads(block) for block in _JSON_BLOCK.findall(section)]
+        requests = [block for block in blocks if "needs_scenarios" in block]
+        self.assertEqual(len(requests), 1)
+        item = make_finding(
+            verdict="unknown", confidence="medium", todo=None,
+            human_check="Vérifier le menu à 320 px de large.", **requests[0],
+        )
+        valid, errors = validate_document({"lot": "x", "findings": [item]}, {item["ref"]})
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 1)
+        for scenario in requests[0]["needs_scenarios"]:
+            self.assertIn(scenario["profile"], SCENARIO_PROFILES)
+        self.assertNotIn("verdict", requests[0])
+
+    def test_rerun_and_recette_offer_mobile_without_new_scenarios(self):
+        skill = _text(SKILL)
+        for heading in ("10. Rerun", "11. Recette"):
+            section = _section(skill, heading)
+            with self.subTest(section=heading):
+                for needle in (
+                    "`mobile`", "`mobile-followup`", "`scenarios-followup.json`",
+                    'run "$RUN" mobile --followup', "no new scenario",
+                ):
+                    self.assertIn(needle, section)
+        rerun = _section(skill, "10. Rerun")
+        step6 = rerun[rerun.index("\n6. Present") : rerun.index("\n7. Start")]
+        self.assertIn("mobile", step6)
+        step7 = rerun[rerun.index("\n7. Start") : rerun.index("\n8. Dispatch")]
+        self.assertIn('run "$RUN" mobile --followup', step7)
+        lots = _text(REFERENCES / "lots.md")
+        self.assertIn("a rerun or a recette", _section_of(lots, "## 6. Follow-ups"))
+
+    def test_the_hard_rules_forbid_a_state_changing_url_in_a_scenario(self):
+        text = _text(BROWSER)
+        for needle in ("`/user/logout`", "`action=trash`", "a token"):
+            self.assertIn(needle, text)
+        for path in (AUDITOR, BROWSER):
+            rule = next(
+                line for line in _text(path).splitlines()
+                if line.startswith("- Never ask for a scenario on a URL that changes a state")
+            )
+            for needle in ("before any guard acts", "`.php` rule", "`needs_scenarios`"):
+                with self.subTest(agent=path.name, needle=needle):
+                    self.assertIn(needle, rule)
+
+
+def _section_of(text: str, heading: str) -> str:
+    start = text.index(heading)
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end != -1 else len(text)]
+
 
 STALE = (
     "`tools/stylelint` and `tools/deps` describe the repos at `repos[].audited_sha`. "

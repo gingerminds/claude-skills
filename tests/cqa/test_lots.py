@@ -1339,6 +1339,8 @@ class HowToTestTest(FicheCase):
         ):
             with self.subTest(run_dir=label):
                 self.assertEqual(how_to_test(run_dir, make_row(1)), "")
+        self.write_fiche(7, fiche_text("x" * 9000))
+        self.assertEqual(how_to_test(self.run_dir, make_row(7)), "x" * 4000)
 
     def test_only_the_file_name_of_the_fiche_path_counts(self):
         self.write_fiche(1, fiche_text("A 320."))

@@ -136,7 +136,7 @@ S="${CLAUDE_SKILL_DIR}/../../scripts"
 bash "$S/cqa-toolbox.sh" doctor
 ```
 
-It prints `{"docker", "docker_version", "registry_login", "images": {"<image>": "<version>" or null}, "agence_crawl", "agence_1_2", "arch"}`. `agence_crawl` is true when the `agence` image is version 1.1.0 or later, `agence_1_2` when it is version 1.2.0 or later.
+It prints `{"docker", "docker_version", "registry_login", "images": {"<image>": "<version>" or null}, "agence_crawl", "agence_1_2", "agence_1_4", "arch"}`. `agence_crawl` is true when the `agence` image is version 1.1.0 or later, `agence_1_2` when it is version 1.2.0 or later, `agence_1_4` when it is version 1.4.0 or later.
 
 | Fact | Meaning | What the lead does |
 |---|---|---|
@@ -146,6 +146,7 @@ It prints `{"docker", "docker_version", "registry_login", "images": {"<image>": 
 | `registry_login` true, an image null | images not pulled | accept the download (below) |
 | `agence_crawl` false | `agence` image older than 1.1.0, crawl unavailable | accept the download again (below) |
 | `agence_1_2` false | image `agence` antérieure à 1.2.0 : affichage, Stylelint, dépendances et passages desktop seront ignorés | accepter un nouveau téléchargement |
+| `agence_1_4` false | image `agence` antérieure à 1.4.0 : le test mobile (`mobile`, 320 px tactile) sera ignoré, les agents retombent sur la vérification à la main | accepter un nouveau téléchargement |
 | `arch` `arm64` | Apple Silicon | nothing; an image without arm64 runs emulated, more slowly |
 
 Download, only after « Télécharger les images de la boîte à outils (plus de 2 Go) ? » (« Oui », « Non »), with Bash `run_in_background`:
@@ -157,7 +158,7 @@ bash "$S/cqa-toolbox.sh" pull
 
 Exit 1: an image failed, usually the registry login. Then run `doctor` again.
 
-In autonomous mode, do not ask: no download (as « Non »), record `cqa_plan.py defer "$RUN" --kind gap --detail "Images de la boîte à outils à télécharger (plus de 2 Go)."`; the tools that need the missing images stay unavailable ("Audit web" without the `agence` image, "Crawler" without `agence_crawl`; `stylelint`, `deps`, `viewport` and the desktop passes without `agence_1_2`).
+In autonomous mode, do not ask: no download (as « Non »), record `cqa_plan.py defer "$RUN" --kind gap --detail "Images de la boîte à outils à télécharger (plus de 2 Go)."`; the tools that need the missing images stay unavailable ("Audit web" without the `agence` image, "Crawler" without `agence_crawl`; `stylelint`, `deps`, `viewport` and the desktop passes without `agence_1_2`, `mobile` without `agence_1_4`).
 
 - The toolbox is **ready** when `docker_version` is set and `images.agence` is not null.
 - "Audit web": toolbox ready, and the target reachable from the workstation (`access` `open`, or `basic_auth` with accepted credentials).
