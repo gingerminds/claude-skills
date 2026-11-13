@@ -3769,6 +3769,9 @@ class MobileInstructionsTest(unittest.TestCase):
             "600000", "foreground", "`status` `ok`", "`unknown`",
             "the lots that waited only for the other follow-up are not relaunched",
             "reads only the results that exist",
+            "URL de plus de 2000 caractères", "nom de fichier du résultat en collision",
+            "texte non encodable en UTF-8", "never fails on the content of a finding",
+            "`?q=user/logout`", "`/logout;jsessionid=x`",
         ):
             with self.subTest(lots=needle):
                 self.assertIn(needle, section6)

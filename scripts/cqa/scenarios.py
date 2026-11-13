@@ -7,6 +7,8 @@ from cqa import probes
 from cqa.findings import (
     ACTION_URL_REASON,
     MAX_URL,
+    UTF8_REASON,
+    is_utf8_encodable,
     requests_action_url,
     utf16_length,
     validate_document,
@@ -46,7 +48,10 @@ def followup_scenarios(run_dir: Path) -> dict:
     lots = probes._lot_entries(probes._read_json(run_dir / "lots.json", "cqa_plan.py lots"))
     scenarios, discarded, kept_lots, names = [], [], [], set()
     for lot_id, ref, request in _requested(run_dir, lots, parts.path):
-        url, reason = _checked_url(request["url"], origin, root, parts.path)
+        if is_utf8_encodable(request):
+            url, reason = _checked_url(request["url"], origin, root, parts.path)
+        else:
+            url, reason = None, UTF8_REASON
         name = _result_name(lot_id, request)
         if url is not None and name in names:
             url, reason = None, COLLISION_REASON
@@ -54,8 +59,9 @@ def followup_scenarios(run_dir: Path) -> dict:
             url, reason = None, CAP_REASON
         if url is None:
             shown = probes._public_url(request["url"])
+            shown_id = probes._printable(request["id"])
             discarded.append(
-                {"lot": lot_id, "ref": ref, "id": request["id"], "url": shown, "reason": reason}
+                {"lot": lot_id, "ref": ref, "id": shown_id, "url": shown, "reason": reason}
             )
             continue
         names.add(name)

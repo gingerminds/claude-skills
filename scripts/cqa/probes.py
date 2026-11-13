@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin, urlsplit
 
-from cqa.findings import PHP_FILE_REASON, requests_php_file, validate_document
+from cqa.findings import (
+    PHP_FILE_REASON,
+    UTF8_REASON,
+    is_utf8_encodable,
+    requests_php_file,
+    validate_document,
+)
 from cqa.target import validate_url
 
 _PROD_PHASES = ("J0", "J+7")
@@ -328,6 +334,8 @@ def _stays_on_origin(path: str, origin: tuple) -> bool:
 
 
 def _followup_path(url: str, origin, app_path: str) -> tuple:
+    if not is_utf8_encodable(url):
+        return None, UTF8_REASON
     try:
         validate_url(url)
     except ValueError as error:
@@ -340,8 +348,15 @@ def _followup_path(url: str, origin, app_path: str) -> tuple:
     return path, None
 
 
+def _printable(text: str) -> str:
+    """Return the text with a "?" for each lone surrogate, so that it can be printed and written
+    to a UTF-8 file."""
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def _public_url(url: str) -> str:
-    """Return the URL without the credentials it may carry."""
+    """Return the URL without the credentials it may carry (see _printable)."""
+    url = _printable(url)
     try:
         parts = urlsplit(url)
         if parts.username is None and parts.password is None:

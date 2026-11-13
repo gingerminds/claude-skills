@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from cqa.findings import (
+    ACTION_KEYS,
     ACTION_SEGMENTS,
     ACTION_URL_REASON,
     ACTION_VALUES,
@@ -17,6 +18,7 @@ from cqa.findings import (
     MAX_SUMMARY_LENGTH,
     PROBE_METHODS,
     REQUIRED_FINDING_KEYS,
+    ROUTE_PARAMS,
     SCENARIO_PRESS_KEYS,
     SCENARIO_PROFILES,
     SCENARIO_STEP_TYPES,
@@ -24,6 +26,7 @@ from cqa.findings import (
     VERDICTS,
     _SCENARIO_ID,
     apply_guardrails,
+    is_utf8_encodable,
     requests_action_url,
     requests_php_file,
     utf16_length,
@@ -935,6 +938,90 @@ class NeedsScenariosTest(unittest.TestCase):
         self.assertEqual(len(valid), 2)
         self.assertEqual(utf16_length("a\U0001F600é"), 4)
 
+    def test_a_lone_surrogate_is_refused_in_every_text_of_a_scenario(self):
+        # "\ud800" in a JSON file is a character no UTF-8 file can hold: it made the collection
+        # fail with no file. Every text of a scenario is refused with a reason in French.
+        lone = "\ud800"
+        reason = "contient un demi-substitut Unicode isolé (texte non encodable en UTF-8)"
+        steps = [{"type": "tap", "selector": "#a"}]
+        cases = {
+            "selector": (
+                [make_scenario(steps=[{"type": "tap", "selector": f"#a{lone}"}])],
+                f"scénario n° 1 : étape n° 1 : « selector » {reason}",
+            ),
+            "selector of a state": (
+                [make_scenario(steps=[{"type": "state", "selector": f"{lone}"}])],
+                f"scénario n° 1 : étape n° 1 : « selector » {reason}",
+            ),
+            "value": (
+                [make_scenario(steps=[{"type": "select", "selector": "#a", "value": "\udfff"}])],
+                f"scénario n° 1 : étape n° 1 : « value » {reason}",
+            ),
+            "url": (
+                [make_scenario(url=f"https://preprod.example.org/a{lone}", steps=steps)],
+                f"scénario n° 1 : « url » {reason}",
+            ),
+            "url in the query": (
+                [make_scenario(url=f"https://preprod.example.org/?q=a{lone}")],
+                f"scénario n° 1 : « url » {reason}",
+            ),
+        }
+        for name, (scenarios, expected) in cases.items():
+            with self.subTest(name=name):
+                problem = only_error(self, scenarios)
+                self.assertEqual(problem, expected)
+                problem.encode("utf-8")
+                self.assertNotIn(EM_DASH, problem)
+
+    def test_a_lone_surrogate_in_an_id_is_refused_and_never_echoed(self):
+        problem = only_error(self, [make_scenario(id="a\ud800")])
+        self.assertEqual(problem, "scénario n° 1 : « id » doit correspondre à [a-z0-9-]{1,40} (« a? »)")
+        problem.encode("utf-8")
+
+    def test_the_other_texts_a_message_quotes_are_encodable_too(self):
+        lone = "\ud800"
+        scenarios = [
+            make_scenario(
+                id=f"a{lone}",
+                profile=f"p{lone}",
+                steps=[{"type": f"t{lone}"}, {"type": "tap", "selector": "#a", f"k{lone}": 1}],
+                **{f"x{lone}": 1},
+            )
+        ]
+        _, errors = scenario_errors(scenarios)
+        self.assertGreaterEqual(len(errors), 4)
+        "\n".join(errors).encode("utf-8")
+
+    def test_a_pair_of_surrogates_is_one_character_and_is_accepted(self):
+        pair = json.loads('"\\ud83d\\ude00"')
+        self.assertEqual(pair, "\U0001F600")
+        steps = [{"type": "tap", "selector": f"#a{pair}"}]
+        valid, errors = scenario_errors([make_scenario(steps=steps)])
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 2)
+
+    def test_a_lone_surrogate_is_refused_in_the_url_of_a_probe(self):
+        for url in ("https://preprod.example.org/a\ud800", "https://preprod.example.org/?q=\udfff"):
+            with self.subTest(url=url):
+                probes = [{"url": url, "method": "GET"}]
+                valid, errors = validate(make_finding(needs_probes=probes), make_finding(ref=80))
+                self.assertEqual([item["ref"] for item in valid], [80])
+                self.assertEqual(
+                    errors,
+                    [
+                        "constat CQ-79 : sonde n° 1 : « url » contient un demi-substitut Unicode "
+                        "isolé (texte non encodable en UTF-8)"
+                    ],
+                )
+                "\n".join(errors).encode("utf-8")
+
+    def test_is_utf8_encodable(self):
+        self.assertTrue(is_utf8_encodable("é\U0001F600"))
+        self.assertTrue(is_utf8_encodable({"a": ["é", 1, None, {"b": "x"}]}))
+        self.assertFalse(is_utf8_encodable("\ud800"))
+        self.assertFalse(is_utf8_encodable({"a": [{"b": "x\udfff"}]}))
+        self.assertFalse(is_utf8_encodable({"k\ud800": 1}))
+
     def test_the_php_rule_follows_the_path_of_the_application(self):
         def errors_for(paths, app_path):
             scenarios = [make_scenario(url=f"{ORIGIN}{path}") for path in paths]
@@ -1175,15 +1262,27 @@ class RequestsActionUrlTest(unittest.TestCase):
             (
                 "logout", "signout", "sign-out", "deconnexion", "deconnecter", "delete", "remove",
                 "trash", "publish", "unpublish", "unsubscribe", "desinscription", "cron",
-                "clear-cache", "flush",
+                "clear-cache", "flush", "add-to-cart", "addtocart", "add_to_cart", "checkout",
+                "purge", "disconnect", "logoff", "signoff", "sign-off",
             ),
         )
         self.assertEqual(
-            ACTION_VALUES, ("trash", "delete", "remove", "logout", "publish", "unpublish", "clear")
+            ACTION_VALUES,
+            (
+                "trash", "delete", "remove", "logout", "publish", "unpublish", "clear", "add",
+                "purge", "flush", "signout", "disconnect", "unsubscribe", "add-to-cart",
+                "addtocart", "checkout",
+            ),
         )
         self.assertEqual(
-            TOKEN_PARAMS, ("token", "_token", "csrf", "nonce", "_wpnonce", "form_token", "key")
+            TOKEN_PARAMS,
+            (
+                "token", "_token", "csrf", "nonce", "_wpnonce", "form_token", "key", "signature",
+                "sig", "access_token", "id_token", "refresh_token", "api_key", "apikey", "auth",
+            ),
         )
+        self.assertEqual(ACTION_KEYS, ("action", "op", "do"))
+        self.assertEqual(ROUTE_PARAMS, ("q", "p", "route"))
         self.assertEqual(ACTION_URL_REASON, "URL d'action refusée")
 
     def test_action_urls_are_refused(self):
@@ -1193,9 +1292,10 @@ class RequestsActionUrlTest(unittest.TestCase):
                 with self.subTest(path=path):
                     self.assertTrue(requests_action_url(f"{ORIGIN}{path}"))
         for value in ACTION_VALUES:
-            for query in (f"action={value}", f"a=1&action={value}&b=2", f"ACTION={value.upper()}"):
-                with self.subTest(query=query):
-                    self.assertTrue(requests_action_url(f"{ORIGIN}/page?{query}"))
+            for key in ACTION_KEYS:
+                for query in (f"{key}={value}", f"a=1&{key}={value}&b=2", f"{key.upper()}={value.upper()}"):
+                    with self.subTest(query=query):
+                        self.assertTrue(requests_action_url(f"{ORIGIN}/page?{query}"))
         for name in TOKEN_PARAMS:
             for query in (f"{name}=abc", f"{name}=", name, f"a=1&{name.upper()}=x"):
                 with self.subTest(query=query):
@@ -1236,7 +1336,7 @@ class RequestsActionUrlTest(unittest.TestCase):
             f"{ORIGIN}/logout-faq/removed",
             f"{ORIGIN}/actions.html",
             f"{ORIGIN}/logout.php",
-            f"{ORIGIN}/logout;x=1",
+            f"{ORIGIN}/produits/delete-pro-fr;x=1",
             f"{ORIGIN}/page?action=view",
             f"{ORIGIN}/page?action=",
             f"{ORIGIN}/page?action",
@@ -1257,6 +1357,111 @@ class RequestsActionUrlTest(unittest.TestCase):
         ):
             with self.subTest(url=url):
                 self.assertFalse(requests_action_url(url))
+
+    def test_the_actions_of_a_shop_and_of_a_session_are_refused(self):
+        for url in (
+            f"{ORIGIN}/cart/add-to-cart",
+            f"{ORIGIN}/cart/addtocart/12",
+            f"{ORIGIN}/cart/ADD_TO_CART",
+            f"{ORIGIN}/fr/checkout",
+            f"{ORIGIN}/admin/purge",
+            f"{ORIGIN}/user/disconnect",
+            f"{ORIGIN}/user/logoff",
+            f"{ORIGIN}/user/signoff",
+            f"{ORIGIN}/user/sign-off",
+            f"{ORIGIN}/page?action=add",
+            f"{ORIGIN}/page?action=purge",
+            f"{ORIGIN}/page?action=flush",
+            f"{ORIGIN}/page?action=signout",
+            f"{ORIGIN}/page?action=disconnect",
+            f"{ORIGIN}/page?action=unsubscribe",
+            f"{ORIGIN}/page?action=add-to-cart",
+            f"{ORIGIN}/page?action=addtocart",
+            f"{ORIGIN}/page?action=checkout",
+            f"{ORIGIN}/node/12/edit?op=delete",
+            f"{ORIGIN}/node/12?op=Logout",
+            f"{ORIGIN}/page?do=trash",
+            f"{ORIGIN}/page?x=1&DO=publish",
+            f"{ORIGIN}/page?signature=abc",
+            f"{ORIGIN}/page?sig=abc",
+            f"{ORIGIN}/page?access_token=abc",
+            f"{ORIGIN}/page?id_token=abc",
+            f"{ORIGIN}/page?refresh_token=abc",
+            f"{ORIGIN}/page?api_key=abc",
+            f"{ORIGIN}/page?apikey=abc",
+            f"{ORIGIN}/page?auth=abc",
+        ):
+            with self.subTest(url=url):
+                self.assertTrue(requests_action_url(url))
+
+    def test_the_path_parameters_of_a_segment_are_dropped_before_the_comparison(self):
+        # Tomcat and Spring drop ";x" from a segment before they route it.
+        for path in (
+            "/logout;jsessionid=x",
+            "/user/logout;x",
+            "/user/logout;x/y",
+            "/user;a=1/logout",
+            "/user/LOGOUT;JSESSIONID=1",
+            "/user/log%6fut;x=1",
+            "/user/logout%3Bx",
+            "/user/logout;a;b",
+            "/checkout;x",
+            "/user/logout;x/../y",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(requests_action_url(f"{ORIGIN}{path}"))
+        for path in (
+            "/produits/delete-pro-fr;x=1",
+            "/tag/trash-talk;jsessionid=y",
+            "/page;logout",
+            "/;logout",
+            "/logout-faq;x",
+            "/a;b/c",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(requests_action_url(f"{ORIGIN}{path}"))
+
+    def test_a_route_held_by_a_query_parameter_is_read_like_a_path(self):
+        # Drupal 7 routes on ?q=user/logout, other front controllers on ?p= or ?route=.
+        for query in (
+            "q=user/logout",
+            "q=user%2Flogout",
+            "q=USER/LOGOUT",
+            "Q=user/logout",
+            "p=node/12/delete",
+            "route=product/checkout",
+            "route=checkout/cart",
+            "a=1&q=x/purge&b=2",
+            "q=/logout",
+            "q=a%2fb%2Fsign-out",
+            "q=user/add-to-cart/",
+            "q=user+x/logout",
+            "q=user/log%6fut",
+        ):
+            with self.subTest(query=query):
+                self.assertTrue(requests_action_url(f"{ORIGIN}/index.php?{query}"))
+        for query in (
+            "q=logout",
+            "q=LOGOUT",
+            "q=user/login",
+            "q=news/delete-pro-fr",
+            "q=tag/trash-talk",
+            "q=checkoutx/cart",
+            "p=2",
+            "p=logout",
+            "route=product/category",
+            "route=common/home",
+            "route=checkout",
+            "search=user/logout",
+            "view=node/12/delete",
+            "q=",
+            "q",
+            "qq=user/logout",
+            "q=user%2Blogout",
+            "x=1&p=a/b",
+        ):
+            with self.subTest(query=query):
+                self.assertFalse(requests_action_url(f"{ORIGIN}/index.php?{query}"))
 
     def test_the_decoding_follows_the_url_parser_of_the_tool(self):
         # new URL() drops tabs and line breaks, trims, and reads a backslash as a slash.

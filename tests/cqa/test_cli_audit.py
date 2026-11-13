@@ -1124,6 +1124,112 @@ class FollowupScenariosTest(AuditCase):
         self.assertEqual(self.read(run_dir, "scenarios-followup.json")["scenarios"], [])
 
 
+def held_valid(document, refs, **_):
+    return list(document["findings"]), []
+
+
+class LoneSurrogateTest(AuditCase):
+    """A JSON file may hold "\\ud800", a character no UTF-8 file can write back."""
+
+    LONE = "\ud800"
+    REASON = "demi-substitut Unicode isolé"
+
+    def write_raw(self, run_dir, lot, ref, **changes):
+        """Write the findings of a lot as an agent's file holds them: the escape stays an escape."""
+        document = self.read(run_dir, f"findings/{lot}.json")
+        for item in document["findings"]:
+            if item["ref"] == ref:
+                item.update(changes)
+        text = json.dumps(document, indent=2)
+        self.assertIn("\\ud800", text)
+        (run_dir / "findings" / f"{lot}.json").write_text(text, encoding="utf-8")
+
+    def tainted_scenario(self, **changes):
+        steps = [{"type": "tap", "selector": f"#a{self.LONE}"}, {"type": "capture"}]
+        return make_scenario(id="tainted", steps=steps, **changes)
+
+    def test_validate_refuses_the_scenario_with_a_reason_in_french(self):
+        run_dir = self.make_run()
+        self.write_raw(run_dir, "code-securite", 103, needs_scenarios=[self.tainted_scenario()])
+        code, out, err = self.run_main(["validate", run_dir, "code-securite"])
+        self.assertEqual(code, 6, err)
+        out.encode("utf-8")
+        errors = json.loads(out)["errors"]
+        self.assertTrue(any(self.REASON in error for error in errors), errors)
+
+    def test_scenarios_followup_writes_its_file_and_keeps_the_scenarios_of_the_other_lots(self):
+        run_dir = self.make_run()
+        self.write_raw(run_dir, "code-securite", 103, needs_scenarios=[self.tainted_scenario()])
+        self.edit_finding(run_dir, "code-performance", 101, needs_scenarios=[make_scenario(id="menu")])
+        code, out, err = self.run_main(["scenarios", run_dir, "--followup"])
+        self.assertEqual(code, 0, err)
+        out.encode("utf-8")
+        document = self.read(run_dir, "scenarios-followup.json")
+        self.assertEqual([item["id"] for item in document["scenarios"]], ["code-performance:menu"])
+        self.assertEqual(document["lots"], ["code-performance"])
+        self.assertFalse((run_dir / "scenarios-followup.json.tmp").exists())
+
+    def test_scenarios_followup_with_only_the_tainted_request_writes_an_empty_file(self):
+        run_dir = self.make_run()
+        self.write_raw(run_dir, "code-securite", 103, needs_scenarios=[self.tainted_scenario()])
+        code, out, err = self.run_main(["scenarios", run_dir, "--followup"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            self.read(run_dir, "scenarios-followup.json"),
+            {"base_url": BASE, "scenarios": [], "lots": [], "discarded": []},
+        )
+
+    def test_scenarios_followup_never_fails_on_a_request_that_slipped_past_the_validation(self):
+        run_dir = self.make_run()
+        tainted = [
+            self.tainted_scenario(),
+            make_scenario(id="value", steps=[{"type": "select", "selector": "#a", "value": "\udfff"}]),
+            make_scenario(id="address", url=f"{BASE}/a{self.LONE}"),
+        ]
+        self.write_raw(run_dir, "code-securite", 103, needs_scenarios=tainted)
+        self.edit_finding(run_dir, "code-performance", 101, needs_scenarios=[make_scenario(id="menu")])
+        with mock.patch.object(scenarios, "validate_document", held_valid):
+            code, out, err = self.run_main(["scenarios", run_dir, "--followup"])
+        self.assertEqual(code, 0, err)
+        out.encode("utf-8")
+        document = self.read(run_dir, "scenarios-followup.json")
+        self.assertEqual([item["id"] for item in document["scenarios"]], ["code-performance:menu"])
+        self.assertEqual(
+            [(item["lot"], item["id"]) for item in document["discarded"]],
+            [("code-securite", "tainted"), ("code-securite", "value"), ("code-securite", "address")],
+        )
+        self.assertTrue(all("UTF-8" in item["reason"] for item in document["discarded"]))
+        json.dumps(document, ensure_ascii=False).encode("utf-8")
+
+    def test_probes_followup_writes_its_file_and_keeps_the_probes_of_the_other_lots(self):
+        run_dir = self.make_run()
+        tainted = [{"url": f"{BASE}/a{self.LONE}", "method": "GET"}]
+        self.write_raw(run_dir, "code-securite", 103, needs_probes=tainted)
+        code, out, err = self.run_main(["probes", run_dir, "--followup"])
+        self.assertEqual(code, 0, err)
+        out.encode("utf-8")
+        document = self.read(run_dir, "probes-followup.json")
+        self.assertEqual([probe["path"] for probe in document["probes"]], ["/telescope"])
+        self.assertEqual(json.loads(out)["lots"], ["code-performance"])
+        self.assertFalse((run_dir / "probes-followup.json.tmp").exists())
+
+    def test_probes_followup_never_fails_on_a_url_that_slipped_past_the_validation(self):
+        run_dir = self.make_run()
+        tainted = [{"url": f"{BASE}/a{self.LONE}", "method": "GET"}]
+        self.write_raw(run_dir, "code-securite", 103, needs_probes=tainted)
+        with mock.patch.object(probes, "validate_document", held_valid):
+            code, out, err = self.run_main(["probes", run_dir, "--followup"])
+        self.assertEqual(code, 0, err)
+        out.encode("utf-8")
+        shown = json.loads(out)["discarded"]
+        self.assertEqual([(item["lot"], item["ref"]) for item in shown], [("code-securite", 103)])
+        self.assertIn("UTF-8", shown[0]["reason"])
+        self.assertNotIn("\ud800", out)
+        paths = [probe["path"] for probe in self.read(run_dir, "probes-followup.json")["probes"]]
+        self.assertIn("/telescope", paths)
+        self.assertEqual([path for path in paths if path.startswith("/a")], [])
+
+
 class ValidateTest(AuditCase):
     def test_valid_lot(self):
         run_dir = self.make_run()

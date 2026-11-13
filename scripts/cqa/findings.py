@@ -1,5 +1,6 @@
 """Findings written by the audit sub-agents: validation and verdict guardrails."""
 import copy
+import json
 import re
 from collections import Counter
 from typing import Iterable
@@ -49,8 +50,10 @@ MAX_STEPS = 15
 MAX_SELECTOR = 200
 MAX_TAB_COUNT = 30
 MAX_URL = 2000
-# The URLs that act (ACTION_SEGMENTS, ACTION_VALUES and TOKEN_PARAMS of the same tool): the load of
-# a scenario URL is a GET that no guard closes. Compared without case.
+# The URLs that act: the load of a scenario URL is a GET that no guard closes. These closed lists
+# mirror ACTION_SEGMENTS, ACTION_VALUES and TOKEN_PARAMS of src/mobile-scenarios.js in the gm-audit
+# toolbox (CONTRACT.md 1.4.0, section "mobile --scenarios", "URL d'action"); a list is never longer
+# on one side only. Compared without case.
 ACTION_SEGMENTS = (
     "logout",
     "signout",
@@ -67,10 +70,56 @@ ACTION_SEGMENTS = (
     "cron",
     "clear-cache",
     "flush",
+    "add-to-cart",
+    "addtocart",
+    "add_to_cart",
+    "checkout",
+    "purge",
+    "disconnect",
+    "logoff",
+    "signoff",
+    "sign-off",
 )
-ACTION_VALUES = ("trash", "delete", "remove", "logout", "publish", "unpublish", "clear")
-TOKEN_PARAMS = ("token", "_token", "csrf", "nonce", "_wpnonce", "form_token", "key")
+ACTION_KEYS = ("action", "op", "do")
+ACTION_VALUES = (
+    "trash",
+    "delete",
+    "remove",
+    "logout",
+    "publish",
+    "unpublish",
+    "clear",
+    "add",
+    "purge",
+    "flush",
+    "signout",
+    "disconnect",
+    "unsubscribe",
+    "add-to-cart",
+    "addtocart",
+    "checkout",
+)
+TOKEN_PARAMS = (
+    "token",
+    "_token",
+    "csrf",
+    "nonce",
+    "_wpnonce",
+    "form_token",
+    "key",
+    "signature",
+    "sig",
+    "access_token",
+    "id_token",
+    "refresh_token",
+    "api_key",
+    "apikey",
+    "auth",
+)
+# The parameters that hold a route (Drupal 7 ?q=user/logout): read like a path.
+ROUTE_PARAMS = ("q", "p", "route")
 ACTION_URL_REASON = "URL d'action refusée"
+UTF8_REASON = "texte non encodable en UTF-8 (demi-substitut Unicode isolé)"
 MAX_SUMMARY_LENGTH = 600
 MAX_FIELD_LENGTH = 400
 PHP_FILE_REASON = "fichier PHP hors des routes de l'application"
@@ -278,12 +327,15 @@ def requests_action_url(url: str) -> bool:
 
     The path is read as the tool's URL parser reads it (tabs and line breaks dropped, a backslash
     taken for a slash), percent-decoded byte by byte (a malformed %XX stays as it is), put in
-    lower case and cut on "/" and "\\", so %2f, %5c and %6c do not hide a word. It acts when one
-    segment is a whole word of ACTION_SEGMENTS: delete-pro-fr or trash-talk do not. The query is
-    cut on "&" only, "+" is a space and %XX is decoded as UTF-8: it acts when a parameter is named
-    as one of TOKEN_PARAMS, or is named action with a value of ACTION_VALUES. The fragment is not
-    read. Dot segments are not resolved, so the mirror is never laxer than the tool: it also
-    refuses /logout/../page. Anything that cannot be parsed as a URL is left to the other checks.
+    lower case and cut on "/" and "\\", so %2f, %5c and %6c do not hide a word. Each segment
+    loses its path parameters (what follows a ";": /logout;jsessionid=x is /logout) and acts
+    when it is a whole word of ACTION_SEGMENTS: delete-pro-fr or trash-talk do not. The query
+    is cut on "&" only, "+" is a space and %XX is decoded as UTF-8: it acts when a parameter is
+    named as one of TOKEN_PARAMS, is named as one of ACTION_KEYS with a value of ACTION_VALUES,
+    or is one of ROUTE_PARAMS and holds a route with a "/" one of whose segments is a word of
+    ACTION_SEGMENTS (?q=user/logout, but not ?q=logout). The fragment is not read. Dot segments
+    are not resolved, so the mirror is never laxer than the tool: it also refuses
+    /logout/../page. Anything that cannot be parsed as a URL is left to the other checks.
     """
     if not isinstance(url, str):
         return False
@@ -296,15 +348,26 @@ def requests_action_url(url: str) -> bool:
     raw = path.encode("utf-8", "replace")
     decoded = _PERCENT_BYTE.sub(lambda match: bytes([int(match.group(1), 16)]), raw)
     decoded = decoded.decode("latin-1")
-    if any(segment in ACTION_SEGMENTS for segment in _PATH_SEPARATORS.split(decoded.lower())):
+    if _has_action_segment(_PATH_SEPARATORS.split(decoded.lower()), path_parameters=True):
         return True
     return any(_is_action_parameter(pair) for pair in query.split("&"))
+
+
+def _has_action_segment(segments: list, *, path_parameters: bool = False) -> bool:
+    if path_parameters:
+        segments = [segment.partition(";")[0] for segment in segments]
+    return any(segment in ACTION_SEGMENTS for segment in segments)
 
 
 def _is_action_parameter(pair: str) -> bool:
     name, _, value = pair.partition("=")
     key = unquote_plus(name).lower()
-    return key in TOKEN_PARAMS or (key == "action" and unquote_plus(value).lower() in ACTION_VALUES)
+    text = unquote_plus(value).lower()
+    if key in TOKEN_PARAMS:
+        return True
+    if key in ACTION_KEYS:
+        return text in ACTION_VALUES
+    return key in ROUTE_PARAMS and "/" in text and _has_action_segment(text.split("/"))
 
 
 def _app_prefix(app_path: str) -> str:
@@ -319,6 +382,21 @@ def _is_entry_point(path: str, prefix: str, query: bool) -> bool:
         return True
     route = local[len(_FRONT_CONTROLLER):]
     return local.startswith(_FRONT_CONTROLLER) and not _PHP_FILE.search(route)
+
+
+def is_utf8_encodable(value) -> bool:
+    """Whether a text, or any text of a JSON value, can be written to a UTF-8 file.
+
+    A lone surrogate ("\\ud800" in a JSON file) cannot: json.loads accepts it, a write fails.
+    """
+    try:
+        if isinstance(value, str):
+            value.encode("utf-8")
+        else:
+            json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except (UnicodeEncodeError, TypeError, ValueError):
+        return False
+    return True
 
 
 def utf16_length(text: str) -> int:
@@ -340,7 +418,8 @@ def _filled(value) -> bool:
 
 def _show(value) -> str:
     text = f"« {value} »" if isinstance(value, str) else repr(value)
-    return text if len(text) <= 60 else text[:59] + "…"
+    text = text if len(text) <= 60 else text[:59] + "…"
+    return text.encode("utf-8", "replace").decode("utf-8")
 
 
 def _finding_problems(item: dict, app_path: str) -> list[str]:
@@ -457,6 +536,7 @@ def _probe_problems(probes, app_path: str) -> list[str]:
             problems.append(f"{place} : doit être un objet")
             continue
         problems.extend(_required_text_problems(place, probe, ("url",)))
+        problems.extend(_utf8_problems(place, probe, "url"))
         problems.extend(_php_file_problems(place, probe.get("url"), app_path))
         if "method" not in probe:
             problems.append(f"{place} : « method » manquant")
@@ -544,6 +624,7 @@ def _one_scenario_problems(index: int, scenario, app_path: str, taken: dict) -> 
     else:
         taken[scenario_id] = index
     problems.extend(_required_text_problems(place, scenario, ("url",)))
+    problems.extend(_utf8_problems(place, scenario, "url"))
     url = scenario.get("url")
     if _is_text(url) and utf16_length(url) > MAX_URL:
         problems.append(f"{place} : « url » dépasse {MAX_URL} caractères ({utf16_length(url)})")
@@ -623,6 +704,16 @@ def _step_text_problems(place: str, step: dict, key: str, *, blank: bool) -> lis
         return [f"{place} : « {key} » dépasse {MAX_SELECTOR} caractères ({len(value)})"]
     if _CONTROL.search(value):
         return [f"{place} : « {key} » contient un caractère de contrôle"]
+    return _utf8_problems(place, step, key)
+
+
+def _utf8_problems(place: str, item: dict, key: str) -> list[str]:
+    value = item.get(key)
+    if isinstance(value, str) and not is_utf8_encodable(value):
+        return [
+            f"{place} : « {key} » contient un demi-substitut Unicode isolé "
+            "(texte non encodable en UTF-8)"
+        ]
     return []
 
 
