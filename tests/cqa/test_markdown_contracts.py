@@ -15,7 +15,10 @@ from cqa import (
     fix_summary, ssh_ro,
 )
 from cqa.lots import DOCUMENT_LOT_ID
-from cqa.findings import VERDICTS, apply_guardrails, validate_document
+from cqa.findings import (
+    MAX_SCENARIOS, MAX_SELECTOR, MAX_STEPS, SCENARIO_PRESS_KEYS, SCENARIO_PROFILES,
+    SCENARIO_STEP_TYPES, VERDICTS, apply_guardrails, validate_document,
+)
 from cqa.plan import STATUS_FOR_VERDICT
 from tests.cqa.test_context_docs import row
 from tests.cqa.test_docs_read import make_xlsx
@@ -3452,6 +3455,51 @@ class VerdictsReferenceTest(unittest.TestCase):
         self.assertIn("cqa_plan.py", document["description"])
         self.assertEqual(finding["properties"]["source"]["const"], "context_doc")
         self.assertNotIn("source", finding["required"])
+        self.assertNotIn(chr(0x2014), json.dumps(schema, ensure_ascii=False))
+
+    def test_schema_declares_needs_scenarios_as_optional(self):
+        schema = json.loads((ROOT / SCHEMA).read_text(encoding="utf-8"))
+        defs = schema["$defs"]
+        finding = defs["finding"]
+        needs = finding["properties"]["needs_scenarios"]
+        self.assertNotIn("needs_scenarios", finding["required"])
+        self.assertEqual(needs["type"], "array")
+        self.assertEqual(needs["items"], {"$ref": "#/$defs/scenario"})
+        self.assertEqual(needs["maxItems"], MAX_SCENARIOS)
+        self.assertIn("ko and partial are kept", needs["description"])
+        scenario = defs["scenario"]
+        self.assertEqual(set(scenario["required"]), {"id", "url", "profile", "steps"})
+        self.assertEqual(set(scenario["properties"]), {"id", "url", "profile", "steps"})
+        self.assertIs(scenario["additionalProperties"], False)
+        self.assertEqual(scenario["properties"]["id"]["pattern"], "^[a-z0-9-]{1,40}$")
+        self.assertEqual(scenario["properties"]["profile"]["enum"], list(SCENARIO_PROFILES))
+        steps = scenario["properties"]["steps"]
+        self.assertEqual(steps["items"], {"$ref": "#/$defs/scenario_step"})
+        self.assertEqual((steps["minItems"], steps["maxItems"]), (1, MAX_STEPS))
+        step = defs["scenario_step"]
+        self.assertEqual(step["required"], ["type"])
+        self.assertIs(step["additionalProperties"], False)
+        properties = step["properties"]
+        self.assertEqual(properties["type"]["enum"], list(SCENARIO_STEP_TYPES))
+        self.assertEqual(properties["key"]["enum"], list(SCENARIO_PRESS_KEYS))
+        self.assertEqual(properties["selector"]["maxLength"], MAX_SELECTOR)
+        self.assertEqual(properties["value"]["maxLength"], MAX_SELECTOR)
+        self.assertEqual(
+            (properties["count"]["minimum"], properties["count"]["maximum"]), (1, 30)
+        )
+        self.assertEqual(properties["count"]["type"], "integer")
+        self.assertEqual(properties["shift"]["type"], "boolean")
+        allowed = {
+            condition["if"]["properties"]["type"]["const"]: condition["then"]
+            for condition in step["allOf"]
+        }
+        self.assertEqual(set(allowed), set(SCENARIO_STEP_TYPES))
+        self.assertEqual(allowed["tab"]["propertyNames"]["enum"], ["type", "count", "shift"])
+        self.assertEqual(allowed["press"]["required"], ["key"])
+        self.assertEqual(allowed["select"]["required"], ["selector", "value"])
+        self.assertEqual(allowed["capture"]["propertyNames"]["enum"], ["type"])
+        for name in ("scenario", "scenario_step"):
+            self.assertTrue(defs[name]["description"])
         self.assertNotIn(chr(0x2014), json.dumps(schema, ensure_ascii=False))
 
     def test_maps_every_verdict_to_its_status(self):

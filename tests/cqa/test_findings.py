@@ -5,14 +5,26 @@ import unittest
 from pathlib import Path
 
 from cqa.findings import (
+    ACTION_SEGMENTS,
+    ACTION_URL_REASON,
+    ACTION_VALUES,
     CONFIDENCES,
     EVIDENCE_REQUIRED,
     MAX_FIELD_LENGTH,
+    MAX_SCENARIOS,
+    MAX_SELECTOR,
+    MAX_STEPS,
     MAX_SUMMARY_LENGTH,
     PROBE_METHODS,
     REQUIRED_FINDING_KEYS,
+    SCENARIO_PRESS_KEYS,
+    SCENARIO_PROFILES,
+    SCENARIO_STEP_TYPES,
+    TOKEN_PARAMS,
     VERDICTS,
+    _SCENARIO_ID,
     apply_guardrails,
+    requests_action_url,
     requests_php_file,
     validate_document,
     worst,
@@ -98,6 +110,24 @@ def make_finding(**overrides):
     return finding
 
 
+def make_scenario(**overrides):
+    scenario = {
+        "id": "menu-burger",
+        "url": "https://preprod.example.org/",
+        "profile": "portrait",
+        "steps": [
+            {"type": "tap", "selector": "#menu-toggle"},
+            {"type": "press", "key": "Escape"},
+            {"type": "tab", "count": 3, "shift": True},
+            {"type": "select", "selector": "#pays", "value": "FR"},
+            {"type": "state", "selector": "#menu"},
+            {"type": "capture"},
+        ],
+    }
+    scenario.update(overrides)
+    return scenario
+
+
 def make_ok(**overrides):
     overrides.setdefault("todo", None)
     return make_finding(verdict="ok", **overrides)
@@ -148,6 +178,30 @@ class ConstantsTest(unittest.TestCase):
         self.assertEqual(MAX_SUMMARY_LENGTH, 600)
         self.assertEqual(MAX_FIELD_LENGTH, 400)
         self.assertEqual(PROBE_METHODS, ("GET", "HEAD"))
+
+    def test_needs_scenarios_is_not_a_required_key(self):
+        self.assertNotIn("needs_scenarios", REQUIRED_FINDING_KEYS)
+        self.assertEqual(len(REQUIRED_FINDING_KEYS), 9)
+
+    def test_scenario_lists_and_limits_copy_the_toolbox(self):
+        # Copied as is from gm-audit (STEP_TYPES, PRESS_KEYS, FOLLOWUP_LIMITS): no test links the two repos.
+        self.assertEqual(SCENARIO_PROFILES, ("portrait", "paysage"))
+        self.assertEqual(SCENARIO_STEP_TYPES, ("tab", "press", "tap", "select", "state", "capture"))
+        self.assertEqual(
+            SCENARIO_PRESS_KEYS,
+            (
+                "Escape", "Tab", "Shift+Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+                "Home", "End",
+            ),
+        )
+        self.assertEqual((MAX_SCENARIOS, MAX_STEPS, MAX_SELECTOR), (3, 15, 200))
+        self.assertEqual(_SCENARIO_ID.pattern, "[a-z0-9-]{1,40}")
+        for good in ("a", "menu-burger", "0-9", "a" * 40):
+            with self.subTest(good=good):
+                self.assertTrue(_SCENARIO_ID.fullmatch(good))
+        for bad in ("", "Bad_ID", "a" * 41, "a b", "a:b", "A", "é", "a\n"):
+            with self.subTest(bad=bad):
+                self.assertFalse(_SCENARIO_ID.fullmatch(bad))
 
 
 class WorstTest(unittest.TestCase):
@@ -685,6 +739,557 @@ class ValidateDocumentTest(unittest.TestCase):
             self.assertNotIn(EM_DASH, message)
 
 
+ORIGIN = "https://preprod.example.org"
+
+
+def scenario_errors(scenarios):
+    """Errors of a document whose finding CQ-79 asks for the scenarios, the finding of CQ-80 being fine."""
+    valid, errors = validate(make_finding(needs_scenarios=scenarios), make_finding(ref=80))
+    return valid, errors
+
+
+def only_error(testcase, scenarios):
+    valid, errors = scenario_errors(scenarios)
+    testcase.assertEqual([item["ref"] for item in valid], [80])
+    testcase.assertEqual(len(errors), 1, errors)
+    prefix = "constat CQ-79 : "
+    testcase.assertTrue(errors[0].startswith(prefix), errors[0])
+    return errors[0][len(prefix):]
+
+
+class NeedsScenariosTest(unittest.TestCase):
+    def test_needs_scenarios_is_optional_and_a_valid_one_passes(self):
+        valid, errors = validate(make_finding(), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 2)
+        self.assertNotIn("needs_scenarios", valid[0])
+        scenarios = [make_scenario()]
+        valid, errors = validate(make_finding(needs_scenarios=scenarios), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(valid[0]["needs_scenarios"], scenarios)
+        valid, errors = validate(make_finding(needs_scenarios=[]), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(valid[0]["needs_scenarios"], [])
+
+    def test_the_step_defaults_and_the_three_scenarios_are_valid(self):
+        steps = [
+            {"type": "tab"},
+            {"type": "tab", "count": 30},
+            {"type": "tab", "count": 1, "shift": False},
+            {"type": "select", "selector": "#pays", "value": ""},
+            {"type": "state", "selector": "x" * MAX_SELECTOR},
+        ]
+        for key in SCENARIO_PRESS_KEYS:
+            steps.append({"type": "press", "key": key})
+        scenarios = [
+            make_scenario(id=f"s{number}", profile=profile, steps=steps[:MAX_STEPS])
+            for number, profile in enumerate(("portrait", "paysage", "portrait"))
+        ]
+        valid, errors = validate(make_finding(needs_scenarios=scenarios), make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(valid[0]["needs_scenarios"], scenarios)
+        fifteen = make_scenario(steps=[{"type": "capture"}] * MAX_STEPS)
+        _, errors = scenario_errors([fifteen])
+        self.assertEqual(errors, [])
+
+    def test_a_valid_request_is_returned_unchanged_and_is_a_copy(self):
+        scenarios = [make_scenario()]
+        before = copy.deepcopy(scenarios)
+        valid, _ = validate(make_finding(needs_scenarios=scenarios), make_finding(ref=80))
+        self.assertEqual(scenarios, before)
+        valid[0]["needs_scenarios"][0]["steps"].append({"type": "capture"})
+        self.assertEqual(scenarios, before)
+
+    def test_hostile_scenario_requests_are_refused_with_their_reason(self):
+        step_tap = {"type": "tap", "selector": "#a"}
+
+        def steps_of(*steps):
+            return make_scenario(steps=list(steps))
+
+        cases = {
+            "four scenarios": (
+                [make_scenario(id=f"s{number}") for number in range(4)],
+                "« needs_scenarios » : 4 scénarios (3 au plus)",
+            ),
+            "sixteen steps": (
+                [make_scenario(steps=[step_tap] * 16)],
+                "scénario n° 1 : 16 étapes (15 au plus)",
+            ),
+            "step type eval": (
+                [steps_of(step_tap, {"type": "eval", "selector": "#a"})],
+                "scénario n° 1 : étape n° 2 : type « eval » inconnu "
+                "(tab, press, tap, select, state, capture)",
+            ),
+            "selector of 201 characters": (
+                [steps_of({"type": "tap", "selector": "a" * 201})],
+                "scénario n° 1 : étape n° 1 : « selector » dépasse 200 caractères (201)",
+            ),
+            "value of 201 characters": (
+                [steps_of({"type": "select", "selector": "#a", "value": "v" * 201})],
+                "scénario n° 1 : étape n° 1 : « value » dépasse 200 caractères (201)",
+            ),
+            "selector with a line break": (
+                [steps_of({"type": "tap", "selector": "#a\n#b"})],
+                "scénario n° 1 : étape n° 1 : « selector » contient un caractère de contrôle",
+            ),
+            "value with a control character": (
+                [steps_of({"type": "select", "selector": "#a", "value": "x\x00y"})],
+                "scénario n° 1 : étape n° 1 : « value » contient un caractère de contrôle",
+            ),
+            "Enter key": (
+                [steps_of({"type": "press", "key": "Enter"})],
+                "scénario n° 1 : étape n° 1 : « key » doit valoir Escape, Tab, Shift+Tab, ArrowUp, "
+                "ArrowDown, ArrowLeft, ArrowRight, Home ou End",
+            ),
+            "key without a name": (
+                [steps_of({"type": "press"})],
+                "scénario n° 1 : étape n° 1 : « key » manquant",
+            ),
+            "script key on a step": (
+                [steps_of({"type": "tap", "selector": "#a", "script": "alert(1)"})],
+                "scénario n° 1 : étape n° 1 : clé « script » non admise pour l'étape tap "
+                "(clés admises : selector)",
+            ),
+            "selector on a capture": (
+                [steps_of({"type": "capture", "selector": "#a"})],
+                "scénario n° 1 : étape n° 1 : clé « selector » non admise pour l'étape capture "
+                "(aucune clé admise)",
+            ),
+            "script key on a scenario": (
+                [make_scenario(script="alert(1)")],
+                "scénario n° 1 : clé « script » non admise (id, url, profile, steps)",
+            ),
+            "uppercase id": (
+                [make_scenario(id="Bad_ID")],
+                "scénario n° 1 : « id » doit correspondre à [a-z0-9-]{1,40} (« Bad_ID »)",
+            ),
+            "id of 41 characters": (
+                [make_scenario(id="a" * 41)],
+                f"scénario n° 1 : « id » doit correspondre à [a-z0-9-]{{1,40}} (« {'a' * 41} »)",
+            ),
+            "lot prefix in the id": (
+                [make_scenario(id="lot:menu")],
+                "scénario n° 1 : « id » doit correspondre à [a-z0-9-]{1,40} (« lot:menu »)",
+            ),
+            "id that is not a text": (
+                [make_scenario(id=12)],
+                "scénario n° 1 : « id » doit correspondre à [a-z0-9-]{1,40} (12)",
+            ),
+            "unknown profile": (
+                [make_scenario(profile="tablette")],
+                "scénario n° 1 : « profile » doit valoir portrait ou paysage",
+            ),
+            "count of 31": (
+                [steps_of({"type": "tab", "count": 31})],
+                "scénario n° 1 : étape n° 1 : « count » doit être un entier de 1 à 30",
+            ),
+            "count of 0": (
+                [steps_of({"type": "tab", "count": 0})],
+                "scénario n° 1 : étape n° 1 : « count » doit être un entier de 1 à 30",
+            ),
+            "count as a text": (
+                [steps_of({"type": "tab", "count": "3"})],
+                "scénario n° 1 : étape n° 1 : « count » doit être un entier de 1 à 30",
+            ),
+            "count as a boolean": (
+                [steps_of({"type": "tab", "count": True})],
+                "scénario n° 1 : étape n° 1 : « count » doit être un entier de 1 à 30",
+            ),
+            "count as a float": (
+                [steps_of({"type": "tab", "count": 2.0})],
+                "scénario n° 1 : étape n° 1 : « count » doit être un entier de 1 à 30",
+            ),
+            "shift as a text": (
+                [steps_of({"type": "tab", "shift": "oui"})],
+                "scénario n° 1 : étape n° 1 : « shift » doit être un booléen (true ou false)",
+            ),
+        }
+        for name, (scenarios, expected) in cases.items():
+            with self.subTest(name=name):
+                problem = only_error(self, scenarios)
+                self.assertEqual(problem, expected)
+                self.assertNotIn(EM_DASH, problem)
+        for url in (
+            "https://preprod.example.org/wp-content/uploads/x.php",
+            "https://preprod.example.org/x.PHP?y=1",
+            "https://preprod.example.org/blog/index.php",
+        ):
+            with self.subTest(url=url):
+                problem = only_error(self, [make_scenario(url=url)])
+                self.assertTrue(
+                    problem.startswith(f"scénario n° 1 : {PHP_FILE_ERROR} (seuls /index.php"), problem
+                )
+        problem = only_error(self, [make_scenario(url="https://preprod.example.org/" + "a" * 2000)])
+        self.assertEqual(problem, "scénario n° 1 : « url » dépasse 2000 caractères (2028)")
+
+    def test_the_php_rule_follows_the_path_of_the_application(self):
+        def errors_for(paths, app_path):
+            scenarios = [make_scenario(url=f"{ORIGIN}{path}") for path in paths]
+            document = make_document(make_finding(needs_scenarios=scenarios[:1]), make_finding(ref=80))
+            return validate_document(document, LOT_REFS, app_path=app_path)[1]
+
+        self.assertEqual(errors_for(["/blog/index.php"], APP_PATH), [])
+        errors = errors_for(["/index.php"], APP_PATH)
+        self.assertEqual(len(errors), 1)
+        self.assertIn(PHP_FILE_ERROR, errors[0])
+        self.assertIn("/blog/index.php", errors[0])
+
+    def test_hostile_selectors_are_data_that_is_never_changed(self):
+        selectors = [
+            "a'); fetch('/x'); ('",
+            "a\"); location.href='/y'; (\"",
+            "xpath=//a",
+            "a >> text=x",
+            "text=Menu",
+            "#bouton-menu >> nth=0",
+            "</script><script>alert(1)</script>",
+            "${process.exit()}",
+            "`rm -rf /`",
+            "javascript:alert(1)",
+            "é",
+        ]
+        steps = [{"type": "tap", "selector": selector} for selector in selectors[:MAX_STEPS]]
+        scenarios = [make_scenario(steps=steps)]
+        document = make_document(make_finding(needs_scenarios=scenarios), make_finding(ref=80))
+        before = copy.deepcopy(document)
+        valid, errors = validate_document(document, LOT_REFS)
+        self.assertEqual(errors, [])
+        self.assertEqual(document, before)
+        self.assertEqual(valid[0]["needs_scenarios"], scenarios)
+
+    def test_malformed_requests_are_refused_and_never_raise(self):
+        huge = {"type": "tap", "selector": "#a"}
+        shapes = [
+            None,
+            "menu",
+            12,
+            {},
+            {"id": "a"},
+            ["menu"],
+            [None],
+            [[]],
+            [{}],
+            [make_scenario(id=None)],
+            [make_scenario(id="")],
+            [make_scenario(id=["a"])],
+            [make_scenario(url=None)],
+            [make_scenario(url="")],
+            [make_scenario(url="   ")],
+            [make_scenario(url=["https://preprod.example.org/"])],
+            [make_scenario(url="https://preprod.example.org/" + "a" * 2000)],
+            [make_scenario(profile=None)],
+            [make_scenario(profile="PORTRAIT")],
+            [make_scenario(profile=["portrait"])],
+            [make_scenario(steps=None)],
+            [make_scenario(steps=[])],
+            [make_scenario(steps="tap #a")],
+            [make_scenario(steps={"type": "tap", "selector": "#a"})],
+            [make_scenario(steps=[None])],
+            [make_scenario(steps=["tap"])],
+            [make_scenario(steps=[[]])],
+            [make_scenario(steps=[{}])],
+            [make_scenario(steps=[{"type": None}])],
+            [make_scenario(steps=[{"type": ["tap"]}])],
+            [make_scenario(steps=[{"type": "TAP", "selector": "#a"}])],
+            [make_scenario(steps=[{"type": "navigate", "url": "/user/logout"}])],
+            [make_scenario(steps=[{"type": "tap"}])],
+            [make_scenario(steps=[{"type": "tap", "selector": None}])],
+            [make_scenario(steps=[{"type": "tap", "selector": ["#a"]}])],
+            [make_scenario(steps=[{"type": "tap", "selector": ""}])],
+            [make_scenario(steps=[{"type": "tap", "selector": "   "}])],
+            [make_scenario(steps=[{"type": "tap", "selector": "#a\u2028"}])],
+            [make_scenario(steps=[{"type": "tap", "selector": "#a\u2029"}])],
+            [make_scenario(steps=[{"type": "tap", "selector": "#a\x7f"}])],
+            [make_scenario(steps=[{"type": "tap", "selector": "#a\x85"}])],
+            [make_scenario(steps=[{"type": "tap", "selector": "#a\r"}])],
+            [make_scenario(steps=[{"type": "tap", "selector": "#a", "value": "x"}])],
+            [make_scenario(steps=[{"type": "select", "selector": "#a"}])],
+            [make_scenario(steps=[{"type": "select", "selector": "#a", "value": None}])],
+            [make_scenario(steps=[{"type": "select", "selector": "#a", "value": 3}])],
+            [make_scenario(steps=[{"type": "select", "value": "x"}])],
+            [make_scenario(steps=[{"type": "state"}])],
+            [make_scenario(steps=[{"type": "press", "key": "enter"}])],
+            [make_scenario(steps=[{"type": "press", "key": ["Escape"]}])],
+            [make_scenario(steps=[{"type": "press", "key": "Escape", "selector": "#a"}])],
+            [make_scenario(steps=[{"type": "tab", "count": -1}])],
+            [make_scenario(steps=[{"type": "tab", "count": None}])],
+            [make_scenario(steps=[{"type": "tab", "shift": None}])],
+            [make_scenario(steps=[{"type": "tab", "shift": 1}])],
+            [make_scenario(steps=[{"type": "tab", "key": "Tab"}])],
+            [make_scenario(steps=[huge] * (MAX_STEPS + 1))],
+            [make_scenario(steps=[huge] * 1000)],
+            [make_scenario(), make_scenario(id="b"), make_scenario(id="c"), make_scenario(id="d")],
+            [make_scenario(), make_scenario()],
+            [make_scenario(extra=1)],
+        ]
+        for shape in shapes:
+            with self.subTest(shape=repr(shape)[:80]):
+                valid, errors = scenario_errors(shape)
+                self.assertEqual([item["ref"] for item in valid], [80])
+                self.assertTrue(errors)
+                for message in errors:
+                    self.assertTrue(message.startswith("constat CQ-79 : "), message)
+                    self.assertNotIn(EM_DASH, message)
+                    self.assertLessEqual(len(message), 400)
+
+    def test_a_huge_request_is_reported_without_flooding_the_errors(self):
+        # The count is reported, and only the steps and scenarios that the caps allow are examined.
+        steps = [{"type": "tap", "selector": "#a\n"}] * 5000
+        _, errors = scenario_errors([make_scenario(steps=steps)])
+        self.assertEqual(errors[0], "constat CQ-79 : scénario n° 1 : 5000 étapes (15 au plus)")
+        self.assertEqual(len(errors), 1 + MAX_STEPS)
+        self.assertIn(f"étape n° {MAX_STEPS} : ", errors[-1])
+        scenarios = [make_scenario(id=f"s{number}") for number in range(100)]
+        _, errors = scenario_errors(scenarios)
+        self.assertEqual(errors, ["constat CQ-79 : « needs_scenarios » : 100 scénarios (3 au plus)"])
+        scenarios = [make_scenario(id="Bad_ID") for number in range(100)]
+        _, errors = scenario_errors(scenarios)
+        self.assertEqual(len(errors), 1 + MAX_SCENARIOS)
+
+    def test_every_problem_of_the_request_is_reported_in_one_pass(self):
+        scenarios = [
+            make_scenario(id="Bad_ID", profile="tablette", steps=[{"type": "eval"}, {"type": "capture", "x": 1}]),
+            make_scenario(id="ok-one", steps=[{"type": "press", "key": "Enter"}]),
+        ]
+        _, errors = scenario_errors(scenarios)
+        self.assertEqual(len(errors), 5, errors)
+        joined = "\n".join(errors)
+        for needle in (
+            "scénario n° 1 : « id »",
+            "scénario n° 1 : « profile »",
+            "scénario n° 1 : étape n° 1 : type « eval » inconnu",
+            "scénario n° 1 : étape n° 2 : clé « x » non admise",
+            "scénario n° 2 : étape n° 1 : « key » doit valoir",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, joined)
+
+    def test_the_other_findings_of_the_document_are_not_affected(self):
+        valid, errors = validate(
+            make_finding(needs_scenarios=[make_scenario(id="Bad_ID")]),
+            make_finding(ref=80, needs_scenarios=[make_scenario(id="ok")]),
+        )
+        self.assertEqual([item["ref"] for item in valid], [80])
+        self.assertEqual(len(errors), 1)
+
+    def test_duplicate_scenario_ids_invalidate_every_holder(self):
+        first = make_scenario(id="menu-burger")
+        second = make_scenario(id="menu-burger", profile="paysage")
+        other = make_scenario(id="menu-footer")
+        valid, errors = validate(
+            make_finding(ref=79, needs_scenarios=[first]),
+            make_finding(ref=80, needs_scenarios=[second, other]),
+            make_finding(ref=81, needs_scenarios=[make_scenario(id="menu-lang")]),
+            lot_refs={79, 80, 81},
+        )
+        self.assertEqual([item["ref"] for item in valid], [81])
+        self.assertEqual(errors, ["identifiant de scénario en double : menu-burger (CQ-79, CQ-80)"])
+
+    def test_duplicate_scenario_ids_are_reported_once_per_id_and_in_every_finding(self):
+        valid, errors = validate(
+            make_finding(ref=79, needs_scenarios=[make_scenario(id="a"), make_scenario(id="b")]),
+            make_finding(ref=80, needs_scenarios=[make_scenario(id="b"), make_scenario(id="a")]),
+            make_finding(ref=81, needs_scenarios=[make_scenario(id="a")]),
+            lot_refs={79, 80, 81},
+        )
+        self.assertEqual(valid, [])
+        self.assertEqual(
+            errors,
+            [
+                "identifiant de scénario en double : a (CQ-79, CQ-80, CQ-81)",
+                "identifiant de scénario en double : b (CQ-79, CQ-80)",
+            ],
+        )
+
+    def test_an_id_repeated_in_one_finding_invalidates_it(self):
+        scenarios = [make_scenario(id="menu"), make_scenario(id="other"), make_scenario(id="menu")]
+        problem = only_error(self, scenarios)
+        self.assertEqual(
+            problem, "scénario n° 3 : « id » « menu » déjà pris par le scénario n° 1"
+        )
+
+    def test_a_clash_is_counted_between_findings_of_the_lot_only(self):
+        # A finding outside the lot is dropped anyway: its ids must not invalidate a good finding.
+        valid, errors = validate(
+            make_finding(ref=79, needs_scenarios=[make_scenario(id="menu")]),
+            make_finding(ref=999, needs_scenarios=[make_scenario(id="menu")]),
+            lot_refs={79, 80},
+        )
+        self.assertEqual([item["ref"] for item in valid], [79])
+        self.assertEqual(errors[0], "constat CQ-999 : Réf hors du lot")
+        self.assertNotIn("identifiant de scénario en double", "\n".join(errors))
+
+    def test_an_invalid_id_is_not_reported_as_a_clash(self):
+        _, errors = validate(
+            make_finding(ref=79, needs_scenarios=[make_scenario(id="Bad_ID")]),
+            make_finding(ref=80, needs_scenarios=[make_scenario(id="Bad_ID")]),
+        )
+        self.assertEqual(len(errors), 2)
+        self.assertNotIn("identifiant de scénario en double", "\n".join(errors))
+
+    def test_a_clash_with_a_finding_invalid_for_another_reason_is_reported(self):
+        valid, errors = validate(
+            make_finding(ref=79, summary="", needs_scenarios=[make_scenario(id="menu")]),
+            make_finding(ref=80, needs_scenarios=[make_scenario(id="menu")]),
+        )
+        self.assertEqual(valid, [])
+        self.assertIn("identifiant de scénario en double : menu (CQ-79, CQ-80)", errors)
+
+    def test_the_same_id_in_two_documents_is_not_a_clash(self):
+        for lot in ("front-1", "front-2"):
+            document = make_document(
+                make_finding(needs_scenarios=[make_scenario(id="menu")]), make_finding(ref=80), lot=lot
+            )
+            valid, errors = validate_document(document, LOT_REFS)
+            self.assertEqual(errors, [])
+            self.assertEqual(len(valid), 2)
+
+    def test_scenarios_do_not_change_the_probe_rules(self):
+        probes = [{"url": "https://preprod.example.org/", "method": "POST"}]
+        valid, errors = validate(
+            make_finding(needs_probes=probes, needs_scenarios=[make_scenario()]), make_finding(ref=80)
+        )
+        self.assertEqual(errors, ["constat CQ-79 : sonde n° 1 : « method » doit valoir GET ou HEAD"])
+        self.assertEqual([item["ref"] for item in valid], [80])
+
+
+class RequestsActionUrlTest(unittest.TestCase):
+    """The mirror of ACTION_SEGMENTS, ACTION_VALUES, TOKEN_PARAMS and isActionUrl of gm-audit."""
+
+    def test_the_closed_lists_copy_the_toolbox(self):
+        self.assertEqual(
+            ACTION_SEGMENTS,
+            (
+                "logout", "signout", "sign-out", "deconnexion", "deconnecter", "delete", "remove",
+                "trash", "publish", "unpublish", "unsubscribe", "desinscription", "cron",
+                "clear-cache", "flush",
+            ),
+        )
+        self.assertEqual(
+            ACTION_VALUES, ("trash", "delete", "remove", "logout", "publish", "unpublish", "clear")
+        )
+        self.assertEqual(
+            TOKEN_PARAMS, ("token", "_token", "csrf", "nonce", "_wpnonce", "form_token", "key")
+        )
+        self.assertEqual(ACTION_URL_REASON, "URL d'action refusée")
+
+    def test_action_urls_are_refused(self):
+        # Every word of the lists, as a whole segment at any depth, as a value of action, every token.
+        for word in ACTION_SEGMENTS:
+            for path in (f"/{word}", f"/fr/{word}", f"/a/b/{word}/c", f"/{word}/", f"/{word.upper()}"):
+                with self.subTest(path=path):
+                    self.assertTrue(requests_action_url(f"{ORIGIN}{path}"))
+        for value in ACTION_VALUES:
+            for query in (f"action={value}", f"a=1&action={value}&b=2", f"ACTION={value.upper()}"):
+                with self.subTest(query=query):
+                    self.assertTrue(requests_action_url(f"{ORIGIN}/page?{query}"))
+        for name in TOKEN_PARAMS:
+            for query in (f"{name}=abc", f"{name}=", name, f"a=1&{name.upper()}=x"):
+                with self.subTest(query=query):
+                    self.assertTrue(requests_action_url(f"{ORIGIN}/page?{query}"))
+        # The path is decoded the way a server decodes it before it routes it.
+        for path in (
+            "/user/logout",
+            "/fr/user/logout",
+            "/user/%6cogout",
+            "/user/%4C%4fGOUT",
+            "/user%2flogout",
+            "/user%2Flogout",
+            "/user%5clogout",
+            "/user/./logout",
+            "/user/x/../logout",
+            "/user/%2e/logout",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(requests_action_url(f"{ORIGIN}{path}"))
+        for query in (
+            "action=%74rash", "%61ction=trash", "%5ftoken=1", "form%5Ftoken=1", "action=tr%61sh",
+        ):
+            with self.subTest(query=query):
+                self.assertTrue(requests_action_url(f"{ORIGIN}/page?{query}"))
+        self.assertTrue(requests_action_url(f"{ORIGIN}/actions.html?action=trash"))
+        self.assertTrue(requests_action_url(f"{ORIGIN}/?action=trash#top"))
+
+    def test_a_word_inside_another_word_is_not_an_action(self):
+        for url in (
+            f"{ORIGIN}/",
+            f"{ORIGIN}",
+            f"{ORIGIN}/contact",
+            f"{ORIGIN}/produits/delete-pro-fr",
+            f"{ORIGIN}/blog?action-figure=1",
+            f"{ORIGIN}/tag/trash-talk",
+            f"{ORIGIN}/cron-job-offers",
+            f"{ORIGIN}/flushing",
+            f"{ORIGIN}/logout-faq/removed",
+            f"{ORIGIN}/actions.html",
+            f"{ORIGIN}/logout.php",
+            f"{ORIGIN}/logout;x=1",
+            f"{ORIGIN}/page?action=view",
+            f"{ORIGIN}/page?action=",
+            f"{ORIGIN}/page?action",
+            f"{ORIGIN}/page?action=trashcan",
+            f"{ORIGIN}/page?actions=trash",
+            f"{ORIGIN}/page?keyword=a&tokens=b&mykey=c&nonces=d",
+            f"{ORIGIN}/page?view=logout",
+            f"{ORIGIN}/page?q=delete&page=2#nonce",
+            f"{ORIGIN}/page#x?token=1",
+            f"{ORIGIN}/produits?type=publish",
+            f"{ORIGIN}/%C3%A9t%C3%A9",
+            f"{ORIGIN}/100%",
+            f"{ORIGIN}/%zz/%",
+            f"{ORIGIN}/page?a=1?token=2",
+            f"{ORIGIN}/page?action%3Dtrash",
+            f"{ORIGIN}/page?q=%2Btoken",
+            f"{ORIGIN}/%256cogout",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(requests_action_url(url))
+
+    def test_the_decoding_follows_the_url_parser_of_the_tool(self):
+        # new URL() drops tabs and line breaks, trims, and reads a backslash as a slash.
+        for url in (
+            f"{ORIGIN}\\user\\logout",
+            f"{ORIGIN}/user\\logout",
+            f"{ORIGIN}/user/log\tout",
+            f"{ORIGIN}/user/log\nout",
+            f"{ORIGIN}/user/log\r\nout",
+            f"  {ORIGIN}/user/logout",
+            f"{ORIGIN}/user/logout  ",
+            f"\x00{ORIGIN}/user/logout",
+            f"{ORIGIN}/page?to\tken=1",
+            f"{ORIGIN}/page?action=tra\nsh",
+            f"{ORIGIN}/page?a+b=1&action=trash",
+            f"{ORIGIN}/page?token",
+            f"{ORIGIN}/page?&&token=1",
+            f"{ORIGIN}/page?x=1;token=2&token=3",
+            "/user/logout",
+            "//other.example.net/user/logout",
+            "https://other.example.net/user/logout",
+            f"{ORIGIN}/%C3%A9/logout",
+        ):
+            with self.subTest(url=url):
+                self.assertTrue(requests_action_url(url))
+        # A semicolon is not a separator of parameters (it was one in old versions of the standard library).
+        self.assertFalse(requests_action_url(f"{ORIGIN}/page?x=1;token=2"))
+        # The fragment never goes to the server.
+        self.assertFalse(requests_action_url(f"{ORIGIN}/page#/user/logout"))
+        # A plus sign is a space in a query, and %2B stays a plus sign.
+        for query in ("to+ken=1", "+token=1", "%2Btoken=1"):
+            with self.subTest(query=query):
+                self.assertFalse(requests_action_url(f"{ORIGIN}/page?{query}"))
+
+    def test_a_dot_segment_is_not_resolved_so_the_mirror_is_never_laxer_than_the_tool(self):
+        # The tool resolves "/logout/../x" to "/x" and lets it pass; the mirror refuses it, which is harmless.
+        for path in ("/logout/../x", "/logout/%2e%2e/x", "/a/b/../../logout"):
+            with self.subTest(path=path):
+                self.assertTrue(requests_action_url(f"{ORIGIN}{path}"))
+
+    def test_anything_that_is_not_a_url_is_left_to_the_other_checks(self):
+        for value in (None, 12, [], {}, b"/logout", "", "http://[::1/logout", "not a url"):
+            with self.subTest(value=value):
+                self.assertFalse(requests_action_url(value))
+
+
 class RequestsPhpFileTest(unittest.TestCase):
     def test_entry_points_under_the_application_path(self):
         for app_path in (APP_PATH, f"{APP_PATH}/", "/Blog"):
@@ -847,6 +1452,50 @@ class GuardrailsTest(unittest.TestCase):
         result = guard(make_ok(needs_probes=[]), followup_done=True)
         self.assertEqual(result["verdict"], "ok")
 
+    def test_guardrail_4_covers_scenarios_and_probes(self):
+        probes = [{"url": "https://preprod.example.org/", "method": "GET"}]
+        scenarios = [make_scenario()]
+        pending = {
+            "scenarios only": {"needs_scenarios": scenarios},
+            "probes only": {"needs_probes": probes},
+            "both": {"needs_probes": probes, "needs_scenarios": scenarios},
+        }
+        for name, needs in pending.items():
+            for verdict in ("ok_human", "ok", "na"):
+                with self.subTest(name=name, verdict=verdict):
+                    result = guard(make_finding(verdict=verdict, **needs), followup_done=True)
+                    self.assertEqual(result["verdict"], "unknown")
+                    self.assertEqual(
+                        result["guardrail"],
+                        f"sondes ou scénarios en attente après la relance : {verdict} abaissé à unknown",
+                    )
+            for verdict in ("ko", "partial", "unknown"):
+                with self.subTest(name=name, verdict=verdict, kept=True):
+                    result = guard(make_finding(verdict=verdict, **needs), followup_done=True)
+                    self.assertEqual(result["verdict"], verdict)
+                    self.assertIsNone(result["guardrail"])
+            with self.subTest(name=name, before_the_follow_up=True):
+                result = guard(make_ok(**needs), followup_done=False)
+                self.assertEqual(result["verdict"], "ok")
+                self.assertIsNone(result["guardrail"])
+
+    def test_answered_scenarios_do_not_lower_a_verdict(self):
+        for needs in ({"needs_scenarios": []}, {}):
+            with self.subTest(needs=needs):
+                result = guard(make_ok(**needs), followup_done=True)
+                self.assertEqual(result["verdict"], "ok")
+                self.assertIsNone(result["guardrail"])
+
+    def test_pending_scenarios_come_before_the_contradiction_rules(self):
+        scenarios = [make_scenario()]
+        result = guard(make_ok(todo="À faire.", needs_scenarios=scenarios), followup_done=True)
+        self.assertEqual(result["verdict"], "unknown")
+        self.assertIn("scénarios", result["guardrail"])
+        self.assertNotIn("à faire", result["guardrail"])
+        result = guard(make_ok(divergence="Écart.", needs_scenarios=scenarios), followup_done=True)
+        self.assertEqual(result["verdict"], "partial")
+        self.assertNotIn("scénarios", result["guardrail"])
+
     def test_rules_chain_in_order(self):
         weak_ok = make_ok(evidence=[], divergence="Écart.")
         result = guard(weak_ok)
@@ -957,10 +1606,11 @@ class GuardrailsTest(unittest.TestCase):
             (None, "Écart."),
             (None, "À faire."),
             ([], probes),
+            ([], [make_scenario()]),
             (False, True),
             (("Code",), (HUMAN,)),
         )
-        for verdict, confidence, ev, divergence, todo, needs, followup, tools in cases:
+        for verdict, confidence, ev, divergence, todo, needs, scenarios, followup, tools in cases:
             finding = make_finding(
                 verdict=verdict,
                 confidence=confidence,
@@ -968,6 +1618,7 @@ class GuardrailsTest(unittest.TestCase):
                 divergence=divergence,
                 todo=todo,
                 needs_probes=needs,
+                needs_scenarios=scenarios,
             )
             result = guard(finding, make_row(tools=tools), followup_done=followup)
             with self.subTest(
@@ -977,6 +1628,7 @@ class GuardrailsTest(unittest.TestCase):
                 divergence=divergence,
                 todo=todo,
                 probes=bool(needs),
+                scenarios=bool(scenarios),
                 followup=followup,
                 tools=tools,
             ):
@@ -1003,7 +1655,7 @@ class SchemaTest(unittest.TestCase):
     def test_every_property_of_the_finding_is_described(self):
         self.assertEqual(
             set(self.finding["properties"]),
-            set(REQUIRED_FINDING_KEYS) | {"tool_dates", "in_repo", "source"},
+            set(REQUIRED_FINDING_KEYS) | {"needs_scenarios", "tool_dates", "in_repo", "source"},
         )
         for name, definition in self.finding["properties"].items():
             with self.subTest(name=name):
@@ -1016,9 +1668,11 @@ class SchemaTest(unittest.TestCase):
         self.assertIn("na needs high confidence", verdict)
         for key in ("todo", "human_check"):
             self.assertIn("an ok with a filled", properties[key]["description"])
-        probes = properties["needs_probes"]["description"]
-        self.assertIn("unknown", probes)
-        self.assertIn("ko and partial are kept", probes)
+        for key in ("needs_probes", "needs_scenarios"):
+            with self.subTest(key=key):
+                description = properties[key]["description"]
+                self.assertIn("unknown", description)
+                self.assertIn("ko and partial are kept", description)
 
     def test_confidence_enum(self):
         self.assertEqual(self.finding["properties"]["confidence"]["enum"], list(CONFIDENCES))
