@@ -33,6 +33,7 @@ from cqa import (
     fix_state,
     probes,
     report,
+    scenarios,
 )
 from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
 from cqa.findings import VERDICTS, apply_guardrails, validate_document
@@ -235,6 +236,15 @@ def _register_audit(commands) -> None:
         "--followup",
         action="store_true",
         help="regroupe les sondes demandées par les constats (probes-followup.json)",
+    )
+    sub = _run_command(
+        commands, "scenarios", "scénarios d'interaction de la boîte à outils", _cmd_scenarios
+    )
+    sub.add_argument(
+        "--followup",
+        action="store_true",
+        required=True,
+        help="regroupe les scénarios demandés par les constats (scenarios-followup.json)",
     )
     sub = _run_command(commands, "validate", "valide les constats d'un lot", _cmd_validate)
     sub.add_argument("lot_id", help="identifiant du lot (lots.json)")
@@ -921,6 +931,8 @@ def _cmd_toolbox_env(args, services) -> int:
         origin = _prod_origin(context["target"].get("prod_url"))
         if origin:
             lines.append(f"GM_AUDIT_PROD_ORIGIN={origin}")
+    if probes.is_prod_run(context):
+        lines.append("GM_CQA_PROD_RUN=1")
     _emit_lines(lines)
     return EXIT_OK
 
@@ -1011,7 +1023,7 @@ def _cmd_lots(args, services) -> int:
     run_dir = args.run_dir
     refs = docs_verdicts.document_refs(run_dir)
     context, kept, excluded = _selection(run_dir, refs)
-    lots = build_lots(kept, document_refs=refs)
+    lots = build_lots(kept, document_refs=refs, run_dir=run_dir)
     counts = coverage(kept, excluded, context["available_tools"], document_refs=refs)
     docs_verdicts.write_findings(run_dir, {row["ref"] for row in kept if row["ref"] in refs})
     docs_verdicts.write_hints(run_dir, lots)
@@ -1086,6 +1098,23 @@ def _cmd_probes(args, services) -> int:
             "count": len(document["probes"]),
             "from_fiches": from_fiches,
             "discarded": result["discarded"],
+        }
+    )
+    return EXIT_OK
+
+
+def _cmd_scenarios(args, services) -> int:
+    run_dir = args.run_dir
+    _checked_context(run_dir)
+    document = scenarios.followup_scenarios(run_dir)
+    write_json(run_dir / "scenarios-followup.json", document)
+    _emit(
+        {
+            "file": "scenarios-followup.json",
+            "base_url": document["base_url"],
+            "count": len(document["scenarios"]),
+            "lots": document["lots"],
+            "discarded": scenarios.printable_discarded(document["discarded"]),
         }
     )
     return EXIT_OK
@@ -2717,14 +2746,16 @@ def _read_findings_file(run_dir: Path, context: dict, lot: dict, name: str) -> O
 def _collect_findings(
     run_dir: Path, context: dict, lots: list, sources: Optional[dict] = None
 ) -> tuple:
-    """Return ({ref: finding}, refs of the lots that went through the follow-up of the probes).
+    """Return ({ref: finding}, refs of the lots that went through a follow-up).
 
     The latest finding of a row prevails: first round, follow-up, then the reruns in order (see
     latest_findings); a ref a later file does not give (or gives invalid) keeps its previous
     finding. A lot went through the follow-up when it has a follow-up file, or when
-    probes-followup.json exists and the lot still asked for probes: if every URL was discarded
-    no relaunch has any use, but what the lot waited for will not come either. sources, when
-    given, receives {ref: name of the findings file of its latest finding}.
+    probes-followup.json exists and the lot still asked for probes, or when
+    scenarios-followup.json exists and the lot still asked for scenarios: if every request was
+    discarded, or the tool of one of the two follow-ups failed, no relaunch has any use, but what
+    the lot waited for will not come either. sources, when given, receives {ref: name of the
+    findings file of its latest finding}.
     """
 
     def read(lot, name):
@@ -2737,8 +2768,11 @@ def _collect_findings(
     findings = latest_findings(run_dir, lots, read)
     followup_done = set()
     requested = set()
+    app_path = probes.app_path(context)
     if (run_dir / "probes-followup.json").is_file():
-        requested = set(probes.pending_lots(run_dir, lots, probes.app_path(context)))
+        requested.update(probes.pending_lots(run_dir, lots, app_path))
+    if (run_dir / "scenarios-followup.json").is_file():
+        requested.update(scenarios.pending_lots(run_dir, lots, app_path))
     for lot in lots:
         if (run_dir / "findings" / _findings_name(lot["id"], True)).exists() or lot[
             "id"

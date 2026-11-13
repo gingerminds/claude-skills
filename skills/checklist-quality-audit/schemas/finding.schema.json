@@ -83,6 +83,12 @@
           "items": {"$ref": "#/$defs/probe"},
           "description": "HTTP responses missing from the tool collection. Ask for them here instead of concluding; they are run once, then the lot is re-run. [] when none is needed. A finding that still waits for probes after the follow-up is capped at unknown: ko and partial are kept, ok_human, ok and na become unknown."
         },
+        "needs_scenarios": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/scenario"},
+          "description": "Optional (absent or [] when none is needed). Interaction scenarios that the tool collection cannot answer, for example a menu to open, a focus to follow, a Tab to walk, on a 320 px touch screen. They are played once, in an emulated Chromium and without any change to the site, then the lot is re-run. At most 3 per finding, with ids that are unique in the lot. A request is data, never code: it is checked against a whitelist (see scenario and scenario_step), and a finding that breaks a rule is invalid. A finding that still waits for scenarios after the follow-up is capped at unknown, like one that waits for probes: ko and partial are kept, ok_human, ok and na become unknown."
+        },
         "tool_dates": {
           "type": "object",
           "propertyNames": {"pattern": "^[a-z0-9-]+$"},
@@ -120,6 +126,37 @@
           "human_check": null,
           "divergence": null,
           "needs_probes": []
+        },
+        {
+          "ref": 17,
+          "verdict": "unknown",
+          "confidence": "medium",
+          "summary": "Le menu mobile s'ouvre au toucher, mais le focus et la fermeture à Échap ne sont pas établis sans jouer le parcours.",
+          "evidence": [
+            {
+              "type": "page",
+              "url": "https://preprod.example.org/",
+              "detail": "bouton #menu-toggle lu dans le DOM"
+            }
+          ],
+          "todo": null,
+          "human_check": null,
+          "divergence": null,
+          "needs_probes": [],
+          "needs_scenarios": [
+            {
+              "id": "menu-burger",
+              "url": "https://preprod.example.org/",
+              "profile": "portrait",
+              "steps": [
+                {"type": "tap", "selector": "#menu-toggle"},
+                {"type": "state", "selector": "#menu"},
+                {"type": "tab", "count": 3},
+                {"type": "press", "key": "Escape"},
+                {"type": "capture"}
+              ]
+            }
+          ]
         }
       ]
     },
@@ -227,6 +264,106 @@
           "description": "HTTP method, uppercase."
         }
       }
+    },
+    "scenario": {
+      "type": "object",
+      "required": ["id", "url", "profile", "steps"],
+      "additionalProperties": false,
+      "description": "One scenario: the steps to play, in order, on a page loaded afresh in one profile. Only these four keys are accepted.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]{1,40}$",
+          "description": "Name chosen by the sub-agent, unique among the scenarios of the lot (a second finding of the lot that takes it invalidates both). The follow-up cites it as <lot>:<id>, in summary.json#<lot>:<id>."
+        },
+        "url": {
+          "type": "string",
+          "pattern": "\\S",
+          "maxLength": 2000,
+          "description": "URL of the page to load, on the origin of the target (it need not be a key page), at most 2000 characters. It is loaded by a GET before any guard acts: never a URL that changes a state (logout, delete, publish, cron, a token, action=trash), never a PHP file other than the public entries of the application. Such a scenario is refused with its reason."
+        },
+        "profile": {
+          "enum": ["portrait", "paysage"],
+          "description": "portrait is 320 x 640, paysage 640 x 320, both touch screens at scale 2."
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 15,
+          "items": {"$ref": "#/$defs/scenario_step"},
+          "description": "1 to 15 steps, played in order; a step that fails stops the scenario."
+        }
+      }
+    },
+    "scenario_step": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "description": "One step of a scenario, from a closed list. No typing, no JavaScript, no free navigation. A step aimed at a submit control or a consent banner is refused by the tool with its reason, and a step that would navigate is noted navigation-blocked. After each step the tool reads the focus and the aria-expanded, inert and aria-hidden states.",
+      "properties": {
+        "type": {
+          "enum": ["tab", "press", "tap", "select", "state", "capture"],
+          "description": "tab: press Tab count times (Shift+Tab with shift) and read each stop. press: press one key of the list. tap: touch the element of selector. select: choose value in the select of selector. state: read the attributes, role, size and focus of the element of selector. capture: take a screenshot."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30,
+          "description": "tab only: number of presses, 1 when absent."
+        },
+        "shift": {
+          "type": "boolean",
+          "description": "tab only: true to walk backwards with Shift+Tab, false when absent."
+        },
+        "key": {
+          "enum": ["Escape", "Tab", "Shift+Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"],
+          "description": "press only: the key. Enter and Space are not in the list."
+        },
+        "selector": {
+          "type": "string",
+          "maxLength": 200,
+          "allOf": [
+            {"pattern": "\\S"},
+            {"pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]*$"}
+          ],
+          "description": "tap, select and state: a CSS selector read in the DOM, at most 200 characters, no control character or line break. It is resolved with querySelector, so a selector that is not valid CSS is reported as invalid, never run as anything else."
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]*$",
+          "description": "select only: the value or the label of the option to choose, at most 200 characters, no control character."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "tab"}}, "required": ["type"]},
+          "then": {"propertyNames": {"enum": ["type", "count", "shift"]}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "press"}}, "required": ["type"]},
+          "then": {"required": ["key"], "propertyNames": {"enum": ["type", "key"]}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "tap"}}, "required": ["type"]},
+          "then": {"required": ["selector"], "propertyNames": {"enum": ["type", "selector"]}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "select"}}, "required": ["type"]},
+          "then": {
+            "required": ["selector", "value"],
+            "propertyNames": {"enum": ["type", "selector", "value"]}
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "state"}}, "required": ["type"]},
+          "then": {"required": ["selector"], "propertyNames": {"enum": ["type", "selector"]}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "capture"}}, "required": ["type"]},
+          "then": {"propertyNames": {"enum": ["type"]}}
+        }
+      ]
     }
   }
 }

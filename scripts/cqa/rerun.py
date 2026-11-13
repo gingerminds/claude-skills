@@ -280,7 +280,7 @@ def rerun_candidates(
         required = [tool for tool in entry.get("tools") or [] if tool != _HUMAN]
         if entry.get("reason") == "no_tools" and required and set(required) <= available:
             ref = entry["ref"]
-            placed = _placement(rows.get(ref), lots, rows)
+            placed = _placement(rows.get(ref), lots, rows, run_dir)
             if placed is None:
                 notes.append(
                     f"{ref_label(ref)} ne peut pas être relancée dans ce run : "
@@ -393,13 +393,18 @@ def list_of(document, key: str) -> list:
     return value if isinstance(value, list) else []
 
 
-def _placement(row: Optional[dict], lots: list, rows: dict) -> Optional[str]:
-    """Return the id of the existing lot the lot builder gives a row, None when none fits."""
+def _placement(
+    row: Optional[dict], lots: list, rows: dict, run_dir: Optional[Path] = None
+) -> Optional[str]:
+    """Return the id of the existing lot the lot builder gives a row, None when none fits.
+
+    The builder reads the fiches of the run (run_dir) as it does when it writes lots.json.
+    """
     if row is None:
         return None
     kept = [rows[ref] for lot in lots for ref in lot.get("refs") or [] if ref in rows]
     kept = [item for item in kept if item["ref"] != row["ref"]] + [row]
-    for lot in build_lots(kept):
+    for lot in build_lots(kept, run_dir=run_dir):
         if row["ref"] in lot["refs"]:
             existing = {item.get("id") for item in lots}
             return lot["id"] if lot["id"] in existing else None

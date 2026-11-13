@@ -2,6 +2,7 @@
 import re
 import unicodedata
 from collections import Counter
+from pathlib import Path
 from typing import Optional
 
 from cqa.categories import in_scope
@@ -57,6 +58,32 @@ _TOOLBOX_HINT = re.compile(
     r"|schemathesis|\bcrawl|\bstylelint|\bcomposer audit|\bnpm audit|\bd[ée]bordements?",
     re.IGNORECASE,
 )
+# A row that asks for a test in a narrow window or an interaction of a menu or a panel reads
+# tools/mobile. Narrow on purpose: "Tab", "clavier" and "focus" are everywhere and would make
+# too many rows wait for the toolbox, and "piège" alone would catch "un nom piégé". Searched without
+# case and accent, with word boundaries.
+MOBILE_TERMS = (
+    "320",
+    "paysage",
+    "landscape",
+    "échap",
+    "escape",
+    "burger",
+    "menu mobile",
+    "tactile",
+    "piège au focus",
+    "piège au clavier",
+    "piège clavier",
+    "piège de focus",
+    "focus trap",
+    "inert",
+    "aria-expanded",
+)
+_FICHES_DIR = "fiches"
+_HOW_TO_TEST_MAX = 4000
+_HOW_TO_TEST_TITLE = re.compile(r"(#{2,3})[ \t]+comment[ \t]+tester[ \t]*", re.IGNORECASE)
+_TITLE = re.compile(r"(#{1,6})[ \t]")
+_CODE_FENCE = re.compile(r"[ \t]*(```|~~~)")
 
 
 def select_rows(
@@ -171,7 +198,10 @@ def coverage(
 
 
 def build_lots(
-    kept: list[dict], max_size: int = 20, document_refs: frozenset = frozenset()
+    kept: list[dict],
+    max_size: int = 20,
+    document_refs: frozenset = frozenset(),
+    run_dir: Optional[Path] = None,
 ) -> list[dict]:
     """Group the kept rows into lots, one per sub-agent, in dispatch order.
 
@@ -184,8 +214,10 @@ def build_lots(
     most max_size rows (a category group is split by sub-category, then into balanced
     numbered chunks). Browser rows that need a session (test accounts, back-office section)
     go to their own "-session" lots, so the others run without a login. Rows that need the
-    toolbox (a toolbox tool, or a tool named in tooling_hint) move to a sibling "<id>-outils"
-    lot. Order: server, code, browser, browser "-session", then every sibling.
+    toolbox (a toolbox tool, a tool named in tooling_hint, or, with a run_dir, a term of
+    MOBILE_TERMS in tooling_hint or in the "Comment tester" section of the fiche) move to a
+    sibling "<id>-outils" lot. Without run_dir the fiches are not read. Order: server, code,
+    browser, browser "-session", then every sibling.
     """
     rows = sorted(kept, key=lambda row: row["ref"])
     server, code = [], []
@@ -207,8 +239,9 @@ def build_lots(
     plain, with_toolbox = [], []
     groups = [group for group in groups if group[2]]
     for lot_id, kind, lot_rows in groups:
-        needing = [row for row in lot_rows if _needs_toolbox(row)]
-        others = [row for row in lot_rows if not _needs_toolbox(row)]
+        wanting = [_needs_toolbox(row, run_dir) for row in lot_rows]
+        needing = [row for row, wants in zip(lot_rows, wanting) if wants]
+        others = [row for row, wants in zip(lot_rows, wanting) if not wants]
         if others:
             plain.append(_lot(lot_id, kind, others, False, document_refs))
         if needing:
@@ -267,10 +300,71 @@ def _kind(row):
     return "code"
 
 
-def _needs_toolbox(row):
+def how_to_test(run_dir: Path, row: dict) -> str:
+    """Return the "Comment tester" section of the fiche of a row, 4000 characters at most.
+
+    The section runs from its "## Comment tester" or "### Comment tester" title (the fiches of
+    notion_read.write_fiches use level 3) to the next title of the same level or a higher one
+    (a deeper title belongs to the section; a line inside a code block is no title). The fiche
+    is fiches/<name of row["fiche_path"]> in the run directory. "" when the row has no fiche,
+    the fiche has no such section or cannot be read: this never raises.
+    """
+    try:
+        name = Path(row["fiche_path"]).name
+        text = (Path(run_dir) / _FICHES_DIR / name).read_text(encoding="utf-8")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return ""
+    lines, level, fenced = [], 0, False
+    for line in text.splitlines():
+        if _CODE_FENCE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            found = _HOW_TO_TEST_TITLE.fullmatch(line)
+            if found:
+                level = len(found.group(1))
+                continue
+            title = _TITLE.match(line)
+            if title and len(title.group(1)) <= level:
+                level = 0
+        if level:
+            lines.append(line)
+    return "\n".join(lines).strip()[:_HOW_TO_TEST_MAX]
+
+
+def _needs_toolbox(row, run_dir=None):
     if any(tool in (row.get("tools") or []) for tool in _TOOLBOX_TOOLS):
         return True
-    return bool(_TOOLBOX_HINT.search(row.get("tooling_hint") or ""))
+    hint = row.get("tooling_hint") or ""
+    if _TOOLBOX_HINT.search(hint) or _mentions_mobile(hint):
+        return True
+    return run_dir is not None and _mentions_mobile(how_to_test(run_dir, row))
+
+
+def _mentions_mobile(text):
+    return bool(_MOBILE_PATTERN.search(_fold(text)))
+
+
+def _fold(text):
+    """Lower case, without accent, with every run of white space reduced to one space."""
+    decomposed = unicodedata.normalize("NFD", text)
+    plain = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return " ".join(plain.lower().split())
+
+
+def _mobile_pattern():
+    alternatives = []
+    for term in MOBILE_TERMS:
+        folded = _fold(term)
+        if folded.isdigit():
+            # A width: "320px" and "320 px" count, "3200", "1,320" and "320,5" do not.
+            bounds = (r"(?<![a-z0-9])(?<![0-9][.,])", r"(?!\d|[.,]\d)")
+        else:
+            bounds = (r"(?<![a-z0-9])", r"(?![a-z0-9])")
+        alternatives.append(f"{bounds[0]}{re.escape(folded)}{bounds[1]}")
+    return re.compile("|".join(alternatives))
+
+
+_MOBILE_PATTERN = _mobile_pattern()
 
 
 def _needs_session(row):

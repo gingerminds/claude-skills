@@ -1,13 +1,17 @@
 import random
+import tempfile
 import unicodedata
 import unittest
+from pathlib import Path
 
 from cqa import checklist
 from cqa.lots import (
+    MOBILE_TERMS,
     TOOL_ACTIONS,
     TOOLS,
     build_lots,
     coverage,
+    how_to_test,
     lot_document_refs,
     lot_needs_session,
     select_rows,
@@ -1045,6 +1049,399 @@ class SessionLotsTest(unittest.TestCase):
             with self.subTest(hint=hint):
                 built = build_lots([make_row(1, tooling_hint=hint)])
                 self.assertEqual(lot_ids(built), ["code-qualite"])
+
+
+def fiche_text(how, todo="Une exigence.", before=""):
+    """A fiche as notion_read.write_fiches writes it: sections of level 3, no title."""
+    return (
+        f"### Pourquoi\n\nUne raison.\n\n{before}### À faire\n\n- {todo}\n\n"
+        f"### Comment tester\n\n{how}\n\n### Par techno\n\n- **Nuxt** : rien.\n\n"
+        "### Critères RGAA 4.1.2\n\n- [1.1](https://example.org/1.1) : Une question ?\n\n"
+        "### Ressources\n\n- [Une page](https://example.org/)\n"
+    )
+
+
+def fiche_text_level_2(how, todo="Une exigence."):
+    """The same fiche with sections of level 2 and a title of level 1."""
+    return (
+        f"# Titre de la ligne\n\n## À faire\n\n{todo}\n\n## Comment tester\n\n{how}\n\n"
+        "## Par techno\n\nRien.\n"
+    )
+
+
+class FicheCase(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.run_dir = Path(tmp.name)
+        (self.run_dir / "fiches").mkdir()
+
+    def write_fiche(self, ref, text):
+        path = self.run_dir / "fiches" / f"CQ-{ref:03d}.md"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def routed(self, row, text=None, **kwargs):
+        """The ids of the lots when the fiche of the row says text (no fiche when None)."""
+        if text is not None:
+            self.write_fiche(row["ref"], text)
+        return lot_ids(build_lots([row], run_dir=self.run_dir, **kwargs))
+
+
+class MobileTermsTest(FicheCase):
+    def test_mobile_terms_are_the_closed_list(self):
+        self.assertEqual(
+            MOBILE_TERMS,
+            (
+                "320",
+                "paysage",
+                "landscape",
+                "échap",
+                "escape",
+                "burger",
+                "menu mobile",
+                "tactile",
+                "piège au focus",
+                "piège au clavier",
+                "piège clavier",
+                "piège de focus",
+                "focus trap",
+                "inert",
+                "aria-expanded",
+            ),
+        )
+
+    def test_each_mobile_term_in_the_fiche_routes_the_row_to_the_outils_lot(self):
+        for term in MOBILE_TERMS:
+            for text in (
+                f"Ouvrir la page puis vérifier : {term}.",
+                f"{term.upper()}",
+                f"Vérifier ({term}) sur la page.",
+                f"Le test\nde {term}\nrestant à faire.",
+            ):
+                with self.subTest(term=term, text=text):
+                    self.write_fiche(1, fiche_text(text))
+                    built = build_lots([make_row(1)], run_dir=self.run_dir)
+                    self.assertEqual(lot_ids(built), ["code-qualite-outils"])
+                    self.assertTrue(built[0]["needs_toolbox"])
+
+    def test_terms_are_read_without_case_and_without_accent(self):
+        for text in (
+            "ECHAP", "echap", "Échap", "ÉCHAP", "touche Echap", "PIEGE de focus", "piege au clavier",
+            "Piège  au\nFocus", "PIÈGE CLAVIER", "Menu  Mobile", "menu\u00a0mobile", "Focus\nTrap", "ARIA-EXPANDED",
+            "Aria-Expanded", "en PAYSAGE", "Landscape", "TACTILE", "Burger", "INERT",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    self.routed(make_row(1), fiche_text(text)), ["code-qualite-outils"]
+                )
+
+    def test_each_term_has_word_boundaries(self):
+        for text in (
+            "Tab", "clavier", "focus", "échappement des sorties", "Échappement", "3200",
+            "13200 pixels", "1320", "inertie du scroll", "escaped", "tactiles", "paysages",
+            "landscaped", "burgers", "x320", "xaria-expanded", "focus traps", "menu mobiles",
+            "1,320 euros", "1.320", "320,5", "320.5 px", "pièges", "pièges au focus",
+            "piège clavierx", "un piège de focusx",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.routed(make_row(1), fiche_text(text)), ["code-qualite"])
+
+    def test_a_width_written_with_its_unit_still_routes(self):
+        for text in ("à 320px de large", "320 px", "320×640", "(320)", "de 320 à 1920", "320."):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    self.routed(make_row(1), fiche_text(text)), ["code-qualite-outils"]
+                )
+
+    def test_common_words_do_not_route(self):
+        for text in (
+            "Parcourir la page à la touche Tab puis au clavier, vérifier le focus visible.",
+            "échappement des sorties",
+            "3200",
+            "Tab, clavier, focus",
+            "Envoyer un fichier au nom piégé → refusé.",
+            "piège", "Piège", "un piège",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.routed(make_row(1), fiche_text(text)), ["code-qualite"])
+
+    def test_only_the_comment_tester_section_counts(self):
+        text = (
+            "# Titre\n\nIntro sur l'Échap.\n\n## Comment tester\n\nRequêter la page.\n\n"
+            "## À faire\n\nGérer Échap, aria-expanded et 320 px.\n\n## Par techno\n\nburger.\n"
+        )
+        self.assertEqual(self.routed(make_row(1), text), ["code-qualite"])
+
+    def test_a_subsection_of_comment_tester_counts(self):
+        text = fiche_text("Intro.\n\n#### Mobile\n\nTester à 320 px.")
+        self.assertEqual(self.routed(make_row(1), text), ["code-qualite-outils"])
+        text = fiche_text_level_2("Intro.\n\n### Mobile\n\nTester à 320 px.")
+        self.assertEqual(self.routed(make_row(2), text), ["code-qualite-outils"])
+
+    def test_the_last_section_counts_too(self):
+        text = "### À faire\n\nx\n\n### Comment tester\n\nEn paysage."
+        self.assertEqual(self.routed(make_row(1), text), ["code-qualite-outils"])
+        text = "# Titre\n\n## À faire\n\nx\n\n## Comment tester\n\nEn paysage."
+        self.assertEqual(self.routed(make_row(2), text), ["code-qualite-outils"])
+
+    def test_a_fiche_as_the_notion_export_writes_it_is_routed_by_its_level_3_section(self):
+        # The real fiches carry "### Comment tester" followed by bullets and a shell block, and
+        # the words of the other sections must not count.
+        text = (
+            "### Pourquoi\n\nUn clavier, des popins et Échap partout.\n\n"
+            "### À faire\n\n- Gérer l'Échap, aria-expanded et 320 px.\n\n"
+            "### Comment tester\n\n"
+            "- Ouvrir la confirmation au clavier → le focus est dans la boîte, Échap la ferme.\n"
+            "- Rechercher les écouteurs :\n```bash\ngrep -rnE 'touchstart' .\n```\n\n"
+            "### Par techno\n\n- **Nuxt** : burger.\n\n### Ressources\n\n- paysage\n"
+        )
+        self.assertEqual(self.routed(make_row(1), text), ["code-qualite-outils"])
+        other = text.replace("Échap la ferme", "Entrée la ferme")
+        self.assertEqual(self.routed(make_row(2), other), ["code-qualite"])
+
+    def test_a_row_whose_fiche_says_nothing_mobile_stays_in_its_lot(self):
+        text = (
+            "### Pourquoi\n\nPour la sécurité.\n\n### Comment tester\n\n"
+            "Sur la préprod, via le formulaire concerné :\n"
+            "- Envoyer un fichier à double extension (`test.php.jpg`) ou au nom piégé → refusé.\n"
+            "- Envoyer un SVG contenant un script → refusé.\n\n### Par techno\n\nRien.\n"
+        )
+        self.assertEqual(self.routed(make_row(1), text), ["code-qualite"])
+
+    def test_a_keyboard_trap_is_still_routed(self):
+        text = fiche_text("- Sur chaque composant, essayer d'en sortir avec Tab → aucun piège clavier.")
+        self.assertEqual(self.routed(make_row(1), text), ["code-qualite-outils"])
+        text = fiche_text("- Aucun piège au focus dans les modales.")
+        self.assertEqual(self.routed(make_row(2), text), ["code-qualite-outils"])
+
+    def test_tooling_hint_alone_routes(self):
+        row = make_row(1, tooling_hint="Navigateur piloté (parcours Tab, touche Échap)")
+        self.assertEqual(lot_ids(build_lots([row])), ["code-qualite-outils"])
+        self.assertEqual(self.routed(row), ["code-qualite-outils"])
+        row = make_row(2, tooling_hint="Navigateur piloté (parcours Tab)")
+        self.assertEqual(lot_ids(build_lots([row])), ["code-qualite"])
+
+    def test_the_hint_and_the_fiche_are_two_signals(self):
+        row = make_row(1, tooling_hint="relecture du code")
+        self.assertEqual(self.routed(row, fiche_text("En 320 px")), ["code-qualite-outils"])
+        row = make_row(2, tooling_hint="Navigateur piloté, Échap")
+        self.assertEqual(self.routed(row, fiche_text("Requêter la page")), ["code-qualite-outils"])
+
+    def test_without_a_run_dir_the_fiches_are_not_read(self):
+        row = make_row(1)
+        self.write_fiche(1, fiche_text("En 320 px"))
+        self.assertEqual(lot_ids(build_lots([row])), ["code-qualite"])
+        self.assertEqual(lot_ids(build_lots([row], run_dir=None)), ["code-qualite"])
+        self.assertEqual(lot_ids(build_lots([row], run_dir=self.run_dir)), ["code-qualite-outils"])
+
+    def test_a_missing_or_broken_fiche_never_raises_and_routes_nothing(self):
+        rows = [
+            make_row(1),
+            make_row(2, fiche_path=None),
+            make_row(3, fiche_path=""),
+            make_row(4, fiche_path="fiches/CQ-404.md"),
+            make_row(5),
+            make_row(6),
+        ]
+        self.write_fiche(1, fiche_text("Requêter la page."))
+        self.write_fiche(5, "# Titre\n\nSans section, mais 320 et Échap.\n")
+        (self.run_dir / "fiches" / "CQ-006.md").write_bytes(b"\xff\xfe## Comment tester\n320\n")
+        built = build_lots(rows, run_dir=self.run_dir)
+        self.assertEqual(lot_ids(built), ["code-qualite"])
+        self.assertEqual(built[0]["refs"], [1, 2, 3, 4, 5, 6])
+
+    def test_a_row_routed_by_its_fiche_follows_the_rules_of_the_lot_it_leaves(self):
+        rows = [
+            make_row(1, category="ACCESSIBILITÉ", tools=["Navigateur"]),
+            make_row(2, category="ACCESSIBILITÉ", tools=["Navigateur"], sections=["Back"]),
+            make_row(3, category="ACCESSIBILITÉ", tools=["Navigateur"]),
+            make_row(4, category="SÉCURITÉ", tools=["SSH serveur"]),
+            make_row(5, category="SÉCURITÉ", tools=["Code"]),
+        ]
+        for ref in (1, 2, 4, 5):
+            self.write_fiche(ref, fiche_text("Tester à 320 px."))
+        self.write_fiche(3, fiche_text("Lire le titre."))
+        built = build_lots(rows, run_dir=self.run_dir)
+        self.assertEqual(
+            lot_ids(built),
+            [
+                "browser-accessibilite",
+                "server-outils",
+                "code-securite-outils",
+                "browser-accessibilite-outils",
+                "browser-accessibilite-session-outils",
+            ],
+        )
+        by_id = {lot["id"]: lot for lot in built}
+        self.assertEqual(by_id["browser-accessibilite"]["refs"], [3])
+        self.assertFalse(by_id["browser-accessibilite"]["needs_toolbox"])
+        self.assertEqual(by_id["browser-accessibilite-outils"]["refs"], [1])
+        self.assertTrue(by_id["browser-accessibilite-outils"]["needs_toolbox"])
+        self.assertFalse(by_id["browser-accessibilite-outils"]["needs_session"])
+        self.assertEqual(by_id["browser-accessibilite-session-outils"]["refs"], [2])
+        self.assertTrue(by_id["browser-accessibilite-session-outils"]["needs_session"])
+        self.assertEqual(by_id["server-outils"]["refs"], [4])
+        self.assertEqual(by_id["server-outils"]["kind"], "server")
+        self.assertEqual(by_id["code-securite-outils"]["refs"], [5])
+
+    def test_the_split_of_a_big_group_counts_the_rows_before_they_move(self):
+        rows = [make_row(ref) for ref in range(1, 22)]
+        for ref in range(1, 6):
+            self.write_fiche(ref, fiche_text("En paysage."))
+        built = build_lots(rows, max_size=20, run_dir=self.run_dir)
+        self.assertEqual(
+            lot_ids(built),
+            ["code-qualite-general-1", "code-qualite-general-2", "code-qualite-general-1-outils"],
+        )
+        self.assertEqual([len(lot["refs"]) for lot in built], [6, 10, 5])
+
+    def test_the_document_refs_stay_with_their_rows(self):
+        rows = [make_row(1), make_row(2)]
+        self.write_fiche(1, fiche_text("En 320 px"))
+        built = build_lots(rows, document_refs=frozenset({1}), run_dir=self.run_dir)
+        self.assertEqual(lot_ids(built), ["code-qualite", "code-qualite-outils"])
+        self.assertEqual(lot_by_id(built, "code-qualite-outils")["document_refs"], [1])
+        self.assertEqual(lot_by_id(built, "code-qualite")["document_refs"], [])
+
+    def test_the_inputs_are_not_modified(self):
+        rows = [make_row(1, tooling_hint="Échap"), make_row(2)]
+        self.write_fiche(2, fiche_text("En 320 px"))
+        before = [dict(row) for row in rows]
+        build_lots(rows, run_dir=self.run_dir)
+        self.assertEqual(rows, before)
+
+
+class HowToTestTest(FicheCase):
+    def test_it_returns_the_section_up_to_the_next_title(self):
+        self.write_fiche(1, fiche_text("Requêter `/` puis lire l'en-tête."))
+        self.assertEqual(
+            how_to_test(self.run_dir, make_row(1)), "Requêter `/` puis lire l'en-tête."
+        )
+
+    def test_it_keeps_the_subsections_and_stops_at_a_level_one_title(self):
+        text = (
+            "# Titre\n\n## Comment tester\n\nA.\n\n### Détail\n\nB.\n\n"
+            "# Autre titre\n\nC.\n\n## À faire\n\nD.\n"
+        )
+        self.write_fiche(1, text)
+        self.assertEqual(how_to_test(self.run_dir, make_row(1)), "A.\n\n### Détail\n\nB.")
+
+    def test_it_reads_the_level_3_title_of_the_real_fiches(self):
+        self.write_fiche(1, fiche_text("- Ouvrir la page.\n- Fermer avec Échap."))
+        self.assertEqual(
+            how_to_test(self.run_dir, make_row(1)), "- Ouvrir la page.\n- Fermer avec Échap."
+        )
+
+    def test_a_level_3_section_runs_to_the_next_title_of_level_3_or_less(self):
+        for after in ("### Par techno", "## Autre", "# Autre"):
+            with self.subTest(after=after):
+                self.write_fiche(1, f"### Comment tester\n\nA.\n\n#### Détail\n\nB.\n\n{after}\n\nZ.\n")
+                self.assertEqual(how_to_test(self.run_dir, make_row(1)), "A.\n\n#### Détail\n\nB.")
+
+    def test_a_level_2_section_runs_to_the_next_title_of_level_2_or_less(self):
+        for after, kept in (("## Autre", True), ("# Autre", True), ("### Détail", False)):
+            with self.subTest(after=after):
+                self.write_fiche(1, f"## Comment tester\n\nA.\n\n{after}\n\nZ.\n")
+                expected = "A." if kept else "A.\n\n### Détail\n\nZ."
+                self.assertEqual(how_to_test(self.run_dir, make_row(1)), expected)
+
+    def test_the_title_is_read_without_case_and_with_spaces(self):
+        for title in (
+            "## comment tester", "##   Comment   Tester  ", "## COMMENT TESTER",
+            "### comment tester", "###   Comment   Tester  ", "### COMMENT TESTER",
+        ):
+            with self.subTest(title=title):
+                self.write_fiche(1, f"# T\n\n{title}\n\nA.\n\n## B\n\nZ.\n")
+                self.assertEqual(how_to_test(self.run_dir, make_row(1)), "A.")
+
+    def test_a_shell_block_of_the_real_fiches_does_not_end_the_section(self):
+        text = (
+            "### Comment tester\n\n- Chercher :\n```bash\n# ## ### not a title\n"
+            "grep -rn x .\n```\n- Fin.\n\n### Par techno\n\nZ.\n"
+        )
+        self.write_fiche(1, text)
+        self.assertEqual(
+            how_to_test(self.run_dir, make_row(1)),
+            "- Chercher :\n```bash\n# ## ### not a title\ngrep -rn x .\n```\n- Fin.",
+        )
+
+    def test_a_title_in_a_code_block_does_not_end_the_section(self):
+        text = "# T\n\n## Comment tester\n\nA.\n\n```\n## not a title\n```\n\nB.\n\n## C\n\nZ.\n"
+        self.write_fiche(1, text)
+        self.assertEqual(
+            how_to_test(self.run_dir, make_row(1)), "A.\n\n```\n## not a title\n```\n\nB."
+        )
+
+    def test_a_similar_title_is_not_the_section(self):
+        for title in (
+            "## Comment tester ?", "### Comment tester plus", "## Comment tester plus",
+            "Comment tester", "#### Comment tester", "# Comment tester", "###Comment tester",
+            "####### Comment tester",
+        ):
+            with self.subTest(title=title):
+                self.write_fiche(1, f"# T\n\n{title}\n\nA 320.\n")
+                self.assertEqual(how_to_test(self.run_dir, make_row(1)), "")
+
+    def test_it_is_cut_at_4000_characters(self):
+        self.write_fiche(1, fiche_text("a" * 5000))
+        text = how_to_test(self.run_dir, make_row(1))
+        self.assertEqual(text, "a" * 4000)
+        self.write_fiche(2, fiche_text("b" * 4000))
+        self.assertEqual(len(how_to_test(self.run_dir, make_row(2))), 4000)
+        self.write_fiche(3, fiche_text("c" * 3999))
+        self.assertEqual(len(how_to_test(self.run_dir, make_row(3))), 3999)
+
+    def test_a_term_after_the_cut_is_not_seen(self):
+        self.write_fiche(1, fiche_text("a " * 2100 + "en paysage"))
+        self.assertEqual(self.routed(make_row(1)), ["code-qualite"])
+
+    def test_how_to_test_never_raises(self):
+        self.write_fiche(1, "# Titre\n\nSans section.\n")
+        (self.run_dir / "fiches" / "CQ-002.md").write_bytes(b"\xff\xfe\x00## Comment tester\n")
+        (self.run_dir / "fiches" / "CQ-003.md").mkdir()
+        (self.run_dir / "fiches" / "CQ-005.md").write_text("", encoding="utf-8")
+        cases = {
+            "no fiche": make_row(4),
+            "no section": make_row(1),
+            "unreadable": make_row(2),
+            "a folder": make_row(3),
+            "empty": make_row(5),
+            "no key": {"ref": 9},
+            "none path": make_row(6, fiche_path=None),
+            "empty path": make_row(6, fiche_path=""),
+            "number path": make_row(6, fiche_path=12),
+            "null byte": make_row(6, fiche_path="fiches/CQ\x00.md"),
+            "not a row": None,
+            "a text": "CQ-1",
+            "a list": [],
+        }
+        for label, row in cases.items():
+            with self.subTest(case=label):
+                self.assertEqual(how_to_test(self.run_dir, row), "")
+        for label, run_dir in (
+            ("missing folder", self.run_dir / "nowhere"),
+            ("none", None),
+            ("text", "nowhere"),
+        ):
+            with self.subTest(run_dir=label):
+                self.assertEqual(how_to_test(run_dir, make_row(1)), "")
+        self.write_fiche(7, fiche_text("x" * 9000))
+        self.assertEqual(how_to_test(self.run_dir, make_row(7)), "x" * 4000)
+
+    def test_only_the_file_name_of_the_fiche_path_counts(self):
+        self.write_fiche(1, fiche_text("A 320."))
+        outside = self.run_dir / "CQ-001.md"
+        outside.write_text(fiche_text("Ailleurs, en paysage."), encoding="utf-8")
+        for path in ("fiches/CQ-001.md", "../CQ-001.md", "/etc/../CQ-001.md", "x/y/CQ-001.md"):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    how_to_test(self.run_dir, make_row(1, fiche_path=path)), "A 320."
+                )
+
+    def test_the_fiche_is_read_from_the_run_not_from_the_row(self):
+        self.write_fiche(1, fiche_text("A."))
+        self.assertEqual(how_to_test(str(self.run_dir), make_row(1)), "A.")
 
 
 if __name__ == "__main__":
