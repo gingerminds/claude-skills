@@ -4,10 +4,18 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from cqa import probes
-from cqa.findings import ACTION_URL_REASON, requests_action_url, validate_document
+from cqa.findings import (
+    ACTION_URL_REASON,
+    MAX_URL,
+    requests_action_url,
+    utf16_length,
+    validate_document,
+)
 
 MAX_FOLLOWUP_SCENARIOS = 20
 CAP_REASON = f"plafond de {MAX_FOLLOWUP_SCENARIOS} scénarios par suivi atteint"
+LENGTH_REASON = f"URL de plus de {MAX_URL} caractères"
+COLLISION_REASON = "nom de fichier du résultat en collision"
 
 
 def followup_scenarios(run_dir: Path) -> dict:
@@ -21,8 +29,11 @@ def followup_scenarios(run_dir: Path) -> dict:
     application routes (validate already refuses it, this is a second barrier), acts (see
     requests_action_url) or is unusable, or the cap is reached (a request kept out for another
     reason does not use a slot). The URL kept is the origin of the target plus the path and
-    the query of the request. Only the valid findings of findings/<lot>.json are read, never
-    the follow-up files.
+    the query of the request, and the tool counts its length in UTF-16 units (an emoji counts
+    for two). The tool names the result of a scenario <lot>-<id>-<profile> and refuses a second
+    scenario of the same name: it is discarded here (COLLISION_REASON), so that no kept scenario
+    shares its result file. Only the valid findings of findings/<lot>.json are read, never the
+    follow-up files.
     """
     run_dir = Path(run_dir)
     context = probes._read_json(run_dir / "context.json", "le diagnostic")
@@ -33,9 +44,12 @@ def followup_scenarios(run_dir: Path) -> dict:
     origin = probes._origin(parts)
     root = f"{parts.scheme}://{parts.netloc}"
     lots = probes._lot_entries(probes._read_json(run_dir / "lots.json", "cqa_plan.py lots"))
-    scenarios, discarded, kept_lots = [], [], []
+    scenarios, discarded, kept_lots, names = [], [], [], set()
     for lot_id, ref, request in _requested(run_dir, lots, parts.path):
         url, reason = _checked_url(request["url"], origin, root, parts.path)
+        name = _result_name(lot_id, request)
+        if url is not None and name in names:
+            url, reason = None, COLLISION_REASON
         if url is not None and len(scenarios) >= MAX_FOLLOWUP_SCENARIOS:
             url, reason = None, CAP_REASON
         if url is None:
@@ -44,6 +58,7 @@ def followup_scenarios(run_dir: Path) -> dict:
                 {"lot": lot_id, "ref": ref, "id": request["id"], "url": shown, "reason": reason}
             )
             continue
+        names.add(name)
         scenarios.append(
             {
                 "id": f"{lot_id}:{request['id']}",
@@ -92,6 +107,25 @@ def _checked_url(url: str, origin: tuple, root: str, app_path: str) -> tuple:
     if path is None:
         return None, reason
     kept = root + path
+    if utf16_length(kept) > MAX_URL:
+        return None, LENGTH_REASON
     if requests_action_url(kept):
         return None, ACTION_URL_REASON
     return kept, None
+
+
+def _result_name(lot_id: str, request: dict) -> str:
+    """Return the name the tool gives the result of a scenario, without its extension."""
+    return f"{lot_id}-{request['id']}-{request['profile']}"
+
+
+def printable_discarded(discarded: list) -> list:
+    """Return the discarded entries as they may be printed: a URL that carries a token or an
+    action is cut before its query and fragment (the file of the run keeps the whole URL)."""
+    shown = []
+    for entry in discarded:
+        url = entry["url"]
+        if entry["reason"] == ACTION_URL_REASON or requests_action_url(url):
+            url = url.partition("#")[0].partition("?")[0]
+        shown.append({**entry, "url": url})
+    return shown

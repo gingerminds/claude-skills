@@ -321,6 +321,11 @@ def _is_entry_point(path: str, prefix: str, query: bool) -> bool:
     return local.startswith(_FRONT_CONTROLLER) and not _PHP_FILE.search(route)
 
 
+def utf16_length(text: str) -> int:
+    """Length of text in UTF-16 code units, as JavaScript counts it (an emoji counts for two)."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
 def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -540,8 +545,8 @@ def _one_scenario_problems(index: int, scenario, app_path: str, taken: dict) -> 
         taken[scenario_id] = index
     problems.extend(_required_text_problems(place, scenario, ("url",)))
     url = scenario.get("url")
-    if _is_text(url) and len(url) > MAX_URL:
-        problems.append(f"{place} : « url » dépasse {MAX_URL} caractères ({len(url)})")
+    if _is_text(url) and utf16_length(url) > MAX_URL:
+        problems.append(f"{place} : « url » dépasse {MAX_URL} caractères ({utf16_length(url)})")
     problems.extend(_php_file_problems(place, url, app_path))
     if "profile" not in scenario:
         problems.append(f"{place} : « profile » manquant")

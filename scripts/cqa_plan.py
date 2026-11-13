@@ -1114,7 +1114,7 @@ def _cmd_scenarios(args, services) -> int:
             "base_url": document["base_url"],
             "count": len(document["scenarios"]),
             "lots": document["lots"],
-            "discarded": document["discarded"],
+            "discarded": scenarios.printable_discarded(document["discarded"]),
         }
     )
     return EXIT_OK

@@ -1026,7 +1026,39 @@ class FollowupScenariosTest(AuditCase):
             [(item["id"], item["url"], item["reason"]) for item in result["discarded"]],
             [
                 ("out", f"{BASE}/user/logout", "URL d'action refusée"),
-                ("trash", f"{BASE}/?action=trash", "URL d'action refusée"),
+                ("trash", f"{BASE}/", "URL d'action refusée"),
+            ],
+        )
+
+    def test_scenarios_followup_prints_no_query_of_an_action_url_but_keeps_it_in_the_file(self):
+        run_dir = self.make_run()
+        self.ask(
+            run_dir,
+            "code-securite",
+            103,
+            make_scenario(id="token", url=f"{BASE}/page?token=abc123&x=1"),
+            make_scenario(id="trash", url=f"{BASE}/?action=trash#top"),
+            make_scenario(id="foreign", url="https://other.example.net/p?x=1"),
+        )
+        code, out, err = self.run_main(["scenarios", run_dir, "--followup"])
+        self.assertEqual(code, 0)
+        shown = json.loads(out)["discarded"]
+        self.assertEqual(
+            [(item["id"], item["url"]) for item in shown],
+            [
+                ("token", f"{BASE}/page"),
+                ("trash", f"{BASE}/"),
+                ("foreign", "https://other.example.net/p?x=1"),
+            ],
+        )
+        self.assertNotIn("abc123", out + err)
+        kept = self.read(run_dir, "scenarios-followup.json")["discarded"]
+        self.assertEqual(
+            [item["url"] for item in kept],
+            [
+                f"{BASE}/page?token=abc123&x=1",
+                f"{BASE}/?action=trash#top",
+                "https://other.example.net/p?x=1",
             ],
         )
 

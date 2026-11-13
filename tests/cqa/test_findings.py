@@ -26,6 +26,7 @@ from cqa.findings import (
     apply_guardrails,
     requests_action_url,
     requests_php_file,
+    utf16_length,
     validate_document,
     worst,
 )
@@ -921,6 +922,18 @@ class NeedsScenariosTest(unittest.TestCase):
                 )
         problem = only_error(self, [make_scenario(url="https://preprod.example.org/" + "a" * 2000)])
         self.assertEqual(problem, "scénario n° 1 : « url » dépasse 2000 caractères (2028)")
+
+    def test_the_length_of_the_url_is_counted_in_utf16_units_like_the_tool(self):
+        # 987 emoji: 1015 code points but 2002 UTF-16 units, which the tool refuses.
+        head = "https://preprod.example.org/"
+        problem = only_error(self, [make_scenario(url=head + "\U0001F600" * 987)])
+        self.assertEqual(problem, "scénario n° 1 : « url » dépasse 2000 caractères (2002)")
+        problem = only_error(self, [make_scenario(url=head + "\U0001F600" * 1000)])
+        self.assertEqual(problem, "scénario n° 1 : « url » dépasse 2000 caractères (2028)")
+        valid, errors = scenario_errors([make_scenario(url=head + "\U0001F600" * 986)])
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 2)
+        self.assertEqual(utf16_length("a\U0001F600é"), 4)
 
     def test_the_php_rule_follows_the_path_of_the_application(self):
         def errors_for(paths, app_path):

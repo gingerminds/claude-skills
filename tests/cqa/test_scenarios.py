@@ -362,5 +362,222 @@ class FollowupScenariosTest(ScenarioRunCase):
         self.assertEqual([item["id"] for item in result["scenarios"]], ["code-securite:menu-burger"])
 
 
+LENGTH_REASON = "URL de plus de 2000 caractères"
+COLLISION_REASON = "nom de fichier du résultat en collision"
+
+
+def stem(item):
+    """The name the tool gives the result of a scenario: <lot>-<id>-<profile>, the colon a dash."""
+    return f"{item['id'].replace(':', '-')}-{item['profile']}"
+
+
+class UrlLengthTest(ScenarioRunCase):
+    """The tool counts the URL it plays in UTF-16 units, as JavaScript does, once rebuilt."""
+
+    def test_the_url_is_counted_after_the_origin_of_the_target_is_put_in_front(self):
+        # 2000 characters as the agent writes it, 2004 once the port of the target is in front.
+        base = "https://preprod.example.org:443"
+        url = "https://preprod.example.org/" + "a" * 1972
+        self.assertEqual(len(url), 2000)
+        run_dir = self.make_run({"code-securite": [(1, [make_scenario(url=url)])]}, base=base)
+        result = scenarios.followup_scenarios(run_dir)
+        self.assertEqual(result["scenarios"], [])
+        self.assertEqual(result["lots"], [])
+        self.assertEqual(
+            [(item["id"], item["reason"]) for item in result["discarded"]],
+            [("menu-burger", LENGTH_REASON)],
+        )
+
+    def test_an_url_of_2000_units_once_rebuilt_is_kept(self):
+        base = "https://preprod.example.org:443"
+        url = "https://preprod.example.org/" + "a" * 1968
+        run_dir = self.make_run({"code-securite": [(1, [make_scenario(url=url)])]}, base=base)
+        result = scenarios.followup_scenarios(run_dir)
+        self.assertEqual(len(result["scenarios"][0]["url"]), 2000)
+        self.assertEqual(result["discarded"], [])
+
+    def test_an_emoji_counts_for_two_units_like_in_the_tool(self):
+        # 1000 emoji: 1028 code points, 2028 UTF-16 units. The validation already refuses it; the
+        # collection is a second barrier that counts the same way.
+        url = "https://preprod.example.org/" + "\U0001F600" * 1000
+        self.assertEqual(len(url), 1028)
+        run_dir = self.make_run({"code-securite": [(1, [make_scenario(url=url)])]})
+        with mock.patch.object(scenarios, "validate_document", held_valid):
+            result = scenarios.followup_scenarios(run_dir)
+        self.assertEqual(result["scenarios"], [])
+        self.assertEqual([item["reason"] for item in result["discarded"]], [LENGTH_REASON])
+        self.assertEqual(result["lots"], [])
+
+    def test_the_limit_is_the_one_of_the_tool_in_units_not_in_code_points(self):
+        for emoji, kept in ((986, True), (987, False)):
+            with self.subTest(emoji=emoji):
+                url = "https://preprod.example.org/" + "\U0001F600" * emoji
+                run_dir = self.make_run({"code-securite": [(1, [make_scenario(url=url)])]})
+                with mock.patch.object(scenarios, "validate_document", held_valid):
+                    result = scenarios.followup_scenarios(run_dir)
+                self.assertEqual(len(result["scenarios"]), 1 if kept else 0)
+
+    def test_a_refused_length_does_not_use_one_of_the_20_slots(self):
+        long_url = "https://preprod.example.org/" + "a" * 1972
+        needs = [request(n) for n in range(1, 22)]
+        needs[0] = request(1, url=long_url)
+        findings = [(ref, needs[(ref - 1) * 3 : ref * 3]) for ref in range(1, 8)]
+        run_dir = self.make_run({"code-performance": findings}, base=BASE + ":443")
+        result = scenarios.followup_scenarios(run_dir)
+        self.assertEqual(len(result["scenarios"]), 20)
+        self.assertEqual([item["reason"] for item in result["discarded"]], [LENGTH_REASON])
+
+
+class FileNameCollisionTest(ScenarioRunCase):
+    """The tool names the result <lot>-<id>-<profile> and refuses two scenarios of one name."""
+
+    def clashing_run(self, **overrides):
+        first = make_scenario(id="outils-menu", **overrides)
+        second = make_scenario(id="menu", **overrides)
+        return self.make_run(
+            {
+                "browser-autres": [(1, [first])],
+                "browser-autres-outils": [(2, [second])],
+            }
+        )
+
+    def test_a_second_lot_whose_file_name_is_taken_is_discarded_with_its_reason(self):
+        run_dir = self.clashing_run()
+        result = scenarios.followup_scenarios(run_dir)
+        self.assertEqual([item["id"] for item in result["scenarios"]], ["browser-autres:outils-menu"])
+        self.assertEqual(
+            [(item["lot"], item["ref"], item["id"], item["reason"]) for item in result["discarded"]],
+            [("browser-autres-outils", 2, "menu", COLLISION_REASON)],
+        )
+        self.assertEqual(result["lots"], ["browser-autres"])
+
+    def test_no_two_kept_scenarios_share_a_result_file(self):
+        # The agent of the second lot reads raw/browser-autres-outils-menu-portrait.json: it is
+        # the file of the first lot, and only the first lot holds a scenario of that name.
+        run_dir = self.clashing_run()
+        result = scenarios.followup_scenarios(run_dir)
+        stems = [stem(item) for item in result["scenarios"]]
+        self.assertEqual(stems, ["browser-autres-outils-menu-portrait"])
+        self.assertEqual(len(stems), len(set(stems)))
+        self.assertNotIn("browser-autres-outils:menu", [item["id"] for item in result["scenarios"]])
+        self.assertNotIn("browser-autres-outils", result["lots"])
+
+    def test_the_lot_with_a_collision_is_still_pending_for_the_relaunch(self):
+        run_dir = self.clashing_run()
+        lots = [
+            {"id": "browser-autres", "refs": [1]},
+            {"id": "browser-autres-outils", "refs": [2]},
+        ]
+        self.assertEqual(
+            scenarios.pending_lots(run_dir, lots), ["browser-autres", "browser-autres-outils"]
+        )
+
+    def test_the_profile_is_part_of_the_name(self):
+        run_dir = self.make_run(
+            {
+                "browser-autres": [(1, [make_scenario(id="outils-menu", profile="portrait")])],
+                "browser-autres-outils": [(2, [make_scenario(id="menu", profile="paysage")])],
+            }
+        )
+        result = scenarios.followup_scenarios(run_dir)
+        self.assertEqual(
+            [stem(item) for item in result["scenarios"]],
+            ["browser-autres-outils-menu-portrait", "browser-autres-outils-menu-paysage"],
+        )
+        self.assertEqual(result["discarded"], [])
+
+    def test_every_following_scenario_of_the_name_is_discarded_too(self):
+        run_dir = self.make_run(
+            {
+                "browser-a": [(1, [make_scenario(id="b-c-d"), make_scenario(id="other")])],
+                "browser-a-b": [(2, [make_scenario(id="c-d")])],
+                "browser-a-b-c": [(3, [make_scenario(id="d")])],
+            }
+        )
+        result = scenarios.followup_scenarios(run_dir)
+        self.assertEqual(
+            [item["id"] for item in result["scenarios"]], ["browser-a:b-c-d", "browser-a:other"]
+        )
+        self.assertEqual(
+            [(item["lot"], item["id"], item["reason"]) for item in result["discarded"]],
+            [
+                ("browser-a-b", "c-d", COLLISION_REASON),
+                ("browser-a-b-c", "d", COLLISION_REASON),
+            ],
+        )
+        self.assertEqual(result["lots"], ["browser-a"])
+
+    def test_a_scenario_refused_for_another_reason_does_not_reserve_its_name(self):
+        run_dir = self.make_run(
+            {
+                "browser-autres": [
+                    (1, [make_scenario(id="outils-menu", url=f"{BASE}/user/logout")])
+                ],
+                "browser-autres-outils": [(2, [make_scenario(id="menu")])],
+            }
+        )
+        result = scenarios.followup_scenarios(run_dir)
+        self.assertEqual([item["id"] for item in result["scenarios"]], ["browser-autres-outils:menu"])
+        self.assertEqual([item["reason"] for item in result["discarded"]], [ACTION_URL_REASON])
+
+    def test_a_collision_is_judged_before_the_cap_and_does_not_use_a_slot(self):
+        others = [(ref, [request(ref * 10 + n) for n in range(3)]) for ref in range(10, 16)]
+        run_dir = self.make_run(
+            {
+                "browser-autres": [(1, [make_scenario(id="outils-menu")])],
+                "browser-autres-outils": [(2, [make_scenario(id="menu")])],
+                "code-performance": others + [(16, [request(1)])],
+            }
+        )
+        result = scenarios.followup_scenarios(run_dir)
+        self.assertEqual(len(result["scenarios"]), 20)
+        self.assertEqual([item["reason"] for item in result["discarded"]], [COLLISION_REASON])
+
+    def test_a_collision_after_the_cap_is_reported_as_a_collision(self):
+        others = [(ref, [request(ref * 10 + n) for n in range(3)]) for ref in range(10, 16)]
+        run_dir = self.make_run(
+            {
+                "browser-autres": [(1, [make_scenario(id="outils-menu")])],
+                "code-performance": others + [(16, [request(1)])],
+                "browser-autres-outils": [(2, [make_scenario(id="menu")])],
+            }
+        )
+        result = scenarios.followup_scenarios(run_dir)
+        self.assertEqual(len(result["scenarios"]), 20)
+        self.assertEqual([item["reason"] for item in result["discarded"]], [COLLISION_REASON])
+
+
+class PrintableDiscardedTest(unittest.TestCase):
+    def entry(self, url, reason):
+        return {"lot": "code-securite", "ref": 1, "id": "menu", "url": url, "reason": reason}
+
+    def test_an_action_url_is_shown_without_its_query(self):
+        entries = [
+            self.entry(f"{BASE}/page?token=abc&x=1", ACTION_URL_REASON),
+            self.entry(f"{BASE}/?action=trash#top", ACTION_URL_REASON),
+            self.entry(f"{BASE}/user/logout", ACTION_URL_REASON),
+        ]
+        shown = scenarios.printable_discarded(entries)
+        self.assertEqual(
+            [item["url"] for item in shown], [f"{BASE}/page", f"{BASE}/", f"{BASE}/user/logout"]
+        )
+        self.assertTrue(all(item["reason"] == ACTION_URL_REASON for item in shown))
+
+    def test_a_token_is_never_shown_whatever_the_reason(self):
+        entry = self.entry("https://other.example.net/p?csrf=abc", ORIGIN_REASON)
+        self.assertEqual(
+            scenarios.printable_discarded([entry])[0]["url"], "https://other.example.net/p"
+        )
+
+    def test_another_url_is_shown_as_it_is_and_the_input_is_not_changed(self):
+        entries = [
+            self.entry("https://other.example.net/p?x=1", ORIGIN_REASON),
+            self.entry(f"{BASE}/a?x=1", CAP_REASON),
+        ]
+        before = [dict(entry) for entry in entries]
+        self.assertEqual(scenarios.printable_discarded(entries), entries)
+        self.assertEqual(entries, before)
+
+
 if __name__ == "__main__":
     unittest.main()
