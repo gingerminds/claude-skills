@@ -62,7 +62,7 @@
               {"$ref": "#/$defs/evidence_document"}
             ]
           },
-          "description": "What the verdict rests on. May be empty, but an ok without evidence is lowered to ok_human and an na without evidence becomes unknown. A page or http URL must be on a host of the target (target.preprod_url, target.prod_url on a prod run, sites), an http URL must be a probe of the toolbox that ran, a tool must have a result.json that is ok or not_applicable: a finding with other evidence is refused. The sub-agents never write a document evidence: cqa_plan.py does, for the rows it judges from a context document, and validate refuses it in a lot file."
+          "description": "What the verdict rests on. May be empty, but an ok without evidence is lowered to ok_human and an na without evidence becomes unknown. A file must exist in its repo and a tool must have its summary.json: a finding with other evidence is refused. A tool must also have a result.json that is ok or not_applicable, a page or http URL must be on a host of the target (target.preprod_url, target.prod_url on a prod run, sites), an http URL must be a probe of the toolbox that ran: any other piece of evidence is dropped from the finding, which stays without it. The sub-agents never write a document evidence: cqa_plan.py does, for the rows it judges from a context document, and validate refuses it in a lot file."
         },
         "todo": {
           "type": ["string", "null"],

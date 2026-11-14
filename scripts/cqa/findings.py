@@ -22,11 +22,19 @@ REQUIRED_FINDING_KEYS = (
     "needs_probes",
 )
 # The keys the sub-agents may write (the schema documents them): a finding of a lot file holds no
-# other. "source" and "guardrail" are the code's own (see CODE_KEYS).
+# other. "source", "guardrail" and the keys the reader of the findings sets are the code's own
+# (see CODE_KEYS).
 AGENT_FINDING_KEYS = REQUIRED_FINDING_KEYS + ("needs_scenarios", "tool_dates", "in_repo")
+# Set by the reader of the findings (cqa.rerun): true on a finding read under the rules of a run
+# started before 0.18.1 (cqa.contract), and the evidence it dropped, each as {"evidence": <the
+# piece of evidence>, "problem": <French text>, "label": <short French reason>}.
+LEGACY_KEY = "legacy_contract"
+REFUSED_KEY = "refused_evidence"
 CODE_KEYS = {
     "source": "cqa_plan.py l'écrit seul, d'après le verdict d'un document de contexte",
     "guardrail": "le script de plan le calcule seul",
+    LEGACY_KEY: "le lecteur des constats l'écrit seul, d'après la version du run",
+    REFUSED_KEY: "le lecteur des constats l'écrit seul, d'après le contrôle des preuves",
 }
 EVIDENCE_REQUIRED = {
     "file": ("repo", "path"),
@@ -205,8 +213,8 @@ def validate_document(
 
     agent_file is true for a file a sub-agent writes (every findings/<lot>*.json but
     findings/context-docs.json, which the code writes): it holds no evidence of type document, no
-    "source", no "guardrail" and no key other than AGENT_FINDING_KEYS, so a finding that breaks
-    one is invalid. lot_id is the id of the lot the file is validated for: a "lot" field that
+    key of CODE_KEYS and no key other than AGENT_FINDING_KEYS, so a finding that breaks one is
+    invalid. lot_id is the id of the lot the file is validated for: a "lot" field that
     holds another id refuses the whole file (no finding is returned).
 
     Every problem of the document is reported in one pass, because the sub-agent gets to fix
@@ -293,11 +301,15 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     7. an na without evidence becomes unknown;
     8. an ok built from a context document (source) becomes ok_human: a report may be older than
        the code.
-    A guardrail the sub-agent wrote itself is always overwritten.
+    A finding read under the rules of a run started before 0.18.1 (LEGACY_KEY true, see
+    cqa.contract) skips rules 7 and 8, which that run was not audited under. The evidence the reader
+    dropped (REFUSED_KEY) is named first: the rules then judge the evidence left. A guardrail the
+    sub-agent wrote itself is always overwritten.
     """
     result = copy.deepcopy(finding)
     verdict = result["verdict"]
-    reasons = []
+    legacy = result.get(LEGACY_KEY) is True
+    reasons = _refused_problems(result.get(REFUSED_KEY))
     if verdict == "ok" and not result.get("evidence"):
         verdict = "ok_human"
         reasons.append("aucune preuve : ok abaissé à ok_human")
@@ -322,15 +334,26 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     if verdict == "na" and result.get("confidence") != "high":
         verdict = "unknown"
         reasons.append("confiance non haute : na abaissé à unknown")
-    if verdict == "na" and not result.get("evidence"):
+    if not legacy and verdict == "na" and not result.get("evidence"):
         verdict = "unknown"
         reasons.append("aucune preuve : na abaissé à unknown")
-    if verdict == "ok" and result.get("source") == CONTEXT_DOC_SOURCE:
+    if not legacy and verdict == "ok" and result.get("source") == CONTEXT_DOC_SOURCE:
         verdict = "ok_human"
         reasons.append("conforme d'après un rapport tiers : ok abaissé à ok_human")
     result["verdict"] = verdict
     result["guardrail"] = "; ".join(reasons) if reasons else None
     return result
+
+
+def _refused_problems(refused) -> list:
+    """Return the French texts of the evidence the reader dropped (REFUSED_KEY), [] when none."""
+    if not isinstance(refused, list):
+        return []
+    return [
+        entry["problem"]
+        for entry in refused
+        if isinstance(entry, dict) and isinstance(entry.get("problem"), str)
+    ]
 
 
 def requests_php_file(url: str, app_path: str = "") -> bool:

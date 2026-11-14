@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from cqa import rerun
+from cqa.findings import apply_guardrails
 
 from tests.cqa.test_cli_audit import AuditCase
 
@@ -44,6 +45,10 @@ class VerifiedCase(AuditCase):
     def status_after(self, run_dir, ref):
         found = self.ops(run_dir, ref, "status")
         return found[0]["after"] if found else None
+
+    def comment_verdict(self, run_dir, ref):
+        (op,) = self.ops(run_dir, ref, "comment")
+        return op["verdict"]
 
     def reasons(self, summary):
         return {item["ref"]: item["reason"] for item in summary["discarded"]}
@@ -107,7 +112,8 @@ class PageOriginTest(VerifiedCase):
         self.assertIn("evil.example.net", errors[0])
         self.assertIn("preprod.example.org", errors[0])
         summary, err = self.plan(run_dir)
-        self.assertIn(102, summary["unknown"])
+        self.assertNotIn(102, summary["unknown"])
+        self.assertEqual(self.comment_verdict(run_dir, 102), "ok_human")
         self.assertNotEqual(self.status_after(run_dir, 102), "Ok / Recetté")
         self.assertIn("evil.example.net", self.reasons(summary)[102])
 
@@ -189,7 +195,8 @@ class PageOriginTest(VerifiedCase):
         self.judge(run_dir, 102, "ok", [{"type": "page", "url": OUTSIDE, "detail": "vu"}])
         self.assertFalse((run_dir / RECORD).exists())
         summary, _ = self.plan(run_dir)
-        self.assertIn(102, summary["unknown"])
+        self.assertEqual(self.comment_verdict(run_dir, 102), "ok_human")
+        self.assertIn("evil.example.net", self.reasons(summary)[102])
 
 
 class HttpProbeTest(VerifiedCase):
@@ -204,7 +211,8 @@ class HttpProbeTest(VerifiedCase):
         self.assertIn("preuve n° 1 (http)", errors[0])
         self.assertIn("sonde", errors[0])
         summary, _ = self.plan(run_dir)
-        self.assertIn(102, summary["unknown"])
+        self.assertNotIn(102, summary["unknown"])
+        self.assertEqual(self.comment_verdict(run_dir, 102), "ok_human")
         self.assertNotEqual(self.status_after(run_dir, 102), "Ok / Recetté")
 
     def test_the_match_is_made_on_host_path_and_query(self):
@@ -319,7 +327,8 @@ class ToolResultTest(VerifiedCase):
         self.assertIn("failed", errors[0])
         self.assertIn("tools/http/result.json", errors[0])
         summary, _ = self.plan(run_dir)
-        self.assertIn(102, summary["unknown"])
+        self.assertNotIn(102, summary["unknown"])
+        self.assertEqual(self.comment_verdict(run_dir, 102), "ok_human")
         self.assertNotEqual(self.status_after(run_dir, 102), "Ok / Recetté")
 
     def test_a_skipped_tool_is_refused_too(self):
@@ -361,6 +370,127 @@ class ToolResultTest(VerifiedCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("failed", errors[0])
         self.assertIn("navigateur de test indisponible", errors[0])
+
+
+UNMATCHED = {"type": "http", "url": "https://preprod.example.org/telescope", "detail": "200 : exposé"}
+
+
+class RefusedEvidenceTest(VerifiedCase):
+    """R-02: a piece of evidence the new checks refuse is dropped from the finding, which stays."""
+
+    def comment(self, run_dir, ref):
+        (op,) = self.ops(run_dir, ref, "comment")
+        return op
+
+    def test_ko_with_valid_file_and_unmatched_http_evidence_stays_ko(self):
+        run_dir = self.make_run()
+        self.judge(run_dir, 101, "ko", [FILE, UNMATCHED])
+        errors = self.errors_of(run_dir, 101)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("preuve n° 2 (http) écartée", errors[0])
+        summary, _ = self.plan(run_dir)
+        self.assertNotIn(101, summary["unknown"])
+        self.assertIn(101, summary["blocking_non_conform"])
+        op = self.comment(run_dir, 101)
+        self.assertEqual(op["verdict"], "ko")
+        self.assertIn("app/Http/Kernel.php", op["text"])
+        self.assertIn("https://preprod.example.org/telescope", op["text"])
+        self.assertIn("preuve écartée", op["text"])
+
+    def test_partial_citing_failed_tool_stays_partial(self):
+        run_dir = self.make_run()
+        self.set_tool_status(run_dir, "lighthouse", "failed")
+        self.judge(run_dir, 101, "partial", [{"type": "tool", "tool": "lighthouse", "ref": "summary.json#home"}])
+        errors = self.errors_of(run_dir, 101)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("preuve n° 1 (tool) écartée", errors[0])
+        summary, _ = self.plan(run_dir)
+        self.assertNotIn(101, summary["unknown"])
+        self.assertEqual(self.status_after(run_dir, 101), "Mise en place partielle")
+        self.assertEqual(self.comment(run_dir, 101)["verdict"], "partial")
+
+    def test_ok_with_only_an_unmatched_http_evidence_becomes_ok_human(self):
+        run_dir = self.make_run()
+        self.judge(run_dir, 101, "ok", [UNMATCHED])
+        summary, _ = self.plan(run_dir)
+        self.assertNotIn(101, summary["unknown"])
+        self.assertEqual(self.status_after(run_dir, 101), "Mis en place")
+        self.assertEqual(self.comment(run_dir, 101)["verdict"], "ok_human")
+        kinds = [op["kind"] for op in self.read(run_dir, "notion/plan.json")["ops"] if op["ref"] == 101]
+        self.assertEqual(kinds, ["status", "assign", "comment"])
+
+    def test_na_with_only_a_refused_evidence_becomes_unknown(self):
+        run_dir = self.make_run()
+        for evidence in ({"type": "page", "url": OUTSIDE}, UNMATCHED):
+            with self.subTest(evidence=evidence["type"]):
+                self.judge(run_dir, 101, "na", [evidence], summary="Rien à auditer.")
+                summary, _ = self.plan(run_dir)
+                self.assertIn(101, summary["unknown"])
+                self.assertIn(101, summary["blocking_non_conform"])
+                self.assertEqual(self.comment(run_dir, 101)["verdict"], "unknown")
+
+    def test_removed_evidence_is_named_in_discarded(self):
+        run_dir = self.make_run()
+        self.judge(run_dir, 101, "ko", [FILE, UNMATCHED])
+        self.assertEqual(len(self.errors_of(run_dir, 101)), 1)
+        summary, err = self.plan(run_dir)
+        reason = self.reasons(summary)[101]
+        self.assertIn(f"findings/{PERF}.json", reason)
+        self.assertIn("preuve n° 2 (http) écartée", reason)
+        self.assertIn("aucune sonde", reason)
+        self.assertIn("gardé sans cette preuve", reason)
+        self.assertIn(f"- CQ-101 : {reason}", err)
+        record = self.read(run_dir, RECORD)["files"][f"{PERF}.json"]["findings"]
+        (entry,) = [item for item in record if item["ref"] == 101]
+        self.assertEqual(entry["problems"], [])
+        self.assertEqual([item["evidence"] for item in entry["refused"]], [2])
+
+    def test_the_guardrail_names_the_removed_evidence(self):
+        run_dir = self.make_run()
+        self.judge(run_dir, 101, "ok", [UNMATCHED])
+        self.validate_errors(run_dir, PERF)
+        context = self.read(run_dir, "context.json")
+        lot = self.read(run_dir, "lots.json")["lots"][0]
+        found = rerun.read_grounded_findings(run_dir, context, lot, f"{PERF}.json")[0]
+        (item,) = [entry for entry in found if entry["ref"] == 101]
+        self.assertEqual(item["evidence"], [])
+        judged = apply_guardrails(item, {"ref": 101, "tools": ["Code"]}, followup_done=False)
+        self.assertEqual(judged["verdict"], "ok_human")
+        self.assertTrue(judged["guardrail"].startswith("preuve n° 1 (http) écartée : aucune sonde"))
+        self.assertIn("aucune preuve : ok abaissé à ok_human", judged["guardrail"])
+
+    def test_the_old_checks_still_set_the_finding_aside(self):
+        run_dir = self.make_run()
+        ghost = {"type": "file", "repo": "laravel", "path": "ghost.php"}
+        self.judge(run_dir, 101, "ko", [ghost, UNMATCHED])
+        self.assertEqual(len(self.errors_of(run_dir, 101)), 2)
+        summary, _ = self.plan(run_dir)
+        self.assertIn(101, summary["unknown"])
+        self.assertIn("Non évaluable", self.reasons(summary)[101])
+        self.judge(run_dir, 101, "ko", [{"type": "tool", "tool": "crawl", "ref": "summary.json"}])
+        summary, _ = self.plan(run_dir)
+        self.assertIn(101, summary["unknown"])
+
+    def test_a_failed_tool_without_summary_still_sets_the_finding_aside(self):
+        run_dir = self.make_run()
+        self.judge(run_dir, 101, "partial", [{"type": "tool", "tool": "lighthouse", "ref": "summary.json#home"}])
+        errors = self.errors_of(run_dir, 101)
+        self.assertEqual(len(errors), 1)
+        self.assertNotIn("écartée", errors[0])
+        summary, _ = self.plan(run_dir)
+        self.assertIn(101, summary["unknown"])
+
+    def test_rerun_close_keeps_a_rerun_file_whose_only_problem_is_a_refused_evidence(self):
+        run_dir = self.make_run()
+        self.run_json(["rerun-start", run_dir])
+        document = self.read(run_dir, f"findings/{PERF}.json")
+        (first,) = [item for item in document["findings"] if item["ref"] == 101]
+        first.update(evidence=[FILE, UNMATCHED], needs_probes=[])
+        self.write(run_dir, f"findings/{PERF}-rerun-01.json", {"lot": PERF, "findings": [first]})
+        self.assertEqual(self.run_json(["rerun-close", run_dir, "1", "--rows", "101"])["discarded"], [])
+        summary, _ = self.plan(run_dir)
+        self.assertNotIn(101, summary["unknown"])
+        self.assertIn("rerun-01", self.reasons(summary)[101])
 
 
 class AgentFileCliTest(VerifiedCase):
@@ -464,7 +594,8 @@ class DocumentEvidenceTest(unittest.TestCase):
         )
 
     def read(self):
-        return rerun.read_grounded_findings(self.run_dir, {}, self.lot, "context-docs.json")
+        context = {"plugin_version": "0.18.1"}
+        return rerun.read_grounded_findings(self.run_dir, context, self.lot, "context-docs.json")
 
     def make_document(self, doc_id="d1"):
         folder = self.run_dir / "context-docs" / doc_id

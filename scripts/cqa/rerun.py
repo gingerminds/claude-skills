@@ -6,9 +6,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from cqa import checked
+from cqa import checked, contract
 from cqa.checklist import STATUS_IMPLEMENTED, ref_label
-from cqa.findings import validate_document
+from cqa.findings import LEGACY_KEY, REFUSED_KEY, validate_document
 from cqa.grounding import Grounding
 from cqa.lots import DOCUMENT_LOT_ID, build_lots, lot_document_refs
 from cqa.probes import app_path
@@ -21,6 +21,15 @@ _DATE = re.compile(
 _TOOL_NAME = re.compile(r"[a-z0-9-]+")
 
 
+_REFUSED_EVIDENCE = re.compile(r"constat CQ-[0-9]+ : preuve n° [0-9]+ \([a-z]+\) écartée : ")
+
+
+def is_refused_evidence(error: str) -> bool:
+    """Whether an error of read_grounded_findings names a piece of evidence dropped from a finding
+    that is kept (cqa.grounding), not a finding set aside."""
+    return bool(_REFUSED_EVIDENCE.match(error))
+
+
 def _default_reader(run_dir: Path, lot: dict, name: str) -> Optional[tuple]:
     try:
         document = json.loads((run_dir / "findings" / name).read_text(encoding="utf-8"))
@@ -28,14 +37,27 @@ def _default_reader(run_dir: Path, lot: dict, name: str) -> Optional[tuple]:
         return None
     except (OSError, ValueError) as error:
         return [], [f"findings/{name} est illisible : {error}"]
-    return validate_document(
+    strict = contract.strict_file(run_dir, contract.run_context(run_dir), lot["id"], name)
+    valid, errors = validate_document(
         document,
         set(lot["refs"]),
         optional_refs=frozenset(lot_document_refs(lot)),
         forbidden_refs=_document_refs_of_round(lot, name),
-        agent_file=_is_agent_file(lot),
-        lot_id=lot["id"],
+        agent_file=strict and _is_agent_file(lot),
+        lot_id=lot["id"] if strict else None,
     )
+    for item in valid:
+        _mark_contract(item, strict)
+    return valid, errors
+
+
+def _mark_contract(item: dict, strict: bool) -> None:
+    """Set the keys the reader owns on a finding it returns, whatever the file held."""
+    item.pop(REFUSED_KEY, None)
+    if strict:
+        item.pop(LEGACY_KEY, None)
+    else:
+        item[LEGACY_KEY] = True
 
 
 def _is_agent_file(lot: dict) -> bool:
@@ -64,8 +86,16 @@ def read_grounded_findings(
     evidence also holds against the run (cqa.grounding): a cited file exists in a repo of
     context.json, a cited tool succeeded and has its summary, a page or an http request is on a
     host of the target and an http request is a probe the toolbox ran, a document is in
-    context-docs/. Every reader of the findings of a run that decides something (plan,
-    rerun-candidates, recette) uses it.
+    context-docs/. A cited file, a tool summary or a document that is missing sets the finding
+    aside; any other refused piece of evidence is only dropped from the finding, which carries it
+    in REFUSED_KEY, and its error says « écartée » (is_refused_evidence). Every reader of the
+    findings of a run that decides something (plan, rerun-candidates, recette, fix) uses it.
+
+    The rules are those of the run (cqa.contract): a file of a run started before 0.18.1 that
+    validate never checked keeps the checks of 0.18.0 (a cited file, a tool summary), is not read
+    as an agent file, and its findings carry LEGACY_KEY (the guardrails then skip their rules 7
+    and 8); such a file is never recorded. validate (freeze "refresh") always applies the rules of
+    0.18.1, so a file it checked follows them since, whatever the run.
 
     The check is frozen when the file is validated (cqa.checked, findings/<lot>.checked.json):
     while the record of the file holds for its current content, the recorded problems stand in
@@ -82,14 +112,15 @@ def read_grounded_findings(
         return None
     except (OSError, ValueError) as error:
         return [], [f"findings/{name} est illisible : {error}"]
+    strict = freeze == "refresh" or contract.strict_file(run_dir, context, lot["id"], name)
     valid, errors = validate_document(
         document,
         set(lot["refs"]),
         app_path=app_path(context),
         optional_refs=frozenset(lot_document_refs(lot)),
         forbidden_refs=_document_refs_of_round(lot, name),
-        agent_file=_is_agent_file(lot),
-        lot_id=lot["id"],
+        agent_file=strict and _is_agent_file(lot),
+        lot_id=lot["id"] if strict else None,
     )
     repos = context.get("repos") if isinstance(context.get("repos"), list) else []
     roots = {
@@ -98,22 +129,54 @@ def read_grounded_findings(
         if isinstance(repo, dict) and isinstance(repo.get("name"), str)
         and isinstance(repo.get("path"), str)
     }
-    grounding = Grounding(run_dir, context, roots)
+    grounding = Grounding(run_dir, context, roots, strict=strict)
     file_digest = checked.digest(data)
-    recorded = None if freeze == "refresh" else checked.load(run_dir, lot["id"], name, file_digest)
+    recorded = None
+    if strict and freeze != "refresh":
+        recorded = checked.load(run_dir, lot["id"], name, file_digest)
     moment = checked.now()
     grounded, entries = [], []
     for item in valid:
-        problems = recorded.get(item["ref"]) if recorded is not None else None
-        if problems is None:
-            problems = grounding.problems(item["evidence"])
-        entries.append(checked.entry(item["ref"], item["evidence"], problems, moment))
-        errors.extend(f"constat {ref_label(item['ref'])} : {problem}" for problem in problems)
+        found = recorded.get(item["ref"]) if recorded is not None else None
+        if found is None:
+            found = _checked(grounding, item["evidence"])
+        problems, refused = found["problems"], found["refused"]
+        entries.append(checked.entry(item["ref"], item["evidence"], problems, moment, refused))
+        label = ref_label(item["ref"])
+        errors.extend(f"constat {label} : {text}" for text in problems)
+        errors.extend(f"constat {label} : {refusal['problem']}" for refusal in refused)
         if not problems:
-            grounded.append(item)
-    if entries and (freeze == "refresh" or (freeze == "ensure" and recorded is None)):
+            grounded.append(_without_refused(item, refused, strict))
+    if strict and entries and (freeze == "refresh" or (freeze == "ensure" and recorded is None)):
         checked.freeze(run_dir, lot["id"], name, file_digest, entries)
     return grounded, errors
+
+
+def _checked(grounding: Grounding, evidence: list) -> dict:
+    """Return {"problems", "refused"} of the evidence of a finding, checked against the run."""
+    problems, refused = [], []
+    for problem in grounding.check(evidence):
+        if problem.drops:
+            refused.append({"evidence": problem.number, "problem": problem.text, "label": problem.label})
+        else:
+            problems.append(problem.text)
+    return {"problems": problems, "refused": refused}
+
+
+def _without_refused(item: dict, refused: list, strict: bool) -> dict:
+    """Return the finding without the evidence refused, which REFUSED_KEY then names."""
+    _mark_contract(item, strict)
+    evidence = item["evidence"]
+    numbers = {refusal["evidence"] for refusal in refused if refusal["evidence"] <= len(evidence)}
+    if not numbers:
+        return item
+    item[REFUSED_KEY] = [
+        {"evidence": evidence[refusal["evidence"] - 1], "problem": refusal["problem"], "label": refusal["label"]}
+        for refusal in refused
+        if refusal["evidence"] in numbers
+    ]
+    item["evidence"] = [piece for number, piece in enumerate(evidence, start=1) if number not in numbers]
+    return item
 
 
 def finding_files(run_dir: Path, lot_id: str) -> list[str]:

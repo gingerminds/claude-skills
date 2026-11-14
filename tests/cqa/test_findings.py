@@ -13,12 +13,14 @@ from cqa.findings import (
     ACTION_VALUES,
     CONFIDENCES,
     EVIDENCE_REQUIRED,
+    LEGACY_KEY,
     MAX_FIELD_LENGTH,
     MAX_SCENARIOS,
     MAX_SELECTOR,
     MAX_STEPS,
     MAX_SUMMARY_LENGTH,
     PROBE_METHODS,
+    REFUSED_KEY,
     REQUIRED_FINDING_KEYS,
     ROUTE_PARAMS,
     SCENARIO_PRESS_KEYS,
@@ -1901,6 +1903,68 @@ class ContextDocumentGuardrailTest(unittest.TestCase):
 
     def test_an_ok_of_the_skill_is_untouched(self):
         self.assertEqual(guard(make_ok())["verdict"], "ok")
+
+
+class LegacyGuardrailTest(unittest.TestCase):
+    """R-01: a finding read under the rules of a run started before 0.18.1 skips rules 7 and 8."""
+
+    def test_a_legacy_na_without_evidence_stays_na(self):
+        result = guard(make_finding(verdict="na", evidence=[], **{LEGACY_KEY: True}))
+        self.assertEqual(result["verdict"], "na")
+        self.assertIsNone(result["guardrail"])
+
+    def test_a_legacy_ok_of_a_report_stays_ok(self):
+        finding = make_ok(source="context_doc", **{LEGACY_KEY: True})
+        self.assertEqual(guard(finding)["verdict"], "ok")
+
+    def test_the_rules_of_0_18_0_still_apply_to_a_legacy_finding(self):
+        legacy = {LEGACY_KEY: True}
+        self.assertEqual(guard(make_ok(evidence=[], **legacy))["verdict"], "ok_human")
+        self.assertEqual(guard(make_finding(verdict="na", confidence="low", **legacy))["verdict"], "unknown")
+
+    def test_only_a_true_marker_counts(self):
+        for value in (False, None, "yes", 1):
+            with self.subTest(value=value):
+                result = guard(make_finding(verdict="na", evidence=[], **{LEGACY_KEY: value}))
+                self.assertEqual(result["verdict"], "unknown")
+
+
+class RefusedEvidenceGuardrailTest(unittest.TestCase):
+    """R-02: the evidence the reader dropped is named first in the guardrail mark."""
+
+    REFUSED = [
+        {
+            "evidence": {"type": "http", "url": "https://preprod.example.org/x", "detail": "200"},
+            "problem": "preuve n° 1 (http) écartée : aucune sonde ne correspond",
+            "label": "aucune sonde de la boîte à outils",
+        }
+    ]
+
+    def test_a_ko_keeps_its_verdict_and_names_the_dropped_evidence(self):
+        result = guard(make_finding(verdict="ko", evidence=[], **{REFUSED_KEY: self.REFUSED}))
+        self.assertEqual(result["verdict"], "ko")
+        self.assertEqual(result["guardrail"], self.REFUSED[0]["problem"])
+
+    def test_an_ok_left_without_evidence_becomes_ok_human(self):
+        result = guard(make_ok(evidence=[], **{REFUSED_KEY: self.REFUSED}))
+        self.assertEqual(result["verdict"], "ok_human")
+        self.assertEqual(
+            result["guardrail"],
+            f"{self.REFUSED[0]['problem']}; aucune preuve : ok abaissé à ok_human",
+        )
+
+    def test_a_damaged_refused_list_names_nothing(self):
+        for value in (None, "x", [1], [{"problem": 3}]):
+            with self.subTest(value=value):
+                self.assertIsNone(guard(make_finding(verdict="ko", **{REFUSED_KEY: value}))["guardrail"])
+
+    def test_the_reader_keys_are_refused_in_a_lot_file(self):
+        for key in (LEGACY_KEY, REFUSED_KEY):
+            with self.subTest(key=key):
+                valid, errors = agent_errors(make_finding(**{key: True}), make_finding(ref=80))
+                self.assertEqual([item["ref"] for item in valid], [80])
+                self.assertIn(f"« {key} »", errors[0])
+                self.assertIn("refusée", errors[0])
 
 
 def agent_errors(*findings, lot="front-1", lot_id=None, refs=None, **kwargs):

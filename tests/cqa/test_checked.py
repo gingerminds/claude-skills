@@ -96,6 +96,39 @@ class RecordTest(FreezeCase):
         self.assertIn("app/ghost.php", by_ref[1]["problems"][0])
         self.assertEqual(by_ref[2]["problems"], [])
 
+    def test_a_refused_evidence_is_recorded_with_its_number_and_the_finding_kept(self):
+        unmatched = {"type": "http", "url": "https://preprod.example.org/telescope", "detail": "200"}
+        self.first_round(finding(1, evidence=[file_evidence("app/a.php"), unmatched]), fill=False)
+        found = self.read(freeze="refresh")
+        self.assertEqual(self.refs(found), [1])
+        self.assertEqual(found[0][0]["evidence"], [file_evidence("app/a.php")])
+        (error,) = [error for error in found[1] if not error.startswith("constat manquant")]
+        self.assertTrue(rerun.is_refused_evidence(error), error)
+        self.assertFalse(any(rerun.is_refused_evidence(other) for other in found[1] if other != error))
+        (entry,) = self.record()["files"][NAME]["findings"]
+        self.assertEqual(entry["problems"], [])
+        (refusal,) = entry["refused"]
+        self.assertEqual(refusal["evidence"], 2)
+        self.assertTrue(refusal["problem"].startswith("preuve n° 2 (http) écartée : "))
+        self.assertEqual(refusal["label"], "aucune sonde de la boîte à outils")
+        self.assertEqual(self.read(), found)
+
+    def test_a_record_written_before_the_refused_entries_is_still_read(self):
+        self.read(freeze="refresh")
+        document = self.record()
+        for entry in document["files"][NAME]["findings"]:
+            del entry["refused"]
+        (self.run_dir / RECORD).write_text(json.dumps(document), encoding="utf-8")
+        self.drop_file()
+        self.assertEqual(self.refs(self.read()), [1, 2, 3])
+
+    def test_has_block_tells_whether_a_file_was_ever_recorded(self):
+        self.assertFalse(checked.has_block(self.run_dir, LOT, NAME))
+        self.read(freeze="refresh")
+        self.assertTrue(checked.has_block(self.run_dir, LOT, NAME))
+        self.assertFalse(checked.has_block(self.run_dir, LOT, "code-securite-followup.json"))
+        self.assertFalse(checked.has_block(self.run_dir, "server", NAME))
+
     def test_a_file_without_a_valid_finding_leaves_no_record(self):
         (self.run_dir / "findings" / NAME).write_text('{"lot": "x"}', encoding="utf-8")
         self.read(freeze="refresh")
@@ -196,6 +229,14 @@ class FrozenReadTest(FreezeCase):
             ),
             "ref is not a number": json.dumps(
                 {"files": {NAME: {"sha256": sha, "findings": [{"ref": "1", "problems": []}]}}}
+            ),
+            "refused is not a list": json.dumps(
+                {"files": {NAME: {"sha256": sha, "findings": [{"ref": 1, "problems": [], "refused": "x"}]}}}
+            ),
+            "a refusal without its number": json.dumps(
+                {"files": {NAME: {"sha256": sha, "findings": [
+                    {"ref": 1, "problems": [], "refused": [{"problem": "x", "label": "y"}]}
+                ]}}}
             ),
         }
         for label, text in damaged.items():

@@ -204,6 +204,29 @@ class FormatCommentTest(unittest.TestCase):
             EXPECTED_KO_TEXT,
         )
 
+    def test_the_evidence_the_check_dropped_follows_the_kept_one_marked_as_such(self):
+        dropped = {"type": "http", "url": "https://preprod.example.org/telescope", "detail": "200"}
+        item = copy.deepcopy(F_KO)
+        item["refused_evidence"] = [
+            {"evidence": dropped, "problem": "preuve n° 4 (http) écartée : x", "label": "aucune sonde de la boîte à outils"},
+            "damaged",
+        ]
+        text = format_comment(
+            finding=item, row=ROW_79, run_date=RUN_DATE, lead_option=LEAD, repos=[REPO_NUXT],
+            plugin_version=VERSION,
+        )
+        self.assertIn(
+            "- a11y : summary.json#home/3\n"
+            "- https://preprod.example.org/telescope : 200 (preuve écartée : aucune sonde de la boîte à outils)\n",
+            text,
+        )
+        del item["refused_evidence"]
+        self.assertEqual(
+            format_comment(finding=item, row=ROW_79, run_date=RUN_DATE, lead_option=LEAD,
+                           repos=[REPO_NUXT], plugin_version=VERSION),
+            EXPECTED_KO_TEXT,
+        )
+
     def test_verdict_line_per_confidence(self):
         for confidence, label in (("high", "haute"), ("medium", "moyenne"), ("low", "basse")):
             with self.subTest(confidence=confidence):

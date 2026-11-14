@@ -1636,7 +1636,7 @@ class PlanTest(AuditCase):
         text = self.ops(run_dir)[(103, "comment")]["text"]
         self.assertIn("Audit PRE-MEL · 02/03/2026 · lancé par Côme D", text)
         self.assertIn("develop@3f2a1c9", text)
-        self.assertIn("gm:checklist-quality-audit 0.9.0", text)
+        self.assertIn("gm:checklist-quality-audit 0.18.1", text)
         self.assertLessEqual(len(text), 1500)
 
     def rerun_101(self, run_dir, dates):
@@ -3581,7 +3581,7 @@ CLOSED_URL = "https://gitlab.example.org/acme/back/-/merge_requests/9"
 FRONT_URL = "https://gitlab.example.org/acme/front/-/merge_requests/5"
 OLDER_URL = "https://gitlab.example.org/acme/back/-/merge_requests/4"
 SHA_A, SHA_B, SHA_C, SHA_D = "1" * 40, "2" * 40, "3" * 40, "4" * 40
-FIX_FOOT = "Réf CQ-{ref} · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0"
+FIX_FOOT = "Réf CQ-{ref} · develop@3f2a1c9 · gm:checklist-quality-audit 0.18.1"
 FIX_HEAD = "Correctif automatique · {day} · lancé par Côme D"
 STATUSES = ("À traiter", "En standby", "Mise en place partielle", "Mis en place", "En review",
             "Ok / Recetté", "Non applicable")

@@ -95,14 +95,13 @@ def pending_lots(run_dir: Path, lots: list, app_path: str = "") -> list:
 def _requested(run_dir: Path, lots: list, app_path: str):
     """Yield (lot id, ref, scenario) for each needs_scenarios entry of the valid first-round
     findings."""
-    for lot in lots:
-        document = probes._first_round(run_dir, lot["id"])
-        valid, _ = (
-            validate_document(
-                document, set(lot["refs"]), app_path=app_path, agent_file=True, lot_id=lot["id"]
-            )
-            if document
-            else ([], [])
+    for lot, document, strict in probes.first_round_files(run_dir, lots):
+        valid, _ = validate_document(
+            document,
+            set(lot["refs"]),
+            app_path=app_path,
+            agent_file=strict,
+            lot_id=lot["id"] if strict else None,
         )
         for item in valid:
             for request in item.get("needs_scenarios") or ():

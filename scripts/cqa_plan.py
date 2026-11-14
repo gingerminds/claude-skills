@@ -37,7 +37,7 @@ from cqa import (
     scenarios,
 )
 from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
-from cqa.findings import VERDICTS, apply_guardrails, validate_document
+from cqa.findings import REFUSED_KEY, VERDICTS, apply_guardrails, validate_document
 from cqa.git_tools import (
     alignment,
     deployed_from_gitlab,
@@ -60,6 +60,7 @@ from cqa.plan import (
 )
 from cqa.rerun import (
     comment_dates,
+    is_refused_evidence,
     latest_findings,
     read_grounded_findings,
     rerun_candidates,
@@ -1280,7 +1281,10 @@ def _cmd_rerun_close(args, services) -> int:
     for path in files:
         lot_id = _RERUN_FILE.fullmatch(path.name).group(1)
         lot = lots.get(lot_id)
-        if lot is None or _rerun_errors(run_dir, context, lot, path.name, rows, freeze="ensure"):
+        errors = [] if lot is None else _rerun_errors(
+            run_dir, context, lot, path.name, rows, freeze="ensure"
+        )
+        if lot is None or [error for error in errors if not is_refused_evidence(error)]:
             folder = _new_history_dir(run_dir, f"-rerun-{number}-invalid")
             shutil.move(str(path), str(folder / path.name))
             checked.forget(run_dir, lot_id, path.name)
@@ -2921,10 +2925,11 @@ class _Reading:
                 self.general.setdefault(lot_id, []).append((name, text))
 
     def left_out(self, lots: list, findings: dict) -> list:
-        """Return [{"ref", "reason", "lost"}] for the rows of the lots whose finding was set aside.
+        """Return [{"ref", "reason", "lost"}] for the rows of the lots whose finding was set aside,
+        or kept without a piece of evidence the check refused (REFUSED_KEY).
 
         lost is true when the row has no finding left (the plan treats it as not evaluated), false
-        when an earlier file gives one that is kept.
+        when an earlier file gives one that is kept, or when the finding kept lost only evidence.
         """
         left = []
         for lot in lots:
@@ -2933,12 +2938,22 @@ class _Reading:
                     left.append({"ref": ref, "reason": self._why_none(lot["id"], ref), "lost": True})
                     continue
                 position, kept_name = self.kept.get(ref, (0, None))
+                if not kept_name:
+                    continue
                 later = [item for item in self.errors.get(ref, []) if item[0] > position]
-                if later and kept_name:
-                    reason = (
-                        f"{_joined(later)} (le constat de findings/{kept_name} est gardé)"
+                reasons = []
+                if later:
+                    reasons.append(f"{_joined(later)} (le constat de findings/{kept_name} est gardé)")
+                refused = [
+                    entry["problem"] for entry in findings[ref].get(REFUSED_KEY) or []
+                ]
+                if refused:
+                    without = "sans cette preuve" if len(refused) == 1 else "sans ces preuves"
+                    reasons.append(
+                        f"findings/{kept_name} : {' ; '.join(refused)} (le constat est gardé {without})"
                     )
-                    left.append({"ref": ref, "reason": reason, "lost": False})
+                if reasons:
+                    left.append({"ref": ref, "reason": " ; ".join(reasons), "lost": False})
         return left
 
     def _why_none(self, lot_id: str, ref: int) -> str:

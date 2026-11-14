@@ -158,7 +158,7 @@ For each row:
 3. Compare the code and the preprod, and fill `divergence` when they disagree.
 4. Write the finding as `verdicts.md` says, keeping the worst verdict across repos.
 
-Evidence. The code checks every piece of evidence at `validate`: a `page` or `http` URL is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` of `context.json`), an `http` URL is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`), and a `tool` is a tool whose `result.json` is `ok` or `not_applicable`. A finding with other evidence is refused. A request you made yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like `ok`, needs at least one piece of evidence.
+Evidence. The code checks every piece of evidence at `validate`: a `file` exists in its repo, a `tool` has its `summary.json` and a `result.json` that is `ok` or `not_applicable`, a `page` or `http` URL is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` of `context.json`), and an `http` URL is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`). A missing file or tool summary refuses the finding; any other piece of evidence that fails is dropped, and the finding stays without it (an `ok` left without evidence becomes `ok_human`, an `na` becomes `unknown`). A request you made yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like `ok`, needs at least one piece of evidence.
 
 Keep your context small:
 - Search with precise Grep and Glob patterns. Skip `vendor`, `node_modules`, `.git`, `.nuxt`, `.output`, `dist`, `storage`, `web/core`, `wp-includes` unless the row is about them.

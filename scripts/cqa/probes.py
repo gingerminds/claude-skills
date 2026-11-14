@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin, urlsplit
 
+from cqa import contract
 from cqa.findings import (
     PHP_FILE_REASON,
     UTF8_REASON,
@@ -295,18 +296,30 @@ def pending_lots(run_dir: Path, lots: list, app_path: str = "") -> list:
 
 def _pending(run_dir: Path, lots: list, app_path: str):
     """Yield (lot id, ref, probe) for each needs_probes entry of the valid first-round findings."""
-    for lot in lots:
-        document = _first_round(run_dir, lot["id"])
-        valid, _ = (
-            validate_document(
-                document, set(lot["refs"]), app_path=app_path, agent_file=True, lot_id=lot["id"]
-            )
-            if document
-            else ([], [])
+    for lot, document, strict in first_round_files(run_dir, lots):
+        valid, _ = validate_document(
+            document,
+            set(lot["refs"]),
+            app_path=app_path,
+            agent_file=strict,
+            lot_id=lot["id"] if strict else None,
         )
         for item in valid:
             for probe in item["needs_probes"]:
                 yield lot["id"], item["ref"], probe
+
+
+def first_round_files(run_dir: Path, lots: list):
+    """Yield (lot, document, strict) for each readable first-round findings file of the lots.
+
+    strict tells whether the file is read under the rules of 0.18.1 (cqa.contract): a file of a run
+    started before them that validate never checked is not read as an agent file.
+    """
+    context = contract.run_context(run_dir)
+    for lot in lots:
+        document = _first_round(run_dir, lot["id"])
+        if document:
+            yield lot, document, contract.strict_file(run_dir, context, lot["id"], f"{lot['id']}.json")
 
 
 class _Collected:

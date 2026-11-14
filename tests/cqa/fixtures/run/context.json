@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "run_id": "2026-10-20-1430",
-  "plugin_version": "0.9.0",
+  "plugin_version": "0.18.1",
   "project": {
     "slug": "acme-shop",
     "name": "Acme - Shop",

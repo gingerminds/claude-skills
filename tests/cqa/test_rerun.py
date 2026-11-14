@@ -66,6 +66,7 @@ class RerunCase(unittest.TestCase):
         self.write(
             "context.json",
             {
+                "plugin_version": "0.18.1",
                 "repos": [{"name": "laravel", "path": str(self.run_dir / "repo"), "audited_sha": sha}],
                 "target": {"preprod_url": "https://preprod.example.org"},
                 "available_tools": self.available,
