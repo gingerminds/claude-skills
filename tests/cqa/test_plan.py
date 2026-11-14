@@ -41,7 +41,7 @@ STATUS_OP_KEYS = OP_KEYS | {"expected"}
 
 
 def op_keys(op):
-    return STATUS_OP_KEYS if op["kind"] == "status" else OP_KEYS
+    return STATUS_OP_KEYS if op["kind"] in ("status", "assign") else OP_KEYS
 
 
 def make_row(ref=79, **overrides):
@@ -327,11 +327,20 @@ class ExpectedStatusTest(unittest.TestCase):
         self.assertFalse(op["human_override"])
         self.assertEqual(op["expected"], "Mis en place")
 
-    def test_other_operations_carry_no_expected(self):
+    def test_a_comment_carries_no_expected(self):
         row = make_row(status="À traiter", last_edited_by_bot=True)
         plan = plan_for([row], [make_finding(verdict="ok_human", todo=None, human_check="x")])
-        for kind in ("assign", "comment"):
-            self.assertNotIn("expected", sole_op(self, plan, kind))
+        self.assertNotIn("expected", sole_op(self, plan, "comment"))
+
+    def test_an_assignment_expects_the_assignees_read_in_the_copy(self):
+        for read in ([], ["Marc"]):
+            with self.subTest(read=read):
+                row = make_row(status="À traiter", assignees=read, last_edited_by_bot=True)
+                finding = make_finding(verdict="ok_human", todo=None, human_check="x")
+                op = sole_op(self, plan_for([row], [finding]), "assign")
+                self.assertEqual(op["expected"], read)
+                self.assertEqual(op["before"], read)
+                self.assertEqual(op["after"], read + [LEAD])
 
     def test_a_row_without_a_status_has_no_expected(self):
         row = make_row(status=None, last_edited_by_bot=True)

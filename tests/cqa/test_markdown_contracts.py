@@ -646,6 +646,53 @@ class SkillTest(unittest.TestCase):
         self.assertIn('cqa_plan.py" plan "$RUN" --recette <NN>', recette)
         self.assertIn("build the plan with `--no-recette` (no rerun of this recette is closed", recette)
 
+    def test_only_a_rerun_opened_for_a_recette_lets_the_plan_take_the_recette_over(self):
+        text = _text(SKILL)
+        recette = _section(text, "11. Recette")
+        opening = recette[recette.index("3. Run the diagnostic of section 5"):]
+        opening = opening[:opening.index("4. Present before anything")]
+        self.assertIn('cqa_plan.py" rerun-start "$RUN" --recette', opening)
+        self.assertIn("only for a rerun opened that way", opening)
+        step7 = recette[recette.index("7. Build the plan with the recette option"):]
+        self.assertIn("one opened with `rerun-start --recette`", step7[:step7.index("<NN>` is the rerun")])
+        self.assertIn("`plan` then says on stderr that it does not take the recette over", step7)
+        rerun = _section(text, "10. Rerun")
+        open_step = rerun[rerun.index("4. Open the rerun."):rerun.index("5. List the rows worth")]
+        self.assertNotIn("--recette", open_step.split("`rerun` is the number")[1].split("```bash")[1])
+        self.assertIn("`kind`", open_step)
+        end = _section(text, "8. Writing and synthesis")
+        end = end[end.index("**5. Deferred"):end.index("**6. Final scan**")]
+        self.assertIn("Invoked as a recette, open it with `rerun-start \"$RUN\" --recette`", end)
+        self.assertIn("one opened with `rerun-start --recette`", _section(text, "3. Resume"))
+
+    def test_skip_keeps_a_good_result_and_the_rerun_says_so(self):
+        rerun = _section(_text(SKILL), "10. Rerun")
+        self.assertIn("`skip` itself keeps such a result and writes the skip in "
+                      "`tools/<tool>/result-last-attempt.json`", rerun)
+        self.assertNotIn("`skip` would replace its `result.json`", rerun)
+
+    def test_the_synthesis_applies_the_consent_so_the_rebuild_is_optional(self):
+        text = _text(SKILL)
+        plan = _section(text, "7. Plan and confirmation")
+        self.assertIn("the rebuild is optional: `apply` and `synthesis` leave those pages out", plan)
+        self.assertIn("`synthesis` describes the plan without them", plan)
+        self.assertNotIn("so that the synthesis matches what is written", text)
+
+    def test_the_consents_hold_for_a_copy_of_the_audit_plan_and_a_dry_run_must_be_a_boolean(self):
+        context = _text(REFERENCES / "context.md")
+        self.assertIn("neither `true` nor `false`", context)
+        self.assertIn("by its content (`rows` and `summary`) as well as by its path", context)
+
+    def test_a_page_whose_status_changed_is_left_alone_under_the_human_consent(self):
+        text = _text(SKILL)
+        writing = _section(text, "8. Writing and synthesis")
+        apply_step = writing[writing.index("**1. Apply**"):writing.index("**2. Synthesis**")]
+        self.assertIn("unless the consent keeps the statuses set by a human", apply_step)
+        self.assertIn("`assignees_changed`", apply_step)
+        verdicts = _text(VERDICTS_MD)
+        self.assertIn("`assignees_changed`", verdicts)
+        self.assertIn("which leaves the whole page alone", verdicts)
+
     def test_scripts_hold_the_notion_consents_so_no_option_is_repeated(self):
         skill = _text(SKILL)
         rules = _section(skill, "1. Imperative rules")
@@ -825,7 +872,8 @@ class SkillTest(unittest.TestCase):
         self.assertIn('cqa_plan.py" rerun-close "$RUN" <NN> --rows CQ-3,CQ-12', end)
         self.assertIn("« aucun fichier de la relance NN »", end)
         self.assertIn("a recette plan keeps its recette", end)
-        self.assertNotIn("--recette", end)
+        self.assertNotIn('cqa_plan.py" plan "$RUN" --recette', end)
+        self.assertIn('rerun-start "$RUN" --recette', end)
 
     def test_held_lots_of_a_rerun_join_the_rerun_of_the_end_block(self):
         end = self._end_block()

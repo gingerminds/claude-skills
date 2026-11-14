@@ -335,8 +335,28 @@ def consented_plan(plan: dict, context) -> dict:
     the plan itself (also when no operation is such a status: nothing to leave out).
     """
     if keeps_human_statuses(context) and any(op.get("human_override") for op in plan["ops"]):
-        return filter_plan(plan, skip_human_overrides=True)
+        result = filter_plan(plan, skip_human_overrides=True)
+        if isinstance(result.get("recette"), dict):
+            result["recette"]["kept"] = kept_human_statuses(plan, result)
+            if "plan_id" in result:
+                result["plan_id"] = plan_digest(result)
+        return result
     return plan
+
+
+def kept_human_statuses(built: dict, filtered: dict) -> list:
+    """Return the judged rows of the recette whose human status the filter kept, with the verdict."""
+    recette = built["recette"]
+    judged = set(recette["judged"]) - set(recette["refs"])
+    written = {op["key"] for op in filtered["ops"]}
+    return [
+        {"ref": op["ref"], "verdict": op["verdict"], "status": op["before"]}
+        for op in built["ops"]
+        if op["kind"] == "status"
+        and op["human_override"]
+        and op["ref"] in judged
+        and op["key"] not in written
+    ]
 
 
 def _finding_operations(
@@ -355,7 +375,9 @@ def _finding_operations(
     assignees = list(row.get("assignees") or [])
     lead = common["lead_option"]
     if verdict == "ok_human" and lead and lead not in assignees:
-        ops.append(_operation("assign", row, verdict, assignees, assignees + [lead]))
+        ops.append(
+            _operation("assign", row, verdict, assignees, assignees + [lead], expected=assignees)
+        )
     if _needs_comment(ref, verdict, status_changed, visible_verdicts, history):
         text = format_comment(finding=finding, row=row, **common)
         ops.append(_operation("comment", row, verdict, None, None, text))
@@ -406,7 +428,7 @@ def _operation(
         "text": text,
         "human_override": human_override,
     }
-    if expected:
+    if expected or isinstance(expected, list):
         operation["expected"] = expected
     return operation
 

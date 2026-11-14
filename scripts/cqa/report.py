@@ -18,6 +18,7 @@ from cqa.checklist import (
 from cqa import context_docs, deferred, docs_link, docs_verdicts
 from cqa.lots import lot_document_refs
 from cqa.comments import format_page_summary
+from cqa.plan import consented_plan
 from cqa.secrets import known_values_from_env, redact
 
 _EM_DASH = chr(0x2014)
@@ -96,8 +97,10 @@ def manifest(run_dir: Path) -> dict:
 def synthesis(run_dir: Path, *, now: Optional[datetime] = None) -> tuple[str, str]:
     """Return (synthese.md text, comment of the copy page) for a planned run.
 
-    Both are in French, and the page comment fits the Notion limit. now is the end of the audit
-    for its duration (the current time when omitted). Raises ValueError when a file of the run
+    Both are in French, and the page comment fits the Notion limit. They describe what apply
+    writes: the plan without the pages whose status a person set when the consent of the run
+    keeps them (plan.consented_plan). now is the end of the audit for its duration (the
+    current time when omitted). Raises ValueError when a file of the run
     is missing or does not have the expected structure.
     """
     run_dir = Path(run_dir)
@@ -106,6 +109,7 @@ def synthesis(run_dir: Path, *, now: Optional[datetime] = None) -> tuple[str, st
     lots = _read(run_dir, "lots.json", "cqa_plan.py lots")
     rows = _read(run_dir, "rows.json", "cqa_notion.py rows")
     try:
+        plan = consented_plan(plan, context)
         text = _synthesis(
             context, plan, lots, rows, manifest(run_dir), now or datetime.now(), run_dir
         )

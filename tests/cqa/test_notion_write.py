@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 import cqa_notion
 from cqa.comments import to_rich_text
 from cqa.notion_api import NotionClient, NotionError
-from cqa.notion_write import ReferenceWriteRefused, apply_plan, text_digest
+from cqa.notion_write import ReferenceWriteRefused, apply_plan, text_digest, validate_plan
 from cqa.plan import operation_key
 from tests.cqa.fakes import Call, FakeClock, apply_report, failure
 
@@ -75,6 +75,7 @@ class FakeNotion:
         self.posts = 0
         self.comment_errors = {}
         self.statuses = {}
+        self.assignees = {}
 
     def __call__(self, method, url, headers, data):
         self.calls.append(Call(method, url, dict(headers), data))
@@ -97,8 +98,14 @@ class FakeNotion:
             return self._patch_page(path.rsplit("/", 1)[1], body["properties"])
         if method == "GET" and path.startswith("/pages/"):
             page_id = path.rsplit("/", 1)[1]
-            status = {"type": "status", "status": {"name": self.statuses[page_id]}}
-            return reply(200, {"object": "page", "id": page_id, "properties": {"Statut": status}})
+            properties = {}
+            if page_id in self.statuses or page_id not in self.assignees:
+                status = {"type": "status", "status": {"name": self.statuses[page_id]}}
+                properties["Statut"] = status
+            if page_id in self.assignees:
+                names = [{"name": name} for name in self.assignees[page_id]]
+                properties["Assignée à"] = {"type": "multi_select", "multi_select": names}
+            return reply(200, {"object": "page", "id": page_id, "properties": properties})
         if method == "GET" and path.startswith("/data_sources/"):
             if self.data_source_error:
                 return reply(*self.data_source_error)
@@ -168,6 +175,8 @@ class FakeNotion:
         label = "status" if "Statut" in properties else "assign"
         if label == "status":
             self.statuses[page] = properties["Statut"]["status"]["name"]
+        else:
+            self.assignees[page] = [item["name"] for item in properties["Assignée à"]["multi_select"]]
         self.writes.append((label, page, properties))
         return reply(200, {"object": "page", "id": page})
 
@@ -269,6 +278,14 @@ def audit_status_op(page_id, ref, read="À traiter", after="Mise en place partie
 
 def assign_op(page_id, ref, after):
     return op("assign", page_id, ref, after=after, before=[], verdict="ok_human")
+
+
+def audit_assign_op(page_id, ref, after, read=()):
+    """An assign operation as the audit plans it: the assignees read in the copy are "expected"."""
+    item = assign_op(page_id, ref, after)
+    item["before"] = list(read)
+    item["expected"] = list(read)
+    return item
 
 
 def comment_op(page_id, ref, text="Constat : à corriger"):
@@ -1317,6 +1334,104 @@ class AuditStatusGuardTest(ApplyTestCase):
         self.assertEqual(self.status_writes(), [])
 
 
+class ChangedPageTest(ApplyTestCase):
+    """What apply does to the rest of a page whose status or assignees changed since the read."""
+
+    def setUp(self):
+        super().setUp()
+        self.notion.statuses = {PAGE_1: "Ok / Recetté", PAGE_2: "À traiter"}
+
+    def ops(self):
+        return (
+            audit_status_op(PAGE_1, 1),
+            assign_op(PAGE_1, 1, ["Inès"]),
+            comment_op(PAGE_1, 1, verdict_blocks("Mise en place partielle")),
+            audit_status_op(PAGE_2, 2),
+            comment_op(PAGE_2, 2, verdict_blocks("Mise en place partielle")),
+        )
+
+    def pages(self):
+        return {page for _, page, _ in self.notion.writes}
+
+    def test_without_the_consent_the_comment_and_the_assignment_of_the_page_are_written(self):
+        result = self.apply(*self.ops())
+        self.assertEqual(self.pages(), {PAGE_1, PAGE_2})
+        self.assertEqual([item["ref"] for item in result["status_changed"]], [1])
+        self.assertEqual(result["done"], 4)
+
+    def test_keeping_human_statuses_leaves_the_whole_page_alone(self):
+        plan = make_plan(*self.ops())
+        plan["plan_id"] = "p1"
+        result = self.apply(plan=plan, keep_human=True)
+        self.assertEqual(self.pages(), {PAGE_2})
+        self.assertEqual([item["ref"] for item in result["status_changed"]], [1])
+        self.assertEqual((result["done"], result["skipped"], result["errors"]), (2, 3, []))
+        self.assertTrue(any("CQ-1 (comment) : non écrit" in line for line in self.log))
+        document = json.loads(self.applied_path().read_text(encoding="utf-8"))
+        self.assertEqual([entry["ref"] for entry in document["applied"]], [2, 2])
+        asides = document["left_aside"]
+        self.assertEqual({(note["ref"], note["plan_id"]) for note in asides}, {(1, "p1")})
+        self.assertEqual(len(asides), 3)
+        self.assertEqual({note["current"] for note in asides}, {"Ok / Recetté"})
+
+    def test_a_page_whose_status_did_not_change_is_written_whole(self):
+        self.notion.statuses[PAGE_1] = "À traiter"
+        result = self.apply(*self.ops(), keep_human=True)
+        self.assertEqual(self.pages(), {PAGE_1, PAGE_2})
+        self.assertEqual((result["done"], result["status_changed"]), (5, []))
+
+    def test_leaving_a_page_alone_does_not_hold_the_resumed_plan(self):
+        plan = make_plan(*self.ops())
+        plan["plan_id"] = "p1"
+        self.apply(plan=plan, keep_human=True)
+        writes = list(self.notion.writes)
+        again = self.apply(plan=plan, keep_human=True)
+        self.assertEqual(self.notion.writes, writes)
+        self.assertEqual(again["done"], 0)
+
+    def test_a_changed_assignee_list_is_not_overwritten(self):
+        self.notion.assignees = {PAGE_1: ["Côme D"], PAGE_2: []}
+        change = audit_assign_op(PAGE_1, 1, ["Inès"], read=[])
+        result = self.apply(change, audit_assign_op(PAGE_2, 2, ["Inès"], read=[]))
+        self.assertEqual([write[1] for write in self.notion.writes], [PAGE_2])
+        self.assertEqual(self.notion.assignees[PAGE_1], ["Côme D"])
+        self.assertEqual(
+            result["assignees_changed"],
+            [{"key": change["key"], "ref": 1, "current": ["Côme D"],
+              "reason": "assignation changée depuis le lancement"}],
+        )
+        self.assertEqual((result["done"], result["skipped"], result["errors"]), (1, 1, []))
+        document = json.loads(self.applied_path().read_text(encoding="utf-8"))
+        self.assertEqual([note["key"] for note in document["left_aside"]], [change["key"]])
+        self.assertNotIn(change["key"], [entry["key"] for entry in document["applied"]])
+
+    def test_an_unchanged_assignee_list_is_written_and_an_applied_one_is_skipped(self):
+        self.notion.assignees = {PAGE_1: ["Côme D"], PAGE_2: ["Inès"]}
+        result = self.apply(
+            audit_assign_op(PAGE_1, 1, ["Côme D", "Inès"], read=["Côme D"]),
+            audit_assign_op(PAGE_2, 2, ["Inès"], read=[]),
+        )
+        self.assertEqual(self.notion.assignees[PAGE_1], ["Côme D", "Inès"])
+        self.assertEqual((result["done"], result["skipped"]), (1, 1))
+        self.assertNotIn("assignees_changed", result)
+
+    def test_an_assign_without_expected_is_written_without_reading_the_page(self):
+        result = self.apply(assign_op(PAGE_1, 1, ["Inès"]))
+        self.assertEqual(result, apply_report(1, 0))
+        self.assertFalse([call for call in self.notion.requests("GET") if "/pages/" in call.url])
+
+    def test_a_page_without_the_assignee_property_is_written(self):
+        result = self.apply(audit_assign_op(PAGE_2, 2, ["Inès"], read=[]))
+        self.assertEqual(result["done"], 1)
+
+    def test_expected_of_an_assign_operation_must_be_a_list_of_names(self):
+        item = audit_assign_op(PAGE_1, 1, ["Inès"])
+        for bad in ("Côme D", [1], 3):
+            with self.subTest(expected=bad):
+                with self.assertRaises(ValueError):
+                    validate_plan(make_plan({**item, "expected": bad}))
+
+
 class CommentReplacementEdgeTest(ApplyTestCase):
     def skill(self, label, comment_id, created="2026-10-01T10:00:00Z"):
         self.notion.add_comment(
@@ -1536,6 +1651,12 @@ class CliTestCase(unittest.TestCase):
     def write_plan(self, *ops, name="notion/plan.json", **fields):
         self.write_json(name, {**make_plan(*ops), **fields})
 
+    def write_other_plan(self, *ops, name):
+        """A plan the way the assign and fix commands write it: no rows, no summary."""
+        plan = make_plan(*ops)
+        del plan["rows"], plan["summary"]
+        self.write_json(name, plan)
+
     def read_json(self, name):
         return json.loads((self.run_dir / name).read_text(encoding="utf-8"))
 
@@ -1623,6 +1744,28 @@ class ApplyCommandTest(CliTestCase):
         self.assertEqual(self.notion.statuses, {PAGE_1: "Ok / Recetté", PAGE_2: "Mise en place partielle"})
         self.assertIn("statut changé depuis le lancement", err)
 
+    def test_a_consent_that_keeps_human_statuses_leaves_a_page_whose_status_changed_alone(self):
+        for label, values, pages in (
+            ("keep_human", {"notion_write": "keep_human"}, {PAGE_2}),
+            ("autonomous all", {"notion_write": "all", "mode": "autonome"}, {PAGE_2}),
+            ("interactive all", {"notion_write": "all", "mode": "interactif"}, {PAGE_1, PAGE_2}),
+        ):
+            with self.subTest(label):
+                self.notion.writes.clear()
+                self.notion.statuses = {PAGE_1: "Ok / Recetté", PAGE_2: "À traiter"}
+                self.write_plan(
+                    audit_status_op(PAGE_1, 1),
+                    comment_op(PAGE_1, 1, "Constat 1"),
+                    audit_status_op(PAGE_2, 2),
+                    comment_op(PAGE_2, 2, "Constat 2"),
+                )
+                self.set_context(**values)
+                code, out, err = self.run_main(["apply", self.run_dir])
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.written_pages(), pages)
+                self.assertEqual([item["ref"] for item in json.loads(out)["status_changed"]], [1])
+                (self.run_dir / "notion" / "applied.json").unlink()
+
     def test_keep_human_skips_human_todo_at_apply(self):
         """A « À traiter » put back by a person is a human_override of the plan: apply leaves it."""
         self.notion.statuses = {PAGE_1: "À traiter", PAGE_2: "À traiter"}
@@ -1671,7 +1814,7 @@ class ApplyCommandTest(CliTestCase):
         self.assertEqual(len(self.notion.writes), 1)
 
     def test_apply_assign_plan_refuses_when_dry_run(self):
-        self.write_plan(assign_op(PAGE_2, 2, ["Inès"]), name="notion/assign-plan.json")
+        self.write_other_plan(assign_op(PAGE_2, 2, ["Inès"]), name="notion/assign-plan.json")
         self.set_context(dry_run=True)
         code, out, err = self.run_main(["apply", self.run_dir, "--plan", "notion/assign-plan.json"])
         self.assertEqual((code, out), (2, ""))
@@ -1692,7 +1835,7 @@ class ApplyCommandTest(CliTestCase):
                 self.assertEqual(self.notion.calls, [])
 
     def test_apply_of_the_fix_plan_ignores_the_audit_dry_run(self):
-        self.write_plan(fix_comment_op(PAGE_1, 1, fix_text()), name="fix/notion-plan.json")
+        self.write_other_plan(fix_comment_op(PAGE_1, 1, fix_text()), name="fix/notion-plan.json")
         self.set_context(dry_run=True, notion_write="none")
         code, _, err = self.run_main(["apply", self.run_dir, "--plan", "fix/notion-plan.json"])
         self.assertEqual(code, 0, err)
@@ -1798,11 +1941,61 @@ class ApplyCommandTest(CliTestCase):
         ):
             with self.subTest(name=name):
                 self.notion.writes.clear()
-                self.write_plan(op_, name=name)
+                self.write_other_plan(op_, name=name)
                 self.set_context(mode="autonome", notion_write="keep_human")
                 code, _, err = self.run_main(["apply", self.run_dir, "--plan", name])
                 self.assertEqual(code, 0, err)
                 self.assertEqual(self.written_pages(), {PAGE_1})
+    def test_the_audit_plan_is_known_by_its_shape_whatever_its_path(self):
+        copy_name = "notion/plan-b.json"
+        cases = (
+            ("keep_human", {"notion_write": "keep_human"}, 0, {PAGE_2}),
+            ("autonomous all", {"notion_write": "all", "mode": "autonome"}, 0, {PAGE_2}),
+            ("none", {"notion_write": "none"}, 2, set()),
+            ("dry_run", {"notion_write": "all", "dry_run": True}, 2, set()),
+        )
+        for label, values, expected, pages in cases:
+            with self.subTest(label):
+                self.notion.writes.clear()
+                self.notion.calls.clear()
+                self.write_human_override_plan(name=copy_name)
+                self.set_context(**{"notion_write": None, "mode": None, "dry_run": False, **values})
+                code, out, err = self.run_main(["apply", self.run_dir, "--plan", copy_name])
+                self.assertEqual(code, expected, err)
+                self.assertEqual(self.written_pages(), pages)
+                if expected:
+                    self.assertEqual(self.notion.calls, [])
+                journal = self.run_dir / "notion" / "applied.json"
+                if journal.exists():
+                    journal.unlink()
+
+    def test_a_plan_that_is_not_the_fix_plan_by_its_shape_follows_the_audit_consent(self):
+        self.write_human_override_plan(name="fix/notion-plan.json")
+        self.set_context(dry_run=True, notion_write="none")
+        code, out, err = self.run_main(["apply", self.run_dir, "--plan", "fix/notion-plan.json"])
+        self.assertEqual((code, out), (2, ""))
+        self.assertEqual(self.notion.calls, [])
+
+    def test_a_dry_run_that_is_not_a_boolean_refuses_every_write(self):
+        path = self.run_dir / "comment.txt"
+        path.write_text("texte", encoding="utf-8")
+        for value in ("true", "false", "", 1, 0, ["x"]):
+            with self.subTest(dry_run=value):
+                self.write_plan(status_op(PAGE_1, 1))
+                self.set_context(dry_run=value, notion_write="all")
+                for argv in (["apply", self.run_dir], ["comment-page", self.run_dir, path]):
+                    code, out, err = self.run_main(argv)
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn("dry_run", err)
+                    self.assertIn("true ou false", err)
+                self.assertEqual(self.notion.calls, [])
+
+    def test_a_null_dry_run_is_the_absence_of_the_option(self):
+        self.write_plan(status_op(PAGE_1, 1))
+        self.set_context(dry_run=None, notion_write="all")
+        code, _, err = self.run_main(["apply", self.run_dir])
+        self.assertEqual(code, 0, err)
+
     def test_applies_the_plan(self):
         self.write_plan(status_op(PAGE_1, 1), comment_op(PAGE_1, 1), page_comment_op())
         code, out, err = self.run_main(["apply", self.run_dir])
@@ -1843,7 +2036,7 @@ class ApplyCommandTest(CliTestCase):
 
     def test_plan_option_reads_another_plan(self):
         self.write_plan(status_op(PAGE_1, 1))
-        self.write_plan(assign_op(PAGE_2, 2, ["Inès"]), name="notion/assign-plan.json")
+        self.write_other_plan(assign_op(PAGE_2, 2, ["Inès"]), name="notion/assign-plan.json")
         code, out, _ = self.run_main(["apply", self.run_dir, "--plan", "notion/assign-plan.json"])
         self.assertEqual(code, 0)
         written = [(label, page) for label, page, _ in self.notion.writes]
@@ -1851,7 +2044,7 @@ class ApplyCommandTest(CliTestCase):
 
     def test_both_plans_share_the_journal(self):
         self.write_plan(status_op(PAGE_1, 1))
-        self.write_plan(assign_op(PAGE_1, 1, ["Inès"]), name="notion/assign-plan.json")
+        self.write_other_plan(assign_op(PAGE_1, 1, ["Inès"]), name="notion/assign-plan.json")
         self.run_main(["apply", self.run_dir])
         self.run_main(["apply", self.run_dir, "--plan", "notion/assign-plan.json"])
         entries = self.read_json("notion/applied.json")["applied"]

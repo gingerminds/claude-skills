@@ -52,6 +52,7 @@ from cqa.plan import (
     build_plan,
     consented_plan,
     filter_plan,
+    kept_human_statuses,
     load_history,
     load_written_refs,
     load_written_statuses,
@@ -97,6 +98,8 @@ _SPEC_SKIPPED_DIRS = frozenset({"vendor", "node_modules", ".git"})
 _EXCLUDED_KEYS = ("ref", "page_id", "reason", "verdict", "detail")
 _MISSING_ROW = "constat manquant : "
 _RERUN_FILE = re.compile(r"(.+)-rerun-([0-9]{2})\.json")
+RERUN_KINDS = ("rerun", "recette")
+_GOOD_TOOL_STATUSES = ("ok", "not_applicable")
 _MAX_COMMENT = 1500
 _EM_DASH = chr(0x2014)
 _CONTEXT_DOC_ACTIONS = ("add", "read", "merge", "ignore", "link", "verdicts")
@@ -276,11 +279,17 @@ def _register_audit(commands) -> None:
     _run_command(
         commands, "snapshot", "copie findings/ et notion/ dans history/", _cmd_snapshot
     )
-    _run_command(
+    sub = _run_command(
         commands,
         "rerun-start",
         "ouvre une relance : écarte les relances non closes, sauvegarde, donne NN",
         _cmd_rerun_start,
+    )
+    sub.add_argument(
+        "--recette",
+        action="store_true",
+        help="la relance appartient à une recette : le plan qui la suit reprend la recette du "
+        "notion/plan.json existant (sans cette option, une relance n'est jamais une recette)",
     )
     sub = _run_command(
         commands, "rerun-close", "clôt une relance : écarte les fichiers invalides", _cmd_rerun_close
@@ -308,18 +317,23 @@ def _register_audit(commands) -> None:
         help="plan d'une recette : NN est le numéro de la relance qui a jugé les lignes de "
         "notion/recette.json ; celles qui sont « Mis en place » et jugées peuvent changer "
         "ce statut posé par un dev. Sans cette option, le plan reprend la recette du "
-        "notion/plan.json existant",
+        "notion/plan.json existant tant que la dernière relance est celle de la recette ou a "
+        "été ouverte avec rerun-start --recette",
     )
     sub.add_argument(
         "--no-recette",
         action="store_true",
-        help="plan sans recette, même si le notion/plan.json existant en porte une",
+        help="plan sans recette, même si le notion/plan.json existant en porte une (le plan ne "
+        "reprend déjà pas la recette quand la dernière relance n'a pas été ouverte avec "
+        "rerun-start --recette)",
     )
     _run_command(commands, "manifest", "résultats des outils (tools/manifest.json)", _cmd_manifest)
     _run_command(commands, "synthesis", "synthese.md et commentaire de la page", _cmd_synthesis)
     _run_command(commands, "scan", "contrôle anti-secret du dossier du run", _cmd_scan)
     _run_command(commands, "openapi-specs", "specs OpenAPI des repos", _cmd_openapi_specs)
-    sub = _run_command(commands, "skip", "marque un outil comme ignoré", _cmd_skip)
+    sub = _run_command(
+        commands, "skip", "marque un outil comme ignoré (sans remplacer un résultat ok)", _cmd_skip
+    )
     sub.add_argument("tool", help="nom de l'outil")
     sub.add_argument("reason", help="raison, affichée dans la synthèse")
     sub.add_argument(
@@ -1204,6 +1218,37 @@ def _closed_reruns(run_dir: Path) -> set:
     return {item for item in closed if isinstance(item, str)} if isinstance(closed, list) else set()
 
 
+def _rerun_kinds(run_dir: Path) -> dict:
+    """Return {NN: "rerun" | "recette"}: what each rerun opened by rerun-start was opened for."""
+    kinds = _read_json_object(run_dir / "reruns.json").get("kinds")
+    if not isinstance(kinds, dict):
+        return {}
+    return {
+        key: value
+        for key, value in kinds.items()
+        if isinstance(key, str) and key.isdigit() and value in RERUN_KINDS
+    }
+
+
+def _save_reruns(run_dir: Path, closed, dates: dict, kinds: dict) -> None:
+    document = {"closed": sorted(closed), "dates": dict(sorted(dates.items()))}
+    if kinds:
+        document["kinds"] = dict(sorted(kinds.items()))
+    write_json(run_dir / "reruns.json", document)
+
+
+def _recette_is_inherited(run_dir: Path, number: int) -> tuple:
+    """Return (does a plan without option take over the recette of rerun number, last rerun).
+
+    It does when no rerun was opened after the recette, or when the last one was opened for a
+    recette (rerun-start --recette): the deferred rerun of its end block. Any other rerun, or
+    one whose kind was never recorded, is not a recette.
+    """
+    kinds = _rerun_kinds(run_dir)
+    last = max([_highest_rerun(run_dir), *(int(key) for key in kinds)])
+    return last <= number or kinds.get(f"{last:02d}") == "recette", last
+
+
 def _rerun_dates(run_dir: Path) -> dict:
     """Return {NN: date} of the closed reruns that recorded their date (rerun-close)."""
     return rerun_dates(run_dir)
@@ -1252,6 +1297,7 @@ def _cmd_rerun_start(args, services) -> int:
         raise UsageError("Il y a déjà 99 relances dans ce run : lancer un nouveau run.")
     target = _new_history_dir(run_dir)
     closed = _closed_reruns(run_dir)
+    kind = "recette" if args.recette else "rerun"
     abandoned = []
     for path in _rerun_files(run_dir):
         if _RERUN_FILE.fullmatch(path.name).group(2) in closed:
@@ -1261,7 +1307,11 @@ def _cmd_rerun_start(args, services) -> int:
         checked.forget(run_dir, _RERUN_FILE.fullmatch(path.name).group(1), path.name)
         abandoned.append(path.name)
     _copy_state(run_dir, target)
-    _emit({"snapshot": str(target), "rerun": f"{number:02d}", "abandoned": abandoned})
+    kinds = {key: value for key, value in _rerun_kinds(run_dir).items() if key in closed}
+    kinds[f"{number:02d}"] = kind
+    dates = {key: value.isoformat() for key, value in _rerun_dates(run_dir).items()}
+    _save_reruns(run_dir, closed, dates, kinds)
+    _emit({"snapshot": str(target), "rerun": f"{number:02d}", "kind": kind, "abandoned": abandoned})
     return EXIT_OK
 
 
@@ -1289,10 +1339,10 @@ def _cmd_rerun_close(args, services) -> int:
             shutil.move(str(path), str(folder / path.name))
             checked.forget(run_dir, lot_id, path.name)
             discarded.append(path.name)
-    closed = sorted(_closed_reruns(run_dir) | {number})
+    closed = _closed_reruns(run_dir) | {number}
     dates = {key: value.isoformat() for key, value in _rerun_dates(run_dir).items()}
     dates.setdefault(number, datetime.now().date().isoformat())
-    write_json(run_dir / "reruns.json", {"closed": closed, "dates": dict(sorted(dates.items()))})
+    _save_reruns(run_dir, closed, dates, _rerun_kinds(run_dir))
     _emit({"closed": number, "discarded": discarded})
     return EXIT_OK
 
@@ -1377,6 +1427,15 @@ def _cmd_plan(args, services) -> int:
     inherited = number is None and not args.no_recette
     if inherited:
         number = _recette_of(_read_json_object(run_dir / "notion" / "plan.json"))
+        taken, last = _recette_is_inherited(run_dir, number) if number is not None else (True, 0)
+        if not taken:
+            print(
+                f"Recette du notion/plan.json existant (relance {number:02d}) non reprise : la "
+                f"dernière relance ({last:02d}) n'a pas été ouverte pour une recette "
+                f"(rerun-start --recette). --recette {number:02d} la reprend.",
+                file=sys.stderr,
+            )
+            number, inherited = None, False
     if number is not None:
         try:
             _check_closed(run_dir, number)
@@ -1416,7 +1475,7 @@ def _cmd_plan(args, services) -> int:
     built = plan
     plan = filter_plan(plan, skip_human_overrides=args.skip_human_overrides)
     if number is not None:
-        plan["recette"]["kept"] = _kept_human_statuses(built, plan)
+        plan["recette"]["kept"] = kept_human_statuses(built, plan)
     plan["plan_id"] = plan_digest(plan)
     (run_dir / "notion").mkdir(exist_ok=True)
     write_json(run_dir / "notion" / "plan.json", plan)
@@ -1466,21 +1525,6 @@ def _check_closed(run_dir: Path, number: int) -> None:
             f"(relances closes dans reruns.json : {listed}). Clore la relance avec "
             "rerun-close d'abord."
         )
-
-
-def _kept_human_statuses(built: dict, filtered: dict) -> list:
-    """Return the judged rows of the recette whose human status the filter kept, with the verdict."""
-    recette = built["recette"]
-    judged = set(recette["judged"]) - set(recette["refs"])
-    written = {op["key"] for op in filtered["ops"]}
-    return [
-        {"ref": op["ref"], "verdict": op["verdict"], "status": op["before"]}
-        for op in built["ops"]
-        if op["kind"] == "status"
-        and op["human_override"]
-        and op["ref"] in judged
-        and op["key"] not in written
-    ]
 
 
 def _recette_scope(run_dir: Path, context: dict, lots: list, rows: list, number: int) -> dict:
@@ -2005,7 +2049,16 @@ def _cmd_skip(args, services) -> int:
     }
     folder = args.run_dir / "tools" / args.tool
     folder.mkdir(parents=True, exist_ok=True)
-    write_json(folder / "result.json", result)
+    earlier = _read_json_object(folder / "result.json").get("status")
+    if earlier in _GOOD_TOOL_STATUSES:
+        write_json(folder / "result-last-attempt.json", result)
+        print(
+            f"{args.tool} : son résultat « {earlier} » est conservé, l'essai est dans "
+            f"tools/{args.tool}/result-last-attempt.json.",
+            file=sys.stderr,
+        )
+    else:
+        write_json(folder / "result.json", result)
     _emit(result)
     return EXIT_OK
 
