@@ -6,6 +6,7 @@ from pathlib import Path
 
 from cqa import rerun
 from cqa.findings import apply_guardrails
+from cqa.probes import target_hosts
 
 from tests.cqa.test_cli_audit import AuditCase
 
@@ -176,6 +177,7 @@ class PageOriginTest(VerifiedCase):
         self.set_context(
             run_dir,
             target={"preprod_url": None, "prod_url": None, "prod_live": False, "access": "open"},
+            key_pages=[],
         )
         self.judge(run_dir, 102, "ok", [PAGE])
         errors = self.errors_of(run_dir, 102)
@@ -491,6 +493,95 @@ class RefusedEvidenceTest(VerifiedCase):
         summary, _ = self.plan(run_dir)
         self.assertNotIn(101, summary["unknown"])
         self.assertIn("rerun-01", self.reasons(summary)[101])
+
+
+BACK_OFFICE = {"template": "Back-office", "url": "https://bo.example.org/admin/login"}
+
+
+class KeyPageHostTest(VerifiedCase):
+    """R-03: the browser may visit the host of a key page, so a page seen there is evidence."""
+
+    def add_back_office(self, run_dir):
+        self.edit(run_dir, "context.json", lambda context: context["key_pages"].append(BACK_OFFICE))
+
+    def test_a_page_on_the_host_of_a_back_office_key_page_is_evidence(self):
+        run_dir = self.make_run()
+        self.add_back_office(run_dir)
+        login = {"type": "page", "url": "https://bo.example.org/admin/login", "detail": "sans limite"}
+        medias = {"type": "page", "url": "https://bo.example.org/admin/medias", "detail": "WebP proposé"}
+        self.judge(run_dir, 101, "ko", [login])
+        self.judge(run_dir, 102, "ok", [medias])
+        self.assertEqual(self.validate_errors(run_dir, PERF), [])
+        summary, _ = self.plan(run_dir)
+        self.assertEqual(self.comment_verdict(run_dir, 101), "ko")
+        self.assertIn(101, summary["blocking_non_conform"])
+        self.assertEqual(self.status_after(run_dir, 102), "Ok / Recetté")
+        self.assertFalse({101, 102} & set(self.reasons(summary)))
+
+    def test_the_external_key_page_of_the_fixture_is_a_host_of_the_pages(self):
+        run_dir = self.make_run()
+        self.judge(run_dir, 102, "ok", [{"type": "page", "url": "https://other.example.net/x", "detail": "vu"}])
+        self.assertEqual(self.errors_of(run_dir, 102), [])
+
+    def test_a_page_outside_every_list_is_refused(self):
+        run_dir = self.make_run()
+        self.add_back_office(run_dir)
+        self.judge(run_dir, 102, "ok", [{"type": "page", "url": OUTSIDE, "detail": "vu"}])
+        (error,) = self.errors_of(run_dir, 102)
+        self.assertIn("evil.example.net", error)
+        self.assertIn("bo.example.org", error)
+        self.assertIn("preprod.example.org", error)
+        summary, _ = self.plan(run_dir)
+        self.assertEqual(self.comment_verdict(run_dir, 102), "ok_human")
+
+    def test_an_http_evidence_stays_bound_to_the_target_and_the_probes(self):
+        run_dir = self.make_run()
+        self.add_back_office(run_dir)
+        self.judge(run_dir, 102, "ok", [{"type": "http", "url": "https://bo.example.org/admin/login", "detail": "200"}])
+        (error,) = self.errors_of(run_dir, 102)
+        self.assertIn("hors de la cible", error)
+        self.assertNotIn("bo.example.org,", error)
+
+    def test_target_hosts_add_the_key_pages_for_the_pages_only(self):
+        context = self.read(self.make_run(), "context.json")
+        context["key_pages"].append(BACK_OFFICE)
+        context["key_pages"].append({"template": "Cassée", "url": "pas une url"})
+        context["key_pages"].append("https://ignored.example.net/")
+        self.assertEqual(target_hosts(context), ["preprod.example.org"])
+        self.assertEqual(
+            target_hosts(context, pages=True),
+            ["bo.example.org", "other.example.net", "preprod.example.org"],
+        )
+
+    def test_the_back_office_scenario_of_the_review_keeps_every_legitimate_verdict(self):
+        """x/e8.py bo of the review: two pages of the back-office, a ko citing a request made by
+        hand next to a valid file, and a partial citing a tool that failed without a summary."""
+        run_dir = self.make_run()
+        self.add_back_office(run_dir)
+        self.judge(run_dir, 101, "ko", [{"type": "page", "url": "https://bo.example.org/admin/login",
+                                         "detail": "formulaire sans limite de tentatives"}])
+        self.judge(run_dir, 102, "ok", [{"type": "page", "url": "https://bo.example.org/admin/medias",
+                                         "detail": "WebP proposé"}])
+        securite = [
+            {"ref": 103, "verdict": "ko", "confidence": "high", "summary": "x",
+             "evidence": [dict(FILE, line=3), UNMATCHED], "todo": "Fermer Telescope.",
+             "human_check": None, "divergence": None, "needs_probes": []},
+            {"ref": 104, "verdict": "partial", "confidence": "high", "summary": "x",
+             "evidence": [{"type": "tool", "tool": "lighthouse", "ref": "summary.json#home"}],
+             "todo": "Voir.", "human_check": None, "divergence": None, "needs_probes": []},
+        ]
+        self.write(run_dir, "findings/code-securite.json", {"lot": "code-securite", "findings": securite})
+        self.assertEqual(self.validate_errors(run_dir, PERF), [])
+        errors = self.validate_errors(run_dir, "code-securite")
+        self.assertEqual(len(errors), 2)
+        summary, _ = self.plan(run_dir)
+        self.assertEqual(summary["unknown"], [104, 106])
+        self.assertEqual(summary["blocking_non_conform"], [101, 103])
+        self.assertEqual(self.comment_verdict(run_dir, 101), "ko")
+        self.assertEqual(self.status_after(run_dir, 102), "Ok / Recetté")
+        self.assertEqual(self.comment_verdict(run_dir, 103), "ko")
+        self.assertIn("écartée", self.reasons(summary)[103])
+        self.assertIn("Non évaluable", self.reasons(summary)[104])
 
 
 class AgentFileCliTest(VerifiedCase):

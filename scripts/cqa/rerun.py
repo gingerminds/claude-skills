@@ -98,9 +98,12 @@ def read_grounded_findings(
     0.18.1, so a file it checked follows them since, whatever the run.
 
     The check is frozen when the file is validated (cqa.checked, findings/<lot>.checked.json):
-    while the record of the file holds for its current content, the recorded problems stand in
+    while the record of the file holds for its JSON content, the recorded problems stand in
     for the check against the run, which has moved since (a file deleted by a merged fix, a tool
-    relaunched). A file, or a finding, that no record covers is checked against the run.
+    relaunched). The problems of a tool or of a probe recorded then (retry: a tool that had not
+    finished) are checked again: a piece of evidence that now holds is accepted, one that still
+    fails keeps its recorded problem, so a reading never makes a finding worse than its
+    validation. A file, or a finding, that no record covers is checked against the run.
     freeze "refresh" checks every finding against the run and records the result (validate);
     "ensure" does the same only when no record covers the file (rerun-close); None never writes.
     """
@@ -130,7 +133,7 @@ def read_grounded_findings(
         and isinstance(repo.get("path"), str)
     }
     grounding = Grounding(run_dir, context, roots, strict=strict)
-    file_digest = checked.digest(data)
+    file_digest = checked.digest(document)
     recorded = None
     if strict and freeze != "refresh":
         recorded = checked.load(run_dir, lot["id"], name, file_digest)
@@ -140,8 +143,12 @@ def read_grounded_findings(
         found = recorded.get(item["ref"]) if recorded is not None else None
         if found is None:
             found = _checked(grounding, item["evidence"])
+        else:
+            found = _retried(grounding, item["evidence"], found)
         problems, refused = found["problems"], found["refused"]
-        entries.append(checked.entry(item["ref"], item["evidence"], problems, moment, refused))
+        entries.append(
+            checked.entry(item["ref"], item["evidence"], problems, moment, refused, found["retry"])
+        )
         label = ref_label(item["ref"])
         errors.extend(f"constat {label} : {text}" for text in problems)
         errors.extend(f"constat {label} : {refusal['problem']}" for refusal in refused)
@@ -153,14 +160,31 @@ def read_grounded_findings(
 
 
 def _checked(grounding: Grounding, evidence: list) -> dict:
-    """Return {"problems", "refused"} of the evidence of a finding, checked against the run."""
-    problems, refused = [], []
+    """Return {"problems", "refused", "retry"} of the evidence of a finding, checked against the run."""
+    problems, refused, retry = [], [], []
     for problem in grounding.check(evidence):
         if problem.drops:
             refused.append({"evidence": problem.number, "problem": problem.text, "label": problem.label})
         else:
             problems.append(problem.text)
-    return {"problems": problems, "refused": refused}
+        if problem.retry:
+            retry.append({"evidence": problem.number, "problem": problem.text})
+    return {"problems": problems, "refused": refused, "retry": retry}
+
+
+def _retried(grounding: Grounding, evidence: list, recorded: dict) -> dict:
+    """Return the recorded check of a finding, less the tool and probe problems the run no longer
+    holds (recorded["retry"]): only those pieces of evidence are checked again."""
+    lifted = set()
+    for again in recorded["retry"]:
+        number = again["evidence"]
+        if number <= len(evidence) and not grounding.check_one(number, evidence[number - 1]):
+            lifted.add(again["problem"])
+    return {
+        "problems": [text for text in recorded["problems"] if text not in lifted],
+        "refused": [item for item in recorded["refused"] if item["problem"] not in lifted],
+        "retry": [again for again in recorded["retry"] if again["problem"] not in lifted],
+    }
 
 
 def _without_refused(item: dict, refused: list, strict: bool) -> dict:

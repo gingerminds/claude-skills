@@ -4141,7 +4141,9 @@ class FrozenEvidenceContract(unittest.TestCase):
         step = skill[skill.index("\n7. After each lot,"):skill.index("\n8. Follow-ups,")]
         self.assertIn("findings/<lot>.checked.json", step)
         self.assertIn("`plan`, `rerun-candidates` and `recette` rely on that record", step)
-        self.assertIn("A finding refused at `validate` stays refused", step)
+        self.assertNotIn("A finding refused at `validate` stays refused", step)
+        self.assertIn("`plan` checks again the tool and probe evidence refused at `validate`", step)
+        self.assertIn("A findings file changed after its `validate` is validated again", step)
         lots = _text(REFERENCES / "lots.md")
         validation = lots[lots.index("## 5. Validation"):lots.index("## 6. Follow-ups")]
         self.assertIn("findings/<lot>.checked.json", validation)
@@ -4176,13 +4178,41 @@ class FrozenEvidenceContract(unittest.TestCase):
         for path in (SKILL, REFERENCES / "lots.md", VERDICTS_MD, TOOLBOX):
             self.assertNotIn(EM_DASH, _text(path), path.name)
 
+    def test_the_record_follows_the_content_and_the_retry_is_said(self):
+        lots = _text(REFERENCES / "lots.md")
+        validation = lots[lots.index("## 5. Validation"):lots.index("## 6. Follow-ups")]
+        self.assertIn("digest of its JSON content", validation)
+        self.assertIn("checks again the tool and probe evidence", validation)
+        verdicts = _text(VERDICTS_MD)
+        plan = verdicts[verdicts.index("### Plan"):verdicts.index("### Confirmation")]
+        self.assertIn("tool and probe evidence refused at `validate`", plan)
+
+
+class RequestOrderContract(unittest.TestCase):
+    """R-17: for a favourable verdict the auditor asks a probe first, since its own request is no
+    evidence the code accepts."""
+
+    def test_the_sources_table_asks_a_probe_first_for_a_favourable_verdict(self):
+        text = _text(AUDITOR)
+        row = next(line for line in text.splitlines() if line.startswith("| HTTP |"))
+        self.assertNotIn("Missing answer: your own GET or HEAD (see \"HTTP\"), else `needs_probes`.", row)
+        first = "for a favourable verdict (`ok`, `na`), ask it in `needs_probes` first"
+        self.assertIn(first, row)
+        self.assertLess(row.index(first), row.index("your own GET or HEAD"))
+
+    def test_the_http_section_says_the_same(self):
+        text = _text(AUDITOR)
+        section_http = text[text.index("## HTTP"):text.index("## Security rows")]
+        self.assertIn("for a favourable verdict, `needs_probes` first", section_http)
+
 
 EVIDENCE_RULES = (
     "The code checks every piece of evidence at `validate`: a `file` exists in its repo, a `tool` "
-    "has its `summary.json` and a `result.json` that is `ok` or `not_applicable`, a `page` or "
-    "`http` URL is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, "
-    "the `sites` of `context.json`), and an `http` URL is a probe of the toolbox that ran "
-    "(`tools/http/`, `tools/http-followup/`). A missing file or tool summary refuses the finding; "
+    "has its `summary.json` and a `result.json` that is `ok` or `not_applicable`, a `page` URL "
+    "is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` "
+    "and the `key_pages` of `context.json`), and an `http` URL is on such a host, `key_pages` aside, "
+    "and is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`). A missing file "
+    "or tool summary refuses the finding; "
     "any other piece of evidence that fails is dropped, and the finding stays without it (an `ok` "
     "left without evidence becomes `ok_human`, an `na` becomes `unknown`). A request you made "
     "yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like "
@@ -4213,8 +4243,9 @@ class VerifiedVerdictsContract(unittest.TestCase):
         text = _text(VERDICTS_MD)
         table = text[text.index("| `type` | Keys | Rules |"):text.index("## Several repos")]
         for needle in ("on a host of the target", "whose `result.json` is `ok` or `not_applicable`",
-                       "A URL that a probe of the toolbox requested"):
+                       "A URL that a probe of the toolbox requested", "or of a key page"):
             self.assertIn(needle, table)
+        self.assertIn("a `page` evidence may cite", _text(CONTEXT_MD))
 
     def test_the_agent_files_hold_nothing_the_code_writes(self):
         text = _text(VERDICTS_MD)

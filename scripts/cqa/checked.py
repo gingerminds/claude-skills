@@ -4,14 +4,18 @@ findings/<lot>.checked.json holds, for each findings file of the lot that went t
 validate (or rerun-close), what the check of its evidence found at that moment:
 
     {"lot": "<lot id>",
-     "files": {"<findings file>": {"sha256": "<digest of the file>",
+     "files": {"<findings file>": {"sha256": "<digest of its JSON content>",
                                    "findings": [{"ref", "checked_at", "files": [{"repo", "path"}],
                                                  "tools": ["<tool>"], "problems": ["<text>"],
-                                                 "refused": [{"evidence", "problem", "label"}]}]}}}
+                                                 "refused": [{"evidence", "problem", "label"}],
+                                                 "retry": [{"evidence", "problem"}]}]}}}
 
 "problems" set the finding aside; "refused" names the pieces of evidence dropped from it (their
-number, counting from 1, and the French texts, see cqa.grounding.Problem). A record written before
-"refused" existed has none.
+number, counting from 1, and the French texts, see cqa.grounding.Problem); "retry" names, among
+both, the problems of a tool or of a probe, which a reader checks again (a tool that had not
+finished). A record written before "refused" or "retry" existed has none. The digest is the one of
+the JSON content of the file (digest), so a file written again with the same content, keys in
+another order or another indentation, keeps its record.
 
 A reader of the findings that decides something trusts the problems recorded for a finding when
 the digest of its file is still the one recorded, instead of checking again the cited files and
@@ -32,19 +36,25 @@ def record_path(run_dir: Path, lot_id: str) -> Path:
     return Path(run_dir) / _FOLDER / f"{lot_id}.checked.json"
 
 
-def digest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def digest(document) -> str:
+    """Return the sha256 of the canonical JSON of a parsed findings file (sorted keys, no spaces,
+    ASCII escapes: a lone surrogate, which JSON allows, has no UTF-8 form)."""
+    text = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(text.encode("ascii")).hexdigest()
 
 
 def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def entry(ref: int, evidence: list, problems: list, checked_at: str, refused: tuple = ()) -> dict:
+def entry(
+    ref: int, evidence: list, problems: list, checked_at: str, refused: tuple = (), retry: tuple = ()
+) -> dict:
     """Return what was checked for one finding: the cited files and tools, and the problems.
 
     refused holds the pieces of evidence dropped from the finding, as
-    {"evidence": <number>, "problem": <text>, "label": <short reason>}.
+    {"evidence": <number>, "problem": <text>, "label": <short reason>}; retry the problems of a tool
+    or of a probe, as {"evidence": <number>, "problem": <the text in problems or refused>}.
     """
     files = [
         {"repo": item["repo"], "path": item["path"]} for item in evidence if item["type"] == "file"
@@ -57,12 +67,13 @@ def entry(ref: int, evidence: list, problems: list, checked_at: str, refused: tu
         "tools": list(dict.fromkeys(tools)),
         "problems": list(problems),
         "refused": [dict(item) for item in refused],
+        "retry": [dict(item) for item in retry],
     }
 
 
 def load(run_dir: Path, lot_id: str, name: str, file_digest: str) -> Optional[dict]:
-    """Return {ref: {"problems", "refused"}} recorded for findings/<name>, None when no record
-    covers the file.
+    """Return {ref: {"problems", "refused", "retry"}} recorded for findings/<name>, None when no
+    record covers the file.
 
     No record covers it when there is none, when it is damaged, or when it was made for another
     content of the file.
@@ -78,15 +89,18 @@ def load(run_dir: Path, lot_id: str, name: str, file_digest: str) -> Optional[di
         ref = item.get("ref") if isinstance(item, dict) else None
         problems = item.get("problems") if isinstance(item, dict) else None
         refused = item.get("refused", []) if isinstance(item, dict) else None
+        retry = item.get("retry", []) if isinstance(item, dict) else None
         if (
             not isinstance(ref, int)
             or isinstance(ref, bool)
             or not _texts(problems)
             or not isinstance(refused, list)
             or not all(_is_refusal(refusal) for refusal in refused)
+            or not isinstance(retry, list)
+            or not all(_is_numbered(again) for again in retry)
         ):
             return None
-        found[ref] = {"problems": problems, "refused": refused}
+        found[ref] = {"problems": problems, "refused": refused, "retry": retry}
     return found
 
 
@@ -120,13 +134,16 @@ def _texts(value) -> bool:
 
 
 def _is_refusal(value) -> bool:
+    return _is_numbered(value) and isinstance(value.get("label"), str)
+
+
+def _is_numbered(value) -> bool:
     return (
         isinstance(value, dict)
         and isinstance(value.get("evidence"), int)
         and not isinstance(value.get("evidence"), bool)
         and value["evidence"] >= 1
         and isinstance(value.get("problem"), str)
-        and isinstance(value.get("label"), str)
     )
 
 

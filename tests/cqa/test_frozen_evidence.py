@@ -51,9 +51,10 @@ class ValidateRecordTest(FrozenCase):
         run_dir = self.validated_run()
         document = self.read(run_dir, RECORD)
         self.assertEqual(document["lot"], PERF)
-        text = (run_dir / "findings" / f"{PERF}.json").read_bytes()
+        content = self.read(run_dir, f"findings/{PERF}.json")
+        canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         block = document["files"][f"{PERF}.json"]
-        self.assertEqual(block["sha256"], hashlib.sha256(text).hexdigest())
+        self.assertEqual(block["sha256"], hashlib.sha256(canonical.encode("utf-8")).hexdigest())
         by_ref = {entry["ref"]: entry for entry in block["findings"]}
         self.assertEqual(sorted(by_ref), [101, 102])
         self.assertEqual(by_ref[101]["files"], [{"repo": "laravel", "path": "app/Http/Kernel.php"}])
@@ -181,6 +182,75 @@ class FrozenPlanTest(FrozenCase):
         by_ref = {item["ref"]: item for item in result["candidates"]}
         self.assertEqual(by_ref[101]["reasons"][0], "cause_levee")
         self.assertIn("aucun constat valide", by_ref[101]["details"][0])
+
+
+class RetryAtPlanTest(FrozenCase):
+    """R-10: plan checks again the tool and probe evidence refused at validate (a tool that had not
+    finished); what now holds is accepted, nothing else is checked again, nothing gets worse."""
+
+    def finish_tool(self, run_dir, tool="http"):
+        self.write(run_dir, f"tools/{tool}/result.json", {"tool": tool, "status": "ok"})
+        self.write(run_dir, f"tools/{tool}/summary.json", {"tool": tool, "findings": []})
+
+    def test_a_tool_that_finished_after_validate_lifts_the_refusal_at_plan(self):
+        run_dir = self.make_run()
+        self.fail_tool(run_dir)
+        errors = self.validate_errors(run_dir, PERF)
+        self.assertTrue(any("CQ-102" in error and "summary.json" in error for error in errors), errors)
+        self.assertTrue(any("CQ-101" in error and "écartée" in error for error in errors), errors)
+        record = (run_dir / RECORD).read_bytes()
+        self.finish_tool(run_dir)
+        summary, err = self.plan(run_dir)
+        self.assertNotIn(102, summary["unknown"])
+        self.assertEqual(self.comment_of(run_dir, 102)[0]["verdict"], "ok")
+        self.assertNotIn(101, self.reasons(summary))
+        self.assertNotIn("écartée", self.comment_of(run_dir, 101)[0]["text"])
+        self.assertEqual((run_dir / RECORD).read_bytes(), record)
+
+    def test_a_refusal_the_run_still_holds_stays(self):
+        run_dir = self.make_run()
+        self.fail_tool(run_dir)
+        self.validate_errors(run_dir, PERF)
+        summary, _ = self.plan(run_dir)
+        self.assertIn(102, summary["unknown"])
+        self.assertIn("écartée", self.reasons(summary)[101])
+
+    def test_a_check_played_again_at_plan_never_makes_a_finding_worse(self):
+        run_dir = self.make_run()
+        self.write(run_dir, "tools/lighthouse/summary.json", {"tool": "lighthouse", "findings": []})
+        lighthouse = {"type": "tool", "tool": "lighthouse", "ref": "summary.json#home"}
+        self.edit_finding(run_dir, PERF, 101, verdict="partial", evidence=[lighthouse])
+        errors = self.validate_errors(run_dir, PERF)
+        self.assertTrue(any("CQ-101" in error and "écartée" in error for error in errors), errors)
+        (run_dir / "tools" / "lighthouse" / "summary.json").unlink()
+        summary, _ = self.plan(run_dir)
+        self.assertNotIn(101, summary["unknown"])
+        self.assertEqual(self.comment_of(run_dir, 101)[0]["verdict"], "partial")
+
+    def test_only_the_tool_and_probe_evidence_is_checked_again(self):
+        run_dir = self.make_run()
+        page = {"type": "page", "url": "https://shop.example.org/", "detail": "vu"}
+        self.edit_finding(run_dir, PERF, 102, evidence=[page])
+        self.validate_errors(run_dir, PERF)
+        site = {"domain": "shop.example.org", "backoffice": "commun", "sso": False,
+                "home": "https://shop.example.org/"}
+        self.edit(run_dir, "context.json", lambda context: context.update(sites=[site]))
+        summary, _ = self.plan(run_dir)
+        self.assertEqual(self.comment_of(run_dir, 102)[0]["verdict"], "ok_human")
+        self.assertIn("shop.example.org", self.reasons(summary)[102])
+
+    def test_a_file_written_again_with_the_same_content_keeps_its_record(self):
+        run_dir = self.validated_run()
+        document = self.read(run_dir, f"findings/{PERF}.json")
+        reordered = {"findings": [dict(sorted(item.items(), reverse=True)) for item in document["findings"]],
+                     "lot": document["lot"]}
+        (run_dir / "findings" / f"{PERF}.json").write_text(
+            json.dumps(reordered, ensure_ascii=True, indent=4), encoding="utf-8"
+        )
+        self.delete_kernel()
+        summary, err = self.plan(run_dir)
+        self.assertNotIn(101, summary["unknown"])
+        self.assertNotIn("CQ-101", err)
 
 
 class RerunFileFreezeTest(FrozenCase):

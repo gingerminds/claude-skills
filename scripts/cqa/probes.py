@@ -144,11 +144,14 @@ def app_path(context: dict) -> str:
         return ""
 
 
-def target_hosts(context: dict) -> list:
+def target_hosts(context: dict, *, pages: bool = False) -> list:
     """Return the hosts of the audit target, sorted: the evidence of a finding is on one of them.
 
     The host of target.preprod_url, the one of target.prod_url on a prod run (is_prod_run), and
-    the domain and the home host of each entry of sites. An unreadable URL is left out.
+    the domain and the home host of each entry of sites. With pages, also the host of each URL of
+    key_pages, which the browser may visit (a back-office on its own host): a page evidence may
+    be there, an http evidence never (it is a probe of the toolbox). An unreadable URL is left
+    out.
     """
     target = context.get("target")
     target = target if isinstance(target, dict) else {}
@@ -160,6 +163,10 @@ def target_hosts(context: dict) -> list:
         if isinstance(site, dict):
             domain = site.get("domain")
             urls.extend([site.get("home"), f"https://{domain}" if isinstance(domain, str) else None])
+    key_pages = context.get("key_pages") if pages else None
+    for page in key_pages if isinstance(key_pages, list) else []:
+        if isinstance(page, dict):
+            urls.append(page.get("url"))
     return sorted({host for host in (url_host(url) for url in urls) if host})
 
 

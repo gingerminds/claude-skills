@@ -203,7 +203,7 @@ Show the domains found as a proposal for the lead to confirm or correct. No othe
 
 `sites` (optional top-level list, 10 at most, unique domains) is `[{"domain": "<host>", "backoffice": "commun" or "propre", "sso": <bool>, "home": "<URL of the home page>"}]`, the preprod site included. `home` is an absolute URL on the host `domain`. More than 10 domains: keep the 10 the lead picks and say so. A `context.json` without `sites` is a single site.
 
-The browser may only visit the hosts of `target.preprod_url`, of `sites` and of `key_pages` (plus `target.prod_url` on a prod run). Each `home` is visited in addition to the 10 key pages, so the sites never use their places.
+The browser may only visit the hosts of `target.preprod_url`, of `sites` and of `key_pages` (plus `target.prod_url` on a prod run). They are the hosts a `page` evidence may cite; an `http` evidence leaves the hosts of `key_pages` aside, since it must be a probe of the toolbox (`references/verdicts.md`, « Evidence »). Each `home` is visited in addition to the 10 key pages, so the sites never use their places.
 
 ## 6.1.1 Third-party plugins (WordPress only)
 

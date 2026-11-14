@@ -9,7 +9,8 @@ that was never imported: the checks of 0.18.0, and the document) or drops only t
 evidence it is about (a page or an http URL off the target, an http URL no probe requested, a tool
 whose result is not ok: the checks of 0.18.1). A dropped piece of evidence leaves the finding to
 the guardrails with the evidence left: an ok without evidence becomes ok_human, an na unknown, a ko
-or a partial stays.
+or a partial stays. A problem of a tool or of a probe (a tool that had not finished, a probe whose
+tool had not run yet) is marked retry: plan checks that piece of evidence again (cqa.rerun).
 """
 import json
 import re
@@ -34,6 +35,7 @@ class Problem(NamedTuple):
     detail: str
     drops: bool
     label: str = ""
+    retry: bool = False
 
     @property
     def text(self) -> str:
@@ -55,7 +57,7 @@ class Grounding:
         self.strict = strict
         context = context if isinstance(context, dict) else {}
         self.hosts = target_hosts(context)
-        self.page_hosts = self.hosts
+        self.page_hosts = target_hosts(context, pages=True)
         self._results: dict = {}
         self._probes: Optional[set] = None
 
@@ -72,8 +74,7 @@ class Grounding:
         result = getattr(self, f"_{kind}_problem")(item)
         if result is None:
             return []
-        detail, drops, label = result
-        return [Problem(number, kind, detail, drops, label)]
+        return [Problem(number, kind, *result)]
 
     def problems(self, evidence: list) -> list:
         """Return the French texts of every problem of the evidence."""
@@ -111,22 +112,25 @@ class Grounding:
         )
         if not (self.run_dir / "tools" / tool / "summary.json").is_file():
             if failed:
-                return _aside(f"{failure}, et tools/{tool}/summary.json est introuvable")
-            return _aside(f"outil {_quoted(tool)} sans résumé (tools/{tool}/summary.json est introuvable)")
+                return _aside(f"{failure}, et tools/{tool}/summary.json est introuvable", retry=True)
+            return _aside(
+                f"outil {_quoted(tool)} sans résumé (tools/{tool}/summary.json est introuvable)",
+                retry=True,
+            )
         if not self.strict:
             return None
         if failed:
-            return (
+            return _dropped(
                 f"{failure}, une preuve exige un résultat ok ou not_applicable",
-                True,
                 f"résultat {_quoted(result.get('status'))} de l'outil",
+                retry=True,
             )
         if result is None:
-            return (
+            return _dropped(
                 f"outil {_quoted(tool)} sans résultat lisible "
                 f"(tools/{tool}/result.json est introuvable ou illisible)",
-                True,
                 "résultat de l'outil illisible",
+                retry=True,
             )
         return None
 
@@ -142,12 +146,12 @@ class Grounding:
         problem = self._origin_problem(url, self.hosts)
         if problem or _key(url) in self._probe_keys():
             return problem
-        return (
+        return _dropped(
             f"aucune sonde de la boîte à outils ne correspond à l'URL {_quoted(_shown(url))} "
             "(hôte, chemin et paramètres, probes.json ou probes-followup.json d'un outil http "
             "ou http-followup en résultat ok) : une requête faite à la main se dit dans « summary »",
-            True,
             "aucune sonde de la boîte à outils",
+            retry=True,
         )
 
     def _document_problem(self, item: dict) -> Optional[tuple]:
@@ -162,19 +166,17 @@ class Grounding:
         host = url_host(url)
         shown = _quoted(_shown(url))
         if host is None:
-            return f"URL {shown} illisible : aucun hôte", True, "URL illisible"
+            return _dropped(f"URL {shown} illisible : aucun hôte", "URL illisible")
         if not hosts:
-            return (
+            return _dropped(
                 f"URL {shown} : context.json ne donne aucun hôte de cible "
                 "(target.preprod_url ou target.prod_url)",
-                True,
                 "aucun hôte de cible",
             )
         if host not in hosts:
-            return (
+            return _dropped(
                 f"URL {shown} sur l'hôte « {host} », hors de la cible "
                 f"(hôtes attendus : {', '.join(hosts)})",
-                True,
                 "hôte hors de la cible",
             )
         return None
@@ -195,9 +197,14 @@ class Grounding:
         return self._probes
 
 
-def _aside(detail: str) -> tuple:
-    """A problem that sets the whole finding aside."""
-    return detail, False, ""
+def _aside(detail: str, *, retry: bool = False) -> tuple:
+    """A problem that sets the whole finding aside: (detail, drops, label, retry) of a Problem."""
+    return detail, False, "", retry
+
+
+def _dropped(detail: str, label: str, *, retry: bool = False) -> tuple:
+    """A problem that drops only its piece of evidence, label being its short French reason."""
+    return detail, True, label, retry
 
 
 def _probe_keys(document: dict) -> set:

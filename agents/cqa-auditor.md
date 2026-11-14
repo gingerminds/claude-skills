@@ -57,7 +57,7 @@ Rows to evaluate: your lot's `refs` minus its `document_refs` (a `lots.json` of 
 |---|---|
 | Code | Read, Grep and Glob in each repo (`repos[].path`). The folders listed in `repos[].third_party_paths` of `context.json` are third-party code (plugins): they are outside the scope of stylelint and deps (CQ-40, CQ-66, CQ-113), so do not judge them (assets and gitleaks still read them); say so in `summary` when it matters (for example « plugins tiers exclus »). |
 | CLI local | For the Composer and npm audits: `tools/deps` (audited commit) first, and your own command only when `deps` is missing, failed, skipped or stale in a rerun (see Dependencies). Other read-only commands through the project runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`) when it is already up, such as `composer audit --locked`, `npm audit --omit=dev`, linters in check mode. Runner not up: the same audits on the host, against the lockfile; otherwise `unknown`. |
-| HTTP | `tools/http/summary.json`. Missing answer: your own GET or HEAD (see "HTTP"), else `needs_probes`. |
+| HTTP | `tools/http/summary.json`. Missing answer: for a favourable verdict (`ok`, `na`), ask it in `needs_probes` first, since only the answer of a probe is evidence the code accepts; for any other verdict, your own GET or HEAD (see "HTTP"), else `needs_probes`. |
 | Audit web | `tools/lighthouse`, `lighthouse-desktop`, `a11y`, `nu`, `yellowlab`, `yellowlab-desktop`, `viewport`, `mobile`, `stylelint`, `deps`, `assets`, `testssl`, `gitleaks`, `redocly`, `schemathesis`. |
 | Crawler | `tools/crawl`. |
 | SSH serveur, BDD | In a `server` lot: the SSH guard (see "Server lot"). In other lots: `facts/server.json`. |
@@ -158,7 +158,7 @@ For each row:
 3. Compare the code and the preprod, and fill `divergence` when they disagree.
 4. Write the finding as `verdicts.md` says, keeping the worst verdict across repos.
 
-Evidence. The code checks every piece of evidence at `validate`: a `file` exists in its repo, a `tool` has its `summary.json` and a `result.json` that is `ok` or `not_applicable`, a `page` or `http` URL is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` of `context.json`), and an `http` URL is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`). A missing file or tool summary refuses the finding; any other piece of evidence that fails is dropped, and the finding stays without it (an `ok` left without evidence becomes `ok_human`, an `na` becomes `unknown`). A request you made yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like `ok`, needs at least one piece of evidence.
+Evidence. The code checks every piece of evidence at `validate`: a `file` exists in its repo, a `tool` has its `summary.json` and a `result.json` that is `ok` or `not_applicable`, a `page` URL is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` and the `key_pages` of `context.json`), and an `http` URL is on such a host, `key_pages` aside, and is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`). A missing file or tool summary refuses the finding; any other piece of evidence that fails is dropped, and the finding stays without it (an `ok` left without evidence becomes `ok_human`, an `na` becomes `unknown`). A request you made yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like `ok`, needs at least one piece of evidence.
 
 Keep your context small:
 - Search with precise Grep and Glob patterns. Skip `vendor`, `node_modules`, `.git`, `.nuxt`, `.output`, `dist`, `storage`, `web/core`, `wp-includes` unless the row is about them.
@@ -168,7 +168,7 @@ Keep your context small:
 ## HTTP
 
 - Target: `target.preprod_url`. When `phase_filter` contains J0 or J+7 and `target.prod_live` is true: `target.prod_url`, in strict read-only mode.
-- `target.access` is `open`: run your own GET or HEAD. `basic_auth`, `ip_filtered` or `unreachable`: use `tools/http/` only, and ask the rest in `needs_probes`.
+- `target.access` is `open`: run your own GET or HEAD (for a favourable verdict, `needs_probes` first: see the Sources table). `basic_auth`, `ip_filtered` or `unreachable`: use `tools/http/` only, and ask the rest in `needs_probes`.
 - Always put `-q` first, so that `~/.curlrc` is ignored.
 - Headers: `curl -q -sS -I --max-time 20 -A "GingermindsAudit/<plugin_version>" "<url>"`.
 - Status only: `curl -q -sS --max-time 20 -A "GingermindsAudit/<plugin_version>" -o /dev/null -w '%{http_code} %{size_download} %{content_type}\n' "<url>"`.

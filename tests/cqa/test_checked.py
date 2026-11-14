@@ -59,11 +59,12 @@ class RecordTest(FreezeCase):
     def test_refresh_records_what_was_checked_for_each_finding(self):
         found = self.read(freeze="refresh")
         self.assertEqual((self.refs(found), found[1]), ([1, 2, 3], []))
-        text = (self.run_dir / "findings" / NAME).read_bytes()
+        content = json.loads((self.run_dir / "findings" / NAME).read_text(encoding="utf-8"))
+        canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         document = self.record()
         self.assertEqual(document["lot"], LOT)
         block = document["files"][NAME]
-        self.assertEqual(block["sha256"], hashlib.sha256(text).hexdigest())
+        self.assertEqual(block["sha256"], hashlib.sha256(canonical.encode("utf-8")).hexdigest())
         self.assertEqual([entry["ref"] for entry in block["findings"]], [1, 2, 3])
         entry = block["findings"][0]
         self.assertEqual(entry["files"], [{"repo": "laravel", "path": "app/a.php"}])
@@ -113,11 +114,29 @@ class RecordTest(FreezeCase):
         self.assertEqual(refusal["label"], "aucune sonde de la boîte à outils")
         self.assertEqual(self.read(), found)
 
+    def test_the_problems_of_a_tool_or_a_probe_are_marked_for_a_later_check(self):
+        crawl = {"type": "tool", "tool": "crawl", "ref": "summary.json"}
+        unmatched = {"type": "http", "url": "https://preprod.example.org/x", "detail": "200"}
+        self.first_round(
+            finding(1, evidence=[file_evidence("app/ghost.php")]),
+            finding(2, evidence=[crawl]),
+            finding(3, evidence=[file_evidence("app/a.php"), unmatched]),
+            fill=False,
+        )
+        self.read(freeze="refresh")
+        by_ref = {entry["ref"]: entry for entry in self.record()["files"][NAME]["findings"]}
+        self.assertEqual(by_ref[1]["retry"], [])
+        self.assertEqual(by_ref[2]["retry"], [{"evidence": 1, "problem": by_ref[2]["problems"][0]}])
+        self.assertEqual(by_ref[3]["retry"], [{"evidence": 2, "problem": by_ref[3]["refused"][0]["problem"]}])
+        self.write("tools/crawl/summary.json", {})
+        self.write("tools/crawl/result.json", {"tool": "crawl", "status": "ok"})
+        self.assertEqual(self.refs(self.read()), [2, 3])
+
     def test_a_record_written_before_the_refused_entries_is_still_read(self):
         self.read(freeze="refresh")
         document = self.record()
         for entry in document["files"][NAME]["findings"]:
-            del entry["refused"]
+            del entry["refused"], entry["retry"]
         (self.run_dir / RECORD).write_text(json.dumps(document), encoding="utf-8")
         self.drop_file()
         self.assertEqual(self.refs(self.read()), [1, 2, 3])
@@ -189,6 +208,19 @@ class FrozenReadTest(FreezeCase):
         self.assertEqual((self.refs(found), found[1]), ([1, 2, 3], []))
         self.assertEqual(self.record()["files"][NAME]["findings"][0]["problems"], [])
 
+    def test_a_file_holding_a_lone_surrogate_gets_a_digest(self):
+        self.assertRegex(checked.digest({"summary": "\ud800"}), "^[0-9a-f]{64}$")
+        self.assertNotEqual(checked.digest({"summary": "\ud800"}), checked.digest({"summary": "\ud801"}))
+
+    def test_a_file_written_again_with_the_same_content_is_still_covered(self):
+        self.read(freeze="refresh")
+        path = self.run_dir / "findings" / NAME
+        content = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps(content, indent=3, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
+        self.drop_file()
+        self.assertEqual(self.refs(self.read()), [1, 2, 3])
+        self.assertEqual(checked.digest(content), checked.digest(json.loads(path.read_text(encoding="utf-8"))))
+
     def test_a_file_rewritten_after_its_validation_is_not_covered_by_the_record(self):
         self.read(freeze="refresh")
         self.first_round(
@@ -232,6 +264,9 @@ class FrozenReadTest(FreezeCase):
             ),
             "refused is not a list": json.dumps(
                 {"files": {NAME: {"sha256": sha, "findings": [{"ref": 1, "problems": [], "refused": "x"}]}}}
+            ),
+            "retry is not a list": json.dumps(
+                {"files": {NAME: {"sha256": sha, "findings": [{"ref": 1, "problems": [], "retry": {}}]}}}
             ),
             "a refusal without its number": json.dumps(
                 {"files": {NAME: {"sha256": sha, "findings": [
