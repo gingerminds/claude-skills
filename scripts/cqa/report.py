@@ -100,8 +100,8 @@ def synthesis(run_dir: Path, *, now: Optional[datetime] = None) -> tuple[str, st
     Both are in French, and the page comment fits the Notion limit. They describe what apply
     writes: the plan without the pages whose status a person set when the consent of the run
     keeps them (plan.consented_plan). now is the end of the audit for its duration (the
-    current time when omitted). Raises ValueError when a file of the run
-    is missing or does not have the expected structure.
+    current time when omitted). Raises ValueError when a file of the run is missing or does
+    not have the expected structure.
     """
     run_dir = Path(run_dir)
     context = _read(run_dir, "context.json", "le diagnostic")

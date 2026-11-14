@@ -98,7 +98,7 @@ _SPEC_SKIPPED_DIRS = frozenset({"vendor", "node_modules", ".git"})
 _EXCLUDED_KEYS = ("ref", "page_id", "reason", "verdict", "detail")
 _MISSING_ROW = "constat manquant : "
 _RERUN_FILE = re.compile(r"(.+)-rerun-([0-9]{2})\.json")
-RERUN_KINDS = ("rerun", "recette")
+_RERUN_KINDS = ("rerun", "recette")
 _GOOD_TOOL_STATUSES = ("ok", "not_applicable")
 _MAX_COMMENT = 1500
 _EM_DASH = chr(0x2014)
@@ -1226,7 +1226,7 @@ def _rerun_kinds(run_dir: Path) -> dict:
     return {
         key: value
         for key, value in kinds.items()
-        if isinstance(key, str) and key.isdigit() and value in RERUN_KINDS
+        if isinstance(key, str) and key.isdigit() and value in _RERUN_KINDS
     }
 
 

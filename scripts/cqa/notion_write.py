@@ -77,7 +77,6 @@ def apply_plan(
     (the assignees read in the copy) is skipped the same way when the page no longer has
     them (assignees_changed, present in the report only then), or journaled when it already
     has the target list.
-
     A comment with "replaces" (text_digest of the audit comment its plan read) rewrites the
     audit comment only while it is still that text: otherwise, or when it is gone, it is
     skipped without being journaled, and nothing is created.
@@ -355,7 +354,11 @@ def _current_assignees(client, page_id: str) -> Optional[list]:
     options = prop.get("multi_select") if isinstance(prop, dict) else None
     if not isinstance(options, list):
         return None
-    return [item["name"] for item in options if isinstance(item, dict) and isinstance(item.get("name"), str)]
+    return [
+        item["name"]
+        for item in options
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    ]
 
 
 def _write_comment(client, page_id: str, text: str, own: list) -> dict:

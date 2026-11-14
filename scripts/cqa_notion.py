@@ -814,12 +814,11 @@ def _cmd_apply(args, client) -> int:
 
     The audit plan is known by its shape (the rows and the summary only cqa_plan.py plan
     writes) as well as by its path (notion/plan.json). The fix plan (fix/notion-plan.json,
-    without them) has its own
-    consent (fix/state.json): the dry_run of the audit does not apply to it. Any other plan
-    refuses a run launched with --dry-run. The audit plan also refuses notion_write "none"
-    and, for "keep_human" or "all" in autonomous mode, leaves alone the pages whose status a
-    person set, whether or not the plan was rebuilt without them and whether or not
-    --skip-human-overrides is given.
+    without them) has its own consent (fix/state.json): the dry_run of the audit does not
+    apply to it. Any other plan refuses a run launched with --dry-run. The audit plan also
+    refuses notion_write "none" and, for "keep_human" or "all" in autonomous mode, leaves
+    alone the pages whose status a person set, whether or not the plan was rebuilt without
+    them and whether or not --skip-human-overrides is given.
     """
     run_dir = args.run_dir
     plan = _read_json(run_dir / args.plan, "lancer d'abord cqa_plan.py plan")

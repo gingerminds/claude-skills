@@ -1023,6 +1023,10 @@ class ContextCheckTest(RunDirCase):
             "prod not live on a prod phase": (prod, prod, "MEL J0", False),
             "other port, same on both": ("https://x.example.org:8443", "https://x.example.org:8443",
                                          "Build", True),
+            "apex against www": ("https://example.org", prod, None, False),
+            "www against apex": (prod, "https://example.org", None, False),
+            "www against apex on the same port": ("https://www.example.org:8443",
+                                                  "https://example.org:8443", "Build", True),
         }
         for label, (preprod, prod_url, phase, live) in cases.items():
             with self.subTest(label):
@@ -1043,7 +1047,7 @@ class ContextCheckTest(RunDirCase):
             "other port": ("https://www.example.org:8443", "https://www.example.org"),
             "no prod url": ("https://www.example.org", None),
             "empty prod url": ("https://www.example.org", ""),
-            "apex and www": ("https://example.org", "https://www.example.org"),
+            "apex and www on other ports": ("https://example.org:8443", "https://www.example.org"),
             "other domain": ("https://www.example.net", "https://www.example.org"),
         }
         for label, (preprod, prod) in cases.items():
@@ -1051,6 +1055,54 @@ class ContextCheckTest(RunDirCase):
                 with self.subTest(label, phase=phase):
                     code, report, _ = self.check(self.with_target(preprod, prod, phase, live))
                     self.assertEqual((code, report["errors"]), (0, []))
+
+    def test_the_refusal_says_how_to_audit_a_site_in_recette_on_its_final_domain(self):
+        context = self.with_target("https://www.example.org", "https://www.example.org")
+        code, report, _ = self.check(context)
+        self.assertEqual(code, 6)
+        message = report["errors"][0]
+        self.assertIn("avant son ouverture", message)
+        self.assertIn("laisser « target.prod_url » vide", message)
+        self.assertEqual(message, probes.PREPROD_IS_PROD)
+        context["target"]["prod_url"] = None
+        self.assertEqual(self.check(context)[:2], (0, {"ok": True, "errors": []}))
+
+    def test_a_site_of_the_audit_that_is_the_prod_is_refused_outside_a_prod_run(self):
+        prod = "https://www.example.org"
+        for label, domain in (
+            ("domain", "www.example.org"),
+            ("apex domain", "example.org"),
+            ("domain case", "WWW.Example.org"),
+        ):
+            for phase, live in ((None, False), ("Recette J-30", True)):
+                with self.subTest(label, phase=phase):
+                    context = self.with_target("https://preprod.example.org", prod, phase, live)
+                    context["sites"] = [self._site("a.example.org"), self._site(domain)]
+                    self.assertTrue(probes.preprod_is_prod(context))
+                    code, report, _ = self.check(context)
+                    self.assertEqual(code, 6)
+                    self.assertEqual(report["errors"], [probes.PREPROD_IS_PROD])
+                    with self.assertRaises(ValueError):
+                        probes.target_url(context)
+
+    def test_a_site_of_the_audit_is_never_the_prod_in_the_legitimate_cases(self):
+        sites = [self._site("a.preprod.example.org"), self._site("b.preprod.example.org")]
+        for label, preprod, prod, phase, live, listed in (
+            ("distinct domains", "https://preprod.example.org", "https://www.example.org", None, False, sites),
+            ("no prod url", "https://preprod.example.org", None, None, False,
+             [self._site("www.example.org")]),
+            ("empty prod url", "https://preprod.example.org", "", None, False,
+             [self._site("www.example.org")]),
+            ("a prod run", "https://preprod.example.org", "https://www.example.org", "MEL J0", True,
+             [self._site("www.example.org")]),
+            ("other domain", "https://preprod.example.org", "https://www.example.org", None, False,
+             [self._site("www.example.net")]),
+        ):
+            with self.subTest(label):
+                context = self.with_target(preprod, prod, phase, live)
+                context["sites"] = listed
+                self.assertFalse(probes.preprod_is_prod(context))
+                self.assertEqual(self.check(context)[:2], (0, {"ok": True, "errors": []}))
 
     def test_the_target_of_the_probes_is_never_a_preprod_that_is_the_prod(self):
         context = self.with_target("https://www.example.org/", "https://www.example.org")

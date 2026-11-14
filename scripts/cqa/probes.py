@@ -82,28 +82,46 @@ def is_prod_run(context: dict) -> bool:
 
 
 PREPROD_IS_PROD = (
-    "context.json : « target.preprod_url » désigne le même site que « target.prod_url » (même hôte "
-    "et même port) alors que l'audit ne cible pas la prod : la prod serait auditée comme une "
-    "préprod (robots.txt ignoré, crawl et tests complets sur le site en ligne). Corriger "
-    "« target.preprod_url » avec l'adresse de la préprod ; pour auditer la prod, lancer l'audit "
-    "avec la phase « MEL J0 » ou « Post-MEL J+7 » et la prod en ligne."
+    "context.json : « target.preprod_url » (ou le domaine d'un site de « sites ») désigne le même "
+    "site que « target.prod_url » (même hôte, à « www. » près, et même port) alors que l'audit "
+    "ne cible pas la prod : la prod serait auditée comme une préprod (robots.txt ignoré, crawl "
+    "et tests complets sur le site en ligne). Corriger « target.preprod_url » avec l'adresse de "
+    "la préprod ; pour un site en recette sur son domaine final avant son ouverture, laisser "
+    "« target.prod_url » vide ; pour auditer la prod, lancer l'audit avec la phase « MEL J0 » ou "
+    "« Post-MEL J+7 » et la prod en ligne."
 )
 
 
 def preprod_is_prod(context: dict) -> bool:
-    """Whether the audit targets the preprod while target.preprod_url is the site of
-    target.prod_url: the same host and port, whatever the scheme, the path and the case (the
-    http and the https address of one site are one site). A prod run never is."""
+    """Whether the audit targets the preprod while target.preprod_url, or the domain of an entry
+    of sites, is the site of target.prod_url: the same host and port, whatever the scheme, the
+    path, the case and a leading "www." (the http and the https address of one site are one
+    site, and so are the apex and the www of a domain). A prod run never is.
+
+    A domain of sites has no port: it is compared by its host.
+    """
     target = context.get("target")
     if not isinstance(target, dict) or is_prod_run(context):
         return False
-    preprod, prod = _site(target.get("preprod_url")), _site(target.get("prod_url"))
-    return preprod is not None and preprod == prod
+    prod = _site(target.get("prod_url"))
+    if prod is None:
+        return False
+    if _site(target.get("preprod_url")) == prod:
+        return True
+    sites = context.get("sites")
+    for site in sites if isinstance(sites, list) else []:
+        if not isinstance(site, dict):
+            continue
+        domain = site.get("domain")
+        if isinstance(domain, str) and _bare(url_host(f"https://{domain}")) == prod[0]:
+            return True
+    return False
 
 
 def _site(url) -> Optional[tuple]:
-    """Return (host, port) of a URL, the port None when it is the default one of its scheme."""
-    host = url_host(url)
+    """Return (host, port) of a URL, without a leading "www." and the port None when it is the
+    default one of its scheme."""
+    host = _bare(url_host(url))
     if host is None:
         return None
     try:
@@ -114,6 +132,10 @@ def _site(url) -> Optional[tuple]:
     if port == _DEFAULT_PORTS.get(parts.scheme.lower()):
         port = None
     return host, port
+
+
+def _bare(host: Optional[str]) -> Optional[str]:
+    return host[4:] if host and host.startswith("www.") and len(host) > 4 else host
 
 
 def target_url(context: dict) -> str:

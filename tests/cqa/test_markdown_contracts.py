@@ -4444,6 +4444,12 @@ class PreprodIsProdContract(unittest.TestCase):
         for phase in ("MEL J0", "Post-MEL J+7"):
             self.assertIn(phase, probes.PREPROD_IS_PROD)
         self.assertNotIn(EM_DASH, probes.PREPROD_IS_PROD)
+        self.assertIn("laisser « target.prod_url » vide", probes.PREPROD_IS_PROD)
+        self.assertIn("`sites[].domain`", step)
+        self.assertIn("a site in recette on its final domain before it opens has no `prod_url`", step)
+        self.assertIn("`domain` of an entry of `sites`", reference)
+        self.assertIn("the apex and its `www.` count as one host", reference)
+        self.assertIn("has no `prod_url` to give: leave it empty", reference)
 
     def test_the_commands_the_reference_names_refuse_a_preprod_that_is_the_prod(self):
         commands = _python_commands(cqa_plan)
