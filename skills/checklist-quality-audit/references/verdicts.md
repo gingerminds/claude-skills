@@ -144,7 +144,7 @@ Use it when what the fiche asks is missing or broken where it matters.
 
 Use it when the subject of the row does not exist in the project: no payment, no form, no API, no user account.
 
-- Always with `confidence: "high"`, at least one piece of evidence (the file or the result that shows the subject is absent) and a `summary` that says what you searched and did not find. An `na` without evidence becomes `unknown`.
+- Always with `confidence: "high"`, at least one piece of evidence (the file or the result that shows the subject is absent) and a `summary` that says what you searched and did not find. An `na` without evidence becomes `unknown`. In a `server` lot, an `na` drawn from an SSH observation cites the `fact` that records it (`references/server.md`, "Facts for the browser lots").
 - Never use `na` for "not checked": that is `unknown`.
 - Rows outside the project technos never reach you: the scripts already set them aside.
 
@@ -203,8 +203,10 @@ List the strongest evidence first: the comment shows the first 5.
 | `page` | `url`, `detail` (optional) | A page seen in the browser, on a host of the target or of a key page (`key_pages`, a back-office on its own host for example). `detail` says what was observed, in French. |
 | `tool` | `tool`, `ref` | `tool` is a folder of `tools/` that holds a `summary.json` and whose `result.json` is `ok` or `not_applicable` (a tool that failed or was skipped is no evidence). `ref` is relative to `tools/<tool>/`, for example `summary.json#home/3`. |
 | `http` | `url`, `detail` | A URL that a probe of the toolbox requested (`tools/http/`, `tools/http-followup/`), on a host of the target. `detail` gives the status, the header or a short excerpt, in French and without any secret. |
+| `fact` | `topic` | The exact `topic` of a fact of `facts/server.json` (written by the `server` lot, see `references/server.md`) whose `refs` hold the row, whose `exit` is `0` and whose `command` and `result` are filled. Supports an `na` only: the comment shows the topic, never the command nor the result. The file is written by the agent, so the check is of form (the fact exists, covers the row, notes a command that exited with 0 and a result), not of truth. |
 
 - The code checks every piece of evidence at `validate`: a `file` exists in its repo, a `tool` has its `summary.json` and a `result.json` that is `ok` or `not_applicable`, a `page` URL is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` and the `key_pages` of `context.json`), and an `http` URL is on such a host, `key_pages` aside, and is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`). A missing file or tool summary refuses the finding; any other piece of evidence that fails is dropped, and the finding stays without it (an `ok` left without evidence becomes `ok_human`, an `na` becomes `unknown`). A request you made yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like `ok`, needs at least one piece of evidence.
+- A `fact` that fails the check is dropped like any other evidence (an `na` left without evidence becomes `unknown`), and an `ok` whose evidence is only facts becomes `ok_human`.
 - Never cite a file, a repo or a tool that the run does not hold: `cqa_plan.py validate` checks them and a finding with such evidence is rejected. The check is made once, at `validate`, and frozen in `findings/<lot>.checked.json`.
 - Never put credentials or a token in a URL.
 
@@ -271,7 +273,7 @@ Use it when the verdict of a row depends on what a menu, a panel or the focus do
 
 `cqa_plan.py plan` applies these rules, in this order, each on the verdict left by the previous one. Write the right verdict yourself: a lowered verdict is a finding the lead has to correct.
 
-1. `ok` without evidence, or with a confidence other than `high`, becomes `ok_human`.
+1. `ok` without evidence, or with a confidence other than `high`, becomes `ok_human`; a `fact` never counts as evidence for an `ok`.
 2. `ok` on a row whose tools include "Intervention humaine" becomes `ok_human`.
 3. A filled `divergence` turns `ok` and `ok_human` into `partial`.
 4. `needs_probes` or `needs_scenarios` still filled after the follow-up turns `ok_human`, `ok` and `na` into `unknown`; `ko` and `partial` stay.

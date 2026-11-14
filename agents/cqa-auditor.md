@@ -234,6 +234,8 @@ Write in `facts/server.json` the facts other lots need, first those of the mixed
 
 `command` is what follows the alias; `result` is a short French text (400 characters at most), without any secret.
 
+A row of the `server` lot that you judge `na` from an SSH observation (for example, no database on this server) needs a fact as its evidence: first note the fact in `facts/server.json` (the row in `refs`, a `topic`, the `command`, `exit` `0`, a short French `result` without any secret; keep the existing entries), then cite `{"type": "fact", "topic": "<the same topic>"}` in `evidence`. A fact that is missing, whose `exit` is not `0`, or whose `refs` do not hold the row is dropped, and the `na` becomes `unknown`. A `fact` never supports an `ok`: an `ok` whose evidence is only facts becomes `ok_human`, so cite a `file` or a `tool` for an `ok`.
+
 ## Follow-up
 
 With `Follow-up: yes`:

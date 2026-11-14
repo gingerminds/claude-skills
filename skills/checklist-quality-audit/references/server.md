@@ -128,3 +128,5 @@ The `server` lot writes `facts/server.json`, read by the browser lots for the mi
 ```
 
 `command` is what follows the alias; `result` is a short French text, without any secret.
+
+The file is also the evidence of the `na` of the `server` lot: the finding cites `{"type": "fact", "topic": "<the same topic>"}`, and `validate` checks that a fact of that topic holds the row in `refs`, with `exit` `0` and a `command` and a `result` filled. A `fact` never supports an `ok`.

@@ -42,7 +42,9 @@ EVIDENCE_REQUIRED = {
     "tool": ("tool", "ref"),
     "http": ("url", "detail"),
     "document": ("doc", "ref"),
+    "fact": ("topic",),
 }
+FACT_EVIDENCE = "fact"
 CONTEXT_DOC_SOURCE = "context_doc"
 PROBE_METHODS = ("GET", "HEAD")
 # Scenario requests (needs_scenarios): data validated by whitelist and caps, never code. The step
@@ -291,7 +293,8 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     The copy carries "guardrail": the French reasons (joined with "; ") of the rules that
     changed the verdict, or None. Rules, in this order, each on the verdict left by the
     previous ones:
-    1. ok without evidence, or with a confidence other than high, becomes ok_human;
+    1. ok without evidence, or with a confidence other than high, becomes ok_human (a fact of the
+       server, FACT_EVIDENCE, is not evidence for an ok);
     2. ok on a row that asks for "Intervention humaine" becomes ok_human;
     3. a filled divergence turns ok and ok_human into partial;
     4. needs_probes or needs_scenarios still filled after the follow-up cap the verdict at unknown:
@@ -310,9 +313,15 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     verdict = result["verdict"]
     legacy = result.get(LEGACY_KEY) is True
     reasons = _refused_problems(result.get(REFUSED_KEY))
-    if verdict == "ok" and not result.get("evidence"):
+    evidence = result.get("evidence")
+    if verdict == "ok" and not _supports_ok(evidence):
         verdict = "ok_human"
-        reasons.append("aucune preuve : ok abaissé à ok_human")
+        reasons.append(
+            "aucune preuve contrôlable (un fait relevé par SSH ne suffit pas pour un ok) : "
+            "ok abaissé à ok_human"
+            if evidence
+            else "aucune preuve : ok abaissé à ok_human"
+        )
     if verdict == "ok" and result.get("confidence") != "high":
         verdict = "ok_human"
         reasons.append("confiance non haute : ok abaissé à ok_human")
@@ -343,6 +352,13 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     result["verdict"] = verdict
     result["guardrail"] = "; ".join(reasons) if reasons else None
     return result
+
+
+def _supports_ok(evidence) -> bool:
+    """Whether some piece of the evidence can support an ok: any but a fact of the server."""
+    if not isinstance(evidence, list):
+        return bool(evidence)
+    return any(not (isinstance(item, dict) and item.get("type") == FACT_EVIDENCE) for item in evidence)
 
 
 def _refused_problems(refused) -> list:

@@ -459,12 +459,12 @@ class ValidateDocumentTest(unittest.TestCase):
         _, errors = validate(make_finding(evidence=[{"type": "log"}]), make_finding(ref=80))
         self.assertEqual(
             errors,
-            ["constat CQ-79 : preuve n° 1 : type « log » inconnu (file, page, tool, http, document)"],
+            ["constat CQ-79 : preuve n° 1 : type « log » inconnu (file, page, tool, http, document, fact)"],
         )
         _, errors = validate(make_finding(evidence=[{"path": "a"}]), make_finding(ref=80))
         self.assertEqual(
             errors,
-            ["constat CQ-79 : preuve n° 1 : type manquant (file, page, tool, http, document)"],
+            ["constat CQ-79 : preuve n° 1 : type manquant (file, page, tool, http, document, fact)"],
         )
 
     def test_evidence_required_keys_per_type(self):
@@ -476,6 +476,7 @@ class ValidateDocumentTest(unittest.TestCase):
                 "tool": ("tool", "ref"),
                 "http": ("url", "detail"),
                 "document": ("doc", "ref"),
+                "fact": ("topic",),
             },
         )
         full = {
@@ -484,6 +485,7 @@ class ValidateDocumentTest(unittest.TestCase):
             "tool": {"type": "tool", "tool": "a11y", "ref": "summary.json#1"},
             "http": {"type": "http", "url": "https://preprod.example.org/", "detail": "200"},
             "document": {"type": "document", "doc": "d1", "ref": "critères 7.3"},
+            "fact": {"type": "fact", "topic": "Base de données du serveur"},
         }
         for kind, keys in EVIDENCE_REQUIRED.items():
             self.assertEqual(validate(make_finding(evidence=[full[kind]]), make_finding(ref=80))[1], [])

@@ -86,10 +86,11 @@ def read_grounded_findings(
     evidence also holds against the run (cqa.grounding): a cited file exists in a repo of
     context.json, a cited tool succeeded and has its summary, a page or an http request is on a
     host of the target and an http request is a probe the toolbox ran, a document is in
-    context-docs/. A cited file, a tool summary or a document that is missing sets the finding
-    aside; any other refused piece of evidence is only dropped from the finding, which carries it
-    in REFUSED_KEY, and its error says « écartée » (is_refused_evidence). Every reader of the
-    findings of a run that decides something (plan, rerun-candidates, recette, fix) uses it.
+    context-docs/, a fact is noted for the row in facts/server.json. A cited file, a tool summary
+    or a document that is missing sets the finding aside; any other refused piece of evidence is
+    only dropped from the finding, which carries it in REFUSED_KEY, and its error says « écartée »
+    (is_refused_evidence). Every reader of the findings of a run that decides something (plan,
+    rerun-candidates, recette, fix) uses it.
 
     The rules are those of the run (cqa.contract): a file of a run started before 0.18.1 that
     validate never checked keeps the checks of 0.18.0 (a cited file, a tool summary), is not read
@@ -101,9 +102,10 @@ def read_grounded_findings(
     while the record of the file holds for its JSON content, the recorded problems stand in
     for the check against the run, which has moved since (a file deleted by a merged fix, a tool
     relaunched). The problems of a tool or of a probe recorded then (retry: a tool that had not
-    finished) are checked again: a piece of evidence that now holds is accepted, one that still
-    fails keeps its recorded problem, so a reading never makes a finding worse than its
-    validation. A file, or a finding, that no record covers is checked against the run.
+    finished, a fact not noted yet) are checked again: a piece of evidence that now holds is
+    accepted, one that still fails keeps its recorded problem, so a reading never makes a finding
+    worse than its validation. A file, or a finding, that no record covers is checked against the
+    run.
     freeze "refresh" checks every finding against the run and records the result (validate);
     "ensure" does the same only when no record covers the file (rerun-close); None never writes.
     """
@@ -142,9 +144,9 @@ def read_grounded_findings(
     for item in valid:
         found = recorded.get(item["ref"]) if recorded is not None else None
         if found is None:
-            found = _checked(grounding, item["evidence"])
+            found = _checked(grounding, item["evidence"], item["ref"])
         else:
-            found = _retried(grounding, item["evidence"], found)
+            found = _retried(grounding, item["evidence"], found, item["ref"])
         problems, refused = found["problems"], found["refused"]
         entries.append(
             checked.entry(item["ref"], item["evidence"], problems, moment, refused, found["retry"])
@@ -159,10 +161,10 @@ def read_grounded_findings(
     return grounded, errors
 
 
-def _checked(grounding: Grounding, evidence: list) -> dict:
+def _checked(grounding: Grounding, evidence: list, ref: int) -> dict:
     """Return {"problems", "refused", "retry"} of the evidence of a finding, checked against the run."""
     problems, refused, retry = [], [], []
-    for problem in grounding.check(evidence):
+    for problem in grounding.check(evidence, ref):
         if problem.drops:
             refused.append({"evidence": problem.number, "problem": problem.text, "label": problem.label})
         else:
@@ -172,13 +174,13 @@ def _checked(grounding: Grounding, evidence: list) -> dict:
     return {"problems": problems, "refused": refused, "retry": retry}
 
 
-def _retried(grounding: Grounding, evidence: list, recorded: dict) -> dict:
-    """Return the recorded check of a finding, less the tool and probe problems the run no longer
-    holds (recorded["retry"]): only those pieces of evidence are checked again."""
+def _retried(grounding: Grounding, evidence: list, recorded: dict, ref: int) -> dict:
+    """Return the recorded check of a finding, less the tool, probe and fact problems the run no
+    longer holds (recorded["retry"]): only those pieces of evidence are checked again."""
     lifted = set()
     for again in recorded["retry"]:
         number = again["evidence"]
-        if number <= len(evidence) and not grounding.check_one(number, evidence[number - 1]):
+        if number <= len(evidence) and not grounding.check_one(number, evidence[number - 1], ref):
             lifted.add(again["problem"])
     return {
         "problems": [text for text in recorded["problems"] if text not in lifted],

@@ -59,10 +59,11 @@
               {"$ref": "#/$defs/evidence_page"},
               {"$ref": "#/$defs/evidence_tool"},
               {"$ref": "#/$defs/evidence_http"},
-              {"$ref": "#/$defs/evidence_document"}
+              {"$ref": "#/$defs/evidence_document"},
+              {"$ref": "#/$defs/evidence_fact"}
             ]
           },
-          "description": "What the verdict rests on. May be empty, but an ok without evidence is lowered to ok_human and an na without evidence becomes unknown. A file must exist in its repo and a tool must have its summary.json: a finding with other evidence is refused. A tool must also have a result.json that is ok or not_applicable, a page URL must be on a host of the target (target.preprod_url, target.prod_url on a prod run, sites, key_pages), an http URL must be on such a host (key_pages aside) and be a probe of the toolbox that ran: any other piece of evidence is dropped from the finding, which stays without it. The sub-agents never write a document evidence: cqa_plan.py does, for the rows it judges from a context document, and validate refuses it in a lot file."
+          "description": "What the verdict rests on. May be empty, but an ok without evidence is lowered to ok_human and an na without evidence becomes unknown. A file must exist in its repo and a tool must have its summary.json: a finding with other evidence is refused. A tool must also have a result.json that is ok or not_applicable, a page URL must be on a host of the target (target.preprod_url, target.prod_url on a prod run, sites, key_pages), an http URL must be on such a host (key_pages aside) and be a probe of the toolbox that ran: any other piece of evidence is dropped from the finding, which stays without it. The sub-agents never write a document evidence: cqa_plan.py does, for the rows it judges from a context document, and validate refuses it in a lot file. A fact evidence supports an na only: it is dropped when facts/server.json does not hold it for the row, and an ok that has only facts is lowered to ok_human."
         },
         "todo": {
           "type": ["string", "null"],
@@ -248,6 +249,19 @@
           "type": "string",
           "pattern": "\\S",
           "description": "What the verdict rests on in the document, paraphrased: the criteria (critères 7.3, 12.9) or the place of the finding. Never an excerpt of the document."
+        }
+      }
+    },
+    "evidence_fact": {
+      "type": "object",
+      "required": ["type", "topic"],
+      "description": "A fact noted from the server in facts/server.json (server lot): supports an na, never an ok.",
+      "properties": {
+        "type": {"const": "fact"},
+        "topic": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "The exact topic of a fact of facts/server.json whose refs hold the row, whose exit is 0 and whose command and result are filled."
         }
       }
     },
