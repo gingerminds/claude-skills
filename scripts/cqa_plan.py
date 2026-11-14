@@ -52,6 +52,7 @@ from cqa.plan import (
     consented_plan,
     filter_plan,
     load_history,
+    load_written_statuses,
     operation_key,
     plan_digest,
 )
@@ -1342,6 +1343,9 @@ def _cmd_plan(args, services) -> int:
     findings, followup_done = _collect_findings(run_dir, context, lots["lots"], sources)
     copy_ds_id = context["notion"]["copy_data_source_id"]
     history = load_history(run_dir.parent.parent, run_dir.parent.name, copy_ds_id, run_dir.name)
+    written = load_written_statuses(
+        run_dir.parent.parent, run_dir.parent.name, copy_ds_id, _read_at(run_dir / "rows.json")
+    )
     recette = {"refs": frozenset(), "judged": [], "unjudged": []}
     if args.recette == 0:
         raise UsageError(
@@ -1384,6 +1388,7 @@ def _cmd_plan(args, services) -> int:
         missing_in_copy=missing,
         recette_refs=recette["refs"],
         comment_dates=_comment_dates(run_dir, sources),
+        written_statuses=written,
     )
     if number is not None:
         plan["recette"] = {**recette, "rerun": f"{number:02d}"}
@@ -1397,6 +1402,14 @@ def _cmd_plan(args, services) -> int:
     write_json(run_dir / "notion" / "plan.json", plan)
     _emit(plan["summary"])
     return EXIT_OK
+
+
+def _read_at(rows_path: Path) -> float:
+    """Return when the copy was read: the mtime of rows.json (0 when unknown: no write counts)."""
+    try:
+        return rows_path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _recette_of(plan: dict) -> Optional[int]:
@@ -2200,7 +2213,8 @@ def _write_pending(run_dir: Path) -> bool:
     counts as written only when the journal holds it under the plan_id of notion/plan.json, as
     apply skips it; an operation blocked by a safety gate is never journaled and keeps it true.
     The operations are those apply writes: without the statuses set by a person when the
-    consent of the run keeps them.
+    consent of the run keeps them. A status operation apply left aside because the status had
+    changed ("left_aside" of the journal) is settled too: a person did that on purpose.
     """
     plan = _read_json_object(run_dir / "notion" / "plan.json")
     ops = plan.get("ops")
@@ -2214,13 +2228,16 @@ def _write_pending(run_dir: Path) -> bool:
     except (KeyError, TypeError, AttributeError):
         pass
     ops = plan["ops"]
-    journal = _read_json_object(run_dir / "notion" / "applied.json").get("applied")
+    document = _read_json_object(run_dir / "notion" / "applied.json")
     plan_id = plan.get("plan_id")
-    written = {
-        entry.get("key")
-        for entry in (journal if isinstance(journal, list) else [])
-        if isinstance(entry, dict) and entry.get("plan_id") == plan_id
-    }
+    written = set()
+    for name in ("applied", "left_aside"):
+        entries = document.get(name)
+        written.update(
+            entry.get("key")
+            for entry in (entries if isinstance(entries, list) else [])
+            if isinstance(entry, dict) and entry.get("plan_id") == plan_id
+        )
     return any(isinstance(op, dict) and op.get("key") not in written for op in ops)
 
 

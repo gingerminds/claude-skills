@@ -64,9 +64,11 @@ def apply_plan(
     edit, all skill comments of the kind are deleted and a new one is created; when it refuses
     the deletion too, the comment is created anyway.
 
-    A status operation with "expected" reads the status of the page first and writes only
-    when it is still expected: otherwise it is skipped (status_changed, not journaled, so a
-    rerun reads it again); a page that already has the target status is skipped and journaled.
+    A status operation with "expected" (the audit's: the status read in the copy) reads the
+    status of the page first and writes only when it is still expected: otherwise it is
+    skipped (status_changed, not journaled, so a rerun reads it again, but noted under
+    "left_aside" in the journal so that it does not hold the plan as unwritten); a page that
+    already has the target status is skipped and journaled, as a write whose answer was lost.
     A comment with "replaces" (text_digest of the audit comment its plan read) rewrites the
     audit comment only while it is still that text: otherwise, or when it is gone, it is
     skipped without being journaled, and nothing is created.
@@ -83,7 +85,9 @@ def apply_plan(
 
     notion/applied.json in run_dir lists what was written and is rewritten after each success
     (entries accumulate across applies; a "status" entry carries "value", the status written,
-    and a "comment" entry "comment_id" and "mode"; older journals have neither):
+    and a "comment" entry "comment_id" and "mode"; older journals have neither; "left_aside"
+    lists {"key", "plan_id", "ref", "current", "at"} for the status operations skipped as
+    changed, and loses an operation once it is written):
     its keys are skipped on a rerun of the same plan: an entry carries the "plan_id" of the plan
     that wrote it and only matches a plan with the same plan_id (an entry without plan_id, from
     an older run, matches only a plan without one). A comment is also skipped when the page already shows a
@@ -102,6 +106,7 @@ def apply_plan(
     allowed = {_normalize(page_id) for page_id in row_page_ids}
     journal = Path(run_dir) / "notion" / "applied.json"
     entries = _load_journal(journal)
+    aside = _load_aside(journal)
     options = _live_options(client, plan, ops)
     journal.parent.mkdir(parents=True, exist_ok=True)
     plan_id = plan.get("plan_id")
@@ -144,6 +149,12 @@ def apply_plan(
                 {"key": key, "ref": item.get("ref"), "current": current, "reason": STATUS_CHANGED}
             )
             log(f"{label} : non écrit, {STATUS_CHANGED} (« {current or 'aucun'} »)")
+            aside[:] = [entry for entry in aside if not _same(entry, key, plan_id)]
+            aside.append(
+                {"key": key, "plan_id": plan_id, "ref": item.get("ref"), "current": current,
+                 "at": _now()}
+            )
+            _save_journal(journal, entries, aside)
             continue
         if sent.get("audit_changed"):
             result["skipped"] += 1
@@ -151,7 +162,8 @@ def apply_plan(
             continue
         recorded.add(key)
         entries.append(_entry(item, sent, plan_id))
-        write_json(journal, {"applied": entries})
+        aside[:] = [entry for entry in aside if not _same(entry, key, plan_id)]
+        _save_journal(journal, entries, aside)
         for reason in sent.get("failed", []):
             result["replace_failed"].append({"key": key, "ref": item.get("ref"), "reason": reason})
             log(f"{label} : ancien commentaire conservé ({reason})")
@@ -390,13 +402,35 @@ def _load_journal(path: Path) -> list:
     return entries
 
 
+def _load_aside(path: Path) -> list:
+    """Return the "left_aside" notes of the journal; nothing when absent, damaged or unreadable."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    notes = document.get("left_aside") if isinstance(document, dict) else None
+    return [note for note in notes if isinstance(note, dict)] if isinstance(notes, list) else []
+
+
+def _save_journal(path: Path, entries: list, aside: list) -> None:
+    write_json(path, {"applied": entries, **({"left_aside": aside} if aside else {})})
+
+
+def _same(note: dict, key: str, plan_id) -> bool:
+    return note.get("key") == key and note.get("plan_id") == plan_id
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _entry(item: dict, sent: dict, plan_id=None) -> dict:
     entry = {
         "key": item["key"],
         "kind": item["kind"],
         "ref": item.get("ref"),
         "verdict": item.get("verdict"),
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "at": _now(),
     }
     if plan_id is not None:
         entry["plan_id"] = plan_id

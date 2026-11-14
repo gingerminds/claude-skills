@@ -59,6 +59,7 @@ OP_KEYS = {
     "text",
     "human_override",
 }
+STATUS_OP_KEYS = OP_KEYS | {"expected"}
 PROBE_KEYS = {"id", "method", "path", "headers", "body", "sensitive"}
 SENSITIVE_PATHS = [
     "/.env",
@@ -1511,8 +1512,11 @@ class PlanTest(AuditCase):
             ],
         )
         for op in ops.values():
-            self.assertEqual(set(op), OP_KEYS)
+            self.assertEqual(set(op), STATUS_OP_KEYS if op["kind"] == "status" else OP_KEYS)
         self.assertEqual(ops[(102, "status")]["after"], "Ok / Recetté")
+        self.assertEqual(ops[(102, "status")]["expected"], "Mis en place")
+        self.assertEqual(ops[(103, "status")]["expected"], "À traiter")
+        self.assertEqual(ops[(105, "status")]["expected"], "À traiter")
         self.assertTrue(ops[(102, "status")]["human_override"])
         self.assertEqual(ops[(103, "status")]["after"], "Mise en place partielle")
         self.assertFalse(ops[(103, "status")]["human_override"])
@@ -1520,6 +1524,87 @@ class PlanTest(AuditCase):
         self.assertEqual(ops[(104, "comment")]["verdict"], "unknown")
         self.assertEqual(ops[(106, "comment")]["verdict"], "unknown")
         self.assertIn("outils indisponibles : Navigateur", ops[(106, "comment")]["text"])
+
+    JOURNAL_AT = "2026-10-19T09:00:00+00:00"
+
+    def write_journal(self, run_dir, *entries, copy_read="2026-10-20T08:00:00+00:00"):
+        """Journal the writes of the skill (at JOURNAL_AT); the copy is read at copy_read."""
+        document = {"applied": [
+            {"key": f"status:page-{ref}:abcdefabcdef", "kind": "status", "ref": ref,
+             "verdict": "ok", "value": value, "at": self.JOURNAL_AT}
+            for ref, value in entries
+        ]}
+        self.write(run_dir, "notion/applied.json", document)
+        if copy_read:
+            self.set_copy_read(run_dir, copy_read)
+
+    def set_copy_read(self, run_dir, stamp):
+        moment = datetime.fromisoformat(stamp).timestamp()
+        os.utime(run_dir / "rows.json", (moment, moment))
+
+    def test_a_todo_set_back_by_a_person_after_a_skill_write_is_a_human_status(self):
+        run_dir = self.make_run()
+        self.write_journal(run_dir, (103, "Ok / Recetté"))
+        summary = self.plan(run_dir)
+        ops = self.ops(run_dir)
+        self.assertTrue(ops[(103, "status")]["human_override"])
+        self.assertEqual(ops[(103, "status")]["expected"], "À traiter")
+        self.assertEqual(
+            summary["human_overrides"],
+            [
+                {"ref": 102, "before": "Mis en place", "after": "Ok / Recetté"},
+                {"ref": 103, "before": "À traiter", "after": "Mise en place partielle"},
+            ],
+        )
+
+    def test_a_todo_the_skill_wrote_in_an_earlier_run_of_the_copy_is_a_human_status_too(self):
+        run_dir = self.make_run()
+        earlier = run_dir.parent / "2026-10-19-0900"
+        earlier.mkdir()
+        self.write(earlier, "context.json", {"notion": {"copy_data_source_id": "ds-copy"}})
+        self.write_journal(earlier, (103, "Ok / Recetté"), copy_read=None)
+        self.set_copy_read(run_dir, "2026-10-20T08:00:00+00:00")
+        self.plan(run_dir)
+        self.assertTrue(self.ops(run_dir)[(103, "status")]["human_override"])
+
+    def test_the_journal_of_another_copy_marks_nothing(self):
+        run_dir = self.make_run()
+        other = run_dir.parent / "2026-10-19-0900"
+        other.mkdir()
+        self.write(other, "context.json", {"notion": {"copy_data_source_id": "ds-other"}})
+        self.write_journal(other, (103, "Ok / Recetté"), copy_read=None)
+        self.set_copy_read(run_dir, "2026-10-20T08:00:00+00:00")
+        self.plan(run_dir)
+        self.assertFalse(self.ops(run_dir)[(103, "status")]["human_override"])
+
+    def test_a_write_made_after_the_copy_was_read_is_not_a_person_putting_the_row_back(self):
+        run_dir = self.make_run()
+        self.write_journal(run_dir, (103, "Ok / Recetté"), copy_read="2026-10-18T08:00:00+00:00")
+        self.plan(run_dir)
+        self.assertFalse(self.ops(run_dir)[(103, "status")]["human_override"])
+
+    def test_a_todo_last_edited_by_the_integration_stays_non_human(self):
+        run_dir = self.make_run()
+        self.edit_row(run_dir, 103, last_edited_by_bot=True)
+        self.write_journal(run_dir, (103, "Ok / Recetté"))
+        self.plan(run_dir)
+        self.assertFalse(self.ops(run_dir)[(103, "status")]["human_override"])
+
+    def test_a_run_with_an_unreadable_journal_plans_as_before(self):
+        run_dir = self.make_run()
+        (run_dir / "notion").mkdir(exist_ok=True)
+        (run_dir / "notion" / "applied.json").write_text("{not json", encoding="utf-8")
+        self.plan(run_dir)
+        self.assertFalse(self.ops(run_dir)[(103, "status")]["human_override"])
+
+    def test_the_audit_leaves_a_human_todo_alone_with_the_human_filter(self):
+        run_dir = self.make_run()
+        self.write_journal(run_dir, (103, "Ok / Recetté"))
+        summary = self.plan(run_dir, "--skip-human-overrides")
+        refs = {op["ref"] for op in self.read(run_dir, "notion/plan.json")["ops"]}
+        self.assertNotIn(103, refs)
+        self.assertNotIn(102, refs)
+        self.assertEqual(summary["human_overrides"], [])
 
     def test_comments_json_keys_are_read_as_integers(self):
         run_dir = self.make_run()
@@ -3085,11 +3170,19 @@ class AssignPlanTest(AuditCase):
 
 
 class FakeNotion:
-    """The part of the Notion client that apply_plan uses, recording what it writes."""
+    """The part of the Notion client that apply_plan uses, recording what it writes.
 
-    def __init__(self, options):
+    statuses maps a page id to its « Statut » now; a page not listed has none.
+    """
+
+    def __init__(self, options, statuses=None):
         self.options = options
         self.writes = []
+        self.statuses = statuses or {}
+
+    def page(self, page_id):
+        status = {"type": "status", "status": {"name": self.statuses.get(page_id)}}
+        return {"properties": {"Statut": status}}
 
     def data_source(self, data_source_id):
         options = [{"name": name} for name in self.options]
@@ -3107,9 +3200,11 @@ class FakeNotion:
 
 
 class ApplyContractTest(AuditCase):
-    def apply(self, run_dir, name):
+    def apply(self, run_dir, name, statuses=None):
         plan = self.read(run_dir, name)
-        client = FakeNotion(["Inès", "Marc", "Côme D"])
+        if statuses is None:
+            statuses = {row["page_id"]: row["status"] for row in self.read(run_dir, "rows.json")["rows"]}
+        client = FakeNotion(["Inès", "Marc", "Côme D"], statuses)
         context = self.read(run_dir, "context.json")
         rows = self.read(run_dir, "rows.json")["rows"]
         result = apply_plan(
@@ -3131,6 +3226,38 @@ class ApplyContractTest(AuditCase):
         plan, result, client = self.apply(run_dir, "notion/plan.json")
         self.assertEqual(result, apply_report(8, 0))
         self.assertEqual(len(client.writes), 8)
+
+    def test_apply_skips_row_whose_status_changed_since_read(self):
+        run_dir = self.make_run()
+        self.run_json(["plan", run_dir])
+        rows = self.read(run_dir, "rows.json")["rows"]
+        live = {row["page_id"]: row["status"] for row in rows}
+        live["page-103"] = "Ok / Recetté"
+        plan, result, client = self.apply(run_dir, "notion/plan.json", statuses=live)
+        patched = [write[1] for write in client.writes
+                   if write[0] == "update" and "Statut" in write[2]]
+        self.assertNotIn("page-103", patched)
+        self.assertEqual(sorted(patched), ["page-102", "page-105"])
+        self.assertEqual([item["ref"] for item in result["status_changed"]], [103])
+        self.assertEqual(result["status_changed"][0]["current"], "Ok / Recetté")
+        self.assertEqual((result["done"], result["errors"]), (7, []))
+
+    def test_rebuilding_the_plan_after_a_write_keeps_the_rows_the_skill_wrote_non_human(self):
+        run_dir = self.make_run()
+        self.run_json(["plan", run_dir])
+        first = self.read(run_dir, "notion/plan.json")
+        long_ago = datetime.now().timestamp() - 3600
+        os.utime(run_dir / "rows.json", (long_ago, long_ago))
+        self.apply(run_dir, "notion/plan.json")
+        self.run_json(["plan", run_dir])
+        rebuilt = self.read(run_dir, "notion/plan.json")
+        self.assertEqual(rebuilt["plan_id"], first["plan_id"])
+        self.assertEqual(rebuilt["summary"]["human_overrides"], first["summary"]["human_overrides"])
+        self.assertEqual([(op["ref"], op["human_override"]) for op in rebuilt["ops"]],
+                         [(op["ref"], op["human_override"]) for op in first["ops"]])
+        plan, result, client = self.apply(run_dir, "notion/plan.json")
+        self.assertEqual((result["done"], result["status_changed"]), (0, []))
+        self.assertEqual(client.writes, [])
 
     def test_assign_plan_is_applicable(self):
         run_dir = self.make_run()

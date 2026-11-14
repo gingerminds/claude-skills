@@ -340,7 +340,7 @@ What the lead sees, in French:
 1. « Statuts après écriture : À traiter <n>, Mise en place partielle <n>, Mis en place <n>, Ok / Recetté <n>, Non applicable <n>, En standby <n>. »
 2. « Lignes bloquantes non conformes : » then one line per ref, `CQ-<ref> : <titre>`.
 3. « Lignes non évaluées : <n> » (the reasons are in the synthesis).
-4. « Statuts posés par un humain que l'audit changerait : » then `CQ-<ref> : <titre> (« <before> » vers « <after> »)`, or « aucun ».
+4. « Statuts posés par un humain que l'audit changerait : » then `CQ-<ref> : <titre> (« <before> » vers « <after> »)`, or « aucun ». A « À traiter » that a person put back after the skill wrote another status on the row (journal of this run or of an earlier run of the copy) is listed here; a « À traiter » the skill never wrote over is not.
 5. « Reportées à J0 / J+7 : <n>. Lignes du modèle absentes de la copie : <n>. »
 
 ### Confirmation
@@ -360,7 +360,7 @@ python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
 
 ### Exit codes of `cqa_notion.py apply`
 
-`apply` prints `{"done", "skipped", "blocked": [{"key", "labels"}], "errors": [{"key", "message"}]}`, plus `kept_human` (the operations left out to keep the statuses set by a human) when there are some. `done` and `skipped` are numbers: operations written now, and operations already written (listed in `notion/applied.json`, or a comment already on the page). It prints one French line per operation on stderr. The `key` of an operation is in `notion/plan.json`, with its `ref` and `kind`.
+`apply` prints `{"done", "skipped", "blocked": [{"key", "labels"}], "errors": [{"key", "message"}], "replace_failed", "status_changed": [{"key", "ref", "current", "reason"}]}`, plus `kept_human` (the operations left out to keep the statuses set by a human) when there are some. `done` and `skipped` are numbers: operations written now, and operations already written (listed in `notion/applied.json`, a comment already on the page, a status the row already has). It prints one French line per operation on stderr. `apply` reads the status of a row again before writing it: when a person changed it since the copy was read, the status operation is left unwritten and listed in `status_changed` (exit code unchanged, the comments and assignments of the row are written); it never holds the run as unwritten, and a later write of the same plan reads the status again. Say each one to the lead: « CQ-<ref> : statut changé dans Notion depuis la lecture de la copie (« <current> »), non réécrit. » The `key` of an operation is in `notion/plan.json`, with its `ref` and `kind`.
 
 | Exit | Meaning | What to tell the lead |
 |---|---|---|

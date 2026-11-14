@@ -260,6 +260,13 @@ def status_op(page_id, ref, after="Ok / Recetté", before="À traiter", override
     return op("status", page_id, ref, after=after, before=before, override=override)
 
 
+def audit_status_op(page_id, ref, read="À traiter", after="Mise en place partielle", **kwargs):
+    """A status operation as the audit plans it: the status read in the copy is "expected"."""
+    item = status_op(page_id, ref, after=after, before=read, **kwargs)
+    item["expected"] = read
+    return item
+
+
 def assign_op(page_id, ref, after):
     return op("assign", page_id, ref, after=after, before=[], verdict="ok_human")
 
@@ -1199,6 +1206,103 @@ class ExpectedStatusTest(ApplyTestCase):
         self.assertFalse([call for call in self.notion.requests("GET") if "/pages/" in call.url])
 
 
+class AuditStatusGuardTest(ApplyTestCase):
+    """The audit status operations carry the status read in the copy (« expected »)."""
+
+    def status_writes(self):
+        return [write for write in self.notion.writes if write[0] == "status"]
+
+    def test_audit_status_changed_since_read_is_skipped(self):
+        self.notion.statuses = {PAGE_1: "Ok / Recetté", PAGE_2: "À traiter"}
+        changed = audit_status_op(PAGE_1, 1)
+        result = self.apply(
+            changed, comment_op(PAGE_1, 1, verdict_blocks("Mise en place partielle")),
+            audit_status_op(PAGE_2, 2),
+        )
+        self.assertEqual([write[1] for write in self.status_writes()], [PAGE_2])
+        self.assertEqual(self.notion.statuses[PAGE_1], "Ok / Recetté")
+        self.assertEqual(
+            result["status_changed"],
+            [{"key": changed["key"], "ref": 1, "current": "Ok / Recetté",
+              "reason": "statut changé depuis le lancement"}],
+        )
+        self.assertEqual(result["errors"], [])
+        self.assertIn("CQ-1 (status) : non écrit, statut changé depuis le lancement "
+                      "(« Ok / Recetté »)", self.log)
+        self.assertNotIn(changed["key"], [entry["key"] for entry in self.applied()])
+
+    def test_a_row_skipped_for_its_status_is_read_again_by_the_next_apply(self):
+        self.notion.statuses = {PAGE_1: "Ok / Recetté"}
+        item = audit_status_op(PAGE_1, 1)
+        self.apply(item)
+        self.notion.statuses[PAGE_1] = "À traiter"
+        result = self.apply(item)
+        self.assertEqual((result["done"], result["status_changed"]), (1, []))
+        self.assertEqual(self.notion.statuses[PAGE_1], "Mise en place partielle")
+
+    def test_resume_after_partial_write_is_not_a_status_change(self):
+        self.notion.statuses = {PAGE_1: "Mise en place partielle"}
+        item = audit_status_op(PAGE_1, 1)
+        result = self.apply(item)
+        self.assertEqual(result["status_changed"], [])
+        self.assertEqual(self.status_writes(), [])
+        self.assertEqual((result["done"], result["skipped"], result["errors"]), (0, 1, []))
+        [entry] = self.applied()
+        self.assertEqual((entry["key"], entry["value"]), (item["key"], "Mise en place partielle"))
+        again = self.apply(item)
+        self.assertEqual(again, apply_report(0, 1))
+
+    def test_resume_of_a_plan_whose_first_ops_were_written_before_the_cut(self):
+        self.notion.statuses = {PAGE_1: "Ok / Recetté", PAGE_2: "À traiter", PAGE_3: "En standby"}
+        first = audit_status_op(PAGE_1, 1, after="Ok / Recetté")
+        second = audit_status_op(PAGE_2, 2)
+        third = audit_status_op(PAGE_3, 3, read="En standby", after="Non applicable")
+        result = self.apply(first, second, third)
+        self.assertEqual(result["status_changed"], [])
+        self.assertEqual([write[1] for write in self.status_writes()], [PAGE_2, PAGE_3])
+        self.assertEqual([entry["ref"] for entry in self.applied()], [1, 2, 3])
+
+    def test_a_status_left_aside_is_recorded_apart_from_the_journal(self):
+        self.notion.statuses = {PAGE_1: "Ok / Recetté", PAGE_2: "À traiter"}
+        changed, other = audit_status_op(PAGE_1, 1), audit_status_op(PAGE_2, 2)
+        plan = make_plan(changed, other)
+        plan["plan_id"] = "p1"
+        self.apply(plan=plan)
+        document = json.loads(self.applied_path().read_text(encoding="utf-8"))
+        self.assertEqual([entry["key"] for entry in document["applied"]], [other["key"]])
+        [aside] = document["left_aside"]
+        self.assertEqual(
+            (aside["key"], aside["plan_id"], aside["ref"], aside["current"]),
+            (changed["key"], "p1", 1, "Ok / Recetté"),
+        )
+        self.apply(plan=plan)
+        again = json.loads(self.applied_path().read_text(encoding="utf-8"))
+        self.assertEqual(len(again["left_aside"]), 1)
+
+    def test_a_status_left_aside_is_forgotten_once_written(self):
+        self.notion.statuses = {PAGE_1: "Ok / Recetté"}
+        item = audit_status_op(PAGE_1, 1)
+        plan = make_plan(item)
+        plan["plan_id"] = "p1"
+        self.apply(plan=plan)
+        self.notion.statuses[PAGE_1] = "À traiter"
+        self.apply(plan=plan)
+        document = json.loads(self.applied_path().read_text(encoding="utf-8"))
+        self.assertEqual([entry["key"] for entry in document["applied"]], [item["key"]])
+        self.assertNotIn("left_aside", document)
+
+    def test_a_journal_without_left_aside_is_unchanged(self):
+        self.notion.statuses = {PAGE_1: "À traiter"}
+        self.apply(audit_status_op(PAGE_1, 1))
+        self.assertEqual(list(json.loads(self.applied_path().read_text(encoding="utf-8"))), ["applied"])
+
+    def test_a_status_neither_expected_nor_target_is_a_change_after_a_resume_too(self):
+        self.notion.statuses = {PAGE_1: "Non applicable"}
+        result = self.apply(audit_status_op(PAGE_1, 1))
+        self.assertEqual([item["current"] for item in result["status_changed"]], ["Non applicable"])
+        self.assertEqual(self.status_writes(), [])
+
+
 class CommentReplacementEdgeTest(ApplyTestCase):
     def skill(self, label, comment_id, created="2026-10-01T10:00:00Z"):
         self.notion.add_comment(
@@ -1488,6 +1592,50 @@ class ApplyCommandTest(CliTestCase):
 
     def written_pages(self):
         return {page for _, page, _ in self.notion.writes}
+
+    def test_status_changed_listed_in_apply_result(self):
+        self.notion.statuses = {PAGE_1: "Ok / Recetté", PAGE_2: "À traiter"}
+        changed = audit_status_op(PAGE_1, 1)
+        self.write_plan(changed, comment_op(PAGE_1, 1, "Constat 1"), audit_status_op(PAGE_2, 2))
+        self.set_notion_write("all")
+        code, out, err = self.run_main(["apply", self.run_dir])
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)
+        self.assertEqual(
+            report["status_changed"],
+            [{"key": changed["key"], "ref": 1, "current": "Ok / Recetté",
+              "reason": "statut changé depuis le lancement"}],
+        )
+        self.assertEqual(self.notion.statuses, {PAGE_1: "Ok / Recetté", PAGE_2: "Mise en place partielle"})
+        self.assertIn("statut changé depuis le lancement", err)
+
+    def test_keep_human_skips_human_todo_at_apply(self):
+        """A « À traiter » put back by a person is a human_override of the plan: apply leaves it."""
+        self.notion.statuses = {PAGE_1: "À traiter", PAGE_2: "À traiter"}
+        self.write_plan(
+            audit_status_op(PAGE_1, 1, override=True),
+            comment_op(PAGE_1, 1, "Constat 1"),
+            audit_status_op(PAGE_2, 2),
+            name="notion/plan.json",
+            rows=[
+                row_state(PAGE_1, 1, before="À traiter"),
+                row_state(PAGE_2, 2, before="À traiter"),
+            ],
+            summary={
+                "by_status_after": {},
+                "blocking_non_conform": [],
+                "unknown": [],
+                "human_overrides": [],
+                "deferred": [],
+                "missing_in_copy": [],
+            },
+        )
+        self.set_notion_write("keep_human")
+        code, out, err = self.run_main(["apply", self.run_dir])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.notion.statuses[PAGE_1], "À traiter")
+        self.assertEqual(self.notion.statuses[PAGE_2], "Mise en place partielle")
+        self.assertEqual({page for _, page, _ in self.notion.writes}, {PAGE_2})
 
     def test_apply_refuses_when_dry_run(self):
         for value in (None, "all", "keep_human"):

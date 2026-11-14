@@ -3,7 +3,7 @@ import hashlib
 import json
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from cqa import checklist
@@ -14,6 +14,7 @@ from cqa.plan import (
     filter_plan,
     is_human_set,
     load_history,
+    load_written_statuses,
     operation_key,
     plan_digest,
 )
@@ -35,6 +36,11 @@ OP_KEYS = {
     "text",
     "human_override",
 }
+STATUS_OP_KEYS = OP_KEYS | {"expected"}
+
+
+def op_keys(op):
+    return STATUS_OP_KEYS if op["kind"] == "status" else OP_KEYS
 
 
 def make_row(ref=79, **overrides):
@@ -119,6 +125,7 @@ def plan_for(
     followup=None,
     missing=None,
     context=None,
+    written=None,
 ):
     return build_plan(
         rows=rows,
@@ -131,6 +138,7 @@ def plan_for(
         plugin_version="0.9.0",
         followup_done=followup or set(),
         missing_in_copy=missing,
+        written_statuses=written,
     )
 
 
@@ -145,8 +153,31 @@ def sole_op(testcase, plan, kind):
 
 
 class IsHumanSetTest(unittest.TestCase):
-    def test_todo_is_never_human_set(self):
-        self.assertFalse(is_human_set({"status": "À traiter", "last_edited_by_bot": False}))
+    def test_todo_never_written_by_skill_is_not_human(self):
+        row = {"ref": 79, "status": "À traiter", "last_edited_by_bot": False}
+        self.assertFalse(is_human_set(row))
+        self.assertFalse(is_human_set(row, {}))
+        self.assertFalse(is_human_set(row, {80: "Ok / Recetté"}))
+        self.assertFalse(is_human_set({"status": "À traiter", "last_edited_by_bot": False}, {79: "Ok"}))
+
+    def test_todo_the_skill_wrote_itself_is_not_human(self):
+        row = {"ref": 79, "status": "À traiter", "last_edited_by_bot": False}
+        self.assertFalse(is_human_set(row, {79: "À traiter"}))
+
+    def test_todo_set_back_by_human_after_skill_write_is_human(self):
+        for written in ("Ok / Recetté", "Non applicable", "Mise en place partielle", "Mis en place"):
+            with self.subTest(written=written):
+                row = {"ref": 79, "status": "À traiter", "last_edited_by_bot": False}
+                self.assertTrue(is_human_set(row, {79: written}))
+        unknown_editor = {"ref": 79, "status": "À traiter"}
+        self.assertTrue(is_human_set(unknown_editor, {79: "Ok / Recetté"}))
+        self.assertTrue(
+            is_human_set({"ref": 79, "status": "À traiter", "last_edited_by_bot": None}, {79: "Ok"})
+        )
+
+    def test_todo_last_edited_by_the_integration_is_not_human_even_after_a_write(self):
+        row = {"ref": 79, "status": "À traiter", "last_edited_by_bot": True}
+        self.assertFalse(is_human_set(row, {79: "Ok / Recetté"}))
 
     def test_other_status_edited_by_a_person(self):
         self.assertTrue(is_human_set({"status": "Mis en place", "last_edited_by_bot": False}))
@@ -245,6 +276,136 @@ class StatusTest(unittest.TestCase):
         plan = plan_for([orphan, make_row()], [make_finding()])
         self.assertEqual({op["page_id"] for op in plan["ops"]}, {f"{79:032x}"})
         self.assertNotIn("CQ-None", json.dumps(plan, ensure_ascii=False))
+
+
+class ExpectedStatusTest(unittest.TestCase):
+    def test_status_operation_carries_expected(self):
+        row = make_row(status="En standby", last_edited_by_bot=True)
+        plan = plan_for([row], [make_finding(verdict="ok", todo=None)])
+        op = sole_op(self, plan, "status")
+        self.assertEqual((op["expected"], op["before"], op["after"]), ("En standby", "En standby", "Ok / Recetté"))
+        self.assertEqual(set(op), STATUS_OP_KEYS)
+
+    def test_expected_is_the_status_read_even_when_a_person_set_it(self):
+        row = make_row(status="Mis en place", last_edited_by_bot=False)
+        op = sole_op(self, plan_for([row], [make_finding(verdict="ko")]), "status")
+        self.assertTrue(op["human_override"])
+        self.assertEqual(op["expected"], "Mis en place")
+
+    def test_every_status_operation_of_a_plan_carries_it(self):
+        rows = [
+            make_row(79, status="Mis en place", last_edited_by_bot=True),
+            make_row(80, status="À traiter", last_edited_by_bot=False),
+            make_row(81, status="Mise en place partielle", last_edited_by_bot=True),
+        ]
+        excluded = [make_excluded(rows[2], "techno", "na", "Techno absente")]
+        findings = [make_finding(79, "ok", todo=None), make_finding(80, "ok_human", todo=None, human_check="x")]
+        plan = plan_for(rows, findings, excluded=excluded)
+        found = {op["ref"]: op["expected"] for op in ops_of(plan, "status")}
+        self.assertEqual(
+            found, {79: "Mis en place", 80: "À traiter", 81: "Mise en place partielle"}
+        )
+
+    def test_the_operations_of_a_recette_carry_it_too(self):
+        row = make_row(status="Mis en place", last_edited_by_bot=False)
+        plan = build_plan(
+            rows=[row],
+            findings={79: make_finding(79, "ok", todo=None)},
+            excluded=[],
+            context=make_context(),
+            visible_verdicts={},
+            history={},
+            run_date=RUN_DATE,
+            plugin_version="0.9.0",
+            followup_done=set(),
+            recette_refs=frozenset({79}),
+        )
+        op = sole_op(self, plan, "status")
+        self.assertFalse(op["human_override"])
+        self.assertEqual(op["expected"], "Mis en place")
+
+    def test_other_operations_carry_no_expected(self):
+        row = make_row(status="À traiter", last_edited_by_bot=True)
+        plan = plan_for([row], [make_finding(verdict="ok_human", todo=None, human_check="x")])
+        for kind in ("assign", "comment"):
+            self.assertNotIn("expected", sole_op(self, plan, kind))
+
+    def test_a_row_without_a_status_has_no_expected(self):
+        row = make_row(status=None, last_edited_by_bot=True)
+        op = sole_op(self, plan_for([row], [make_finding(verdict="ok", todo=None)]), "status")
+        self.assertNotIn("expected", op)
+
+    def test_expected_does_not_change_the_key(self):
+        row = make_row(status="Mis en place", last_edited_by_bot=True)
+        op = sole_op(self, plan_for([row], [make_finding(verdict="ko")]), "status")
+        self.assertEqual(op["key"], operation_key("status", op["page_id"], "À traiter", ""))
+
+
+class HumanTodoTest(unittest.TestCase):
+    def reset_row(self, ref=79, **overrides):
+        return make_row(ref, status="À traiter", last_edited_by_bot=False, **overrides)
+
+    def test_human_todo_listed_in_human_overrides(self):
+        plan = plan_for(
+            [self.reset_row()],
+            [make_finding(79, "ok", todo=None)],
+            written={79: "Ok / Recetté"},
+        )
+        op = sole_op(self, plan, "status")
+        self.assertTrue(op["human_override"])
+        self.assertEqual(
+            plan["summary"]["human_overrides"],
+            [{"ref": 79, "before": "À traiter", "after": "Ok / Recetté"}],
+        )
+
+    def test_keep_human_skips_human_todo(self):
+        rows = [self.reset_row(79), make_row(80, status="À traiter", last_edited_by_bot=True)]
+        findings = [make_finding(79, "partial"), make_finding(80, "partial")]
+        plan = plan_for(rows, findings, written={79: "Ok / Recetté", 80: "À traiter"})
+        self.assertEqual([op["ref"] for op in ops_of(plan, "status")], [79, 80])
+        kept = filter_plan(plan, skip_human_overrides=True)
+        self.assertEqual({op["ref"] for op in kept["ops"]}, {80})
+        by_ref = {state["ref"]: state for state in kept["rows"]}
+        self.assertEqual(by_ref[79]["after"], "À traiter")
+        self.assertEqual(kept["summary"]["human_overrides"], [])
+
+    def test_todo_never_written_by_skill_is_not_human_in_a_plan(self):
+        rows = [self.reset_row(ref) for ref in range(79, 89)]
+        findings = [make_finding(ref, "partial") for ref in range(79, 89)]
+        for written in (None, {}, {500: "Ok / Recetté"}):
+            with self.subTest(written=written):
+                plan = plan_for(rows, findings, written=written)
+                self.assertEqual(len(ops_of(plan, "status")), 10)
+                self.assertFalse(any(op["human_override"] for op in plan["ops"]))
+                self.assertEqual(plan["summary"]["human_overrides"], [])
+
+    def test_a_verdict_that_keeps_todo_has_nothing_to_protect(self):
+        plan = plan_for([self.reset_row()], [make_finding(79, "ko")], written={79: "Ok / Recetté"})
+        self.assertEqual(ops_of(plan, "status"), [])
+        self.assertEqual(plan["summary"]["human_overrides"], [])
+
+    def test_the_recette_still_replaces_a_status_the_devs_set(self):
+        row = make_row(79, status="Mis en place", last_edited_by_bot=False)
+        plan = build_plan(
+            rows=[row],
+            findings={79: make_finding(79, "ok", todo=None)},
+            excluded=[],
+            context=make_context(),
+            visible_verdicts={},
+            history={},
+            run_date=RUN_DATE,
+            plugin_version="0.9.0",
+            followup_done=set(),
+            recette_refs=frozenset({79}),
+            written_statuses={79: "Mise en place partielle"},
+        )
+        self.assertFalse(sole_op(self, plan, "status")["human_override"])
+
+    def test_a_techno_row_set_back_by_a_person_is_protected(self):
+        row = self.reset_row()
+        excluded = [make_excluded(row, "techno", "na", "Techno absente")]
+        plan = plan_for([row], excluded=excluded, written={79: "Non applicable"})
+        self.assertTrue(sole_op(self, plan, "status")["human_override"])
 
 
 class AssignTest(unittest.TestCase):
@@ -531,7 +692,7 @@ class OperationShapeTest(unittest.TestCase):
         ]
         plan = plan_for(rows, findings)
         for op in plan["ops"]:
-            self.assertEqual(set(op), OP_KEYS)
+            self.assertEqual(set(op), op_keys(op))
         self.assertEqual(
             [(op["ref"], op["kind"]) for op in plan["ops"]],
             [(79, "status"), (79, "comment"), (80, "status"), (80, "assign"), (80, "comment")],
@@ -893,6 +1054,139 @@ class RecetteTest(unittest.TestCase):
         plan = self.scenario(set())
         self.assertTrue(all(op["human_override"] for op in plan["ops"] if op["kind"] == "status"))
         self.assertEqual(filter_plan(plan, skip_human_overrides=True)["ops"], [])
+
+
+class LoadWrittenStatusesTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def write_run(self, run_id, applied, *, copy_ds=COPY_DS, plan_ops=None, slug="acme-shop"):
+        run_dir = self.root / slug / run_id
+        (run_dir / "notion").mkdir(parents=True)
+        if applied is not None:
+            self.write_json(run_dir / "notion" / "applied.json", {"applied": applied})
+        plan = {"copy_data_source_id": copy_ds, "ops": plan_ops or []}
+        self.write_json(run_dir / "notion" / "plan.json", plan)
+        return run_dir
+
+    @staticmethod
+    def write_json(path, data):
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    @staticmethod
+    def entry(ref, value, *, kind="status", at="2026-10-20T14:30:00+00:00", key=None):
+        found = {"key": key or f"{kind}:{ref}:abcdefabcdef", "kind": kind, "ref": ref, "at": at}
+        if value is not None:
+            found["value"] = value
+        return found
+
+    def load(self, copy_ds=COPY_DS, slug="acme-shop"):
+        return load_written_statuses(self.root, slug, copy_ds)
+
+    def test_last_status_written_per_ref(self):
+        self.write_run("2026-10-18-0900", [self.entry(79, "Ok / Recetté"), self.entry(80, "À traiter")])
+        self.write_run("2026-10-19-0900", [self.entry(79, "Mise en place partielle")])
+        self.assertEqual(self.load(), {79: "Mise en place partielle", 80: "À traiter"})
+
+    def test_the_current_run_is_read_too(self):
+        self.write_run("2026-10-21-0900", [self.entry(79, "Ok / Recetté")])
+        self.assertEqual(self.load(), {79: "Ok / Recetté"})
+
+    def test_the_latest_write_wins_by_date_whatever_the_run_order(self):
+        self.write_run("2026-10-20-1430", [self.entry(79, "Ok / Recetté", at="2026-10-20T14:30:00+00:00")])
+        self.write_run("2026-10-20-0900", [self.entry(79, "À traiter", at="2026-10-20T09:30:00+00:00")])
+        self.assertEqual(self.load(), {79: "Ok / Recetté"})
+
+    def test_later_entry_of_a_run_wins(self):
+        self.write_run("2026-10-19-0900", [self.entry(79, "Ok / Recetté"), self.entry(79, "À traiter")])
+        self.assertEqual(self.load(), {79: "À traiter"})
+
+    def test_only_status_entries_with_a_ref_count(self):
+        applied = [
+            self.entry(79, "ko", kind="comment"),
+            self.entry(80, None, kind="assign"),
+            self.entry(None, "Ok / Recetté", kind="page_comment"),
+            self.entry(81, "Non applicable"),
+        ]
+        self.write_run("2026-10-18-0900", applied)
+        self.assertEqual(self.load(), {81: "Non applicable"})
+
+    def test_other_copies_and_projects_are_ignored(self):
+        self.write_run("2026-10-18-0900", [self.entry(79, "Ok / Recetté")], copy_ds=OTHER_DS)
+        self.write_run("2026-10-18-0900", [self.entry(80, "Ok / Recetté")], slug="other-project")
+        self.write_run("2026-10-19-0900", [self.entry(81, "Ok / Recetté")])
+        self.assertEqual(self.load(), {81: "Ok / Recetté"})
+
+    def test_an_entry_without_value_is_read_from_the_plan_of_its_run(self):
+        op = {"key": "status:p79:abcdefabcdef", "kind": "status", "ref": 79, "after": "Non applicable"}
+        self.write_run(
+            "2026-10-18-0900",
+            [self.entry(79, None, key=op["key"]), self.entry(80, None, key="status:p80:other")],
+            plan_ops=[op],
+        )
+        self.assertEqual(self.load(), {79: "Non applicable"})
+
+    def test_a_run_without_journal_or_with_a_damaged_one_gives_nothing(self):
+        self.write_run("2026-10-18-0900", None)
+        broken = self.write_run("2026-10-19-0900", [self.entry(79, "Ok / Recetté")])
+        (broken / "notion" / "applied.json").write_text("{not json", encoding="utf-8")
+        shaped = self.write_run("2026-10-20-0900", [self.entry(80, "Ok / Recetté")])
+        self.write_json(shaped / "notion" / "applied.json", ["unexpected"])
+        garbled = self.write_run("2026-10-20-1000", None)
+        self.write_json(
+            garbled / "notion" / "applied.json",
+            {"applied": ["x", 3, {"kind": "status"}, {"kind": "status", "ref": True, "value": "Ok"},
+                         {"kind": "status", "ref": "79", "value": "Ok"}, self.entry(82, "Ok / Recetté")]},
+        )
+        self.assertEqual(self.load(), {82: "Ok / Recetté"})
+
+    def test_missing_cache_root_or_project_gives_nothing(self):
+        self.assertEqual(self.load(), {})
+        self.assertEqual(load_written_statuses(self.root / "absent", "acme-shop", COPY_DS), {})
+
+    def test_only_the_writes_made_before_the_copy_was_read_count(self):
+        early, late = "2026-10-20T10:00:00+00:00", "2026-10-20T12:00:00+00:00"
+        self.write_run(
+            "2026-10-20-0900",
+            [self.entry(79, "Ok / Recetté", at=early), self.entry(79, "Non applicable", at=late),
+             self.entry(80, "Ok / Recetté", at=late)],
+        )
+        read = datetime(2026, 10, 20, 11, 0, tzinfo=timezone.utc).timestamp()
+        self.assertEqual(load_written_statuses(self.root, "acme-shop", COPY_DS, read), {79: "Ok / Recetté"})
+        self.assertEqual(load_written_statuses(self.root, "acme-shop", COPY_DS, 0.0), {})
+        self.assertEqual(
+            load_written_statuses(self.root, "acme-shop", COPY_DS),
+            {79: "Non applicable", 80: "Ok / Recetté"},
+        )
+
+    def test_an_entry_without_a_readable_date_counts_only_without_a_read_time(self):
+        undated = {"key": "status:79:abcdefabcdef", "kind": "status", "ref": 79, "value": "Ok / Recetté"}
+        garbled = {**undated, "key": "status:80:abcdefabcdef", "ref": 80, "at": "soon"}
+        self.write_run("2026-10-20-0900", [undated, garbled])
+        read = datetime(2030, 1, 1, tzinfo=timezone.utc).timestamp()
+        self.assertEqual(load_written_statuses(self.root, "acme-shop", COPY_DS, read), {})
+        self.assertEqual(
+            load_written_statuses(self.root, "acme-shop", COPY_DS), {79: "Ok / Recetté", 80: "Ok / Recetté"}
+        )
+
+    def test_dates_with_z_or_without_an_offset_are_read_as_utc(self):
+        self.write_run(
+            "2026-10-20-0900",
+            [self.entry(79, "Ok / Recetté", at="2026-10-20T10:00:00Z"),
+             self.entry(80, "Ok / Recetté", at="2026-10-20T10:00:00")],
+        )
+        read = datetime(2026, 10, 20, 10, 0, 1, tzinfo=timezone.utc).timestamp()
+        self.assertEqual(
+            load_written_statuses(self.root, "acme-shop", COPY_DS, read), {79: "Ok / Recetté", 80: "Ok / Recetté"}
+        )
+
+    def test_the_written_statuses_feed_build_plan(self):
+        self.write_run("2026-10-18-0900", [self.entry(79, "Ok / Recetté")])
+        row = make_row(79, status="À traiter", last_edited_by_bot=False)
+        plan = plan_for([row], [make_finding(79, "partial")], written=self.load())
+        self.assertTrue(sole_op(self, plan, "status")["human_override"])
 
 
 class LoadHistoryTest(unittest.TestCase):

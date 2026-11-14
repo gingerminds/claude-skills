@@ -753,6 +753,50 @@ class SkillTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, step1)
 
+    def test_the_status_is_read_again_at_the_write_and_the_skipped_rows_are_said(self):
+        skill = _text(SKILL)
+        self.assertNotIn("The copy does not change during the audit", skill)
+        self.assertNotIn("the copy does not change during the audit", skill)
+        launch = _section(skill, "4. Context")
+        self.assertIn("`apply` reads the status of each row again before writing it", launch)
+        self.assertIn("`status_changed`", launch)
+        rules = _section(skill, "1. Imperative rules")
+        self.assertIn("`apply` reads the status of a row again before writing it", rules)
+        self.assertIn("never replaced", rules)
+        resume = _section(skill, "3. Resume")
+        self.assertIn("not as a change made by a person", resume)
+        writing = _section(skill, "8. Writing and synthesis")
+        step1 = writing[writing.index("**1. Apply**"):writing.index("**2. Synthesis**")]
+        self.assertIn("`done`, `skipped`, `blocked`, `errors`, `status_changed`", step1)
+        self.assertIn("a person changed the status of the row", step1)
+        step3 = writing[writing.index("**3. Remarques**"):writing.index("**4.")]
+        self.assertIn("the rows of `status_changed` at step 1", step3)
+        self.assertIn("statut changé dans Notion depuis la lecture de la copie", step3)
+        verdicts = _text(VERDICTS_MD)
+        for needle in ("`status_changed`", "never holds the run as unwritten",
+                       "statut changé dans Notion depuis la lecture de la copie"):
+            with self.subTest(verdicts=needle):
+                self.assertIn(needle, verdicts)
+
+    def test_a_todo_put_back_by_a_person_is_a_protected_human_status(self):
+        plan = _section(_text(SKILL), "7. Plan and confirmation")
+        step1 = plan.split("\n1. ")[1].split("\n2. ")[0]
+        for needle in ("put back to « À traiter » after the skill wrote another status on it",
+                       "`notion/applied.json`", "a false negative",
+                       "A « À traiter » the skill never wrote over"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, step1)
+        self.assertIn("that a person put back after the skill wrote another status",
+                      _text(VERDICTS_MD))
+
+    def test_the_copy_is_read_again_before_the_end_block_rebuilds_the_plan(self):
+        end = self._end_block()
+        step = end[end.index("\n5. Only when this invocation already wrote to Notion"):
+                   end.index("\n6. Write it again")]
+        self.assertIn('cqa_notion.py" rows "$RUN"', step)
+        self.assertLess(step.index('cqa_notion.py" rows "$RUN"'), step.index('cqa_plan.py" plan "$RUN"'))
+        self.assertIn("would look changed by a person", step)
+
     def test_resume_is_offered_for_an_incomplete_run_of_any_date(self):
         skill = _text(SKILL)
         resume = _section(skill, "3. Resume")

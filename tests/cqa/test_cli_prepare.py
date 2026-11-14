@@ -1964,6 +1964,23 @@ class RunsCommandTest(CliCase):
                 self.pending_run(**options)
                 self.assertFalse(self.runs()["runs"][0]["write_pending"])
 
+    def test_write_pending_ignores_a_status_left_aside_for_a_change_of_status(self):
+        run_dir = self.pending_run(applied=("k1",))
+        self.write(run_dir, "notion/applied.json", {
+            "applied": [{"key": "k1", "plan_id": "p2"}],
+            "left_aside": [{"key": "k2", "plan_id": "p2", "ref": 2, "current": "Ok / Recetté"}],
+        })
+        self.assertFalse(self.runs()["runs"][0]["write_pending"])
+        self.write(run_dir, "notion/applied.json", {
+            "applied": [{"key": "k1", "plan_id": "p2"}],
+            "left_aside": [{"key": "k2", "plan_id": "p1", "ref": 2, "current": "Ok / Recetté"}],
+        })
+        self.assertTrue(self.runs()["runs"][0]["write_pending"])
+        self.write(run_dir, "notion/applied.json", {
+            "applied": [{"key": "k1", "plan_id": "p2"}], "left_aside": "damaged",
+        })
+        self.assertTrue(self.runs()["runs"][0]["write_pending"])
+
     def test_write_pending_counts_only_what_the_consent_lets_apply_write(self):
         run_dir = self.make_run("2026-10-20-1000", "done.json")
         ops = [
