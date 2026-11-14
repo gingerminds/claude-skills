@@ -1,6 +1,7 @@
 """R-04: a fact noted from the server (facts/server.json) is the evidence of an na, never of an ok."""
 import copy
 import json
+import shlex
 import unittest
 from datetime import date
 from pathlib import Path
@@ -9,8 +10,11 @@ from cqa import rerun
 from cqa.comments import format_comment
 from cqa.findings import REFUSED_KEY, apply_guardrails, validate_document
 from cqa.grounding import Grounding
+from cqa.ssh_ro import check_command
 
 from tests.cqa.test_verified_verdicts import FILE, PERF, VerifiedCase
+
+BROWSER_AGENT = Path(__file__).resolve().parents[2] / "agents" / "cqa-browser.md"
 
 ROOT = Path(__file__).resolve().parents[2]
 AUDITOR = ROOT / "agents" / "cqa-auditor.md"
@@ -20,8 +24,8 @@ EM_DASH = chr(0x2014)
 
 TOPIC = "Base de données du serveur"
 FACT = {"type": "fact", "topic": TOPIC}
-COMMAND = "--sql drush SELECT COUNT(*) FROM watchdog LIMIT 1"
-RESULT = "aucune base de données sur ce serveur (jeton-factice-4f9a)"
+COMMAND = "ps -A -o comm"
+RESULT = "aucun processus de base de données dans la liste (jeton-factice-4f9a)"
 GOOD = {"refs": [101], "topic": TOPIC, "command": COMMAND, "exit": 0, "result": RESULT}
 
 
@@ -223,7 +227,7 @@ class NaWithAFactTest(FactCase):
         self.judge_na(run_dir)
         (error,) = self.errors_of(run_dir, 101)
         self.assertNotIn("jeton-factice", error)
-        self.assertNotIn("watchdog", error)
+        self.assertNotIn(COMMAND, error)
         summary, err = self.plan(run_dir)
         self.assertNotIn("jeton-factice", err)
         self.assertNotIn("jeton-factice", json.dumps(summary))
@@ -256,6 +260,30 @@ class NaWithAFactTest(FactCase):
         summary, _ = self.plan(run_dir)
         self.assertIn(101, summary["unknown"])
 
+    def test_the_replay_names_the_reason_of_now_not_the_one_of_validate(self):
+        run_dir = self.make_run()
+        self.judge_na(run_dir)
+        (error,) = self.errors_of(run_dir, 101)
+        self.assertIn("introuvable", error)
+        record = (run_dir / f"findings/{PERF}.checked.json").read_bytes()
+        steps = (
+            (fact(refs=[102]), "ne couvre la ligne CQ-101", "fait qui ne couvre pas la ligne"),
+            (fact(exit=1), "exit", "commande en échec (exit différent de 0)"),
+            (fact(result=""), "résultat", "commande ou résultat vide"),
+            (fact(topic="Autre sujet"), "aucun fait du sujet", "aucun fait pour ce sujet"),
+        )
+        for entry, reason, label in steps:
+            with self.subTest(reason=reason):
+                self.write_facts(run_dir, entry)
+                summary, _ = self.plan(run_dir)
+                self.assertIn(101, summary["unknown"])
+                self.assertIn(reason, self.reasons(summary)[101])
+                self.assertNotIn("introuvable", self.reasons(summary)[101])
+                (op,) = self.ops(run_dir, 101, "comment")
+                self.assertIn(f"(preuve écartée : {label})", op["text"])
+                self.assertNotIn("introuvable", op["text"])
+        self.assertEqual((run_dir / f"findings/{PERF}.checked.json").read_bytes(), record)
+
     def test_an_accepted_fact_is_frozen_at_validation(self):
         run_dir = self.make_run()
         self.write_facts(run_dir, GOOD)
@@ -277,6 +305,68 @@ class NaWithAFactTest(FactCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("CQ-102", errors[0])
         self.assertNotIn("CQ-101 ", errors[0])
+
+
+class FactInAMixedRowTest(FactCase):
+    """R-04: a fact is evidence for the row its refs hold, whatever the lot that cites it."""
+
+    MIXED = "Planificateur de purge côté serveur"
+
+    def set_lots(self, run_dir, server_finding, browser_finding):
+        lots = [
+            {"id": "server", "kind": "server", "needs_toolbox": False, "needs_server_facts": False,
+             "needs_session": False, "refs": [101], "document_refs": []},
+            {"id": "browser-front", "kind": "browser", "needs_toolbox": False, "needs_server_facts": True,
+             "needs_session": False, "refs": [102], "document_refs": []},
+        ]
+        self.edit(run_dir, "lots.json", lambda document: document.update(lots=lots))
+        self.edit_row(run_dir, 101, tools=["SSH serveur", "BDD"])
+        self.edit_row(run_dir, 102, tools=["Navigateur", "SSH serveur"])
+        for name in (PERF, "code-securite"):
+            (run_dir / "findings" / f"{name}.json").unlink()
+        for lot, item in (("server", server_finding), ("browser-front", browser_finding)):
+            self.write(run_dir, f"findings/{lot}.json", {"lot": lot, "findings": [item]})
+
+    def facts(self, run_dir):
+        mixed = fact(refs=[102], topic=self.MIXED, command="systemctl list-timers --no-pager",
+                     result="aucun minuteur de purge dans la liste")
+        self.write_facts(run_dir, GOOD, mixed)
+
+    def test_a_browser_lot_cites_the_fact_the_server_lot_noted_for_its_row(self):
+        run_dir = self.make_run()
+        self.facts(run_dir)
+        mixed = {"type": "fact", "topic": self.MIXED}
+        self.set_lots(run_dir, _finding("na", [FACT], ref=101), _finding("na", [mixed], ref=102))
+        self.assertEqual(self.validate_errors(run_dir, "server"), [])
+        self.assertEqual(self.validate_errors(run_dir, "browser-front"), [])
+        summary, _ = self.plan(run_dir)
+        self.assertNotIn(101, summary["unknown"])
+        self.assertNotIn(102, summary["unknown"])
+        self.assertEqual(self.status_after(run_dir, 101), "Non applicable")
+        self.assertEqual(self.status_after(run_dir, 102), "Non applicable")
+        (op,) = self.ops(run_dir, 102, "comment")
+        self.assertIn(f"Fait relevé sur le serveur : {self.MIXED}", op["text"])
+
+    def test_the_fact_of_another_row_does_not_cover_the_mixed_row(self):
+        run_dir = self.make_run()
+        self.facts(run_dir)
+        self.set_lots(run_dir, _finding("na", [FACT], ref=101), _finding("na", [FACT], ref=102))
+        self.assertEqual(self.validate_errors(run_dir, "server"), [])
+        (error,) = self.validate_errors(run_dir, "browser-front")
+        self.assertIn("CQ-102", error)
+        self.assertIn("ne couvre la ligne CQ-102", error)
+        summary, _ = self.plan(run_dir)
+        self.assertIn(102, summary["unknown"])
+
+    def test_a_browser_lot_never_makes_an_ok_of_a_fact(self):
+        run_dir = self.make_run()
+        self.facts(run_dir)
+        mixed = {"type": "fact", "topic": self.MIXED}
+        self.set_lots(run_dir, _finding("na", [FACT], ref=101), _finding("ok", [mixed], ref=102))
+        self.assertEqual(self.validate_errors(run_dir, "browser-front"), [])
+        summary, _ = self.plan(run_dir)
+        self.assertEqual(self.comment_verdict(run_dir, 102), "ok_human")
+        self.assertNotEqual(self.status_after(run_dir, 102), "Ok / Recetté")
 
 
 class FactInARerunTest(FactCase):
@@ -466,7 +556,7 @@ class FactCommentTest(FactCase):
         item = _finding("na", [FACT, FILE], ref=101)
         text = self.comment(item)
         self.assertIn(f"- Fait relevé sur le serveur : {TOPIC}", text.splitlines())
-        for leaked in (COMMAND, RESULT, "jeton-factice", "watchdog", "exit"):
+        for leaked in (COMMAND, RESULT, "jeton-factice", "exit"):
             self.assertNotIn(leaked, text)
 
     def test_a_topic_on_several_lines_stays_on_one_line(self):
@@ -490,6 +580,18 @@ class FactCommentTest(FactCase):
             self.assertNotIn(leaked, op["text"])
 
 
+SUCCEEDING_COMMANDS = {
+    "ps -A -o comm": ["ps", "-A", "-o", "comm"],
+    "systemctl list-timers --no-pager": ["systemctl", "list-timers", "--no-pager"],
+    "ls <app_dir>": ["ls", "/var/www/app"],
+    "find <app_dir> -maxdepth 3 -name <marker>": ["find", "/var/www/app", "-maxdepth", "3", "-name", "artisan"],
+    "docker ps": ["docker", "ps"],
+    "php -m": ["php", "-m"],
+    "wp plugin list": ["wp", "plugin", "list"],
+    "drush pm:list": ["drush", "pm:list"],
+}
+
+
 class FactInstructionsTest(unittest.TestCase):
     def test_the_auditor_notes_the_fact_before_citing_it(self):
         text = AUDITOR.read_text(encoding="utf-8")
@@ -499,6 +601,26 @@ class FactInstructionsTest(unittest.TestCase):
         self.assertIn("never supports an `ok`", section)
         self.assertIn("`unknown`", section[section.index('"type": "fact"'):])
 
+    def test_the_exit_is_the_real_code_of_a_command_that_the_guard_allows(self):
+        auditor = AUDITOR.read_text(encoding="utf-8")
+        section = auditor[auditor.index("## Server lot"):auditor.index("## Follow-up")]
+        server = SERVER_MD.read_text(encoding="utf-8")
+        server = server[server.index("## Facts for the browser lots"):]
+        for label, text in (("cqa-auditor.md", section), ("server.md", server)):
+            with self.subTest(file=label):
+                self.assertIn("the real exit code the guard returned", text)
+                self.assertIn("Only a command that exited with `0` supports an `na`", text)
+                self.assertIn("never write `0` as the `exit` of a command that failed", text)
+                self.assertIn("`crontab -l` without a crontab", text)
+                self.assertIn("the row is `unknown` and `human_check` names", text)
+        for text, argv in SUCCEEDING_COMMANDS.items():
+            with self.subTest(command=text):
+                self.assertIn(f"`{text}`", section)
+                self.assertTrue(check_command(argv)[0], check_command(argv))
+
+    def test_the_fixture_command_is_one_the_guard_allows(self):
+        self.assertTrue(check_command(shlex.split(COMMAND))[0])
+
     def test_the_reference_gives_the_type_its_check_and_its_limit(self):
         text = VERDICTS_MD.read_text(encoding="utf-8")
         table = text[text.index("| `type` | Keys | Rules |"):text.index("## Several repos")]
@@ -507,6 +629,34 @@ class FactInstructionsTest(unittest.TestCase):
         self.assertIn("written by the agent", table)
         guardrails = text[text.index("## Guardrails of the merge script"):text.index("## From verdict to Notion")]
         self.assertIn("a `fact` never counts", guardrails)
+
+    def test_a_fact_is_evidence_for_the_rows_it_covers_in_any_lot(self):
+        text = VERDICTS_MD.read_text(encoding="utf-8")
+        table = text[text.index("| `type` | Keys | Rules |"):text.index("## Several repos")]
+        self.assertIn("for the rows its `refs` hold, in whatever lot cites it", table)
+        na = text[text.index("### `na`: not applicable"):text.index("### `unknown`: cannot be evaluated")]
+        self.assertIn("whatever the lot that cites it", na)
+        self.assertNotIn("In a `server` lot, an `na`", na)
+        browser = BROWSER_AGENT.read_text(encoding="utf-8")
+        self.assertIn('{"type": "fact", "topic": "<the exact topic>"}', browser)
+        self.assertIn("never of an `ok`", browser)
+
+    def test_the_limits_of_a_fact_are_written(self):
+        text = VERDICTS_MD.read_text(encoding="utf-8")
+        bullets = text[text.index("- A `fact` that fails the check"):text.index("- Never cite a file")]
+        for needle in (
+            "written by the agent",
+            "of form",
+            "not of truth",
+            "A fact is not dated",
+            "frozen at `validate`",
+            "stays accepted even if `facts/server.json` is later removed or changed",
+            "cite a fact the run no longer holds",
+            "accepted by the replay in `plan` is not frozen",
+            "can become `unknown` again at the next reading",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, bullets)
 
     def test_the_server_reference_says_the_file_serves_the_na_too(self):
         text = SERVER_MD.read_text(encoding="utf-8")
@@ -522,7 +672,7 @@ class FactInstructionsTest(unittest.TestCase):
         self.assertNotIn(EM_DASH, json.dumps(schema, ensure_ascii=False))
 
     def test_the_new_lines_carry_no_long_dash(self):
-        for path in (AUDITOR, VERDICTS_MD, SERVER_MD):
+        for path in (AUDITOR, VERDICTS_MD, SERVER_MD, BROWSER_AGENT):
             self.assertNotIn(EM_DASH, path.read_text(encoding="utf-8"), path.name)
 
 

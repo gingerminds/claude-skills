@@ -215,6 +215,21 @@ class RetryAtPlanTest(FrozenCase):
         self.assertIn(102, summary["unknown"])
         self.assertIn("écartée", self.reasons(summary)[101])
 
+    def test_a_tool_that_still_fails_is_named_with_its_result_of_now(self):
+        run_dir = self.make_run()
+        self.write(run_dir, "tools/http/result.json", {"tool": "http", "status": "failed", "reason": "x"})
+        self.validate_errors(run_dir, PERF)
+        record = (run_dir / RECORD).read_bytes()
+        summary, _ = self.plan(run_dir)
+        self.assertIn("« failed »", self.reasons(summary)[102])
+        self.write(run_dir, "tools/http/result.json", {"tool": "http", "status": "skipped", "reason": "y"})
+        summary, _ = self.plan(run_dir)
+        self.assertIn("« skipped »", self.reasons(summary)[102])
+        self.assertNotIn("« failed »", self.reasons(summary)[102])
+        self.assertIn("« skipped »", self.comment_of(run_dir, 102)[0]["text"])
+        self.assertEqual(self.comment_of(run_dir, 102)[0]["verdict"], "ok_human")
+        self.assertEqual((run_dir / RECORD).read_bytes(), record)
+
     def test_a_check_played_again_at_plan_never_makes_a_finding_worse(self):
         run_dir = self.make_run()
         self.write(run_dir, "tools/lighthouse/summary.json", {"tool": "lighthouse", "findings": []})

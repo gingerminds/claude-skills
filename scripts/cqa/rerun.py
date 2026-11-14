@@ -176,17 +176,50 @@ def _checked(grounding: Grounding, evidence: list, ref: int) -> dict:
 
 def _retried(grounding: Grounding, evidence: list, recorded: dict, ref: int) -> dict:
     """Return the recorded check of a finding, less the tool, probe and fact problems the run no
-    longer holds (recorded["retry"]): only those pieces of evidence are checked again."""
-    lifted = set()
+    longer holds (recorded["retry"]): only those pieces of evidence are checked again.
+
+    A problem that still holds is named as the run shows it now (its text and its short reason),
+    unless it changed kind (a dropped piece of evidence that would now set the finding aside):
+    the record then stands, so a reading never makes a finding worse than its validation.
+    """
+    lifted, now = set(), {}
     for again in recorded["retry"]:
         number = again["evidence"]
-        if number <= len(evidence) and not grounding.check_one(number, evidence[number - 1], ref):
-            lifted.add(again["problem"])
-    return {
-        "problems": [text for text in recorded["problems"] if text not in lifted],
-        "refused": [item for item in recorded["refused"] if item["problem"] not in lifted],
-        "retry": [again for again in recorded["retry"] if again["problem"] not in lifted],
+        if number <= len(evidence):
+            found = grounding.check_one(number, evidence[number - 1], ref)
+            if not found:
+                lifted.add(again["problem"])
+            else:
+                now[again["problem"]] = found[0]
+    dropped = {item["problem"] for item in recorded["refused"]}
+    set_aside = set(recorded["problems"])
+    now = {
+        old: problem
+        for old, problem in now.items()
+        if (problem.drops and old in dropped) or (not problem.drops and old in set_aside)
     }
+
+    def current(text: str) -> str:
+        return now[text].text if text in now else text
+
+    return {
+        "problems": [current(text) for text in recorded["problems"] if text not in lifted],
+        "refused": [
+            {**item, "problem": current(item["problem"]), "label": _label(item, now)}
+            for item in recorded["refused"]
+            if item["problem"] not in lifted
+        ],
+        "retry": [
+            {**again, "problem": current(again["problem"])}
+            for again in recorded["retry"]
+            if again["problem"] not in lifted
+        ],
+    }
+
+
+def _label(item: dict, now: dict) -> str:
+    problem = now.get(item["problem"])
+    return problem.label if problem is not None and problem.label else item["label"]
 
 
 def _without_refused(item: dict, refused: list, strict: bool) -> dict:
