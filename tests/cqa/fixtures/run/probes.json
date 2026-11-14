@@ -1,0 +1,29 @@
+{
+  "base_url": "https://preprod.example.org",
+  "probes": [
+    {
+      "id": "root",
+      "method": "GET",
+      "path": "/",
+      "headers": {},
+      "body": "keep",
+      "sensitive": false
+    },
+    {
+      "id": "robots",
+      "method": "GET",
+      "path": "/robots.txt",
+      "headers": {},
+      "body": "keep",
+      "sensitive": false
+    },
+    {
+      "id": "http-version",
+      "method": "GET",
+      "path": "http://preprod.example.org/",
+      "headers": {},
+      "body": "keep",
+      "sensitive": false
+    }
+  ]
+}

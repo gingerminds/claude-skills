@@ -98,7 +98,9 @@ def _requested(run_dir: Path, lots: list, app_path: str):
     for lot in lots:
         document = probes._first_round(run_dir, lot["id"])
         valid, _ = (
-            validate_document(document, set(lot["refs"]), app_path=app_path)
+            validate_document(
+                document, set(lot["refs"]), app_path=app_path, agent_file=True, lot_id=lot["id"]
+            )
             if document
             else ([], [])
         )

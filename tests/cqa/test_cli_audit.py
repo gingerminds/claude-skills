@@ -941,11 +941,12 @@ class FollowupProbesTest(AuditCase):
 
     def test_command_writes_the_contract_file_and_reports_the_rest(self):
         run_dir = self.make_run()
+        sweep = (run_dir / "probes.json").read_bytes()
         result = self.run_json(["probes", run_dir, "--followup"])
         document = self.read(run_dir, "probes-followup.json")
         self.assertEqual(set(document), {"base_url", "probes"})
         self.assertEqual(len(document["probes"]), 2)
-        self.assertFalse((run_dir / "probes.json").exists())
+        self.assertEqual((run_dir / "probes.json").read_bytes(), sweep)
         self.assertEqual(result["file"], "probes-followup.json")
         self.assertEqual(result["count"], 2)
         self.assertEqual(result["lots"], ["code-performance", "code-securite"])
@@ -992,6 +993,7 @@ class FollowupScenariosTest(AuditCase):
 
     def test_scenarios_followup_writes_the_contract_file_and_reports_the_rest(self):
         run_dir = self.make_run()
+        sweep = (run_dir / "probes.json").read_bytes()
         far = make_scenario(id="far", url="https://other.example.net/p")
         self.ask(run_dir, "code-securite", 103, make_scenario(), make_scenario(id="menu-2"), far)
         result = self.run_json(["scenarios", run_dir, "--followup"])
@@ -1014,7 +1016,7 @@ class FollowupScenariosTest(AuditCase):
             [("code-securite", 103, "far", "https://other.example.net/p")],
         )
         self.assertFalse((run_dir / "probes-followup.json").exists())
-        self.assertFalse((run_dir / "probes.json").exists())
+        self.assertEqual((run_dir / "probes.json").read_bytes(), sweep)
 
     def test_scenarios_followup_discards_action_urls_with_their_reason(self):
         run_dir = self.make_run()
@@ -1395,13 +1397,13 @@ class ValidateTest(AuditCase):
             self.set_evidence(run_dir, [{"type": "tool", "tool": name, "ref": "x"}])
             self.assertTrue(self.validate_errors(run_dir), repr(name))
 
-    def test_other_evidence_types_are_not_checked_against_the_run(self):
+    def test_page_and_http_evidence_are_checked_against_the_target_and_the_probes(self):
         run_dir = self.make_run()
         self.set_evidence(
             run_dir,
             [
-                {"type": "page", "url": "https://elsewhere.example.net/", "detail": None},
-                {"type": "http", "url": "https://elsewhere.example.net/", "detail": "x"},
+                {"type": "page", "url": "https://preprod.example.org/a", "detail": None},
+                {"type": "http", "url": "https://preprod.example.org/", "detail": "x"},
             ],
         )
         self.assertEqual(self.validate_errors(run_dir), [])
@@ -1411,7 +1413,7 @@ class ValidateTest(AuditCase):
         self.set_evidence(
             run_dir,
             [
-                {"type": "page", "url": "https://elsewhere.example.net/", "detail": None},
+                {"type": "page", "url": "https://preprod.example.org/", "detail": None},
                 {"type": "file", "repo": "ghost", "path": "a.php"},
                 {"type": "tool", "tool": "ghost", "ref": "x"},
             ],
@@ -3372,7 +3374,9 @@ class RerunValidateAndSnapshotTest(AuditCase):
         run_dir = self.make_run()
         errors = self.rerun_errors(run_dir, 3)
         self.assertIn("code-performance-rerun-03.json", errors[0])
-        self.write(run_dir, "findings/code-performance-rerun-03.json", {"lot": "x", "findings": []})
+        self.write(
+            run_dir, "findings/code-performance-rerun-03.json", {"lot": "code-performance", "findings": []}
+        )
         self.assertTrue(any("aucun constat" in error for error in self.rerun_errors(run_dir, 3)))
 
     def test_validate_rerun_rejects_a_bad_number_and_followup_together(self):
@@ -5071,13 +5075,13 @@ class ContextDocsCommandTest(ContextDocsFixtures, AuditCase):
             json.loads(out),
             {
                 "rows": 2,
-                "by_verdict": {"ko": 1, "ok": 1},
+                "by_verdict": {"ko": 1, "ok_human": 1},
                 "documents": [{"id": "d1", "rows": 2}],
             },
         )
         stored = self.stored_verdicts()
         self.assertEqual(sorted(stored), ["112", "113"])
-        self.assertEqual((stored["112"]["verdict"], stored["113"]["verdict"]), ("ko", "ok"))
+        self.assertEqual((stored["112"]["verdict"], stored["113"]["verdict"]), ("ko", "ok_human"))
         finding = stored["112"]["finding"]
         self.assertEqual(finding["source"], "context_doc")
         self.assertEqual(
@@ -5193,9 +5197,9 @@ class NeutralStatusTest(ContextDocsFixtures, AuditCase):
         self.assertEqual(
             self.coverage("7.3"), {"ok": 1, "na": 1, "ko": 0, "undetermined": 0, "points": []}
         )
-        self.assertEqual(self.stored_verdicts()["113"]["verdict"], "ok")
+        self.assertEqual(self.stored_verdicts()["113"]["verdict"], "ok_human")
         self.assertEqual(self.stored_verdicts()["112"]["verdict"], "ko")
-        self.assertEqual(summary["by_verdict"], {"ko": 1, "ok": 1})
+        self.assertEqual(summary["by_verdict"], {"ko": 1, "ok_human": 1})
 
     def test_a_ko_point_attached_to_that_criterion_makes_the_row_ko(self):
         self.judge(neutral=True, ko_on_7_3=True)
@@ -5325,7 +5329,7 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         self.assertEqual(document["lot"], "context-docs")
         self.assertEqual(
             [(item["ref"], item["verdict"]) for item in document["findings"]],
-            [(112, "ko"), (113, "ok")],
+            [(112, "ko"), (113, "ok_human")],
         )
         verdicts = self.read(self.run_dir, "context-docs/verdicts.json")["verdicts"]
         self.assertEqual(document["findings"][0], verdicts["112"]["finding"])
@@ -5529,7 +5533,7 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         verdicts = self.read(self.run_dir, "context-docs/verdicts.json")["verdicts"]
         self.assertEqual(
             {ref: entry["verdict"] for ref, entry in verdicts.items()},
-            {"112": "ko", "113": "ok", "115": "partial"},
+            {"112": "ko", "113": "ok_human", "115": "partial"},
         )
         self.lots()
         self.write_lot_findings(
@@ -5542,7 +5546,7 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
             after,
             {
                 112: "À traiter",
-                113: "Ok / Recetté",
+                113: "Mis en place",
                 114: "Ok / Recetté",
                 115: "Mise en place partielle",
             },
@@ -5553,6 +5557,75 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         self.assertIn("Rapport d1 : critères 1.1, 7.3", comments[115])
         self.assertNotIn(112, plan["summary"]["unknown"])
         validate_plan(plan)
+
+    def test_a_conforming_report_is_planned_as_ok_human_never_as_ok_recette(self):
+        self.judged(rows=[(114, ())])
+        for ref in (112, 113, 114):
+            self.edit_row(self.run_dir, ref, status="À traiter", last_edited_by_bot=True)
+        self.lots()
+        self.write_lot_findings(
+            "code-accessibilite", "code-accessibilite", self.skill_finding(114, "ok")
+        )
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
+        self.assertEqual(after[113], "Mis en place")
+        self.assertEqual(after[114], "Ok / Recetté")
+        verdicts = {op["ref"]: op["verdict"] for op in plan["ops"] if op["kind"] == "comment"}
+        self.assertEqual((verdicts[112], verdicts[113]), ("ko", "ok_human"))
+        comments = {op["ref"]: op["text"] for op in plan["ops"] if op["kind"] == "comment"}
+        self.assertIn("Conforme d'après le rapport d1 du 2026-10-01", comments[113])
+        self.assertIn("à confirmer sur la version actuelle", comments[113])
+        self.assertIn("Rapport d1 : critères 7.3", comments[113])
+
+    def test_an_ok_of_a_report_written_by_an_older_run_is_still_planned_as_ok_human(self):
+        self.judged()
+        self.edit_row(self.run_dir, 113, status="À traiter", last_edited_by_bot=True)
+        self.lots()
+        document = self.read(self.run_dir, "findings/context-docs.json")
+        for item in document["findings"]:
+            if item["ref"] == 113:
+                item["verdict"], item["human_check"] = "ok", None
+        self.write(self.run_dir, "findings/context-docs.json", document)
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
+        self.assertEqual(after[113], "Mis en place")
+        verdicts = {op["ref"]: op["verdict"] for op in plan["ops"] if op["kind"] == "comment"}
+        self.assertEqual(verdicts[113], "ok_human")
+
+    def test_a_ko_of_a_report_is_still_taken_over_by_plan(self):
+        self.judged()
+        self.edit_row(self.run_dir, 112, status="Mis en place", last_edited_by_bot=True)
+        self.lots()
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
+        self.assertEqual(after[112], "À traiter")
+
+    def test_context_docs_file_still_validates(self):
+        self.judged(rows=[(114, ())])
+        self.lots()
+        virtual = rerun.document_lot(self.stored_lots()["lots"])
+        found = rerun.read_grounded_findings(
+            self.run_dir, self.read(self.run_dir, "context.json"), virtual, "context-docs.json",
+            freeze="refresh",
+        )
+        self.assertEqual(found[1], [])
+        self.assertEqual([(item["ref"], item["verdict"]) for item in found[0]], [(112, "ko"), (113, "ok_human")])
+        self.assertTrue(all(item["source"] == "context_doc" for item in found[0]))
+        recorded = self.read(self.run_dir, "findings/context-docs.checked.json")
+        self.assertEqual(
+            [entry["problems"] for entry in recorded["files"]["context-docs.json"]["findings"]], [[], []]
+        )
+
+    def test_a_document_evidence_of_a_missing_document_is_refused_at_plan(self):
+        self.judged()
+        self.lots()
+        shutil.rmtree(self.run_dir / "context-docs" / "d1")
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        self.assertTrue({112, 113} <= set(plan["summary"]["unknown"]))
 
     def test_the_skill_finding_of_a_rerun_replaces_the_one_of_the_document(self):
         self.judged(rows=[(114, ())])
@@ -5580,7 +5653,7 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         plan = self.read(self.run_dir, "notion/plan.json")
         self.assertEqual(plan["summary"]["unknown"], [104, 106, 114, 120])
         after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
-        self.assertEqual((after[112], after[113]), ("À traiter", "Ok / Recetté"))
+        self.assertEqual((after[112], after[113]), ("À traiter", "Mis en place"))
 
 
     def synthesis_text(self, mode=None):
@@ -5613,7 +5686,7 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
                 "  - Rattachés à une ligne : 2 (dont 1 proposé par le skill)",
                 "  - Sans ligne : 1",
                 "    - d1-002 : Contraste insuffisant du pied de page (Transverses, critère 3.1)",
-                "  - Lignes jugées d'après le document : 3 (CQ-112 : ko, CQ-113 : ok, CQ-115 : partial)",
+                "  - Lignes jugées d'après le document : 3 (CQ-112 : ko, CQ-113 : ok_human, CQ-115 : partial)",
                 "  - Rattachements proposés par le skill, acceptés en mode autonome :",
                 "    - d1-003 : CQ-114",
             ],

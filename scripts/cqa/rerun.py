@@ -9,6 +9,7 @@ from typing import Callable, Optional
 from cqa import checked
 from cqa.checklist import STATUS_IMPLEMENTED, ref_label
 from cqa.findings import validate_document
+from cqa.grounding import Grounding
 from cqa.lots import DOCUMENT_LOT_ID, build_lots, lot_document_refs
 from cqa.probes import app_path
 
@@ -18,7 +19,6 @@ _DATE = re.compile(
     r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]+))?Z"
 )
 _TOOL_NAME = re.compile(r"[a-z0-9-]+")
-_EVIDENCE_TOOL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _default_reader(run_dir: Path, lot: dict, name: str) -> Optional[tuple]:
@@ -33,7 +33,14 @@ def _default_reader(run_dir: Path, lot: dict, name: str) -> Optional[tuple]:
         set(lot["refs"]),
         optional_refs=frozenset(lot_document_refs(lot)),
         forbidden_refs=_document_refs_of_round(lot, name),
+        agent_file=_is_agent_file(lot),
+        lot_id=lot["id"],
     )
+
+
+def _is_agent_file(lot: dict) -> bool:
+    """Whether the findings files of the lot are written by a sub-agent: all but the documents'."""
+    return lot.get("id") != DOCUMENT_LOT_ID
 
 
 def _document_refs_of_round(lot: dict, name: str) -> frozenset:
@@ -52,10 +59,13 @@ def read_grounded_findings(
 ) -> Optional[tuple]:
     """Return (valid findings, errors) of findings/<name>, None when it does not exist.
 
-    The valid findings are those of validate_document, with the path the application is served
-    under (context.json target), whose evidence also holds against the run: a cited file exists
-    in a repo of context.json, a cited tool has its summary. Every reader of the findings of a
-    run that decides something (plan, rerun-candidates, recette) uses it.
+    The valid findings are those of validate_document (as an agent file, but for the virtual lot
+    of the documents), with the path the application is served under (context.json target), whose
+    evidence also holds against the run (cqa.grounding): a cited file exists in a repo of
+    context.json, a cited tool succeeded and has its summary, a page or an http request is on a
+    host of the target and an http request is a probe the toolbox ran, a document is in
+    context-docs/. Every reader of the findings of a run that decides something (plan,
+    rerun-candidates, recette) uses it.
 
     The check is frozen when the file is validated (cqa.checked, findings/<lot>.checked.json):
     while the record of the file holds for its current content, the recorded problems stand in
@@ -78,6 +88,8 @@ def read_grounded_findings(
         app_path=app_path(context),
         optional_refs=frozenset(lot_document_refs(lot)),
         forbidden_refs=_document_refs_of_round(lot, name),
+        agent_file=_is_agent_file(lot),
+        lot_id=lot["id"],
     )
     repos = context.get("repos") if isinstance(context.get("repos"), list) else []
     roots = {
@@ -86,6 +98,7 @@ def read_grounded_findings(
         if isinstance(repo, dict) and isinstance(repo.get("name"), str)
         and isinstance(repo.get("path"), str)
     }
+    grounding = Grounding(run_dir, context, roots)
     file_digest = checked.digest(data)
     recorded = None if freeze == "refresh" else checked.load(run_dir, lot["id"], name, file_digest)
     moment = checked.now()
@@ -93,7 +106,7 @@ def read_grounded_findings(
     for item in valid:
         problems = recorded.get(item["ref"]) if recorded is not None else None
         if problems is None:
-            problems = _evidence_problems(item["evidence"], roots, run_dir)
+            problems = grounding.problems(item["evidence"])
         entries.append(checked.entry(item["ref"], item["evidence"], problems, moment))
         errors.extend(f"constat {ref_label(item['ref'])} : {problem}" for problem in problems)
         if not problems:
@@ -101,55 +114,6 @@ def read_grounded_findings(
     if entries and (freeze == "refresh" or (freeze == "ensure" and recorded is None)):
         checked.freeze(run_dir, lot["id"], name, file_digest, entries)
     return grounded, errors
-
-
-def _evidence_problems(evidence: list, roots: dict, run_dir: Path) -> list:
-    """Return what the evidence of a valid finding claims that the run does not hold."""
-    problems = []
-    for number, item in enumerate(evidence, start=1):
-        kind = item["type"]
-        if kind == "file":
-            problem = _file_problem(item, roots)
-        elif kind == "tool":
-            problem = _tool_problem(item, run_dir)
-        else:
-            problem = None
-        if problem:
-            problems.append(f"preuve n° {number} ({kind}) : {problem}")
-    return problems
-
-
-def _file_problem(item: dict, roots: dict) -> Optional[str]:
-    repo, path = item["repo"], item["path"]
-    if repo not in roots:
-        return f"repo {_quoted(repo)} absent de context.json (repos : {', '.join(roots)})"
-    relative = Path(path)
-    if relative.is_absolute() or ".." in relative.parts:
-        return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
-    if relative.parts == ():
-        return f"chemin {_quoted(path)} : la racine du repo {_quoted(repo)} n'est pas une preuve"
-    candidate = roots[repo] / relative
-    if not candidate.exists():
-        return f"chemin {_quoted(path)} introuvable dans le repo {_quoted(repo)}"
-    if not candidate.resolve().is_relative_to(roots[repo].resolve()):
-        return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
-    if not candidate.is_file():
-        return f"chemin {_quoted(path)} : pas un fichier dans le repo {_quoted(repo)} (dossier ?)"
-    return None
-
-
-def _tool_problem(item: dict, run_dir: Path) -> Optional[str]:
-    tool = item["tool"]
-    if not _EVIDENCE_TOOL.fullmatch(tool):
-        return f"nom d'outil {_quoted(tool)} invalide"
-    if not (run_dir / "tools" / tool / "summary.json").is_file():
-        return f"outil {_quoted(tool)} sans résumé (tools/{tool}/summary.json est introuvable)"
-    return None
-
-
-def _quoted(value) -> str:
-    text = str(value)
-    return f"« {text if len(text) <= 60 else text[:59] + '…'} »"
 
 
 def finding_files(run_dir: Path, lot_id: str) -> list[str]:

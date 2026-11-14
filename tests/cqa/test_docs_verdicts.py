@@ -253,6 +253,20 @@ class SyntheticFindingTest(unittest.TestCase):
                 )
         self.assertIn("in_repo", synthetic_finding(112, "partial", [self.ko_part()]))
 
+    def test_an_ok_human_finding_says_what_to_confirm(self):
+        finding = synthetic_finding(112, "ok_human", [part(criteria=["7.3"])])
+        self.assertEqual(finding["verdict"], "ok_human")
+        self.assertEqual(
+            finding["human_check"],
+            f"Conforme d'après le rapport d1 du {DATE}, à confirmer sur la version actuelle.",
+        )
+        self.assertEqual(finding["summary"], f"Rapport « {LABEL} » ({DATE}) : critères conformes ou non applicables : 7.3.")
+        self.assertNotIn("in_repo", finding)
+        self.assertIsNone(finding["todo"])
+
+    def test_an_ok_finding_called_directly_keeps_no_check(self):
+        self.assertIsNone(synthetic_finding(112, "ok", [part(criteria=["7.3"])])["human_check"])
+
     def test_the_wording_follows_the_verdict_of_each_document(self):
         ok = synthetic_finding(112, "ok", [part(criteria=["7.2", "7.3"])])
         self.assertEqual(
@@ -460,7 +474,7 @@ class SyntheticFindingTest(unittest.TestCase):
         cases = {
             "ko": part([make_point(1, ["7.3"])], ["7.3"]),
             "partial": part([make_point(1, ["7.3"])], ["7.3", "7.2"]),
-            "ok": part(criteria=["7.3"]),
+            "ok_human": part(criteria=["7.3"]),
             "na": part(criteria=["7.3"]),
         }
         for verdict, one in cases.items():
@@ -477,9 +491,13 @@ class SyntheticFindingTest(unittest.TestCase):
                 after_followup = apply_guardrails(finding, row, followup_done=True)
                 self.assertEqual(after_followup["verdict"], verdict)
                 on_human = apply_guardrails(finding, human, followup_done=False)
-                self.assertEqual(
-                    on_human["verdict"], "ok_human" if verdict == "ok" else verdict
-                )
+                self.assertEqual(on_human["verdict"], verdict)
+
+    def test_an_ok_of_a_report_is_lowered_by_the_guardrail_of_the_plan(self):
+        finding = synthetic_finding(112, "ok", [part(criteria=["7.3"])])
+        guarded = apply_guardrails(finding, {"ref": 112, "tools": ["Navigateur"]}, followup_done=False)
+        self.assertEqual(guarded["verdict"], "ok_human")
+        self.assertIn("rapport", guarded["guardrail"])
 
     def test_the_parts_are_not_modified(self):
         original = [self.ko_part("contenu", "dev")]
@@ -554,6 +572,111 @@ class DocumentVerdictsTest(VerdictCase):
         self.assertEqual(finding["evidence"][0]["ref"], "critères 7.3")
         self.assertTrue(finding["summary"].startswith(f"Rapport « {LABEL} » ({DATE}) : 1 point"))
 
+    def conforming(self, *, date=DATE, label=LABEL):
+        """A grid that covers every criterion of the rows 112 and 113 as conforming."""
+        rows = self.standard_rows()
+        coverage = {"7.2": counts(ok=1), "7.3": counts(ok=1), "12.9": counts(ok=1)}
+        self.add_document([], coverage, label=label, date=date)
+        self.validate_links(rows)
+        return rows
+
+    def test_document_ok_becomes_ok_human_with_report_and_date(self):
+        rows = self.conforming()
+        found = self.verdicts(rows)
+        for ref in (112, 113):
+            with self.subTest(ref=ref):
+                verdict, finding = self.only(found, ref)
+                self.assertEqual((verdict, finding["verdict"]), ("ok_human", "ok_human"))
+                self.assertEqual(
+                    finding["human_check"],
+                    f"Conforme d'après le rapport d1 du {DATE}, "
+                    "à confirmer sur la version actuelle.",
+                )
+                self.assertIsNone(finding["todo"])
+                self.assertEqual(finding["confidence"], "high")
+                self.assertEqual(finding["source"], "context_doc")
+                self.assertEqual(
+                    finding["evidence"], [{"type": "document", "doc": "d1", "ref": finding["evidence"][0]["ref"]}]
+                )
+                self.assertIn(f"Rapport « {LABEL} » ({DATE}) : critères conformes", finding["summary"])
+                valid, errors = validate_document({"lot": "context-docs", "findings": [finding]}, {ref})
+                self.assertEqual((errors, valid), ([], [finding]))
+                guarded = apply_guardrails(finding, {"ref": ref, "tools": ["Navigateur"]}, followup_done=True)
+                self.assertEqual((guarded["verdict"], guarded["guardrail"]), ("ok_human", None))
+
+    def test_document_ok_without_date_says_unknown_date(self):
+        rows = self.conforming(date="")
+        finding = self.verdicts(rows)[112]["finding"]
+        self.assertEqual(finding["verdict"], "ok_human")
+        self.assertEqual(
+            finding["human_check"],
+            "Conforme d'après le rapport d1 de date inconnue, à confirmer sur la version actuelle.",
+        )
+
+    def test_document_ko_is_still_carried_over(self):
+        rows = self.standard_document()
+        self.validate_links(rows)
+        found = self.verdicts(rows)
+        verdict, finding = self.only(found, 113)
+        self.assertEqual((verdict, finding["verdict"]), ("ko", "ko"))
+        self.assertIsNone(finding["human_check"])
+        self.assertEqual(self.only(found, 112)[0], "partial")
+        self.assertIsNone(self.only(found, 112)[1]["human_check"])
+
+    def test_a_document_na_is_still_carried_over(self):
+        rows = self.standard_rows()
+        self.add_document([], {"7.3": counts(na=2)})
+        self.validate_links(rows)
+        verdict, finding = self.only(self.verdicts(rows), 113)
+        self.assertEqual((verdict, finding["verdict"]), ("na", "na"))
+        self.assertIsNone(finding["human_check"])
+
+    def test_two_conforming_reports_are_both_named(self):
+        rows = self.standard_rows()
+        coverage = {"7.2": counts(ok=1), "7.3": counts(ok=1), "12.9": counts(ok=1)}
+        self.add_document([], coverage, date="2026-10-01")
+        self.add_document([], coverage, doc_id="d2", date="")
+        self.validate_links(rows)
+        finding = self.verdicts(rows)[112]["finding"]
+        self.assertEqual(finding["verdict"], "ok_human")
+        self.assertEqual(
+            finding["human_check"],
+            "Conforme d'après le rapport d1 du 2026-10-01 et le rapport d2 de date inconnue, "
+            "à confirmer sur la version actuelle.",
+        )
+
+    def test_a_conforming_report_next_to_a_na_one_names_the_conforming_one_only(self):
+        rows = self.standard_rows()
+        self.add_document([], {"7.3": counts(na=2)}, date="2026-10-01")
+        self.add_document([], {"7.3": counts(ok=2)}, doc_id="d2", date="2026-10-02")
+        self.validate_links(rows)
+        finding = self.verdicts(rows)[113]["finding"]
+        self.assertEqual(finding["verdict"], "ok_human")
+        self.assertIn("rapport d2 du 2026-10-02", finding["human_check"])
+        self.assertNotIn("d1", finding["human_check"])
+
+    def test_a_conforming_report_next_to_a_ko_one_stays_ko_without_a_check_to_make(self):
+        rows = self.standard_rows()
+        self.add_document([], {"7.2": counts(ok=1), "7.3": counts(ok=1), "12.9": counts(ok=1)})
+        self.add_document(
+            [make_point(1, [], doc="d2", source="Constat 3")], doc_id="d2", kind="constats"
+        )
+        self.validate_links(rows, proposed={"d2-001": [112]})
+        verdict, finding = self.only(self.verdicts(rows), 112)
+        self.assertEqual((verdict, finding["verdict"]), ("ko", "ko"))
+        self.assertIsNone(finding["human_check"])
+
+    def test_the_check_of_many_reports_fits_its_cap(self):
+        rows = self.standard_rows()
+        coverage = {"7.2": counts(ok=1), "7.3": counts(ok=1), "12.9": counts(ok=1)}
+        for number in range(1, 16):
+            self.add_document([], coverage, doc_id=f"d{number}")
+        self.validate_links(rows)
+        finding = self.verdicts(rows)[112]["finding"]
+        self.assertLessEqual(len(finding["human_check"]), 400)
+        valid, errors = validate_document({"lot": "context-docs", "findings": [finding]}, {112})
+        self.assertEqual(errors, [])
+
     def test_rows_without_any_verdict_are_left_to_the_skill(self):
         rows = self.standard_document()
         self.validate_links(rows)
@@ -569,7 +692,7 @@ class DocumentVerdictsTest(VerdictCase):
         self.validate_links(rows)
         found = self.verdicts(rows)
         self.assertEqual(
-            {ref: entry["verdict"] for ref, entry in found.items()}, {112: "ok", 113: "na"}
+            {ref: entry["verdict"] for ref, entry in found.items()}, {112: "ok_human", 113: "na"}
         )
         finding = found[113]["finding"]
         self.assertEqual(finding["summary"], f"Rapport « {LABEL} » ({DATE}) : critères non applicables : 7.3.")
@@ -621,7 +744,7 @@ class DocumentVerdictsTest(VerdictCase):
         self.validate_links(rows, proposed={"d1-001": [112]})
         found = self.verdicts(rows)
         self.assertEqual(found[112]["verdict"], "partial")
-        self.assertEqual(found[113]["verdict"], "ok")
+        self.assertEqual(found[113]["verdict"], "ok_human")
         self.assertIn("Problème de focus", found[112]["finding"]["summary"])
 
     def test_a_ko_point_proposed_for_a_row_without_criteria_gives_ko(self):
@@ -652,7 +775,7 @@ class DocumentVerdictsTest(VerdictCase):
         )
         self.validate_links(rows)
         found = self.verdicts(rows)
-        self.assertEqual({entry["verdict"] for entry in found.values()}, {"ok"})
+        self.assertEqual({entry["verdict"] for entry in found.values()}, {"ok_human"})
         self.assertNotIn("point", found[112]["finding"]["summary"])
 
     def test_row_of_another_category_citing_the_criterion_is_untouched(self):
@@ -660,7 +783,7 @@ class DocumentVerdictsTest(VerdictCase):
         self.write_fiche(120, fiche_text("7.3"))
         rows = [make_row(112, ACCESS), make_row(120, QUALITY)]
         for coverage, points, expected in (
-            ({"7.3": counts(ok=2)}, [], "ok"),
+            ({"7.3": counts(ok=2)}, [], "ok_human"),
             ({"7.3": counts(ko=1, points=["d1-001"])}, [make_point(1, ["7.3"])], "ko"),
         ):
             with self.subTest(expected=expected):
@@ -720,7 +843,7 @@ class DocumentVerdictsTest(VerdictCase):
         self.assertIn("2026-10-30", finding["summary"])
         self.assertTrue(finding["summary"].startswith("Rapport « Pentest » (2026-11-02) : 1 point"))
         self.assertEqual(finding["todo"], "Régénérer l'identifiant")
-        self.assertEqual(found[113]["verdict"], "ok")
+        self.assertEqual(found[113]["verdict"], "ok_human")
         self.assertEqual(len(found[113]["finding"]["evidence"]), 1)
 
     def test_each_document_is_worded_by_its_own_verdict(self):
@@ -750,7 +873,7 @@ class DocumentVerdictsTest(VerdictCase):
         self.validate_links(rows, proposed={"d1-001": [112]})
         found = self.verdicts(rows)
         self.assertEqual(found[112]["verdict"], "ko")
-        self.assertEqual(found[113]["verdict"], "ok")
+        self.assertEqual(found[113]["verdict"], "ok_human")
         self.assertEqual(len(found[112]["finding"]["evidence"]), 2)
 
     def test_several_documents_the_worst_verdict_wins(self):
@@ -759,7 +882,7 @@ class DocumentVerdictsTest(VerdictCase):
         self.add_document([], {"7.3": counts(ok=2)}, doc_id="d2", label="Second", date="2026-10-02")
         self.validate_links(rows)
         found = self.verdicts(rows)
-        self.assertEqual(found[113]["verdict"], "ok")
+        self.assertEqual(found[113]["verdict"], "ok_human")
         self.assertEqual([item["doc"] for item in found[113]["finding"]["evidence"]], ["d1", "d2"])
 
     def test_a_constats_document_gives_ko_only_to_the_rows_it_is_linked_to(self):

@@ -4176,6 +4176,95 @@ class FrozenEvidenceContract(unittest.TestCase):
             self.assertNotIn(EM_DASH, _text(path), path.name)
 
 
+EVIDENCE_RULES = (
+    "The code checks every piece of evidence at `validate`: a `page` or `http` URL is on a host of "
+    "the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` of "
+    "`context.json`), an `http` URL is a probe of the toolbox that ran (`tools/http/`, "
+    "`tools/http-followup/`), and a `tool` is a tool whose `result.json` is `ok` or "
+    "`not_applicable`. A finding with other evidence is refused. A request you made yourself is "
+    "not `http` evidence: write its status, header or size in `summary`. `na`, like `ok`, needs "
+    "at least one piece of evidence."
+)
+
+
+class VerifiedVerdictsContract(unittest.TestCase):
+    """The instructions say which evidence the code checks and what a report may give."""
+
+    def test_the_reference_and_both_agents_say_the_same_evidence_rules(self):
+        for path in (VERDICTS_MD, AUDITOR, BROWSER):
+            with self.subTest(path=path.name):
+                self.assertIn(EVIDENCE_RULES, _text(path))
+
+    def test_the_reference_no_longer_lets_an_na_go_without_evidence(self):
+        text = _text(VERDICTS_MD)
+        self.assertNotIn("May be empty, except for `ok`.", text)
+        self.assertIn("May be empty, except for `ok` and `na`", text)
+        na = text[text.index("### `na`: not applicable"):text.index("### `unknown`: cannot be evaluated")]
+        self.assertIn("at least one piece of evidence", na)
+        self.assertIn("An `na` without evidence becomes `unknown`", na)
+        guardrails = text[text.index("## Guardrails of the merge script"):text.index("## From verdict to Notion")]
+        self.assertIn("7. `na` without evidence becomes `unknown`.", guardrails)
+        self.assertIn("8. An `ok` built from a context document", guardrails)
+
+    def test_the_evidence_table_names_the_checks_of_each_type(self):
+        text = _text(VERDICTS_MD)
+        table = text[text.index("| `type` | Keys | Rules |"):text.index("## Several repos")]
+        for needle in ("on a host of the target", "whose `result.json` is `ok` or `not_applicable`",
+                       "A URL that a probe of the toolbox requested"):
+            self.assertIn(needle, table)
+
+    def test_the_agent_files_hold_nothing_the_code_writes(self):
+        text = _text(VERDICTS_MD)
+        self.assertIn("no other key than the optional `needs_scenarios`, `tool_dates` and `in_repo`", text)
+        self.assertIn("a `source`, a `guardrail` or a `document` evidence", text)
+        self.assertIn("a file whose `lot` is not the lot it is validated for", text)
+        schema = _text(ROOT / SCHEMA)
+        self.assertIn('"additionalProperties": false', schema)
+
+    def test_a_conforming_report_is_ok_human_in_every_instruction(self):
+        verdicts = _text(VERDICTS_MD)
+        documents = _text(DOCUMENTS_MD)
+        for text in (verdicts, documents):
+            self.assertIn("Conforme d'après le rapport d1 du <date>, à confirmer sur la version actuelle", text)
+            self.assertIn("de date inconnue", text)
+        self.assertIn("gives `ok_human`, or `na` when all are `na`", documents)
+        self.assertIn("`ok_human` when every criterion of the row is covered", verdicts)
+        self.assertIn("never `ok`", _text(CONTEXT_MD))
+        readme = _text(ROOT / "README.md")
+        self.assertIn("jamais repris en « Ok / Recetté »", readme)
+        self.assertNotIn("`ko` (un `ko` du rapport n'est jamais perdu : `partial` quand un autre critère de la ligne est conforme), `ok` ou `na`", readme)
+
+    def test_validation_lists_the_new_refusals(self):
+        lots = _text(REFERENCES / "lots.md")
+        validation = lots[lots.index("## 5. Validation"):lots.index("## 6. Follow-ups")]
+        for needle in ("a `lot` field that is not the lot", "a key a lot never writes",
+                       "a `document` evidence", "a tool that failed or was skipped",
+                       "outside the target", "no probe of the toolbox answered"):
+            self.assertIn(needle, validation)
+
+    def test_the_confirmation_text_is_the_one_of_the_code(self):
+        check = docs_verdicts._confirmation(
+            [{"document": {"id": "d1", "date": "2026-10-30"}, "verdict": "ok"}], "ok_human"
+        )
+        self.assertEqual(
+            check, "Conforme d'après le rapport d1 du 2026-10-30, à confirmer sur la version actuelle."
+        )
+        self.assertTrue(_text(VERDICTS_MD).count("à confirmer sur la version actuelle") >= 1)
+
+    def test_the_schema_says_what_it_refuses(self):
+        schema = json.loads(_text(ROOT / SCHEMA))
+        finding = schema["$defs"]["finding"]["properties"]
+        self.assertIn("an na without evidence becomes unknown", finding["evidence"]["description"])
+        self.assertIn("is refused", finding["evidence"]["description"])
+        self.assertIn("at least one piece of evidence", finding["verdict"]["description"])
+        self.assertIn("validate refuses it in a lot file", finding["source"]["description"])
+        self.assertIn("is refused", schema["properties"]["lot"]["description"])
+
+    def test_the_new_lines_carry_no_long_dash(self):
+        for path in (VERDICTS_MD, DOCUMENTS_MD, CONTEXT_MD, AUDITOR, BROWSER, ROOT / SCHEMA):
+            self.assertNotIn(EM_DASH, _text(path), path.name)
+
+
 class FirstContextContract(unittest.TestCase):
     def test_wp_plugins_needs_a_first_context_written_before_step_8(self):
         skill = SKILL.read_text(encoding="utf-8")

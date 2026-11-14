@@ -158,6 +158,8 @@ For each row:
 3. Compare the code and the preprod, and fill `divergence` when they disagree.
 4. Write the finding as `verdicts.md` says, keeping the worst verdict across repos.
 
+Evidence. The code checks every piece of evidence at `validate`: a `page` or `http` URL is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` of `context.json`), an `http` URL is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`), and a `tool` is a tool whose `result.json` is `ok` or `not_applicable`. A finding with other evidence is refused. A request you made yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like `ok`, needs at least one piece of evidence.
+
 Keep your context small:
 - Search with precise Grep and Glob patterns. Skip `vendor`, `node_modules`, `.git`, `.nuxt`, `.output`, `dist`, `storage`, `web/core`, `wp-includes` unless the row is about them.
 - Read only the lines you need.
@@ -173,7 +175,7 @@ Keep your context small:
 - Never print the body of a sensitive path (`/.env`, `/.git/...`, backups, `composer.json`, `phpinfo.php`): status, size and type only.
 - Only URLs of the project, a few per row. Never crawl, never loop.
 - Before your own request: never request a `.php` URL, see the hard rules.
-- Cite each request you made as `http` evidence; cite `tools/http/` answers as `tool` evidence.
+- Your own request is not `http` evidence (see Method): write what it returned in `summary`, and cite `tools/http/` and `tools/http-followup/` answers as `tool` evidence.
 - A finding that lists probes is never `ok`, `ok_human` or `na`: give `unknown`, or `ko` or `partial` when your evidence already establishes it.
 
 ## Security rows

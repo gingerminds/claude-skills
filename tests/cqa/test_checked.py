@@ -26,6 +26,7 @@ class FreezeCase(RerunCase):
         (repo / "app" / "a.php").write_text("<?php\n", encoding="utf-8")
         (repo / "app" / "b.php").write_text("<?php\n", encoding="utf-8")
         self.write("tools/http/summary.json", {})
+        self.write("tools/http/result.json", {"tool": "http", "status": "ok"})
         self.first_round(*(finding(ref, evidence=evidence_of()) for ref in (1, 2, 3)), fill=False)
 
     @property

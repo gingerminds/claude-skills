@@ -10,7 +10,7 @@ The contract is the JSON Schema `skills/checklist-quality-audit/schemas/finding.
 - Shape: `{"lot": "<lot id>", "findings": [<finding>, ...]}`, valid JSON in UTF-8.
 - Always one finding for every row of the lot: every ref of the lot entry in `lots.json`, no other ref, never the same ref twice. A ref outside the lot or given twice is rejected, and the row counts as not evaluated.
 - The follow-up file is a complete lot document too, with one finding for every row of the lot. Copy unchanged the first-round finding of every row that asked for no probe.
-- Every finding has the nine keys below, none missing, and no other key than the optional `needs_scenarios` (and the keys the agents' own instructions name).
+- Every finding has the nine keys below, none missing, and no other key than the optional `needs_scenarios`, `tool_dates` and `in_repo`. `validate` refuses a finding that holds any other key, a `source`, a `guardrail` or a `document` evidence (the code writes them, never a lot), and a file whose `lot` is not the lot it is validated for.
 
 | Key | Type | Rule |
 |---|---|---|
@@ -18,7 +18,7 @@ The contract is the JSON Schema `skills/checklist-quality-audit/schemas/finding.
 | `verdict` | `ko`, `partial`, `unknown`, `ok_human`, `ok`, `na` | See "Verdicts". |
 | `confidence` | `high`, `medium`, `low` | See "Confidence". |
 | `summary` | text, 1 to 600 characters | What was found. |
-| `evidence` | list | See "Evidence". May be empty, except for `ok`. |
+| `evidence` | list | See "Evidence". May be empty, except for `ok` and `na`, which need at least one piece of evidence. |
 | `todo` | text of 400 characters at most, or `null` | What to do to make the row compliant. `null` when nothing is left to do. |
 | `human_check` | text of 400 characters at most, or `null` | What a human must validate, and where. `null` when nothing. |
 | `divergence` | text of 400 characters at most, or `null` | Difference between the code and the preprod. See "Code and preprod". |
@@ -144,7 +144,7 @@ Use it when what the fiche asks is missing or broken where it matters.
 
 Use it when the subject of the row does not exist in the project: no payment, no form, no API, no user account.
 
-- Always with `confidence: "high"`, and a `summary` that says what you searched and did not find.
+- Always with `confidence: "high"`, at least one piece of evidence (the file or the result that shows the subject is absent) and a `summary` that says what you searched and did not find. An `na` without evidence becomes `unknown`.
 - Never use `na` for "not checked": that is `unknown`.
 - Rows outside the project technos never reach you: the scripts already set them aside.
 
@@ -200,10 +200,11 @@ List the strongest evidence first: the comment shows the first 5.
 | `type` | Keys | Rules |
 |---|---|---|
 | `file` | `repo`, `path`, `line` (optional: integer from 1, or `null`) | `repo` is a `repos[].name` of `context.json`. `path` is relative to the repo root and names an existing file (never a folder nor the root `.`); never absolute, never `..`. The comment links it to GitLab at the audited commit. |
-| `page` | `url`, `detail` (optional) | A page seen in the browser. `detail` says what was observed, in French. |
-| `tool` | `tool`, `ref` | `tool` is a folder of `tools/` that holds a `summary.json`. `ref` is relative to `tools/<tool>/`, for example `summary.json#home/3`. |
-| `http` | `url`, `detail` | A URL requested. `detail` gives the status, the header or a short excerpt, in French and without any secret. |
+| `page` | `url`, `detail` (optional) | A page seen in the browser, on a host of the target. `detail` says what was observed, in French. |
+| `tool` | `tool`, `ref` | `tool` is a folder of `tools/` that holds a `summary.json` and whose `result.json` is `ok` or `not_applicable` (a tool that failed or was skipped is no evidence). `ref` is relative to `tools/<tool>/`, for example `summary.json#home/3`. |
+| `http` | `url`, `detail` | A URL that a probe of the toolbox requested (`tools/http/`, `tools/http-followup/`), on a host of the target. `detail` gives the status, the header or a short excerpt, in French and without any secret. |
 
+- The code checks every piece of evidence at `validate`: a `page` or `http` URL is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` of `context.json`), an `http` URL is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`), and a `tool` is a tool whose `result.json` is `ok` or `not_applicable`. A finding with other evidence is refused. A request you made yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like `ok`, needs at least one piece of evidence.
 - Never cite a file, a repo or a tool that the run does not hold: `cqa_plan.py validate` checks them and a finding with such evidence is rejected. The check is made once, at `validate`, and frozen in `findings/<lot>.checked.json`.
 - Never put credentials or a token in a URL.
 
@@ -276,6 +277,8 @@ Use it when the verdict of a row depends on what a menu, a panel or the focus do
 4. `needs_probes` or `needs_scenarios` still filled after the follow-up turns `ok_human`, `ok` and `na` into `unknown`; `ko` and `partial` stay.
 5. `ok` with a filled `todo` or `human_check` becomes `ok_human`.
 6. `na` with a confidence other than `high` becomes `unknown`.
+7. `na` without evidence becomes `unknown`.
+8. An `ok` built from a context document (its `source`) becomes `ok_human`: a report may be older than the code.
 
 A row of the lot without a valid finding (missing, invalid, rejected for its evidence, ref given twice) counts as `unknown`.
 
@@ -297,10 +300,10 @@ A status set by a human changes only with the lead's agreement.
 
 ### Rows judged from a context document
 
-A row can take its verdict from a context document, a third-party audit report (SKILL.md, section 6, step 1, and `references/documents.md`). The sub-agents never write such a finding: they never write `source` nor a `document` evidence (the schema says so). `cqa_plan.py lots` writes these findings in `findings/context-docs.json` from `context-docs/verdicts.json`, and the plan and the Notion write take them like any other finding.
+A row can take its verdict from a context document, a third-party audit report (SKILL.md, section 6, step 1, and `references/documents.md`). The sub-agents never write such a finding: they never write `source` nor a `document` evidence (the schema says so, and `validate` refuses them in a lot file). `cqa_plan.py lots` writes these findings in `findings/context-docs.json` from `context-docs/verdicts.json`, and the plan and the Notion write take them like any other finding.
 
-- Shape: `source: "context_doc"`, `confidence: "high"`, one piece of evidence of type `document` per report (`doc` is the id of the document in the run, `ref` the criteria such as « critères 7.3 », else the places of its points), a `summary` that names the report and its date (« Rapport « <label> » (<date>) : ... ») and paraphrases its points, a `todo` made of the suggested fixes for `ko` and `partial`, and `human_check` and `divergence` at `null`.
-- Verdict: `ko` when a `ko` point of the report is linked to the row and no criterion of the row is `ok`, `partial` when one is (a `ko` of the report is never lost); `ok` when every criterion of the row is covered and `ok` or `na` in the report, `na` when all are `na`; no verdict otherwise (a criterion the report leaves undetermined, or a report of findings without a `ko` for the row): the skill audits the row, the points of the report being hints. With several reports the worst verdict wins.
+- Shape: `source: "context_doc"`, `confidence: "high"`, one piece of evidence of type `document` per report (`doc` is the id of an imported document of `context-docs/`, which the code checks, `ref` the criteria such as « critères 7.3 », else the places of its points), a `summary` that names the report and its date (« Rapport « <label> » (<date>) : ... ») and paraphrases its points, a `todo` made of the suggested fixes for `ko` and `partial`, and `human_check` and `divergence` at `null`.
+- Verdict: `ko` when a `ko` point of the report is linked to the row and no criterion of the row is `ok`, `partial` when one is (a `ko` of the report is never lost); `ok_human` when every criterion of the row is covered and `ok` or `na` in the report (a conforming report is never an `ok`: it may be older than the code, so `human_check` says « Conforme d'après le rapport d1 du <date>, à confirmer sur la version actuelle », and the date is « de date inconnue » when the report has none), `na` when all are `na`; no verdict otherwise (a criterion the report leaves undetermined, or a report of findings without a `ko` for the row): the skill audits the row, the points of the report being hints. With several reports the worst verdict wins.
 - `in_repo` is `false` only when every linked point is for the content, a third party or the infrastructure: the `todo` then starts with « À traiter par <propriétaires> : » and the fix mode leaves the row to the devs with that reason.
 - Notion: the table above applies, and so do the guardrails (an `ok` on a row whose tools include « Intervention humaine » becomes `ok_human`). The comment lists the line « Rapport d1 : critères 7.3 » among its evidence. In Notion and in the merge requests only the name of the document, the reference and the paraphrased fix are written, never a raw excerpt of the document and never an exploitation detail.
 - A rerun or a recette ignores these verdicts: the agents judge the code as it is, and their finding replaces the one of the document.

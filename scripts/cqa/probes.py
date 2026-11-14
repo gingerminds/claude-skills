@@ -105,6 +105,36 @@ def app_path(context: dict) -> str:
         return ""
 
 
+def target_hosts(context: dict) -> list:
+    """Return the hosts of the audit target, sorted: the evidence of a finding is on one of them.
+
+    The host of target.preprod_url, the one of target.prod_url on a prod run (is_prod_run), and
+    the domain and the home host of each entry of sites. An unreadable URL is left out.
+    """
+    target = context.get("target")
+    target = target if isinstance(target, dict) else {}
+    urls = [target.get("preprod_url")]
+    if is_prod_run(context):
+        urls.append(target.get("prod_url"))
+    sites = context.get("sites")
+    for site in sites if isinstance(sites, list) else []:
+        if isinstance(site, dict):
+            domain = site.get("domain")
+            urls.extend([site.get("home"), f"https://{domain}" if isinstance(domain, str) else None])
+    return sorted({host for host in (url_host(url) for url in urls) if host})
+
+
+def url_host(url) -> Optional[str]:
+    """Return the host of a URL in lower case, without a trailing dot, None when it has none."""
+    if not isinstance(url, str):
+        return None
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return None
+    return host.lower().rstrip(".") if host else None
+
+
 def build_probes(
     *,
     base_url: str,
@@ -230,7 +260,9 @@ def _pending(run_dir: Path, lots: list, app_path: str):
     for lot in lots:
         document = _first_round(run_dir, lot["id"])
         valid, _ = (
-            validate_document(document, set(lot["refs"]), app_path=app_path)
+            validate_document(
+                document, set(lot["refs"]), app_path=app_path, agent_file=True, lot_id=lot["id"]
+            )
             if document
             else ([], [])
         )

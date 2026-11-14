@@ -100,7 +100,7 @@ Examples of read-only expressions:
 
 Cookies set before consent: take them from `tools/http/` (requests sent without cookies, names and attributes only). The lead's profile may already hold a consent, and `document.cookie` never shows HttpOnly or third-party cookies. From the browser alone, a row about cookies before consent is at most `ok_human`, and `unknown` when a consent cookie is already present; only `tools/http/` evidence can make it `partial` or `ko`.
 
-Evidence: `page` for what you saw (`url`, `detail` in French), `tool` for a toolbox result, `file` only for a repo file you read at a known path (you cannot search the repos).
+Evidence: `page` for what you saw (`url`, `detail` in French), `tool` for a toolbox result, `file` only for a repo file you read at a known path (you cannot search the repos). The code checks every piece of evidence at `validate`: a `page` or `http` URL is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` of `context.json`), an `http` URL is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`), and a `tool` is a tool whose `result.json` is `ok` or `not_applicable`. A finding with other evidence is refused. A request you made yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like `ok`, needs at least one piece of evidence.
 
 Missing HTTP answer: ask for it in `needs_probes`. Missing interaction on a touch screen: ask for it in `needs_scenarios` (above). A finding that lists probes is never `ok`, `ok_human` or `na`: give `unknown`, or `ko` or `partial` when your evidence already establishes it.
 

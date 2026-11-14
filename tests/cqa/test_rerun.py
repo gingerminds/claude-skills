@@ -67,6 +67,7 @@ class RerunCase(unittest.TestCase):
             "context.json",
             {
                 "repos": [{"name": "laravel", "path": str(self.run_dir / "repo"), "audited_sha": sha}],
+                "target": {"preprod_url": "https://preprod.example.org"},
                 "available_tools": self.available,
             },
         )
@@ -262,6 +263,7 @@ class DocumentFindingsTest(RerunCase):
     def test_the_document_finding_passes_the_evidence_check(self):
         item = finding(2, "ko", evidence=[{"type": "document", "doc": "d1", "ref": "critères 1.1"}])
         self.findings("context-docs", item, lot="context-docs")
+        self.write("context-docs/d1/items.json", {"document": {"id": "d1"}, "items": []})
         found = rerun.read_grounded_findings(
             self.run_dir, {}, rerun.document_lot(self.lots), "context-docs.json"
         )

@@ -1,11 +1,13 @@
 import copy
 import itertools
 import json
+import re
 import unittest
 from pathlib import Path
 
 from cqa.findings import (
     ACTION_KEYS,
+    AGENT_FINDING_KEYS,
     ACTION_SEGMENTS,
     ACTION_URL_REASON,
     ACTION_VALUES,
@@ -1764,8 +1766,8 @@ class GuardrailsTest(unittest.TestCase):
                 self.assertIn("confiance", result["guardrail"])
                 self.assertIn("na abaissé à unknown", result["guardrail"])
 
-    def test_na_with_high_confidence_is_kept(self):
-        result = guard(make_finding(verdict="na", confidence="high", evidence=[]))
+    def test_na_with_high_confidence_and_evidence_is_kept(self):
+        result = guard(make_finding(verdict="na", confidence="high"))
         self.assertEqual(result["verdict"], "na")
         self.assertIsNone(result["guardrail"])
 
@@ -1851,6 +1853,194 @@ class GuardrailsTest(unittest.TestCase):
                 tools=tools,
             ):
                 self.assertLessEqual(rank[result["verdict"]], rank[verdict])
+
+
+class NaEvidenceGuardrailTest(unittest.TestCase):
+    def test_na_without_evidence_becomes_unknown_whatever_the_confidence(self):
+        for confidence in ("high", "medium", "low"):
+            with self.subTest(confidence=confidence):
+                result = guard(make_finding(verdict="na", confidence=confidence, evidence=[]))
+                self.assertEqual(result["verdict"], "unknown")
+                self.assertIn("na abaissé à unknown", result["guardrail"])
+
+    def test_the_reason_of_a_high_confidence_na_says_there_is_no_evidence(self):
+        result = guard(make_finding(verdict="na", confidence="high", evidence=[]))
+        self.assertEqual(result["guardrail"], "aucune preuve : na abaissé à unknown")
+
+    def test_na_with_evidence_and_high_confidence_stays_na(self):
+        result = guard(make_finding(verdict="na", confidence="high"))
+        self.assertEqual(result["verdict"], "na")
+        self.assertIsNone(result["guardrail"])
+
+    def test_a_row_that_asks_for_a_human_does_not_change_the_na_rule(self):
+        row = make_row(tools=("Code", HUMAN))
+        self.assertEqual(guard(make_finding(verdict="na", evidence=[]), row)["verdict"], "unknown")
+        self.assertEqual(guard(make_finding(verdict="na"), row)["verdict"], "na")
+
+    def test_unknown_and_partial_without_evidence_are_still_allowed(self):
+        for verdict in ("unknown", "partial", "ko", "ok_human"):
+            with self.subTest(verdict=verdict):
+                result = guard(make_finding(verdict=verdict, evidence=[]))
+                self.assertEqual(result["verdict"], verdict)
+                self.assertIsNone(result["guardrail"])
+
+
+class ContextDocumentGuardrailTest(unittest.TestCase):
+    def test_an_ok_built_from_a_report_becomes_ok_human(self):
+        finding = make_ok(source="context_doc", evidence=[{"type": "document", "doc": "d1", "ref": "x"}])
+        result = guard(finding)
+        self.assertEqual(result["verdict"], "ok_human")
+        self.assertIn("rapport", result["guardrail"])
+
+    def test_a_ko_or_na_built_from_a_report_is_kept(self):
+        for verdict in ("ko", "partial", "na"):
+            with self.subTest(verdict=verdict):
+                result = guard(make_finding(verdict=verdict, source="context_doc"))
+                self.assertEqual(result["verdict"], verdict)
+                self.assertIsNone(result["guardrail"])
+
+    def test_an_ok_of_the_skill_is_untouched(self):
+        self.assertEqual(guard(make_ok())["verdict"], "ok")
+
+
+def agent_errors(*findings, lot="front-1", lot_id=None, refs=None, **kwargs):
+    document = make_document(*findings, lot=lot)
+    return validate_document(
+        document, LOT_REFS if refs is None else refs, agent_file=True, lot_id=lot_id, **kwargs
+    )
+
+
+def validate_document_calls(source):
+    """Yield the text of each call of validate_document in a source, never its definition."""
+    for match in re.finditer(r"(?<!def )validate_document\(", source):
+        depth = 0
+        for index in range(match.end() - 1, len(source)):
+            depth += source[index] == "("
+            depth -= source[index] == ")"
+            if depth == 0:
+                yield source[match.start() : index + 1]
+                break
+
+
+class AgentFileTest(unittest.TestCase):
+    def test_the_agent_keys_are_the_documented_ones(self):
+        self.assertEqual(
+            AGENT_FINDING_KEYS, REQUIRED_FINDING_KEYS + ("needs_scenarios", "tool_dates", "in_repo")
+        )
+
+    def test_agent_file_refuses_document_source_guardrail_and_unknown_keys(self):
+        document_evidence = {"type": "document", "doc": "d1", "ref": "critères 7.3"}
+        cases = {
+            "document evidence": (make_finding(evidence=[document_evidence]), "preuve n° 1 (document)"),
+            "source": (make_finding(source="context_doc"), "« source »"),
+            "guardrail": (make_finding(guardrail="trust me"), "« guardrail »"),
+            "unknown key": (make_finding(foo=1), "« foo »"),
+        }
+        for name, (finding, expected) in cases.items():
+            with self.subTest(case=name):
+                valid, errors = agent_errors(finding, make_finding(ref=80))
+                self.assertEqual([item["ref"] for item in valid], [80])
+                self.assertEqual(len(errors), 1, errors)
+                self.assertTrue(errors[0].startswith("constat CQ-79 : "), errors)
+                self.assertIn(expected, errors[0])
+
+    def test_the_same_findings_are_valid_outside_an_agent_file(self):
+        document_evidence = {"type": "document", "doc": "d1", "ref": "critères 7.3"}
+        finding = make_finding(
+            evidence=[document_evidence], source="context_doc", guardrail="x", foo=1
+        )
+        valid, errors = validate_document(make_document(finding, make_finding(ref=80)), LOT_REFS)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 2)
+
+    def test_the_optional_keys_the_agents_are_told_to_write_stay_valid(self):
+        finding = make_finding(
+            needs_scenarios=[make_scenario()],
+            tool_dates={"http": "2026-10-27T21:15:05Z"},
+            in_repo=True,
+        )
+        valid, errors = agent_errors(finding, make_finding(ref=80))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 2)
+
+    def test_every_unknown_key_is_named_once_with_the_admitted_ones(self):
+        valid, errors = agent_errors(make_finding(foo=1, bar=2), make_finding(ref=80))
+        self.assertEqual(len(errors), 2)
+        for error in errors:
+            self.assertIn("ref, verdict", error)
+            self.assertIn("in_repo", error)
+
+    def test_a_finding_the_check_refuses_is_still_reported_with_its_other_problems(self):
+        _, errors = agent_errors(make_finding(foo=1, verdict="great"), make_finding(ref=80))
+        self.assertEqual(len(errors), 2)
+
+    def test_the_schema_properties_are_the_agent_keys_and_source(self):
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        properties = set(schema["$defs"]["finding"]["properties"])
+        self.assertEqual(properties - {"source"}, set(AGENT_FINDING_KEYS))
+
+    def test_every_reader_of_a_lot_file_validates_it_as_an_agent_file(self):
+        scripts = Path(__file__).resolve().parents[2] / "scripts"
+        found = 0
+        for path in sorted(scripts.rglob("*.py")):
+            for call in validate_document_calls(path.read_text(encoding="utf-8")):
+                found += 1
+                with self.subTest(path=path.name, call=call[:60]):
+                    self.assertIn("agent_file=", call)
+                    self.assertIn("lot_id=", call)
+        self.assertGreaterEqual(found, 4)
+
+
+class LotFieldTest(unittest.TestCase):
+    def test_lot_field_must_match_validated_lot(self):
+        valid, errors = agent_errors(make_finding(), make_finding(ref=80), lot="other-lot", lot_id="front-1")
+        self.assertEqual(valid, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("« other-lot »", errors[0])
+        self.assertIn("« front-1 »", errors[0])
+
+    def test_the_lot_of_the_file_is_accepted_when_it_matches(self):
+        valid, errors = agent_errors(make_finding(), make_finding(ref=80), lot="front-1", lot_id="front-1")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 2)
+
+    def test_no_lot_id_to_compare_is_the_behaviour_of_before(self):
+        valid, errors = validate_document(
+            make_document(make_finding(), make_finding(ref=80), lot="anything"), LOT_REFS
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 2)
+
+    def test_a_missing_lot_keeps_its_own_error(self):
+        document = make_document(make_finding(), make_finding(ref=80))
+        del document["lot"]
+        _, errors = validate_document(document, LOT_REFS, lot_id="front-1")
+        self.assertEqual(errors, ["champ « lot » manquant"])
+
+    def test_the_other_problems_of_the_file_are_reported_with_the_mismatch(self):
+        _, errors = agent_errors(make_finding(verdict="great"), make_finding(ref=80), lot="x", lot_id="y")
+        self.assertEqual(len(errors), 2)
+
+
+class ContextDocsFileTest(unittest.TestCase):
+    def test_context_docs_file_still_validates(self):
+        finding = {
+            "ref": 79,
+            "verdict": "ko",
+            "confidence": "high",
+            "source": "context_doc",
+            "summary": "Rapport « Audit » (2026-10-01) : 1 point non conforme.",
+            "evidence": [{"type": "document", "doc": "d1", "ref": "critères 7.3"}],
+            "todo": "Corriger.",
+            "human_check": None,
+            "divergence": None,
+            "needs_probes": [],
+            "in_repo": True,
+        }
+        document = make_document(finding, make_finding(ref=80, source="context_doc"), lot="context-docs")
+        valid, errors = validate_document(document, LOT_REFS, agent_file=False, lot_id="context-docs")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(valid), 2)
 
 
 class SchemaTest(unittest.TestCase):
