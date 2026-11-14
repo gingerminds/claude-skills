@@ -67,6 +67,6 @@ RUN="<run_dir>"
 python3 "$S/cqa_notion.py" apply "$RUN" --plan notion/assign-plan.json
 ```
 
-- Prefix `GM_AUDIT_AUTH_PASS='<mot de passe>'` when the session holds the Basic Auth credentials, for the secret check.
+- Prefix `GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>'` when the session holds the Basic Auth credentials, for the secret check.
 - Exit codes: as in SKILL.md section 8, step 1 (3: once more after fixing the cause, then stop; 7: report the blocked rows; 8: stop); their words for the lead: `references/verdicts.md`, section "For the orchestrator". An `unknown_option`: the option was removed from the copy since the plan; nothing is created.
 - End with « <n> lignes assignées. »

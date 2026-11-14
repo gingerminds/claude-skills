@@ -982,6 +982,23 @@ class SkillTest(unittest.TestCase):
                     self.assertIn(_SESSION_CREDENTIALS, text)
                     self.assertNotIn("when `target.access` is `basic_auth`", text)
 
+    def test_the_secret_checks_receive_the_identifier_and_the_password(self):
+        found = 0
+        for path in _skill_files():
+            for block in _BASH_BLOCK.findall(_text(path)):
+                if _NOTION_WRITE.search(block) or re.search(r'cqa_plan\.py" scan\b', block):
+                    for line in block.splitlines():
+                        if "GM_AUDIT_AUTH_PASS=" in line:
+                            found += 1
+                            with self.subTest(file=path.name, line=line):
+                                self.assertIn("GM_AUDIT_AUTH_USER='<identifiant>' ", line)
+        self.assertGreaterEqual(found, 4)
+        skill = _text(SKILL)
+        self.assertIn("Both variables also go, the same way, to the secret checks", skill)
+        self.assertNotIn("`GM_AUDIT_AUTH_PASS` alone", skill)
+        self.assertIn("GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>'`",
+                      _text(REFERENCES / "assign.md"))
+
     def test_launch_asks_mode_then_notion_consent(self):
         section = _section(_text(SKILL), "4. Context")
         mode = section.index("« Mode 100 % autonome ? »")

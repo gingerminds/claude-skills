@@ -660,19 +660,31 @@ class CommonSecretFormsTest(unittest.TestCase):
 
     def test_redact_cookie_header(self):
         for text, expected in (
-            (f"Cookie: SESSabcdef0123456789={SALT}", f"Cookie: {MASK}"),
-            (f"Cookie: lang=fr; session={PASSWORD}", f"Cookie: {MASK}"),
-            (f'"Cookie": "SESS={PASSWORD}"', f'"Cookie": "{MASK}"'),
+            (f"Cookie: SESSabcdef0123456789={SALT}", f"Cookie: SESSabcdef0123456789={MASK}"),
+            (f"Cookie: lang=fr; session={PASSWORD}", f"Cookie: lang={MASK}; session={MASK}"),
+            (f'"Cookie": "SESS={PASSWORD}"', f'"Cookie": "SESS={MASK}"'),
             (f"curl -H 'Cookie: sid={PASSWORD}' https://example.org",
-             f"curl -H 'Cookie: {MASK}' https://example.org"),
+             f"curl -H 'Cookie: sid={MASK}' https://example.org"),
+            ("Cookie : _ga=GA1.2.123456.789 déposé avant consentement",
+             f"Cookie : _ga={MASK} déposé avant consentement"),
+            ("cookie: tarteaucitron=!gtag=wait présent, pas de cookie tiers",
+             f"cookie: tarteaucitron={MASK} présent, pas de cookie tiers"),
+            ("Requête sans en-tête Cookie: PHPSESSID=abc123 ; réponse 200",
+             f"Requête sans en-tête Cookie: PHPSESSID={MASK} ; réponse 200"),
+            ("Cookie: a=1;b=2; c=3", f"Cookie: a={MASK};b={MASK}; c={MASK}"),
+            (f"Cookie: a={MASK}; b=2", f"Cookie: a={MASK}; b={MASK}"),
         ):
             with self.subTest(text=text):
-                self.assert_masked(text, PASSWORD if PASSWORD in text else SALT, expected)
+                self.assertEqual(redact(text, []), expected)
+                self.assertNotEqual(scan_text(text, []), [])
+                self.assertEqual(scan_text(expected, []), [])
         for text in (
             "Cookie: ",
             "en-tête Cookie: absent",
             "Set-Cookie: sid=abc123; Path=/; Secure; HttpOnly; SameSite=Lax",
             "$headers['Cookie'] = $cookie;",
+            "Cookie: sid=${SESSION_ID}; lang=",
+            f"Cookie: _ga={MASK}",
         ):
             with self.subTest(text=text):
                 self.assert_untouched(text)
@@ -755,9 +767,39 @@ class CommonSecretFormsTest(unittest.TestCase):
             "cache_key: user-list",
             "salt: 10",
             "Le mot de passe est haché avec bcrypt ; la politique impose 12 caractères.",
+            "Champ password: non masqué à la saisie",
+            "password: oui",
+            "pwd: non",
+            "mot_de_passe: requis (min 8)",
+            "password: yes",
+            "password: none",
+            "password: empty",
+            "password: required.",
+            "mot-de-passe: absent",
+            "passwd: vide",
+            "DB_PASS: absent",
+            "Auth: Basic realm=\"Préprod\"",
+            "WWW-Authenticate: Basic realm=\"Restricted\"",
+            "auth: Sanctum + cookie de session",
+            "session.cookie_secure=1, session.cookie_httponly=1",
+            "autocomplete=\"new-password\" absent sur le champ password",
         ):
             with self.subTest(text=text):
                 self.assert_untouched(text)
+
+    def test_a_state_word_never_unmasks_a_real_password(self):
+        for text in (
+            "password: oui123",
+            "password: Oui",
+            "password: nonon",
+            "pwd: requis-2024",
+            "mot_de_passe: hunter22",
+            "MAIL_PASSWORD=abc",
+            "DB_PASS=abc",
+        ):
+            with self.subTest(text=text):
+                self.assertNotEqual(redact(text, []), text)
+                self.assertNotEqual(scan_text(text, []), [])
 
     def test_code_that_only_looks_like_a_secret_name_is_kept(self):
         for text in (

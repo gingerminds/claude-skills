@@ -18,7 +18,7 @@ Load each reference with Read when its section starts, not before.
 - **Read-only (v1).** Never modify a project repo: no checkout, switch, stash, pull, commit, install, file edit, runner start. Never write on a server or in a database, never submit a form, never deploy. When something needs one of these, give the lead the exact command and let them run it. Exception, the `fix` mode only (section 12): it writes only in its own worktrees, under the run directory (`fix/<repo>/wt`, on a branch of its own), and pushes only its pass branches (`feature/checklist-qa-fix`, `feature/checklist-qa-fix-<n>`), after the lead's consent, always through `cqa_fix.py` and its sub-agents; it runs the project's commands (install, build, lint, test) only in disposable containers that see the worktree alone; the dev's checkout (working files, current branch, local `develop`, stash) never changes.
 - **Notion.** Write only through `cqa_notion.py apply` and `cqa_notion.py comment-page`, after the lead's consent: the answer to the question of section 4, or the confirmation of section 7 when that answer is missing; in the fix mode, the answer to « Écrire le résultat de la passe dans Notion ? » (section 12). Never through another tool, never on the reference template (exit 8). Never create an option, a row or a page; never delete anything. The scripts hold the consents stored in `context.json`, whatever the orchestrator remembers: `apply` and `comment-page` exit 2 while `dry_run` is true, `apply` of `notion/plan.json` exits 2 when `notion_write` is `none`, and it leaves alone the pages whose status a human set when `notion_write` is `keep_human`, or `all` in autonomous mode (no option to repeat). `apply` reads the status of a row again before writing it: a status that a person changed since the copy was read is never replaced.
 - **Secrets (spec § 10).** Never print, write or hand to a sub-agent the value of `NOTION_TOKEN` or the preprod Basic Auth credentials. Never run `env`, `printenv` or `set`, never `echo` these variables: test their presence only, as in `references/context.md`.
-- **Basic Auth credentials.** Asked only after a 401, kept in this session, never stored. They go only as inline environment variables (`GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>'`) to `cqa_plan.py probe-target --auth-env` and `cqa-toolbox.sh`, and only when the session holds the Basic Auth credentials (accepted by `probe-target --auth-env`). `GM_AUDIT_AUTH_PASS` alone also goes, the same way, to the secret checks of `cqa_notion.py apply`, `cqa_notion.py comment-page` and `cqa_plan.py scan`. Never in a file, a URL, Notion, a sub-agent prompt or Chrome (the lead types it there).
+- **Basic Auth credentials.** Asked only after a 401, kept in this session, never stored. They go only as inline environment variables (`GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>'`) to `cqa_plan.py probe-target --auth-env` and `cqa-toolbox.sh`, and only when the session holds the Basic Auth credentials (accepted by `probe-target --auth-env`). Both variables also go, the same way, to the secret checks of `cqa_notion.py apply`, `cqa_notion.py comment-page` and `cqa_plan.py scan` (the checks need the identifier too to know the Basic credentials in base64). Never in a file, a URL, Notion, a sub-agent prompt or Chrome (the lead types it there).
 - **SSH (agency rule).** Ask which alias to use before any SSH command (aliases read in `~/.ssh/config`). Run every server command through `cqa_ssh_ro.py`, except the connection test `ssh -o BatchMode=yes <alias> true`. Exit 4 of the guard means "commande à faire confirmer par le lead": stop and ask, stating the impact, even if the lead asked to go faster (`references/server.md`). The rule holds in autonomous mode: only read commands run, and a write, a change, a restart or a command of uncertain impact (exit 4, or anything that needs the lead's confirmation) is never run, even in autonomous mode or confirmed in advance. It is recorded with `cqa_plan.py defer --kind ssh_refused` and put to the lead at the end.
 - **Questions.** One at a time, with AskUserQuestion, in French, and only when the answer is missing or must be confirmed. AskUserQuestion takes 2 to 4 options and always adds a free-text answer (« Autre »). For a value to type (URL, SHA, identifier, password, folder), give real options (« Annuler l'audit », « Je ne sais pas », « Continuer sans identifiants »...) and say in the question to type the value in « Autre ». If the free-text answer is not available in this session, ask the same question as a plain message and wait for the reply. Never repeat a password back to the lead, in a message, a summary or a recap of the answers.
 - **Language.** Everything the lead reads is in French. Never write an em dash: use a colon, a comma or parentheses.
@@ -307,14 +307,14 @@ bash "$S/cqa-keepawake.sh" stop "$RUN"
 
 ## 8. Writing and synthesis
 
-Each step is one Bash call. Prefix `GM_AUDIT_AUTH_PASS='<mot de passe>'` only when the session holds the Basic Auth credentials.
+Each step is one Bash call. Prefix `GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>'` only when the session holds the Basic Auth credentials.
 
 **1. Apply**, only when section 7 settled on « Tout écrire » or « Sans toucher aux statuts posés par un humain » (`all` or `keep_human`; `apply` reads the consent in `context.json`, so it takes no option for it):
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_notion.py" apply "$RUN"
+GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_notion.py" apply "$RUN"
 ```
 
 The output lists only the operations written, blocked or failed, then the JSON summary (`done`, `skipped`, `blocked`, `errors`, `status_changed`); operations already present are counted in `skipped`, never listed, so read it as is, without a pipe or filter. `status_changed` lists `{"key", "ref", "current", "reason"}` for each status operation left unwritten because a person changed the status of the row after the copy was read (its comments and assignments are written, unless the consent keeps the statuses set by a human: the whole page is then left alone): the row keeps the status of the person, and a run that rewrites it later reads the copy again. An assignment is left unwritten the same way when the assignees of the page changed since the copy was read (`assignees_changed`, in the JSON only then, with `{"key", "ref", "current", "reason"}`). `apply` exits 2 without writing while `dry_run` is true. With `keep_human`, or `all` in autonomous mode (it then says so on stderr), it leaves alone the pages whose status a human set, their comments included, and adds `kept_human`, the number of operations left out, to its JSON when there are some.
@@ -354,7 +354,7 @@ The entries set aside in autonomous mode (gaps, `ssh_refused`, questions, logins
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_notion.py" comment-page "$RUN" "$RUN/notion/page-comment.txt"
+GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_notion.py" comment-page "$RUN" "$RUN/notion/page-comment.txt"
 ```
 
 Same exit codes as step 1. Without `copy_page_id` it writes nothing and says so. Exit 3 after one more try once the cause is fixed, or exit 7: say that the page comment is missing (its text is in `notion/page-comment.txt`) and go on.
@@ -440,7 +440,7 @@ python3 "$S/cqa_plan.py" plan "$RUN"
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_notion.py" apply "$RUN"
+GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_notion.py" apply "$RUN"
 ```
 
 When no row is left to rerun (the lead answered « Passer » to everything, or no answered row has a lot), skip 1 to 4 only: no rerun is dispatched or closed (a rerun opened at 1 with nothing to dispatch has no file and needs no closing). After a `login` entry, whatever its answer, always run 5 and 6: its held lots wrote new findings that the plan must take. Without a `login` entry and without rows, skip 5 and 6 too: run the synthesis again (step 2, as below), run step 4 now (page comment), then go to step 6.
@@ -454,7 +454,7 @@ Once the entries are handled (and any rerun is written), run the synthesis (step
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
-GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_plan.py" scan "$RUN"
+GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_plan.py" scan "$RUN"
 ```
 
 Anti-secret check of the run directory (the cached template fiches in `fiches/` and `context-docs/` are excluded: the secrets of a context document are looked for at its import, by `context-docs --check`). Exit 7: give the lead the files and labels found, never a value.
@@ -509,7 +509,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_notion.py" apply "$RUN" --plan notion/assign-plan.json
 ```
 
-Exit codes as in section 8, step 1 (prefix `GM_AUDIT_AUTH_PASS` the same way). End with « <n> lignes assignées. »
+Exit codes as in section 8, step 1 (prefix `GM_AUDIT_AUTH_USER` and `GM_AUDIT_AUTH_PASS` the same way). End with « <n> lignes assignées. »
 
 ## 10. Rerun
 

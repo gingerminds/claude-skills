@@ -81,6 +81,17 @@ _FLAG_VALUES = frozenset({
     "true", "false", "yes", "no", "on", "off", "null", "none", "nil", "ok", "pass", "fail",
     "passed", "failed", "skipped",
 })
+# A word an audit comment uses to say the state of a password field (« password: oui », « mot_de_passe:
+# requis »). After a password name it is not a secret: only these words, in lower case.
+_STATE_VALUES = frozenset({
+    "oui", "non", "vide", "vides", "absent", "absente", "requis", "requise", "obligatoire",
+    "facultatif", "facultative", "présent", "présente", "défini", "définie", "indéfini",
+    "masqué", "masquée", "caché", "cachée", "visible", "actif", "active", "inactif", "inactive",
+    "activé", "activée", "désactivé", "désactivée", "inconnu", "inconnue", "aucun", "aucune",
+    "manquant", "manquante", "valide", "invalide", "yes", "empty", "blank", "missing",
+    "required", "optional", "present", "set", "unset", "defined", "undefined", "hidden",
+    "masked", "shown", "enabled", "disabled", "inactive", "unknown", "valid", "invalid",
+}) | _FLAG_VALUES
 # What follows a secret word in the name of a setting (password_policy, token_lifetime,
 # password_hash): its value is a plain word, a number or a path, not a secret.
 _DESCRIPTOR_WORDS = frozenset({
@@ -144,17 +155,18 @@ _URL_CREDENTIALS = re.compile(
     re.VERBOSE,
 )
 
-# The request header of cookies: session ids of the visitor. Set-Cookie stays (its attributes
-# are evidence for the audit).
+# The request header of cookies: session ids of the visitor. Each pair keeps its name (it is the
+# evidence of the audit) and loses its value. Set-Cookie stays (its attributes are evidence too).
+_COOKIE_PAIR = r"""[\w.%\-]+=(?:\[secret\ masqué\]|[^\s;,"'`\\]*)"""
 _COOKIE_HEADER = re.compile(
-    r"""
+    rf"""
     (?P<pre>(?<![\w-])cookie\\?["']?[ \t]*:[ \t]*\\?["']?)
-    (?!\[secret\ masqué\])
-    (?P<val>[\w.%\-]+=[^\n"'`\\]+)
+    (?P<val>{_COOKIE_PAIR}(?:[ \t]*;[ \t]*{_COOKIE_PAIR})*)
     """,
     re.IGNORECASE | re.VERBOSE,
 )
-_REFERENCE_COOKIE = re.compile(r"[\w.%\-]+=\$\{?\w+\}?")
+_COOKIE_VALUE = re.compile(r"(?P<name>[\w.%\-]+=)(?P<value>\[secret masqué\]|[^\s;,\"'`\\]*)")
+_REFERENCE_COOKIE_VALUE = re.compile(r"\$\{?\w+\}?")
 
 # A key of an obvious form, with no keyword near it.
 _PROVIDER_KEY = re.compile(
@@ -263,7 +275,7 @@ def _is_non_secret(match: re.Match) -> bool:
     elif _is_setting(match.group("suffix"), value):
         return True
     elif keyword.startswith(_PASSWORD_WORDS):
-        if not re.search(r"\w", value):
+        if not re.search(r"\w", value) or value.rstrip(".,;:)") in _STATE_VALUES:
             return True
         if keyword == "pass" and not _is_pass_secret(match.group("kw"), value):
             return True
@@ -442,7 +454,7 @@ def _skipped(pattern: re.Pattern, match: re.Match) -> bool:
     if pattern is _URL_CREDENTIALS:
         return bool(_PLACEHOLDER_VALUE.fullmatch(match.group("val")))
     if pattern is _COOKIE_HEADER:
-        return bool(_REFERENCE_COOKIE.fullmatch(match.group("val")))
+        return _masked_cookies(match) == match.group(0)
     return False
 
 
@@ -550,7 +562,21 @@ def _redact_credentials(text: str, pattern: re.Pattern) -> str:
 def _mask(match: re.Match, pattern: re.Pattern) -> str:
     if _skipped(pattern, match):
         return match.group(0)
+    if pattern is _COOKIE_HEADER:
+        return _masked_cookies(match)
     return (match.groupdict().get("pre") or "") + MASK
+
+
+def _masked_cookies(match: re.Match) -> str:
+    """The cookie header with the value of each pair masked (names, empty values and references kept)."""
+
+    def pair(found: re.Match) -> str:
+        value = found.group("value")
+        if not value or value == MASK or _REFERENCE_COOKIE_VALUE.fullmatch(value):
+            return found.group(0)
+        return found.group("name") + MASK
+
+    return match.group("pre") + _COOKIE_VALUE.sub(pair, match.group("val"))
 
 
 def _raise(error: OSError) -> None:
