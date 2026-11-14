@@ -14,6 +14,7 @@ from cqa.plan import (
     filter_plan,
     is_human_set,
     load_history,
+    load_written_refs,
     load_written_statuses,
     operation_key,
     plan_digest,
@@ -126,6 +127,7 @@ def plan_for(
     missing=None,
     context=None,
     written=None,
+    written_refs=frozenset(),
 ):
     return build_plan(
         rows=rows,
@@ -139,6 +141,7 @@ def plan_for(
         followup_done=followup or set(),
         missing_in_copy=missing,
         written_statuses=written,
+        written_refs=written_refs,
     )
 
 
@@ -678,6 +681,32 @@ class MissingFindingTest(unittest.TestCase):
         self.assertEqual(by_ref[79]["verdict"], "ko")
 
 
+class WrittenRowWithoutFindingTest(unittest.TestCase):
+    def test_a_row_the_journal_wrote_is_left_as_it_is_without_a_finding(self):
+        plan = plan_for([make_row(79), make_row(80)], [make_finding(80)], written_refs=frozenset({79}))
+        self.assertEqual({op["ref"] for op in plan["ops"]}, {80})
+        self.assertEqual(plan["summary"]["unknown"], [79])
+        by_page = {state["ref"]: state for state in plan["rows"]}
+        self.assertEqual(by_page[79]["after"], by_page[79]["before"])
+
+    def test_a_row_without_a_written_verdict_still_gets_the_unknown_comment(self):
+        plan = plan_for([make_row(79)], written_refs=frozenset({80}))
+        self.assertEqual(sole_op(self, plan, "comment")["verdict"], "unknown")
+
+    def test_a_written_row_with_a_finding_is_planned_as_usual(self):
+        finding = make_finding(79, verdict="partial")
+        plan = plan_for([make_row(79)], [finding], written_refs=frozenset({79}))
+        self.assertEqual(sole_op(self, plan, "status")["after"], checklist.STATUS_PARTIAL)
+        self.assertEqual(sole_op(self, plan, "comment")["verdict"], "partial")
+
+    def test_the_plan_id_does_not_depend_on_the_written_refs_of_other_rows(self):
+        rows, findings = [make_row(79)], [make_finding(79)]
+        self.assertEqual(
+            plan_for(rows, findings)["plan_id"],
+            plan_for(rows, findings, written_refs=frozenset({90}))["plan_id"],
+        )
+
+
 class OperationShapeTest(unittest.TestCase):
     def build(self, **overrides):
         row = make_row(status="Mis en place", assignees=["Inès"])
@@ -1187,6 +1216,63 @@ class LoadWrittenStatusesTest(unittest.TestCase):
         row = make_row(79, status="À traiter", last_edited_by_bot=False)
         plan = plan_for([row], [make_finding(79, "partial")], written=self.load())
         self.assertTrue(sole_op(self, plan, "status")["human_override"])
+
+
+class LoadWrittenRefsTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+    def write_run(self, run_id, applied, *, copy_ds=COPY_DS, raw=None):
+        run_dir = self.root / "acme-shop" / run_id
+        (run_dir / "notion").mkdir(parents=True)
+        (run_dir / "notion" / "applied.json").write_text(
+            raw if raw is not None else json.dumps({"applied": applied}), encoding="utf-8"
+        )
+        (run_dir / "notion" / "plan.json").write_text(
+            json.dumps({"copy_data_source_id": copy_ds}), encoding="utf-8"
+        )
+
+    def load(self, copy_ds=COPY_DS):
+        return load_written_refs(self.root, "acme-shop", copy_ds)
+
+    def test_comment_and_status_entries_of_every_run_of_the_copy_count(self):
+        self.write_run("2026-10-18-0900", [{"kind": "comment", "ref": 79, "verdict": "ko"}])
+        self.write_run("2026-10-19-0900", [{"kind": "status", "ref": 80, "value": "Ok / Recetté"}])
+        self.assertEqual(self.load(), frozenset({79, 80}))
+
+    def test_a_comment_that_wrote_unknown_does_not_count(self):
+        self.write_run(
+            "2026-10-18-0900",
+            [
+                {"kind": "comment", "ref": 79, "verdict": "unknown"},
+                {"kind": "comment", "ref": 80, "verdict": "ko"},
+                {"kind": "comment", "ref": 81},
+            ],
+        )
+        self.assertEqual(self.load(), frozenset({80, 81}))
+
+    def test_other_entries_and_other_copies_do_not_count(self):
+        self.write_run(
+            "2026-10-18-0900",
+            [
+                {"kind": "assign", "ref": 79},
+                {"kind": "page_comment", "ref": None},
+                {"kind": "comment", "ref": True, "verdict": "ko"},
+                {"kind": "comment", "ref": "81", "verdict": "ko"},
+                "not an entry",
+            ],
+        )
+        self.write_run("2026-10-19-0900", [{"kind": "comment", "ref": 82}], copy_ds=OTHER_DS)
+        self.assertEqual(self.load(), frozenset())
+
+    def test_a_damaged_or_missing_journal_gives_nothing(self):
+        self.write_run("2026-10-18-0900", None, raw="{not json")
+        self.write_run("2026-10-19-0900", None, raw='["a list"]')
+        self.write_run("2026-10-20-0900", None, raw='{"applied": "x"}')
+        self.assertEqual(self.load(), frozenset())
+        self.assertEqual(load_written_refs(self.root / "absent", "acme-shop", COPY_DS), frozenset())
 
 
 class LoadHistoryTest(unittest.TestCase):

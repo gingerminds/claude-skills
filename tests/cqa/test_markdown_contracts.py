@@ -11,8 +11,8 @@ import cqa_notion
 import cqa_plan
 import cqa_ssh_ro
 from cqa import (
-    categories, context_docs, docs_link, docs_verdicts, fix_guard, fix_mr, fix_names, fix_state,
-    fix_summary, ssh_ro,
+    categories, checked, context_docs, docs_link, docs_verdicts, fix_guard, fix_mr, fix_names,
+    fix_state, fix_summary, report, ssh_ro,
 )
 from cqa.lots import DOCUMENT_LOT_ID, MOBILE_TERMS
 from cqa.findings import (
@@ -4124,6 +4124,56 @@ class StaleToolsContract(unittest.TestCase):
 
 
 
+
+
+class FrozenEvidenceContract(unittest.TestCase):
+    """The instructions say what the code does with the evidence and with the tool results."""
+
+    def test_the_record_and_the_key_names_are_the_ones_of_the_code(self):
+        self.assertEqual(checked.record_path(Path("run"), "lot-id").name, "lot-id.checked.json")
+        toolbox = _text(TOOLBOX)
+        self.assertIn(report._LAST_ATTEMPT, toolbox)
+        self.assertIn('"$dir.prev"', toolbox)
+
+    def test_validation_freezes_the_evidence_and_the_readers_rely_on_it(self):
+        skill = _text(SKILL)
+        step = skill[skill.index("\n7. After each lot,"):skill.index("\n8. Follow-ups,")]
+        self.assertIn("findings/<lot>.checked.json", step)
+        self.assertIn("`plan`, `rerun-candidates` and `recette` rely on that record", step)
+        self.assertIn("A finding refused at `validate` stays refused", step)
+        lots = _text(REFERENCES / "lots.md")
+        validation = lots[lots.index("## 5. Validation"):lots.index("## 6. Follow-ups")]
+        self.assertIn("findings/<lot>.checked.json", validation)
+        self.assertIn("run without the record", validation)
+        self.assertIn("findings/<lot>.checked.json", _text(VERDICTS_MD))
+
+    def test_plan_names_what_it_sets_aside(self):
+        verdicts = _text(VERDICTS_MD)
+        plan = verdicts[verdicts.index("### Plan"):verdicts.index("### Confirmation")]
+        for needle in ("`discarded`", "`discarded_count`", "never silently", "left as it is",
+                       "printed on stderr", "frozen at `validate`"):
+            self.assertIn(needle, plan)
+        plan_step = _section(_text(SKILL), "7. Plan and confirmation")
+        self.assertIn("`discarded`", plan_step)
+        self.assertIn("`discarded_count`", plan_step)
+        recap = _section(_text(SKILL), "8. Writing and synthesis")
+        self.assertIn("rows set aside by `plan` (`discarded`)", recap)
+
+    def test_a_relaunched_tool_keeps_its_previous_good_result(self):
+        sec10 = _text(SKILL)
+        sec10 = sec10[sec10.index("## 10. Rerun"):]
+        step7 = sec10[sec10.index("\n7. "):sec10.index("\n8. ")]
+        for needle in ("keeps the previous good result", "result-last-attempt.json", "`last_attempt`",
+                       "no `ok` or `not_applicable` result yet"):
+            self.assertIn(needle, step7)
+        lots = _text(REFERENCES / "lots.md")
+        for needle in ("tools/<tool>.prev", "result-last-attempt.json", "`last_attempt`",
+                       "`ok` or `not_applicable`"):
+            self.assertIn(needle, lots)
+
+    def test_the_new_lines_carry_no_long_dash(self):
+        for path in (SKILL, REFERENCES / "lots.md", VERDICTS_MD, TOOLBOX):
+            self.assertNotIn(EM_DASH, _text(path), path.name)
 
 
 class FirstContextContract(unittest.TestCase):

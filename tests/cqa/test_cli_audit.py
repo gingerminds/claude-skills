@@ -90,6 +90,11 @@ ESCAPING_URLS = [
 ]
 
 
+def without_discarded(summary):
+    """The summary of a plan as notion/plan.json holds it: what plan prints, less what it names."""
+    return {key: value for key, value in summary.items() if not key.startswith("discarded")}
+
+
 def origin_of(url):
     parts = urlsplit(url)
     return parts.scheme, parts.hostname, parts.port or {"http": 80, "https": 443}[parts.scheme]
@@ -1459,7 +1464,7 @@ class PlanTest(AuditCase):
         missing = [{"ref": 190, "title": "Auditer les sauvegardes"}]
         self.assertEqual(summary["missing_in_copy"], missing)
         plan = self.read(run_dir, "notion/plan.json")
-        self.assertEqual(plan["summary"], summary)
+        self.assertEqual(plan["summary"], without_discarded(summary))
         self.assertEqual(
             set(plan),
             {
@@ -1688,7 +1693,9 @@ class PlanTest(AuditCase):
             summary["by_status_after"],
             {"À traiter": 3, "Mise en place partielle": 1, "Mis en place": 1, "Non applicable": 1},
         )
-        self.assertEqual(self.read(run_dir, "notion/plan.json")["summary"], summary)
+        self.assertEqual(
+            self.read(run_dir, "notion/plan.json")["summary"], without_discarded(summary)
+        )
 
     def test_history_of_earlier_runs_spares_repeated_comments(self):
         run_dir = self.make_run()

@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from cqa import checked
 from cqa.checklist import STATUS_IMPLEMENTED, ref_label
 from cqa.findings import validate_document
 from cqa.lots import DOCUMENT_LOT_ID, build_lots, lot_document_refs
@@ -46,16 +47,27 @@ def _document_refs_of_round(lot: dict, name: str) -> frozenset:
     return frozenset(lot_document_refs(lot))
 
 
-def read_grounded_findings(run_dir: Path, context: dict, lot: dict, name: str) -> Optional[tuple]:
+def read_grounded_findings(
+    run_dir: Path, context: dict, lot: dict, name: str, *, freeze: Optional[str] = None
+) -> Optional[tuple]:
     """Return (valid findings, errors) of findings/<name>, None when it does not exist.
 
     The valid findings are those of validate_document, with the path the application is served
     under (context.json target), whose evidence also holds against the run: a cited file exists
     in a repo of context.json, a cited tool has its summary. Every reader of the findings of a
     run that decides something (plan, rerun-candidates, recette) uses it.
+
+    The check is frozen when the file is validated (cqa.checked, findings/<lot>.checked.json):
+    while the record of the file holds for its current content, the recorded problems stand in
+    for the check against the run, which has moved since (a file deleted by a merged fix, a tool
+    relaunched). A file, or a finding, that no record covers is checked against the run.
+    freeze "refresh" checks every finding against the run and records the result (validate);
+    "ensure" does the same only when no record covers the file (rerun-close); None never writes.
     """
+    path = run_dir / "findings" / name
     try:
-        document = json.loads((run_dir / "findings" / name).read_text(encoding="utf-8"))
+        data = path.read_bytes()
+        document = json.loads(data.decode("utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as error:
@@ -74,12 +86,20 @@ def read_grounded_findings(run_dir: Path, context: dict, lot: dict, name: str) -
         if isinstance(repo, dict) and isinstance(repo.get("name"), str)
         and isinstance(repo.get("path"), str)
     }
-    grounded = []
+    file_digest = checked.digest(data)
+    recorded = None if freeze == "refresh" else checked.load(run_dir, lot["id"], name, file_digest)
+    moment = checked.now()
+    grounded, entries = [], []
     for item in valid:
-        problems = _evidence_problems(item["evidence"], roots, run_dir)
+        problems = recorded.get(item["ref"]) if recorded is not None else None
+        if problems is None:
+            problems = _evidence_problems(item["evidence"], roots, run_dir)
+        entries.append(checked.entry(item["ref"], item["evidence"], problems, moment))
         errors.extend(f"constat {ref_label(item['ref'])} : {problem}" for problem in problems)
         if not problems:
             grounded.append(item)
+    if entries and (freeze == "refresh" or (freeze == "ensure" and recorded is None)):
+        checked.freeze(run_dir, lot["id"], name, file_digest, entries)
     return grounded, errors
 
 

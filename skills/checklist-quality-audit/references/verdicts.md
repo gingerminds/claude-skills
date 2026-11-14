@@ -204,7 +204,7 @@ List the strongest evidence first: the comment shows the first 5.
 | `tool` | `tool`, `ref` | `tool` is a folder of `tools/` that holds a `summary.json`. `ref` is relative to `tools/<tool>/`, for example `summary.json#home/3`. |
 | `http` | `url`, `detail` | A URL requested. `detail` gives the status, the header or a short excerpt, in French and without any secret. |
 
-- Never cite a file, a repo or a tool that the run does not hold: `cqa_plan.py` checks them, and a finding with such evidence is rejected.
+- Never cite a file, a repo or a tool that the run does not hold: `cqa_plan.py validate` checks them and a finding with such evidence is rejected. The check is made once, at `validate`, and frozen in `findings/<lot>.checked.json`.
 - Never put credentials or a token in a URL.
 
 ## Several repos: the worst verdict
@@ -317,7 +317,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" plan "$RUN"
 ```
 
-- It merges the findings (after the guardrails above), the rows and the exclusions into `notion/plan.json`, and prints its `summary`: `{"by_status_after", "blocking_non_conform", "unknown", "human_overrides": [{"ref", "before", "after"}], "deferred", "missing_in_copy"}`.
+- It merges the findings (after the guardrails above), the rows and the exclusions into `notion/plan.json`, and prints its `summary`: `{"by_status_after", "blocking_non_conform", "unknown", "human_overrides": [{"ref", "before", "after"}], "deferred", "missing_in_copy"}`, plus `discarded` (`[{"ref", "reason"}]`, in French) and `discarded_count`: the rows whose finding it set aside, never silently. A row without a valid finding (refused evidence, a row the file does not hold, a lot that wrote nothing) is written « Non évaluable », except a row on which the journal of the copy already holds a verdict written by the skill (a status, or a comment other than « Non évaluable »), which is left as it is (its reason says so); a finding refused in a later file leaves the earlier one in place and is listed too. The same list is printed on stderr. It is not part of `notion/plan.json`. The evidence of a finding is not checked again against the workstation: it was frozen at `validate` (`findings/<lot>.checked.json`), and only a finding without a record (a run older than the record) is.
 - A comment is planned only when the status changes, or when neither the visible comments of the integration (`comments.json`) nor the earlier runs of this copy already carry the verdict: a run again does not repeat comments.
 - The header of a comment gives the date of the run; for a row whose latest finding comes from a rerun, the date of the rerun (recorded by `rerun-close` in `reruns.json`), so that the lead sees when it was judged again. The footer keeps the audited commit.
 - Exit 6: `context.json` incomplete for the comments (`lead.option`, `audited_sha`, `run_id`): fix it. Exit 2: a file of the run is missing (the message names the command).

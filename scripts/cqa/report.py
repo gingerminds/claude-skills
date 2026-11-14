@@ -38,6 +38,8 @@ _TOOL_STATUS = {
 }
 _NO_CATEGORY = "Sans catégorie"
 _NO_RESULT = "result.json absent ou illisible"
+_SET_ASIDE = ".prev"
+_LAST_ATTEMPT = "result-last-attempt.json"
 _UNKNOWN_STATUS = "statut inconnu"
 _UNKNOWN_WITHOUT_TEXT = "voir le commentaire déjà présent dans Notion"
 _CONSTAT = "Constat :"
@@ -76,11 +78,17 @@ def manifest(run_dir: Path) -> dict:
     """Return {"toolbox_version", "tools"}: the result.json of every tool folder, by tool name.
 
     A tool folder whose result.json is missing or unreadable is reported as failed, so that a
-    crashed tool does not go unnoticed. toolbox_version is the first one the results carry.
+    crashed tool does not go unnoticed. toolbox_version is the first one the results carry. A
+    folder the launcher set aside (<tool>.prev) is not a tool. A tool whose last attempt failed
+    while its previous result was kept (result-last-attempt.json) carries it as "last_attempt".
     """
     tools_dir = Path(run_dir) / "tools"
     folders = sorted(tools_dir.iterdir()) if tools_dir.is_dir() else []
-    results = [_tool_result(folder) for folder in folders if folder.is_dir()]
+    results = [
+        _tool_result(folder)
+        for folder in folders
+        if folder.is_dir() and not folder.name.endswith(_SET_ASIDE)
+    ]
     versions = (item.get("toolbox_version") for item in results)
     return {"toolbox_version": next((item for item in versions if item), None), "tools": results}
 
@@ -527,8 +535,22 @@ def _tool_lines(tools: dict) -> list:
         label = _TOOL_STATUS.get(status, status) if isinstance(status, str) and status else None
         label = label or _UNKNOWN_STATUS
         reason = _line(item.get("reason"))
-        lines.append(f"- {item['tool']} : {label}" + (f" ({reason})" if reason else ""))
+        line = f"- {item['tool']} : {label}" + (f" ({reason})" if reason else "")
+        lines.append(line + _last_attempt_text(item.get("last_attempt")))
     return lines
+
+
+def _last_attempt_text(attempt) -> str:
+    if not isinstance(attempt, dict):
+        return ""
+    status = attempt.get("status")
+    label = _TOOL_STATUS.get(status, status) if isinstance(status, str) and status else None
+    reason = _line(attempt.get("reason"))
+    return (
+        f", dernier essai {label or _UNKNOWN_STATUS}"
+        + (f" ({reason})" if reason else "")
+        + " : le résultat précédent est conservé"
+    )
 
 
 def _not_applicable_lines(tools: dict) -> list:
@@ -564,8 +586,23 @@ def _tool_result(folder: Path) -> dict:
     if isinstance(result, dict):
         if not (isinstance(result.get("tool"), str) and result["tool"]):
             result = {**result, "tool": folder.name}
-        return result
+        attempt = _last_attempt(folder)
+        return {**result, "last_attempt": attempt} if attempt else result
     return {"tool": folder.name, "status": "failed", "reason": _NO_RESULT}
+
+
+def _last_attempt(folder: Path) -> Optional[dict]:
+    """Return {"status", "reason", "started_at"} of the attempt that failed after a good result."""
+    path = folder / _LAST_ATTEMPT
+    if not path.is_file():
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        document = None
+    if not isinstance(document, dict):
+        return {"status": "failed", "reason": _NO_RESULT, "started_at": None}
+    return {key: document.get(key) for key in ("status", "reason", "started_at")}
 
 
 def _read(run_dir: Path, relative: str, hint: str):

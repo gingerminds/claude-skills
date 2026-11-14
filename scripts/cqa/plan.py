@@ -124,6 +124,25 @@ def load_written_statuses(
     return {ref: value for ref, (_, value) in last.items()}
 
 
+def load_written_refs(cache_root: Path, slug: str, copy_ds_id: str) -> frozenset:
+    """Return the refs the skill already wrote a real verdict on, in any run of this copy.
+
+    Every run counts, the current one too: the "status" entries of notion/applied.json and its
+    "comment" entries but the ones that wrote "unknown" (the comment a row without finding gets:
+    planning the row again gives the same comment, which keeps a rebuilt plan identical to the
+    plan whose writes the journal holds). A file that cannot be read is skipped.
+    """
+    refs = set()
+    for _, entries in _copy_journals(cache_root, slug, copy_ds_id):
+        for entry in entries:
+            if not isinstance(entry, dict) or not _is_ref(entry.get("ref")):
+                continue
+            kind = entry.get("kind")
+            if kind == "status" or (kind == "comment" and entry.get("verdict") != "unknown"):
+                refs.add(entry["ref"])
+    return frozenset(refs)
+
+
 def _copy_journals(cache_root: Path, slug: str, copy_ds_id: str, exclude_run: Optional[str] = None):
     """Yield (run_dir, entries of notion/applied.json) for the runs of the copy, in name order."""
     project_dir = Path(cache_root) / slug
@@ -179,6 +198,7 @@ def build_plan(
     recette_refs: frozenset = frozenset(),
     comment_dates: Optional[dict] = None,
     written_statuses: Optional[dict] = None,
+    written_refs: frozenset = frozenset(),
 ) -> dict:
     """Return the plan.json document: the Notion writes the run proposes, and their summary.
 
@@ -186,7 +206,9 @@ def build_plan(
     operations, in this order: status (the target of its verdict when it differs from the
     current status), assign (the lead, on ok_human) and comment. A comment is written when the
     status changes, or when neither the visible comments of the integration nor the history of
-    earlier runs already carry the verdict. A kept row without finding counts as unknown.
+    earlier runs already carry the verdict. A kept row without finding counts as unknown, and gets
+    a comment saying so, unless written_refs (the rows the journal of the copy holds a written
+    verdict for, see load_written_refs) has it: its page is left as it is.
     Excluded rows: techno gets the status "Non applicable" and a comment, no_tools a comment,
     standby, phase and no_fiche nothing. A row of another category than the scope (category)
     gets nothing either, whatever its status, and is left out of "rows" and of the summary. A
@@ -231,6 +253,7 @@ def build_plan(
                 history,
                 ref in recette_refs,
                 written_statuses,
+                ref in written_refs,
             )
             if verdict == "unknown":
                 unknown.append(ref)
@@ -317,10 +340,13 @@ def consented_plan(plan: dict, context) -> dict:
 
 
 def _finding_operations(
-    row, finding, common, followup_done, visible_verdicts, history, recette=False, written=None
+    row, finding, common, followup_done, visible_verdicts, history, recette=False, written=None,
+    already_written=False,
 ):
     ref = row["ref"]
     if finding is None:
+        if already_written:
+            return [], "unknown"
         finding = _missing_finding(ref)
     finding = apply_guardrails(finding, row, followup_done=ref in followup_done)
     verdict = finding["verdict"]

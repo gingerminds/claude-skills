@@ -25,6 +25,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 
 from cqa import (
     categories,
+    checked,
     context_docs,
     deferred,
     docs_link,
@@ -52,6 +53,7 @@ from cqa.plan import (
     consented_plan,
     filter_plan,
     load_history,
+    load_written_refs,
     load_written_statuses,
     operation_key,
     plan_digest,
@@ -1247,6 +1249,7 @@ def _cmd_rerun_start(args, services) -> int:
             continue
         (target / "abandoned").mkdir(exist_ok=True)
         shutil.move(str(path), str(target / "abandoned" / path.name))
+        checked.forget(run_dir, _RERUN_FILE.fullmatch(path.name).group(1), path.name)
         abandoned.append(path.name)
     _copy_state(run_dir, target)
     _emit({"snapshot": str(target), "rerun": f"{number:02d}", "abandoned": abandoned})
@@ -1267,10 +1270,12 @@ def _cmd_rerun_close(args, services) -> int:
     lots = {item["id"]: item for item in _read_lots(run_dir)["lots"]}
     discarded = []
     for path in files:
-        lot = lots.get(_RERUN_FILE.fullmatch(path.name).group(1))
-        if lot is None or _rerun_errors(run_dir, context, lot, path.name, rows):
+        lot_id = _RERUN_FILE.fullmatch(path.name).group(1)
+        lot = lots.get(lot_id)
+        if lot is None or _rerun_errors(run_dir, context, lot, path.name, rows, freeze="ensure"):
             folder = _new_history_dir(run_dir, f"-rerun-{number}-invalid")
             shutil.move(str(path), str(folder / path.name))
+            checked.forget(run_dir, lot_id, path.name)
             discarded.append(path.name)
     closed = sorted(_closed_reruns(run_dir) | {number})
     dates = {key: value.isoformat() for key, value in _rerun_dates(run_dir).items()}
@@ -1284,9 +1289,9 @@ def _parse_rows(text: str) -> set:
     return set(parse_refs(text))
 
 
-def _rerun_errors(run_dir, context, lot, name, rows) -> list:
+def _rerun_errors(run_dir, context, lot, name, rows, freeze=None) -> list:
     """Return the errors of a rerun file: only the rows it holds count, none is required."""
-    found = _read_findings_file(run_dir, context, lot, name)
+    found = _read_findings_file(run_dir, context, lot, name, freeze=freeze)
     if found is None:
         return [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
     errors = [error for error in found[1] if not error.startswith(_MISSING_ROW)]
@@ -1321,10 +1326,10 @@ def _cmd_validate(args, services) -> int:
     if args.rerun is not None:
         name = f"{lot['id']}-rerun-{args.rerun:02d}.json"
         rows = _parse_rows(args.rows) if args.rows is not None else None
-        errors = _rerun_errors(args.run_dir, context, lot, name, rows)
+        errors = _rerun_errors(args.run_dir, context, lot, name, rows, freeze="refresh")
     else:
         name = _findings_name(lot["id"], args.followup)
-        found = _read_findings_file(args.run_dir, context, lot, name)
+        found = _read_findings_file(args.run_dir, context, lot, name, freeze="refresh")
         if found is None:
             errors = [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
         else:
@@ -1339,13 +1344,15 @@ def _cmd_plan(args, services) -> int:
     rows, missing = _read_rows(run_dir)
     lots = _read_lots(run_dir)
     visible = _read_visible_verdicts(run_dir)
-    sources = {}
-    findings, followup_done = _collect_findings(run_dir, context, lots["lots"], sources)
-    copy_ds_id = context["notion"]["copy_data_source_id"]
-    history = load_history(run_dir.parent.parent, run_dir.parent.name, copy_ds_id, run_dir.name)
-    written = load_written_statuses(
-        run_dir.parent.parent, run_dir.parent.name, copy_ds_id, _read_at(run_dir / "rows.json")
+    sources, left_out = {}, []
+    findings, followup_done = _collect_findings(
+        run_dir, context, lots["lots"], sources, left_out
     )
+    copy_ds_id = context["notion"]["copy_data_source_id"]
+    cache_root, slug = run_dir.parent.parent, run_dir.parent.name
+    history = load_history(cache_root, slug, copy_ds_id, run_dir.name)
+    written = load_written_statuses(cache_root, slug, copy_ds_id, _read_at(run_dir / "rows.json"))
+    written_refs = load_written_refs(cache_root, slug, copy_ds_id)
     recette = {"refs": frozenset(), "judged": [], "unjudged": []}
     if args.recette == 0:
         raise UsageError(
@@ -1389,6 +1396,7 @@ def _cmd_plan(args, services) -> int:
         recette_refs=recette["refs"],
         comment_dates=_comment_dates(run_dir, sources),
         written_statuses=written,
+        written_refs=written_refs,
     )
     if number is not None:
         plan["recette"] = {**recette, "rerun": f"{number:02d}"}
@@ -1400,7 +1408,9 @@ def _cmd_plan(args, services) -> int:
     plan["plan_id"] = plan_digest(plan)
     (run_dir / "notion").mkdir(exist_ok=True)
     write_json(run_dir / "notion" / "plan.json", plan)
-    _emit(plan["summary"])
+    discarded = _discarded(left_out, written_refs)
+    _say_discarded(discarded)
+    _emit({**plan["summary"], "discarded": discarded, "discarded_count": len(discarded)})
     return EXIT_OK
 
 
@@ -2796,21 +2806,32 @@ def _findings_name(lot_id: str, followup: bool) -> str:
     return f"{lot_id}-followup.json" if followup else f"{lot_id}.json"
 
 
-def _read_findings(run_dir: Path, context: dict, lot: dict, *, followup: bool) -> Optional[tuple]:
+def _read_findings(
+    run_dir: Path, context: dict, lot: dict, *, followup: bool, freeze: Optional[str] = None
+) -> Optional[tuple]:
     """Return (valid findings, errors) of a lot file, None when the file does not exist."""
-    return _read_findings_file(run_dir, context, lot, _findings_name(lot["id"], followup))
+    name = _findings_name(lot["id"], followup)
+    return _read_findings_file(run_dir, context, lot, name, freeze=freeze)
 
 
-def _read_findings_file(run_dir: Path, context: dict, lot: dict, name: str) -> Optional[tuple]:
+def _read_findings_file(
+    run_dir: Path, context: dict, lot: dict, name: str, *, freeze: Optional[str] = None
+) -> Optional[tuple]:
     """Return (valid findings, errors) of a findings file, None when it does not exist.
 
-    The valid findings are those of validate_document whose evidence also holds against the run.
+    The valid findings are those of validate_document whose evidence also holds: as it was frozen
+    when the file was validated, else against the run (read_grounded_findings says what freeze
+    does).
     """
-    return read_grounded_findings(run_dir, context, lot, name)
+    return read_grounded_findings(run_dir, context, lot, name, freeze=freeze)
 
 
 def _collect_findings(
-    run_dir: Path, context: dict, lots: list, sources: Optional[dict] = None
+    run_dir: Path,
+    context: dict,
+    lots: list,
+    sources: Optional[dict] = None,
+    left_out: Optional[list] = None,
 ) -> tuple:
     """Return ({ref: finding}, refs of the lots that went through a follow-up).
 
@@ -2821,17 +2842,22 @@ def _collect_findings(
     scenarios-followup.json exists and the lot still asked for scenarios: if every request was
     discarded, or the tool of one of the two follow-ups failed, no relaunch has any use, but what
     the lot waited for will not come either. sources, when given, receives {ref: name of the
-    findings file of its latest finding}.
+    findings file of its latest finding}. left_out, when given, receives what the reading set
+    aside (_Reading.left_out).
     """
+    seen = _Reading()
 
     def read(lot, name):
         found = _read_findings_file(run_dir, context, lot, name)
+        seen.note(lot["id"], name, found)
         if sources is not None:
             for item in found[0] if found else []:
                 sources[item["ref"]] = name
         return found
 
     findings = latest_findings(run_dir, lots, read)
+    if left_out is not None:
+        left_out.extend(seen.left_out(lots, findings))
     followup_done = set()
     requested = set()
     app_path = probes.app_path(context)
@@ -2845,6 +2871,122 @@ def _collect_findings(
         ] in requested:
             followup_done.update(lot["refs"])
     return findings, followup_done
+
+
+_FINDING_ERROR = re.compile(r"constat CQ-([0-9]+) : (.*)", re.DOTALL)
+_ERROR_REF = re.compile(r"CQ-([0-9]+)")
+_MAX_REASONS = 3
+
+
+class _Reading:
+    """What the reading of the findings files of a run saw, to say what it set aside.
+
+    note() is given each file read, in reading order (latest_findings'): the finding of a ref
+    comes from the last file that holds a valid one, and an error of a later file means a
+    finding that file held for the ref was set aside. A row a file does not hold is no error
+    here: a rerun file holds the rows of its rerun only.
+    """
+
+    def __init__(self) -> None:
+        self.position = 0
+        self.files: dict = {}
+        self.kept: dict = {}
+        self.errors: dict = {}
+        self.general: dict = {}
+
+    def note(self, lot_id: str, name: str, found: Optional[tuple]) -> None:
+        self.position += 1
+        if found is None:
+            return
+        self.files.setdefault(lot_id, []).append(name)
+        for item in found[0]:
+            self.kept[item["ref"]] = (self.position, name)
+        for error in found[1]:
+            if error.startswith(_MISSING_ROW):
+                continue
+            refs, text = _error_refs(error)
+            for ref in refs:
+                self.errors.setdefault(ref, []).append((self.position, name, text))
+            if not refs:
+                self.general.setdefault(lot_id, []).append((name, text))
+
+    def left_out(self, lots: list, findings: dict) -> list:
+        """Return [{"ref", "reason", "lost"}] for the rows of the lots whose finding was set aside.
+
+        lost is true when the row has no finding left (the plan treats it as not evaluated), false
+        when an earlier file gives one that is kept.
+        """
+        left = []
+        for lot in lots:
+            for ref in lot["refs"]:
+                if ref not in findings:
+                    left.append({"ref": ref, "reason": self._why_none(lot["id"], ref), "lost": True})
+                    continue
+                position, kept_name = self.kept.get(ref, (0, None))
+                later = [item for item in self.errors.get(ref, []) if item[0] > position]
+                if later and kept_name:
+                    reason = (
+                        f"{_joined(later)} (le constat de findings/{kept_name} est gardé)"
+                    )
+                    left.append({"ref": ref, "reason": reason, "lost": False})
+        return left
+
+    def _why_none(self, lot_id: str, ref: int) -> str:
+        if self.errors.get(ref):
+            return _joined(self.errors[ref])
+        names = self.files.get(lot_id, [])
+        if not names:
+            return f"findings/{lot_id}.json est introuvable : le lot n'a rien écrit"
+        if self.general.get(lot_id):
+            name, text = self.general[lot_id][0]
+            return f"findings/{name} : {text}"
+        return f"aucun constat pour cette ligne dans {', '.join(f'findings/{name}' for name in names)}"
+
+
+def _joined(errors: list) -> str:
+    texts = list(dict.fromkeys(f"findings/{name} : {text}" for _, name, text in errors))
+    return " ; ".join(texts[:_MAX_REASONS])
+
+
+def _error_refs(error: str) -> tuple:
+    """Return ([refs], text) of an error of a findings file: the rows it names, none for a file."""
+    found = _FINDING_ERROR.fullmatch(error)
+    if found:
+        return [int(found.group(1))], found.group(2)
+    return [int(number) for number in _ERROR_REF.findall(error)], error
+
+
+def _discarded(left_out: list, written: frozenset) -> list:
+    """Return [{"ref", "reason"}]: the rows plan set aside, with what happens to each.
+
+    A row without finding is written "Non évaluable", unless the journal already holds a verdict
+    written on it: its page is left as it is.
+    """
+    found = []
+    for item in left_out:
+        reason = item["reason"].rstrip(".")
+        if item["lost"]:
+            if item["ref"] in written:
+                reason += (
+                    ". La ligne garde le commentaire déjà écrit dans Notion, "
+                    "aucun commentaire de remplacement."
+                )
+            else:
+                reason += ". La ligne est notée « Non évaluable »."
+        found.append({"ref": item["ref"], "reason": reason})
+    return found
+
+
+def _say_discarded(discarded: list) -> None:
+    """Print the rows plan set aside on stderr, the rows that share a reason on one line."""
+    if not discarded:
+        return
+    print(f"Constats écartés : {len(discarded)}.", file=sys.stderr)
+    by_reason: dict = {}
+    for item in discarded:
+        by_reason.setdefault(item["reason"], []).append(ref_label(item["ref"]))
+    for reason, labels in by_reason.items():
+        print(f"- {', '.join(labels)} : {reason}", file=sys.stderr)
 
 
 def _verdicts(run_dir: Path, context: dict, rows: list) -> dict:

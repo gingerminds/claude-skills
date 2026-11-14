@@ -13,9 +13,14 @@ CQA_STUB_ERR        text a named container prints on stderr
 CQA_STUB_RUN_CODE   exit code of a named container (default 0)
 CQA_STUB_HANG       a named container never ends by itself: "kill <name>" ends it (as SIGKILL)
 CQA_STUB_CI_JSON    JSON printed by the container that reads /repo/.gitlab-ci.yml
+CQA_STUB_RESULT     status a tool container writes in result.json of its folder under the /out
+                    mount (the folder is --name, else the first argument, else the one a
+                    "summarize" names); raw/new.json too, and summary.json when the status is ok
+CQA_STUB_RESULT_REASON  reason written with that status (default: none)
 """
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -42,6 +47,32 @@ for index, arg in enumerate(args[:-1]):
         if not expected(host):
             sys.stderr.write(f"stub: bind mount source is not a {kind}: {host}\n")
             sys.exit(99)
+
+IMAGE_REF = re.compile(r"^[a-z0-9][a-z0-9.-]*(:[0-9]+)?/\S+:[0-9A-Za-z.-]+$")
+status = os.environ.get("CQA_STUB_RESULT")
+if status and args[:1] == ["run"]:
+    mounts = [
+        args[index + 1].partition(":")[0]
+        for index, arg in enumerate(args[:-1])
+        if arg == "-v" and args[index + 1].endswith(":/out")
+    ]
+    images = [index for index, arg in enumerate(args) if IMAGE_REF.match(arg)]
+    if mounts and images:
+        rest = args[images[-1] + 1 :]
+        if "--name" in rest:
+            tool = rest[rest.index("--name") + 1]
+        else:
+            tool = rest[1] if rest[:1] == ["summarize"] and len(rest) > 1 else rest[0]
+        folder = os.path.join(mounts[0], tool)
+        os.makedirs(os.path.join(folder, "raw"), exist_ok=True)
+        result = {"tool": tool, "status": status, "started_at": "2026-11-14T10:00:00Z"}
+        if os.environ.get("CQA_STUB_RESULT_REASON"):
+            result["reason"] = os.environ["CQA_STUB_RESULT_REASON"]
+        for name, content in (("result.json", result), ("raw/new.json", {})) + (
+            (("summary.json", {}),) if status == "ok" else ()
+        ):
+            with open(os.path.join(folder, name), "w", encoding="utf-8") as handle:
+                json.dump(content, handle)
 
 needle = os.environ.get("CQA_STUB_FAIL")
 if needle and needle in " ".join(args):
