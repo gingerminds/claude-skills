@@ -1,14 +1,18 @@
 """Detect and mask secrets. Scans report labels, never values."""
+import base64
 import bisect
 import fnmatch
 import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import quote, quote_plus
 
 MASK = "[secret masqué]"
 
 _ENV_NAMES = ("NOTION_TOKEN", "GM_AUDIT_AUTH_PASS")
+_AUTH_USER = "GM_AUDIT_AUTH_USER"
+_AUTH_PASS = "GM_AUDIT_AUTH_PASS"
 _MIN_ENV_LENGTH = 6
 
 _PRIVATE_KEY = re.compile(
@@ -32,19 +36,131 @@ _KUBE_CLIENT_KEY = re.compile(r"(?P<pre>\bclient-key-data:[ \t]*)(?P<val>[A-Za-z
 # redact keeps "pre" and masks "val". "q" is an opening quote, maybe after a string prefix "sp"
 # (b'', r'', f''...): a quoted value runs to its closing quote, a bare one to the next space or
 # quote. The lookahead skips masked values. The bounded name suffix keeps scans linear on long
-# runs of keywords.
-_CREDENTIAL = re.compile(
+# runs of keywords. A name may close with "]" (['password'] = ...).
+_SEPARATOR = r"""\\?["']?\]?[ \t]*(?:=>|[:=])"""
+# Strong names: the password, secret and token words, and a name ending in pass (DB_PASS,
+# smtp_pass, dbPass) unless a letter comes before it (compass, bypass).
+_STRONG_NAMES = (
+    r"password|passwd|pwd|secret|token|api[_-]?key|mot[_-]?de[_-]?passe"
+    rf"|(?:(?<=[A-Za-z0-9][_.-])|(?-i:(?<=[a-z0-9])(?=P)))pass(?={_SEPARATOR})"
+)
+# Weak names say less: a bare pass, salt, auth, credentials, a key of a known kind (APP_KEY,
+# stripe_key) or any upper-case name ending in _KEY. Their value has to look like a secret.
+_WEAK_NAMES = (
+    r"(?<![A-Za-z0-9_.-])pass|(?<![A-Za-z])(?:salt|auth|credentials?)"
+    r"|(?-i:(?<=[a-z0-9])(?:Salt|Auth|Credentials?))"
+    r"|(?<![A-Za-z])(?:app|encryption|signing|master|private|jwt|crypto|cipher|hmac|licen[sc]e"
+    r"|access|session|stripe|webhook|service|client)[_-]?key"
+    r"|(?-i:\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_KEY)"
+)
+
+
+def _assignment(names: str, suffix: str, minimum: int) -> re.Pattern:
+    return re.compile(
+        rf"""
+        (?P<pre>
+            (?P<kw>{names})(?P<suffix>{suffix})
+            \\?["']?(?P<br>\])?[ \t]*(?:=>|[:=])[ \t]*
+            (?:(?P<sp>[bBrRuUfF]{{1,2}})(?=\\?["']))?
+            (?:\\?(?P<q>["']))?
+        )
+        (?!\[secret\ masqué\])
+        (?P<val>(?(q)(?:(?!\\?(?P=q))[^\n]){{{minimum},}}|[^\s"'`]{{{minimum},}}))
+        """,
+        re.IGNORECASE | re.VERBOSE,
+    )
+
+
+_CREDENTIAL = _assignment(_STRONG_NAMES, r"[\w\-]{0,64}", 3)
+_WEAK_CREDENTIAL = _assignment(_WEAK_NAMES, "", 8)
+_ASSIGNMENTS = (_CREDENTIAL, _WEAK_CREDENTIAL)
+_PASSWORD_WORDS = ("pass", "pwd", "mot")
+# A value shorter than this after a name that is not a password word is not a secret.
+_MIN_VALUE_LENGTH = 4
+_FLAG_VALUES = frozenset({
+    "true", "false", "yes", "no", "on", "off", "null", "none", "nil", "ok", "pass", "fail",
+    "passed", "failed", "skipped",
+})
+# What follows a secret word in the name of a setting (password_policy, token_lifetime,
+# password_hash): its value is a plain word, a number or a path, not a secret.
+_DESCRIPTOR_WORDS = frozenset({
+    "policy", "policies", "hash", "hashes", "hashing", "hashed", "algo", "algorithm",
+    "algorithms", "length", "min", "max", "minimum", "maximum", "strength", "reset", "expiry",
+    "expiration", "expire", "expires", "lifetime", "ttl", "type", "types", "field", "fields",
+    "label", "labels", "required", "rule", "rules", "complexity", "history", "enabled",
+    "disabled", "attempts", "timeout", "cost", "rounds", "format", "file", "path", "url",
+    "endpoint", "name", "names", "mode", "scheme", "driver", "handler", "class", "provider",
+    "validator", "encoder", "hasher", "storage", "encoding", "check", "count", "limit",
+    "option", "options", "setting", "settings", "config",
+})
+# A value that only says a secret goes here: <mot de passe>, ***, xxxx.
+_EMPTY_VALUE = re.compile(r"<[^<>\n]+>|\*+|x{3,}", re.IGNORECASE)
+_PLAIN_VALUE = re.compile(
+    r"(?:[A-Za-z][a-z0-9_.\-]*|\d+|/[\w./\-]*|[A-Za-z][A-Za-z0-9+.\-]*://[^\s@]*)[,;]?"
+)
+_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+")
+_CODE_FREE_VALUE = re.compile(r"[\w+/=:@%.\-~!#^&*$]+")
+_PATH_OR_URL = re.compile(r"(?:/|~/|\.{1,2}/)|\w+://")
+_SECRET_SHAPE = re.compile(r"\d|[^\w\s.\-]|.[A-Z]")
+# A placeholder in a URL, an option or a header: ${X}, $X, <x>, {x}, [x], %s, ***, xxx.
+_PLACEHOLDER_VALUE = re.compile(
+    r"\$\{[^{}\n]*\}|\$[A-Za-z_]\w*|<[^<>\n]*>|\{[^{}\n]*\}|\[[^\[\]\n]*\]|%\(?\w*\)?[sd]|\*+|x{3,}",
+    re.IGNORECASE,
+)
+
+# A secret that is written after a space: "SetEnv DB_PASSWORD value", "fastcgi_param NAME value;",
+# "--password value", "redis-cli -a value", "curl -u user:value", "sshpass -p value". The name
+# ends with the keyword, so --password-file, --no-password and --password-stdin are not matched.
+_COMMAND_CREDENTIAL = re.compile(
     r"""
     (?P<pre>
-        (?P<kw>password|passwd|pwd|secret|token|api[_-]?key)[\w\-]{0,64}
-        \\?["']?[ \t]*(?:=>|[:=])[ \t]*
-        (?:(?P<sp>[bBrRuUfF]{1,2})(?=\\?["']))?
-        (?:\\?(?P<q>["']))?
+        (?:
+            (?-i:\b(?:SetEnv|setenv|fastcgi_param|uwsgi_param|scgi_param|ENV|ARG))[ \t]+
+            ["']?[\w.\-]*(?:password|passwd|pwd|pass|secret|token|api[_-]?key|salt|key)["']?[ \t]+
+          | (?<![\w-])--?(?!no-|ask-)[\w-]*?(?:password|passwd|pwd|secret|token|api[_-]?key)
+            [ \t]+
+          | (?<![\w-])--passphrase[ \t]+
+          | \bredis-cli\b(?:(?!\bredis-cli\b)[^\n|;&])*?[ \t](?:-a|--pass)[ \t]+
+          | \bsshpass\b(?:(?!\bsshpass\b)[^\n|;&])*?[ \t]-p[ \t]*
+          | \b(?:curl|wget)\b(?:(?!\b(?:curl|wget)\b)[^\n|;&])*?[ \t]
+            (?:-u[ \t]+|--user(?:[ \t]+|=))["']?[^\s:"']+:
+        )
+        (?:(?P<q>["']))?
     )
     (?!\[secret\ masqué\])
-    (?P<val>(?(q)(?:(?!\\?(?P=q))[^\n]){4,}|[^\s"'`]{4,}))
+    (?!-)
+    (?P<val>(?(q)(?:(?!(?P=q))[^\n])+|[^\s"'`;|]{3,}))
     """,
     re.IGNORECASE | re.VERBOSE,
+)
+
+# A user and a password in a URL, up to the last "@" of the authority.
+_URL_CREDENTIALS = re.compile(
+    r"""
+    (?P<pre>\b[A-Za-z][A-Za-z0-9+.\-]{1,15}://[^\s/@:"'`<>]*:)
+    (?P<val>[^\s/"'`<>]+)
+    (?=@[^\s@/"'`<>])
+    """,
+    re.VERBOSE,
+)
+
+# The request header of cookies: session ids of the visitor. Set-Cookie stays (its attributes
+# are evidence for the audit).
+_COOKIE_HEADER = re.compile(
+    r"""
+    (?P<pre>(?<![\w-])cookie\\?["']?[ \t]*:[ \t]*\\?["']?)
+    (?!\[secret\ masqué\])
+    (?P<val>[\w.%\-]+=[^\n"'`\\]+)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_REFERENCE_COOKIE = re.compile(r"[\w.%\-]+=\$\{?\w+\}?")
+
+# A key of an obvious form, with no keyword near it.
+_PROVIDER_KEY = re.compile(
+    r"\b(?:(?:sk|rk)_(?:live|test)_[0-9A-Za-z]{10,}|whsec_[0-9A-Za-z]{16,}"
+    r"|xox[abprs]-[0-9A-Za-z\-]{10,}|AIza[0-9A-Za-z_\-]{35}"
+    r"|SG\.[0-9A-Za-z_\-]{16,}\.[0-9A-Za-z_\-]{16,}|npm_[0-9A-Za-z]{36})"
 )
 
 # A PHP constant whose name says it holds a credential (DB_PASSWORD, API_TOKEN...) or a
@@ -136,8 +252,25 @@ _OPENING_BRACKET = re.compile(r"[ \t]*(?:\(|\[(?!secret masqué\]))")
 
 
 def _is_non_secret(match: re.Match) -> bool:
-    """True when a credential match is a form field description or a pure code expression."""
+    """True when a credential match is a setting, a form field description or a pure code expression."""
     value = match.group("val")
+    keyword = match.group("kw").lower()
+    if _EMPTY_VALUE.fullmatch(value):
+        return True
+    if match.re is _WEAK_CREDENTIAL:
+        if not _looks_like_secret(value):
+            return True
+    elif _is_setting(match.group("suffix"), value):
+        return True
+    elif keyword.startswith(_PASSWORD_WORDS):
+        if not re.search(r"\w", value):
+            return True
+        if keyword == "pass" and not _is_pass_secret(match.group("kw"), value):
+            return True
+    elif len(value) < _MIN_VALUE_LENGTH:
+        return True
+    if match.group("br") and not match.group("q") and not _is_word_secret(value):
+        return True
     if match.group("q"):
         f_string = "f" in (match.group("sp") or "").lower()
         return _is_reference(value) or (f_string and bool(_F_TEMPLATE.fullmatch(value)))
@@ -159,6 +292,32 @@ def _is_non_secret(match: re.Match) -> bool:
         return False
     literals = list(_QUOTED_LITERAL.finditer(rest)) + list(_N_LITERAL.finditer(rest))
     return all(_is_harmless_literal(rest, literal) for literal in literals)
+
+
+def _is_setting(suffix: str, value: str) -> bool:
+    """True for password_policy: strong, token_lifetime: 3600, password_file: /run/x."""
+    words = _WORD.findall(suffix)
+    return bool(words) and all(word.lower() in _DESCRIPTOR_WORDS for word in words) and bool(
+        _PLAIN_VALUE.fullmatch(value)
+    )
+
+
+def _looks_like_secret(value: str) -> bool:
+    """True for a value that has the shape of a secret: 8 characters or more, not a path or a
+    URL, without spaces or brackets, with a digit, a symbol or an upper-case letter inside (not
+    only a word)."""
+    return len(value) >= 8 and not _PATH_OR_URL.match(value) and _is_word_secret(value)
+
+
+def _is_word_secret(value: str) -> bool:
+    return bool(_CODE_FREE_VALUE.fullmatch(value) and _SECRET_SHAPE.search(value))
+
+
+def _is_pass_secret(name: str, value: str) -> bool:
+    """A value after a name ending in pass: DB_PASS takes any word, smtp_pass a secret shape."""
+    if value.lower() in _FLAG_VALUES or not _CODE_FREE_VALUE.fullmatch(value):
+        return False
+    return name.isupper() or bool(_SECRET_SHAPE.search(value))
 
 
 def _is_reference(text: str) -> bool:
@@ -200,8 +359,13 @@ _PATTERNS = (
     ("notion_token", _NOTION),
     ("jwt", _JWT),
     ("credential_assignment", _CREDENTIAL),
+    ("credential_assignment", _WEAK_CREDENTIAL),
+    ("credential_assignment", _COMMAND_CREDENTIAL),
+    ("provider_key", _PROVIDER_KEY),
+    ("url_credentials", _URL_CREDENTIALS),
     ("credential_define", _DEFINE),
     ("authorization_header", _AUTH_HEADER),
+    ("cookie_header", _COOKIE_HEADER),
     ("mysql_password_option", _MYSQL_PASSWORD),
     ("kube_client_key", _KUBE_CLIENT_KEY),
 )
@@ -212,7 +376,9 @@ def scan_text(text: str, known_values: list[str]) -> list[str]:
     labels = []
     if any(value in text for value in known_values if value):
         labels.append("known_value")
-    labels.extend(label for label, pattern in _PATTERNS if _search(pattern, text))
+    for label, pattern in _PATTERNS:
+        if label not in labels and _search(pattern, text):
+            labels.append(label)
     return labels
 
 
@@ -269,7 +435,20 @@ def _search(pattern: re.Pattern, text: str) -> bool:
 
 
 def _skipped(pattern: re.Pattern, match: re.Match) -> bool:
-    return pattern is _CREDENTIAL and _is_non_secret(match)
+    if pattern in _ASSIGNMENTS:
+        return _is_non_secret(match)
+    if pattern is _COMMAND_CREDENTIAL:
+        return _is_placeholder(match.group("val"))
+    if pattern is _URL_CREDENTIALS:
+        return bool(_PLACEHOLDER_VALUE.fullmatch(match.group("val")))
+    if pattern is _COOKIE_HEADER:
+        return bool(_REFERENCE_COOKIE.fullmatch(match.group("val")))
+    return False
+
+
+def _is_placeholder(value: str) -> bool:
+    return bool(_PLACEHOLDER_VALUE.fullmatch(value) or _VARIABLE_REFERENCE.fullmatch(value)
+                or _is_reference(value))
 
 
 def redact(text: str, known_values: list[str]) -> str:
@@ -278,17 +457,30 @@ def redact(text: str, known_values: list[str]) -> str:
     if values:
         text = re.sub("|".join(re.escape(value) for value in values), lambda _: MASK, text)
     for _, pattern in _PATTERNS:
-        if pattern is _CREDENTIAL:
-            text = _redact_credentials(text)
+        if pattern in _ASSIGNMENTS:
+            text = _redact_credentials(text, pattern)
         else:
-            text = pattern.sub(_mask, text)
+            text = pattern.sub(lambda match, pattern=pattern: _mask(match, pattern), text)
     return text
 
 
 def known_values_from_env(env: Mapping[str, str] = os.environ) -> list[str]:
-    """Return the values of the secret environment variables that are long enough to match."""
-    values = (env.get(name, "").strip() for name in _ENV_NAMES)
-    return [value for value in values if len(value) >= _MIN_ENV_LENGTH]
+    """Return the values of the secret environment variables that are long enough to match.
+
+    The Basic Auth password comes with the forms it takes on the wire: the Basic credentials in
+    base64 (with the user) and the password percent-encoded in a URL or a form.
+    """
+    values = [value for value in (env.get(name, "").strip() for name in _ENV_NAMES)
+              if len(value) >= _MIN_ENV_LENGTH]
+    password = env.get(_AUTH_PASS, "").strip()
+    user = env.get(_AUTH_USER, "").strip()
+    forms = [quote(password, safe=""), quote_plus(password)] if password else []
+    if password and user:
+        forms.append(base64.b64encode(f"{user}:{password}".encode()).decode("ascii"))
+    for form in forms:
+        if len(form) >= _MIN_ENV_LENGTH and form not in values:
+            values.append(form)
+    return values
 
 
 def scan_tree(
@@ -336,11 +528,11 @@ def _skipped_dir(relative: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def _redact_credentials(text: str) -> str:
+def _redact_credentials(text: str, pattern: re.Pattern) -> str:
     """Mask credential values; an unquoted call or index is masked to the end of line."""
     out = []
     position = 0
-    for match in _CREDENTIAL.finditer(text):
+    for match in pattern.finditer(text):
         if match.start() < position or _is_non_secret(match):
             continue
         end = match.end("val")
@@ -355,7 +547,9 @@ def _redact_credentials(text: str) -> str:
     return "".join(out) + text[position:]
 
 
-def _mask(match: re.Match) -> str:
+def _mask(match: re.Match, pattern: re.Pattern) -> str:
+    if _skipped(pattern, match):
+        return match.group(0)
     return (match.groupdict().get("pre") or "") + MASK
 
 

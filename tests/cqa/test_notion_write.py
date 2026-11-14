@@ -522,6 +522,20 @@ class SecretGateTest(ApplyTestCase):
         self.assertEqual(result["blocked"][0]["labels"], ["credential_assignment"])
         self.assertEqual(self.notion.calls, [])
 
+    def test_the_common_secret_forms_never_reach_notion(self):
+        for text, label in (
+            ("Constat : DATABASE_URL=mysql://app:Sup3rS3cretDb@db:3306/app", "url_credentials"),
+            ("Constat : DB_PASS=Sup3rS3cretDb", "credential_assignment"),
+            ("Constat : SetEnv DB_PASSWORD Sup3rS3cretDb", "credential_assignment"),
+            ("Constat : redis-cli -a Sup3rS3cretDb ping", "credential_assignment"),
+            ("Constat : Cookie: SESS=Sup3rS3cretDb", "cookie_header"),
+        ):
+            with self.subTest(text=text):
+                result = self.apply(comment_op(PAGE_1, 1, text))
+                self.assertEqual(result["done"], 0)
+                self.assertEqual(result["blocked"][0]["labels"], [label])
+        self.assertEqual(self.notion.calls, [])
+
     def test_secret_in_an_assignee_name_blocks_too(self):
         assign = assign_op(PAGE_1, 1, ["Inès", "s3cr3t-value-xyz"])
         plan = make_plan(assign, options=[*OPTIONS, "s3cr3t-value-xyz"])

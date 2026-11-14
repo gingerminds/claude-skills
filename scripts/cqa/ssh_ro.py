@@ -41,14 +41,26 @@ _COMPONENT_SEPARATORS = re.compile(r"[/=:, ]+")
 _GLOB = re.compile(r"[*?\[{]")
 _PSEUDO_FS = re.compile(r"/+(?:proc|sys|dev)(?:/|$)")
 _SECRET_NAME = re.compile(
-    r"^\.env|\.env$|\.env\.|wp-config|^settings.*\.php|htpasswd|auth\.json"
+    r"^\.env|\.env$|\.env\.|wp-config|^settings.*\.php|\.settings\.php$|htpasswd|auth\.json"
     r"|\.(?:key|pem|p12|pfx)(?:\.|$)|^id_|_history$"
+    r"|^settings.*\.py$|^local_settings|^\.npmrc$|^parameters\.ya?ml|^env\.php$"
+    r"|\.tfvars(?:\.|$)|\.tfstate|^secrets?\.ya?ml$|^credentials(?:\.|$)"
+    r"|^service[-_]?account.*\.json$"
 )
-_SECRET_NAMES = frozenset(
-    {"shadow", "gshadow", ".my.cnf", "debian.cnf", ".pgpass", ".netrc", ".git-credentials"}
-)
-_SECRET_PAIRS = frozenset(
-    {(".git", "config"), (".docker", "config.json"), (".aws", "credentials"), (".kube", "config")}
+_SECRET_NAMES = frozenset({
+    "shadow", "gshadow", "shadow-", "gshadow-", ".my.cnf", "debian.cnf", ".pgpass", ".netrc",
+    ".git-credentials",
+})
+_SECRET_PAIRS = frozenset({
+    (".git", "config"), (".docker", "config.json"), (".aws", "credentials"), (".kube", "config"),
+    ("run", "secrets"),
+})
+# A file of a "settings" folder (Django: config/settings/production.py).
+_SETTINGS_DIR = "settings"
+# Names that hold secrets but are listed, searched by name and passed to docker compose -f: only
+# their content is refused (cat, head, tail, grep).
+_SECRET_CONTENT_NAME = re.compile(
+    r"^docker-compose|^compose[\w.-]*\.ya?ml$|\.sql(?:\.|$)"
 )
 # Session ids are file names: a "sessions" folder or a PHP "sess_<id>" file is never listed,
 # searched or read, whatever the command.
@@ -96,7 +108,12 @@ def _check_token(token, *, secrets: bool = True) -> None:
         return
     for index, part in enumerate(lowered):
         pair = tuple(lowered[index:index + 2])
-        if _SECRET_NAME.search(part) or part in _SECRET_NAMES or pair in _SECRET_PAIRS:
+        if pair in _SECRET_PAIRS or _is_settings_file(lowered, index):
+            raise Refused(
+                f"fichier porteur de secrets refusé (« {'/'.join(components[index:index + 2])} ») : "
+                "lire les clés utiles avec --env-keys"
+            )
+        if _SECRET_NAME.search(part) or part in _SECRET_NAMES:
             raise Refused(
                 f"fichier porteur de secrets refusé (« {components[index]} ») : "
                 "lire les clés utiles avec --env-keys"
@@ -106,6 +123,14 @@ def _check_token(token, *, secrets: bool = True) -> None:
                 f"dossier ou fichier de sessions refusé (« {components[index]} ») : les noms "
                 "des fichiers de session sont les identifiants de session"
             )
+
+
+def _is_settings_file(lowered: list, index: int) -> bool:
+    return (
+        lowered[index] == _SETTINGS_DIR
+        and index + 1 < len(lowered)
+        and lowered[index + 1].endswith(".py")
+    )
 
 
 def _check_listing_root(command: str, path: str) -> None:
@@ -135,6 +160,12 @@ def _check_path(path: str, *, content: bool = False) -> None:
     if content and _PSEUDO_FS.match(posixpath.normpath(path)):
         raise Refused(
             f"lecture d'un pseudo-fichier système refusée (/proc, /sys, /dev) : « {path} »"
+        )
+    name = posixpath.basename(path)
+    if content and _SECRET_CONTENT_NAME.search(name.lower()):
+        raise Refused(
+            f"fichier porteur de secrets refusé (« {name} ») : fichier de composition ou dump "
+            "de base de données, à lire dans le dépôt"
         )
 
 

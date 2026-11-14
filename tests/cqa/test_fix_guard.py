@@ -13,10 +13,10 @@ from tests.cqa.test_git_tools import commit, git as real_git
 
 SCHEMAS = Path(__file__).resolve().parents[2] / "skills" / "checklist-quality-audit" / "schemas"
 SECTION = ["--section", "securite"]
-# A made-up Stripe-shaped key: gitleaks flags it (stripe-access-token), the home rule does not
+# A made-up Square-shaped key: gitleaks flags it (square-access-token), the home rule does not
 # unless a credential keyword precedes it.
-STRIPE = "sk_live_" + "51Hx9k2LmN8pQ7rS3tU6vW0xY4zA1bC5dE2fG8hJ3kL6mN9pQ"
-GITLEAKS = "gitleaks:stripe-access-token"
+VENDOR_KEY = "EAAA" + "lPqR7sT3uV6wX0yZ1aB5cD2eF8gH4iJ9kL3mN6oPqRsTuVwX"
+GITLEAKS = "gitleaks:square-access-token"
 
 THIRD_PARTY = "code tiers (third_party_paths)"
 DEPENDENCY_DIR = "dossier de dépendances"
@@ -347,15 +347,15 @@ class GitleaksTest(RepoCase):
     files whole and the messages); a finding becomes a content problem, never waivable, at
     its commit, file and line, when one of its lines is added."""
 
-    LINE = f"$stripe = '{STRIPE}';"
+    LINE = f"$vendor = '{VENDOR_KEY}';"
 
     def scanner(self, calls, finder=None):
         def scan(text):
             calls.append(text)
             if finder is not None:
                 return finder(text)
-            return [("stripe-access-token", number, number)
-                    for number, line in enumerate(text.split("\n"), start=1) if STRIPE in line]
+            return [("square-access-token", number, number)
+                    for number, line in enumerate(text.split("\n"), start=1) if VENDOR_KEY in line]
         return scan
 
     def test_findings_map_back_to_their_commit_file_and_line(self):
@@ -365,7 +365,7 @@ class GitleaksTest(RepoCase):
             "web/old.php": f"<?php\n{self.LINE}\n// note\n",
         })
         second = self.add("fix(securite CQ-12): rotate", {"docs/a.md": f"{self.LINE}\n"},
-                          f"Old key: {STRIPE}")
+                          f"Old key: {VENDOR_KEY}")
         calls = []
         problems = self.check(gitleaks=self.scanner(calls))
         self.assertEqual(problems, [
@@ -376,7 +376,7 @@ class GitleaksTest(RepoCase):
         self.assertEqual({(item["kind"], item["waivable"]) for item in problems}, {("content", False)})
         self.assertEqual(len(calls), 1)
         for part in ("fix(securite CQ-3): pay", "$x = 1;", "// note", "fix(securite CQ-12): rotate",
-                     f"Old key: {STRIPE}"):
+                     f"Old key: {VENDOR_KEY}"):
             with self.subTest(part=part):
                 self.assertIn(part, calls[0])
         self.assertLess(calls[0].index("fix(securite CQ-3): pay"), calls[0].index("$x = 1;"))
@@ -488,7 +488,7 @@ class GuardCommandTest(GitCase):
         self.open_pass()
         worktree = Path(self.start_ok()["worktree"])
         leaked = self.commit_files(worktree, "fix(securite CQ-3): read the value",
-                                   {"web/config.php": "<?php\n$auth = 's3cr3t-value';\n"})
+                                   {"web/config.php": "<?php\n$note = 's3cr3t-value';\n"})
         self.commit_files(worktree, "fix(securite CQ-3): drop the value",
                           {"web/config.php": "<?php\n"})
         message = self.commit_files(worktree, "fix(securite CQ-5): rotate s3cr3t-value",
@@ -577,11 +577,11 @@ class GuardCommandTest(GitCase):
                 self.assertEqual(out, "")
 
     def test_guard_reports_gitleaks_findings_without_the_value(self):
-        self.gitleaks = {STRIPE: "stripe-access-token"}
+        self.gitleaks = {VENDOR_KEY: "square-access-token"}
         self.open_pass()
         worktree = Path(self.start_ok()["worktree"])
         sha = self.commit_files(worktree, "fix(securite CQ-3): pay",
-                                {"web/pay.php": f'<?php\napi_key = "{STRIPE}"\n'})
+                                {"web/pay.php": f'<?php\napi_key = "{VENDOR_KEY}"\n'})
         code, out, err = self.run_main(["guard", self.run_dir, KEY])
         self.assertEqual(code, 5, err)
         found = secret(sha, 3, "web/pay.php", GITLEAKS, 2)
@@ -590,10 +590,10 @@ class GuardCommandTest(GitCase):
         ], "note": None})
         self.assertEqual((found["kind"], found["waivable"]), ("content", False))
         for text in (out, err):
-            self.assertNotIn(STRIPE, text)
+            self.assertNotIn(VENDOR_KEY, text)
             self.assertNotIn("CANARY", text)
         self.assertEqual(len(self.toolbox_inputs), 1)
-        self.assertIn(f'api_key = "{STRIPE}"', self.toolbox_inputs[0])
+        self.assertIn(f'api_key = "{VENDOR_KEY}"', self.toolbox_inputs[0])
         self.assertIn("fix(securite CQ-3): pay", self.toolbox_inputs[0])
         for path in self.toolbox_paths[0]:
             self.assertFalse(path.exists(), path)
@@ -602,13 +602,13 @@ class GuardCommandTest(GitCase):
                  "--line", "2", "--label"]
         code, out, err = self.run_main(waive + [GITLEAKS])
         self.assertEqual((code, out), (2, ""))
-        self.assertNotIn(STRIPE, err)
+        self.assertNotIn(VENDOR_KEY, err)
         code, out, err = self.run_main(waive + ["credential_assignment"])
         self.assertEqual(code, 0, err)
         code, out, err = self.run_main(["guard", self.run_dir, KEY])
         self.assertEqual(code, 5, err)
         self.assertEqual(json.loads(out)["problems"], [found])
-        self.assertNotIn(STRIPE, (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8"))
+        self.assertNotIn(VENDOR_KEY, (self.run_dir / fix_state.STATE_FILE).read_text(encoding="utf-8"))
 
     def test_guard_keeps_the_home_rule_next_to_gitleaks(self):
         self.gitleaks = {}
@@ -645,14 +645,14 @@ class GuardCommandTest(GitCase):
         self.assertEqual(len(self.toolbox_inputs), 2)
 
     def test_staged_guard_uses_gitleaks(self):
-        self.gitleaks = {STRIPE: "stripe-access-token"}
+        self.gitleaks = {VENDOR_KEY: "square-access-token"}
         self.open_pass()
         worktree = Path(self.start_ok()["worktree"])
         head = self.head(worktree)
-        write(worktree, "web/pay.php", f"<?php\n$stripe = '{STRIPE}';\n")
+        write(worktree, "web/pay.php", f"<?php\n$vendor = '{VENDOR_KEY}';\n")
         self.assertEqual(fix_names.git(worktree, subprocess.run, "add", "--", "web/pay.php").returncode, 0)
         message = self.root / "message.txt"
-        message.write_text(f"fix(securite CQ-3): pay\n\nOld key {STRIPE}\n", encoding="utf-8")
+        message.write_text(f"fix(securite CQ-3): pay\n\nOld key {VENDOR_KEY}\n", encoding="utf-8")
         blob = real_git(worktree, "rev-parse", ":web/pay.php")
         code, out, err = self.guard_staged("--staged", "--message-file", str(message))
         self.assertEqual(code, 5, err)
@@ -662,7 +662,7 @@ class GuardCommandTest(GitCase):
         ], "note": None})
         self.assertEqual(self.head(worktree), head)
         self.assertEqual(len(self.toolbox_inputs), 1)
-        self.assertNotIn(STRIPE, out + err)
+        self.assertNotIn(VENDOR_KEY, out + err)
         self.gitleaks = None
         code, out, err = self.guard_staged("--staged", "--message-file", str(message))
         self.assertEqual(code, 0, err)
@@ -801,7 +801,7 @@ class SecretWaiverTest(GitCase):
         env = {"GM_AUDIT_AUTH_PASS": "s3cr3t-value"}
         aws = "AKIA" + "IOSFODNN7EXAMPLE"
         known = self.commit("fix(securite CQ-3): read the value",
-                            {"web/config.php": "<?php\n$auth = 's3cr3t-value';\n",
+                            {"web/config.php": "<?php\n$note = 's3cr3t-value';\n",
                              "web/key.php": f"<?php\n$key = '{aws}';\n"})
         literal = self.commit("fix(securite CQ-3): seed a password",
                               {"web/seed.php": "<?php\n$password = 'hunter2hunter2';\n"})

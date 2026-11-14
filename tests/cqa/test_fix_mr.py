@@ -11,7 +11,7 @@ import cqa_fix
 from cqa import fix_mr, fix_state
 from tests.cqa.test_cli_fix import GITLEAKS_DOWN
 from tests.cqa.test_fix_git import BASE, GitCase, HOST, KEY, PREFIX, flight, mr
-from tests.cqa.test_fix_guard import GITLEAKS, STRIPE, problem, secret
+from tests.cqa.test_fix_guard import GITLEAKS, VENDOR_KEY, problem, secret
 from tests.cqa.test_git_tools import commit, git as real_git
 
 SECTION = ["--section", "securite"]
@@ -1895,10 +1895,10 @@ class PublishTest(MrCase):
 
     def test_publish_refuses_a_gitleaks_finding_without_the_value(self):
         self.reviewed()
-        self.gitleaks = {STRIPE: "stripe-access-token"}
-        (self.worktree / "pay.txt").write_text(f"$stripe = '{STRIPE}';\n", encoding="utf-8")
+        self.gitleaks = {VENDOR_KEY: "square-access-token"}
+        (self.worktree / "pay.txt").write_text(f"$vendor = '{VENDOR_KEY}';\n", encoding="utf-8")
         for args in (("add", "pay.txt"),
-                     ("commit", "-q", "-m", "fix(securite CQ-3): pay", "-m", f"Old key {STRIPE}")):
+                     ("commit", "-q", "-m", "fix(securite CQ-3): pay", "-m", f"Old key {VENDOR_KEY}")):
             result = cqa_fix.fix_names.git(self.worktree, subprocess.run, *args)
             self.assertEqual(result.returncode, 0, result.stderr)
         leak = self.head(self.worktree)
@@ -1909,7 +1909,7 @@ class PublishTest(MrCase):
             secret(leak, 3, None, GITLEAKS, 3),
             secret(leak, 3, "pay.txt", GITLEAKS, 1),
         ], "note": None})
-        self.assertNotIn(STRIPE, out + err)
+        self.assertNotIn(VENDOR_KEY, out + err)
         self.assertIn("rien n'a été poussé", err)
         self.assertEqual(self.remote(self.branch), "")
         self.assertEqual(self.glab_args("mr"), [])

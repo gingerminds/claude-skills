@@ -14,6 +14,7 @@ from cqa import (
     categories, checked, context_docs, docs_link, docs_verdicts, fix_guard, fix_mr, fix_names,
     fix_state, fix_summary, report, ssh_ro,
 )
+from cqa import secrets as secret_scan
 from cqa.lots import DOCUMENT_LOT_ID, MOBILE_TERMS
 from cqa.findings import (
     MAX_SCENARIOS, MAX_SELECTOR, MAX_STEPS, SCENARIO_PRESS_KEYS, SCENARIO_PROFILES,
@@ -4314,6 +4315,79 @@ class ThirdPartyWordingContract(unittest.TestCase):
         self.assertIn("a plugin added since is custom by default", ref)
         self.assertNotIn("so an earlier answer is proposed again", ref)
         self.assertIn("(SSH alias, preprod URL, Notion copy, key pages, excluded third-party plugins)", SKILL.read_text(encoding="utf-8"))
+
+
+class SecretFilesContract(unittest.TestCase):
+    """The instructions list the files the SSH guard refuses and the forms the output masks."""
+
+    SAMPLES = {
+        "settings*.py": "/srv/app/settings.py",
+        "local_settings*": "/srv/app/local_settings.py",
+        "docker-compose*": "/srv/app/docker-compose.yml",
+        "compose*.yml": "/srv/app/compose.prod.yml",
+        ".npmrc": "/srv/app/.npmrc",
+        "parameters.yml": "/srv/app/parameters.yml",
+        "local.settings.php": "/srv/app/local.settings.php",
+        "env.php": "/srv/app/env.php",
+        "*.sql": "/srv/backup.sql",
+        "*.sql.*": "/srv/backup.sql.gz",
+        "*.tfvars": "/srv/prod.tfvars",
+        "shadow-": "/etc/shadow-",
+        "/run/secrets": "/run/secrets/db_password",
+    }
+
+    def test_server_reference_lists_every_file_the_guard_refuses(self):
+        server = _text(REFERENCES / "server.md")
+        for name, path in self.SAMPLES.items():
+            with self.subTest(name=name):
+                self.assertIn(f"`{name}`", server)
+                allowed, reason = ssh_ro.check_command(["cat", path])
+                self.assertFalse(allowed)
+                self.assertIn("porteur de secrets", reason)
+
+    def test_server_reference_says_which_names_stay_allowed_to_list(self):
+        server = _text(REFERENCES / "server.md")
+        self.assertIn("naming them in `ls`, `stat`, `find -name` or `docker compose -f` stays allowed", server)
+        for argv in (["ls", "-l", "/srv/app/docker-compose.yml"], ["find", "/srv", "-name", "*.sql"],
+                     ["docker", "compose", "-f", "/srv/app/docker-compose.yml", "ps"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(ssh_ro.check_command(argv)[0])
+
+    def test_instructions_forbid_copying_a_value_read(self):
+        for path in (REFERENCES / "server.md", AUDITOR):
+            with self.subTest(path=path.name):
+                text = _text(path)
+                self.assertIn("Never copy a value you read", text)
+                self.assertIn("a URL with `user:password@`", text)
+                self.assertIn("safety net, not a licence to read those files", text)
+        auditor = _text(AUDITOR)
+        for name in ("settings*.py", "local_settings*", "docker-compose*", ".npmrc", "*.sql",
+                     "/run/secrets/*"):
+            with self.subTest(name=name):
+                self.assertIn(f"`{name}`", auditor)
+
+    def test_server_reference_names_the_masked_forms(self):
+        text = _text(REFERENCES / "server.md")
+        masked = text[text.index("- Masked in every output"):].split("\n", 1)[0]
+        for needle in ("`DB_PASS`", "`scheme://user:<mot de passe>@host`", "`--password <valeur>`",
+                       "`SetEnv`", "`fastcgi_param`", "`curl -u user:<valeur>`",
+                       "`redis-cli -a <valeur>`", "`Cookie:`", "`sk_live_...`", "`password_policy: strong`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, masked)
+        for line in ("SetEnv DB_PASSWORD x1y2z3", "curl -u admin:x1y2z3 https://example.org",
+                     "redis-cli -a x1y2z3 ping", "mysql --password x1y2z3 app",
+                     "DATABASE_URL=mysql://app:x1y2z3@db/app", "Cookie: sid=x1y2z3"):
+            with self.subTest(line=line):
+                self.assertNotIn("x1y2z3", secret_scan.redact(line, []))
+        self.assertEqual(secret_scan.redact("password_policy: strong", []), "password_policy: strong")
+
+    def test_verdicts_reference_lists_every_secret_label(self):
+        text = _text(VERDICTS_MD)
+        labels = {label for label, _ in secret_scan._PATTERNS} | {"known_value"}
+        item = text[text.index("- A secret label ("):].split("\n", 1)[0]
+        for label in sorted(labels):
+            with self.subTest(label=label):
+                self.assertIn(f"`{label}`", item)
 
 
 class DocumentHintsContract(unittest.TestCase):

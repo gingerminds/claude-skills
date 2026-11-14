@@ -377,6 +377,6 @@ Labels of `blocked[].labels`:
 
 - `page_outside_copy`: « page hors de la copie » (not a row of `rows.json`, or not the page of the copy).
 - `unknown_option`: « option de « Assignée à » absente de la copie » (removed since the plan; Notion would create it, so the skill does not write it).
-- A secret label (`known_value`, `private_key`, `aws_key`, `gitlab_token`, `github_token`, `notion_token`, `jwt`, `credential_assignment`, `authorization_header`): « le texte contient ce qui ressemble à un secret (<label>) ». Never show the text. The lead writes that comment by hand if needed, without the secret.
+- A secret label (`known_value`, `private_key`, `aws_key`, `gitlab_token`, `github_token`, `notion_token`, `jwt`, `credential_assignment`, `credential_define`, `provider_key`, `url_credentials`, `authorization_header`, `cookie_header`, `mysql_password_option`, `kube_client_key`): « le texte contient ce qui ressemble à un secret (<label>) ». Never show the text. The lead writes that comment by hand if needed, without the secret.
 
 A blocked operation stays blocked when run again. `cqa_notion.py comment-page` follows the same codes and the same journal.
