@@ -127,4 +127,6 @@ The `server` lot writes `facts/server.json`, read by the browser lots for the mi
 {"facts": [{"refs": [88], "topic": "Affichage des erreurs PHP", "command": "--php-ini display_errors", "exit": 0, "result": "display_errors=Off (PHP CLI)"}]}
 ```
 
-`command` is what follows the alias; `result` is a short French text, without any secret.
+`command` is what follows the alias; `exit` is the real exit code the guard returned; `result` is a short French text, without any secret.
+
+The file is also the evidence of the `na` of the `server` lot: the finding cites `{"type": "fact", "topic": "<the same topic>"}`, and `validate` checks that a fact of that topic holds the row in `refs`, with `exit` `0` and a `command` and a `result` filled. Only a command that exited with `0` supports an `na`: never write `0` as the `exit` of a command that failed. When only a command that fails shows the absence (`crontab -l` without a crontab, a `grep` without a match, `systemctl is-active` on an inactive unit, a `--sql` query on a missing database), the row is `unknown` and `human_check` names the command. A `fact` never supports an `ok`.

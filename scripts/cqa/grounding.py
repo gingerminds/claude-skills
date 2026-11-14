@@ -1,4 +1,4 @@
-"""What the evidence of a finding claims that the run holds: files, tools, pages, probes, documents.
+"""What the evidence of a finding claims that the run holds: files, tools, pages, probes, facts, documents.
 
 validate_document checks the shape of a finding; Grounding checks the evidence of a valid one
 against the run directory (and the repos of context.json) and says in French what the run does not
@@ -7,10 +7,12 @@ hold. Nothing here is written: cqa.rerun freezes the result at validation (cqa.c
 A problem either sets the finding aside (a cited file or a tool summary that is missing, a document
 that was never imported: the checks of 0.18.0, and the document) or drops only the piece of
 evidence it is about (a page or an http URL off the target, an http URL no probe requested, a tool
-whose result is not ok: the checks of 0.18.1). A dropped piece of evidence leaves the finding to
-the guardrails with the evidence left: an ok without evidence becomes ok_human, an na unknown, a ko
-or a partial stays. A problem of a tool or of a probe (a tool that had not finished, a probe whose
-tool had not run yet) is marked retry: plan checks that piece of evidence again (cqa.rerun).
+whose result is not ok: the checks of 0.18.1; a fact of the server that facts/server.json does not
+hold for the row: the check of 0.18.2). A dropped piece of evidence leaves the finding to the
+guardrails with the evidence left: an ok without evidence becomes ok_human, an na unknown, a ko or
+a partial stays. A problem of a tool, of a probe or of a fact (a tool that had not finished, a probe
+whose tool had not run yet, a fact not noted yet) is marked retry: plan checks that piece of
+evidence again (cqa.rerun).
 """
 import json
 import re
@@ -19,12 +21,14 @@ from typing import NamedTuple, Optional
 from urllib.parse import urlsplit
 
 from cqa import context_docs
+from cqa.checklist import ref_label
 from cqa.probes import target_hosts, url_host
 
 GOOD_TOOL_RESULTS = ("ok", "not_applicable")
 # The probe lists the plugin hands to the toolbox, with the tool that answers each one.
 _PROBE_FILES = (("http", "probes.json"), ("http-followup", "probes-followup.json"))
 _EVIDENCE_TOOL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_FACTS_FILE = ("facts", "server.json")
 
 
 class Problem(NamedTuple):
@@ -60,25 +64,32 @@ class Grounding:
         self.page_hosts = target_hosts(context, pages=True)
         self._results: dict = {}
         self._probes: Optional[set] = None
+        self._facts: Optional[tuple] = None
 
-    def check(self, evidence: list) -> list:
-        """Return the Problems of the evidence of a valid finding, in the order of the evidence."""
+    def check(self, evidence: list, ref: Optional[int] = None) -> list:
+        """Return the Problems of the evidence of a valid finding, in the order of the evidence.
+
+        ref is the row of the finding: a fact of the server must cover it (without it, no fact holds).
+        """
         found = []
         for number, item in enumerate(evidence, start=1):
-            found.extend(self.check_one(number, item))
+            found.extend(self.check_one(number, item, ref))
         return found
 
-    def check_one(self, number: int, item: dict) -> list:
+    def check_one(self, number: int, item: dict, ref: Optional[int] = None) -> list:
         """Return the Problems of one piece of evidence (at most one)."""
         kind = item["type"]
-        result = getattr(self, f"_{kind}_problem")(item)
+        if kind == "fact":
+            result = self._fact_problem(item, ref)
+        else:
+            result = getattr(self, f"_{kind}_problem")(item)
         if result is None:
             return []
         return [Problem(number, kind, *result)]
 
-    def problems(self, evidence: list) -> list:
+    def problems(self, evidence: list, ref: Optional[int] = None) -> list:
         """Return the French texts of every problem of the evidence."""
-        return [problem.text for problem in self.check(evidence)]
+        return [problem.text for problem in self.check(evidence, ref)]
 
     def _file_problem(self, item: dict) -> Optional[tuple]:
         repo, path = item["repo"], item["path"]
@@ -162,6 +173,57 @@ class Grounding:
             return _aside(f"document {_quoted(doc)} introuvable dans context-docs/ du run (document importé)")
         return None
 
+    def _fact_problem(self, item: dict, ref: Optional[int]) -> Optional[tuple]:
+        """Drop a fact that facts/server.json does not note for the row with a command that exited 0.
+
+        The sub-agent writes the file: the check is of form (the fact exists, covers the row, notes
+        a command that exited with 0 and a result), never of truth.
+        """
+        if not self.strict:
+            return None
+        topic = item["topic"]
+        shown = _quoted(topic)
+        if ref is None:
+            return _dropped(
+                f"fait {shown} : la ligne du constat n'est pas connue du contrôle",
+                "ligne du constat inconnue",
+            )
+        facts, problem = self._server_facts()
+        if problem is not None:
+            return _dropped(*problem, retry=True)
+        found = [fact for fact in facts if isinstance(fact, dict) and fact.get("topic") == topic]
+        if not found:
+            return _dropped(
+                f"aucun fait du sujet {shown} dans facts/server.json "
+                "(le « topic » doit être le même, à l'identique)",
+                "aucun fait pour ce sujet",
+                retry=True,
+            )
+        found = [fact for fact in found if _covers(fact.get("refs"), ref)]
+        if not found:
+            return _dropped(
+                f"aucun fait du sujet {shown} ne couvre la ligne {ref_label(ref)} "
+                "(« refs » de facts/server.json)",
+                "fait qui ne couvre pas la ligne",
+                retry=True,
+            )
+        found = [fact for fact in found if _is_zero(fact.get("exit"))]
+        if not found:
+            return _dropped(
+                f"le fait du sujet {shown} n'a pas un « exit » égal à 0 "
+                "(entier attendu) : la commande a échoué ou son code n'est pas noté",
+                "commande en échec (exit différent de 0)",
+                retry=True,
+            )
+        if not any(_filled(fact.get("command")) and _filled(fact.get("result")) for fact in found):
+            return _dropped(
+                f"le fait du sujet {shown} n'a pas à la fois une commande (« command ») "
+                "et un résultat (« result ») non vides",
+                "commande ou résultat vide",
+                retry=True,
+            )
+        return None
+
     def _origin_problem(self, url: str, hosts: list) -> Optional[tuple]:
         host = url_host(url)
         shown = _quoted(_shown(url))
@@ -185,6 +247,33 @@ class Grounding:
         if tool not in self._results:
             self._results[tool] = _read_object(self.run_dir / "tools" / tool / "result.json") or None
         return self._results[tool]
+
+    def _server_facts(self) -> tuple:
+        """Return (facts, None) of facts/server.json, or (None, (detail, label)) when it holds none."""
+        if self._facts is None:
+            self._facts = self._read_facts()
+        return self._facts
+
+    def _read_facts(self) -> tuple:
+        name = "/".join(_FACTS_FILE)
+        path = self.run_dir.joinpath(*_FACTS_FILE)
+        if not path.is_file():
+            return None, (
+                f"{name} est introuvable dans le run : noter d'abord le fait "
+                "(lignes, sujet, commande, exit, résultat), puis le citer",
+                f"{name} introuvable",
+            )
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            return None, (f"{name} est illisible (JSON invalide)", f"{name} illisible")
+        facts = document.get("facts") if isinstance(document, dict) else None
+        if not isinstance(facts, list):
+            return None, (
+                f"{name} doit être un objet avec une liste « facts »",
+                f"{name} mal formé",
+            )
+        return facts, None
 
     def _probe_keys(self) -> set:
         """Return the (host, path, query) of the probes that a toolbox tool answered."""
@@ -238,6 +327,21 @@ def _key(url) -> Optional[tuple]:
     except ValueError:
         return None
     return host, parts.path or "/", parts.query
+
+
+def _covers(refs, ref: int) -> bool:
+    """Whether the refs of a fact (a list of integers) hold the row."""
+    return isinstance(refs, list) and any(
+        isinstance(item, int) and not isinstance(item, bool) and item == ref for item in refs
+    )
+
+
+def _is_zero(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value == 0
+
+
+def _filled(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _read_object(path: Path) -> dict:

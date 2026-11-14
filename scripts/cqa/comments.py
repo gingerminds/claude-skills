@@ -650,6 +650,8 @@ def _evidence_line(item: dict, repos: list[dict]) -> str:
         return f"{item['tool']} : {item['ref']}"
     if kind == "document":
         return f"Rapport {item['doc']} : {item['ref']}"
+    if kind == "fact":
+        return f"Fait relevé sur le serveur : {' '.join(item['topic'].split())}"
     raise ValueError(f"type de preuve inconnu : {kind}")
 
 

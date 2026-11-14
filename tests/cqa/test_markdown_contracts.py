@@ -4207,7 +4207,7 @@ class FrozenEvidenceContract(unittest.TestCase):
         self.assertIn("findings/<lot>.checked.json", step)
         self.assertIn("`plan`, `rerun-candidates` and `recette` rely on that record", step)
         self.assertNotIn("A finding refused at `validate` stays refused", step)
-        self.assertIn("`plan` checks again the tool and probe evidence refused at `validate`", step)
+        self.assertIn("`plan` checks again the tool, probe and fact evidence refused at `validate`", step)
         self.assertIn("A findings file changed after its `validate` is validated again", step)
         lots = _text(REFERENCES / "lots.md")
         validation = lots[lots.index("## 5. Validation"):lots.index("## 6. Follow-ups")]
@@ -4243,14 +4243,27 @@ class FrozenEvidenceContract(unittest.TestCase):
         for path in (SKILL, REFERENCES / "lots.md", VERDICTS_MD, TOOLBOX):
             self.assertNotIn(EM_DASH, _text(path), path.name)
 
+    def test_the_replay_at_plan_names_the_facts_too(self):
+        skill = _text(SKILL)
+        step = skill[skill.index("\n7. After each lot,"):skill.index("\n8. Follow-ups,")]
+        lots = _text(REFERENCES / "lots.md")
+        validation = lots[lots.index("## 5. Validation"):lots.index("## 6. Follow-ups")]
+        verdicts = _text(VERDICTS_MD)
+        plan = verdicts[verdicts.index("### Plan"):verdicts.index("### Confirmation")]
+        for label, text in (("SKILL.md", step), ("lots.md", validation), ("verdicts.md", plan)):
+            with self.subTest(file=label):
+                self.assertIn("tool, probe and fact evidence refused at `validate`", text)
+                self.assertIn("a fact not noted yet", text)
+        self.assertIn("(cited files, tools, pages, probes and facts)", validation)
+
     def test_the_record_follows_the_content_and_the_retry_is_said(self):
         lots = _text(REFERENCES / "lots.md")
         validation = lots[lots.index("## 5. Validation"):lots.index("## 6. Follow-ups")]
         self.assertIn("digest of its JSON content", validation)
-        self.assertIn("checks again the tool and probe evidence", validation)
+        self.assertIn("checks again the tool, probe and fact evidence", validation)
         verdicts = _text(VERDICTS_MD)
         plan = verdicts[verdicts.index("### Plan"):verdicts.index("### Confirmation")]
-        self.assertIn("tool and probe evidence refused at `validate`", plan)
+        self.assertIn("tool, probe and fact evidence refused at `validate`", plan)
 
 
 class RequestOrderContract(unittest.TestCase):

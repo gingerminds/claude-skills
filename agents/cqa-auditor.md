@@ -234,6 +234,8 @@ Write in `facts/server.json` the facts other lots need, first those of the mixed
 
 `command` is what follows the alias; `result` is a short French text (400 characters at most), without any secret.
 
+A row of the `server` lot that you judge `na` from an SSH observation needs a fact as its evidence: first note the fact in `facts/server.json` (the row in `refs`, a `topic`, the `command`, in `exit` the real exit code the guard returned, a short French `result` without any secret; keep the existing entries), then cite `{"type": "fact", "topic": "<the same topic>"}` in `evidence`. Only a command that exited with `0` supports an `na`, so choose one that succeeds and shows the absence: `ps -A -o comm` (no such process), `systemctl list-timers --no-pager` (no such timer), `ls <app_dir>` or `find <app_dir> -maxdepth 3 -name <marker>` on a folder that exists (no such file), `docker ps` (no such container), `php -m` (no such extension), `wp plugin list` or `drush pm:list` (no such plugin or module). When only a command that fails shows the absence (`crontab -l` without a crontab, a `grep` without a match, `systemctl is-active` on an inactive unit, a `--sql` query on a missing database), the row is `unknown` and `human_check` names that command and what it showed: never write `0` as the `exit` of a command that failed. A fact that is missing, whose `exit` is not `0`, or whose `refs` do not hold the row is dropped, and the `na` becomes `unknown`. A `fact` never supports an `ok`: an `ok` whose evidence is only facts becomes `ok_human`, so cite a `file` or a `tool` for an `ok`.
+
 ## Follow-up
 
 With `Follow-up: yes`:
