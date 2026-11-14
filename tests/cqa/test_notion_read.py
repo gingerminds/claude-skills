@@ -11,6 +11,7 @@ from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 import cqa_notion
+from cqa import rerun
 from cqa.notion_api import NotionClient, NotionError
 from cqa.notion_read import (
     assemble_rows,
@@ -1071,6 +1072,17 @@ class RecetteCommandTest(CliTestCase):
         changed, rows = self.recette_refs("app/Missing.php")
         self.assertEqual(changed, [])
         self.assertEqual([item["ref"] for item in rows], [79])
+
+    def test_recette_uses_the_evidence_frozen_at_validation_when_a_fix_deleted_the_file(self):
+        self.write_code_finding()
+        context = self.read_json("context.json")
+        lot = self.read_json("lots.json")["lots"][0]
+        found = rerun.read_grounded_findings(self.run_dir, context, lot, "code-a.json", freeze="refresh")
+        self.assertEqual([item["ref"] for item in found[0]], [81])
+        (self.run_dir / "repos" / "laravel" / "app" / "Redirect.php").unlink()
+        changed, rows = self.recette_refs("app/Redirect.php")
+        self.assertEqual(changed, [81])
+        self.assertEqual(sorted(item["ref"] for item in rows), [79, 81])
 
     def test_recette_reads_the_findings_with_the_path_of_the_application(self):
         probe = {"url": "https://preprod.example.org/blog/index.php/node/1", "method": "GET"}

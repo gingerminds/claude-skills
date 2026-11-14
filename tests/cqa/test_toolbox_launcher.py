@@ -146,6 +146,10 @@ class LauncherCase(unittest.TestCase):
     def read_json(self, relative):
         return json.loads((self.run_dir / relative).read_text(encoding="utf-8"))
 
+    @staticmethod
+    def result_of(folder):
+        return json.loads((folder / "result.json").read_text(encoding="utf-8"))
+
 
 class CommonOptionsTest(LauncherCase):
     def test_user_and_mounts(self):
@@ -263,13 +267,193 @@ class CommonOptionsTest(LauncherCase):
         stale = self.run_dir / "tools" / "testssl"
         (stale / "raw").mkdir(parents=True)
         (stale / "raw" / "old.json").write_text("{}", encoding="utf-8")
-        (stale / "result.json").write_text('{"status": "ok"}', encoding="utf-8")
+        (stale / "result.json").write_text('{"status": "failed"}', encoding="utf-8")
         self.launch("run", str(self.run_dir), "testssl")
         self.assertTrue((stale / "raw").is_dir())
         self.assertFalse((stale / "raw" / "old.json").exists())
         self.assertFalse((stale / "result.json").exists())
         self.launch("run", str(self.run_dir), "http")
         self.assertTrue((self.run_dir / "tools" / "http" / "raw").is_dir())
+
+
+class KeepResultTest(LauncherCase):
+    """A good result of a tool stays until a new attempt succeeds (A-02, D-02)."""
+
+    OLD_START = "2026-11-01T09:00:00Z"
+
+    def previous(self, tool="http", status="ok"):
+        folder = self.run_dir / "tools" / tool
+        shutil.rmtree(folder, ignore_errors=True)
+        (folder / "raw").mkdir(parents=True)
+        (folder / "raw" / "old.json").write_text("{}", encoding="utf-8")
+        (folder / "summary.json").write_text('{"old": true}', encoding="utf-8")
+        (folder / "result.json").write_text(
+            json.dumps({"tool": tool, "status": status, "started_at": self.OLD_START}),
+            encoding="utf-8",
+        )
+        return folder
+
+    def attempt(self, *args, status=None, reason=None, **extra):
+        if status:
+            extra["CQA_STUB_RESULT"] = status
+        if reason:
+            extra["CQA_STUB_RESULT_REASON"] = reason
+        return self.launch("run", str(self.run_dir), *args, **extra)
+
+    def leftovers(self):
+        return sorted(path.name for path in (self.run_dir / "tools").glob("*.prev"))
+
+    def test_prepare_tool_keeps_previous_ok_result_when_new_attempt_fails(self):
+        folder = self.previous()
+        result = self.attempt("http", status="failed", reason="préprod injoignable")
+        self.assertEqual(0, result.returncode, result.stderr)
+        kept = json.loads((folder / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(("ok", self.OLD_START), (kept["status"], kept["started_at"]))
+        self.assertTrue((folder / "raw" / "old.json").is_file())
+        self.assertTrue((folder / "summary.json").is_file())
+        self.assertFalse((folder / "raw" / "new.json").exists())
+        last = json.loads((folder / "result-last-attempt.json").read_text(encoding="utf-8"))
+        self.assertEqual(("failed", "préprod injoignable"), (last["status"], last["reason"]))
+        self.assertEqual([], self.leftovers())
+        self.assertIn("http", result.stderr)
+        self.assertIn("résultat précédent est conservé", result.stderr)
+        self.assertIn("préprod injoignable", result.stderr)
+        self.assertIn("result-last-attempt.json", result.stderr)
+
+    def test_a_skipped_attempt_does_not_replace_a_previous_ok_result_either(self):
+        folder = self.previous("viewport")
+        result = self.attempt("viewport", CQA_STUB_VERSION="1.1.0")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("ok", self.result_of(folder)["status"])
+        last = json.loads((folder / "result-last-attempt.json").read_text(encoding="utf-8"))
+        self.assertEqual("skipped", last["status"])
+        self.assertIn("boîte à outils 1.2 requise", last["reason"])
+        self.assertTrue((folder / "raw" / "old.json").is_file())
+        self.assertEqual([], self.leftovers())
+
+    def test_an_attempt_that_never_reached_its_container_keeps_the_previous_result(self):
+        folder = self.previous("http-followup")
+        (self.run_dir / "probes-followup.json").unlink()
+        result = self.attempt("http", "--followup")
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("ok", self.result_of(folder)["status"])
+        self.assertTrue((folder / "raw" / "old.json").is_file())
+        self.assertEqual([], self.leftovers())
+
+    def test_a_tool_that_writes_nothing_keeps_the_previous_result(self):
+        folder = self.previous("assets")
+        result = self.attempt("assets")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(self.OLD_START, self.result_of(folder)["started_at"])
+        last = json.loads((folder / "result-last-attempt.json").read_text(encoding="utf-8"))
+        self.assertEqual("failed", last["status"])
+        self.assertIn("result.json", last["reason"])
+
+    def test_prepare_tool_replaces_result_on_success(self):
+        for status in ("ok", "not_applicable"):
+            with self.subTest(status=status):
+                folder = self.previous()
+                (folder / "result-last-attempt.json").write_text("{}", encoding="utf-8")
+                result = self.attempt("http", status=status)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(status, self.result_of(folder)["status"])
+                self.assertNotEqual(self.OLD_START, self.result_of(folder)["started_at"])
+                self.assertFalse((folder / "raw" / "old.json").exists())
+                self.assertTrue((folder / "raw" / "new.json").is_file())
+                self.assertFalse((folder / "result-last-attempt.json").exists())
+                self.assertEqual([], self.leftovers())
+                self.assertNotIn("conservé", result.stderr)
+
+    def test_prepare_tool_installs_failure_when_no_previous_result(self):
+        result = self.attempt("http", status="failed", reason="502")
+        self.assertEqual(0, result.returncode, result.stderr)
+        folder = self.run_dir / "tools" / "http"
+        self.assertEqual("failed", self.result_of(folder)["status"])
+        self.assertTrue((folder / "raw" / "new.json").is_file())
+        self.assertFalse((folder / "result-last-attempt.json").exists())
+        self.assertEqual([], self.leftovers())
+        self.assertNotIn("conservé", result.stderr)
+
+    def test_a_previous_result_that_was_not_good_is_replaced_by_the_new_failure(self):
+        for status in ("failed", "skipped"):
+            with self.subTest(status=status):
+                folder = self.previous(status=status)
+                self.attempt("http", status="failed", reason="502")
+                self.assertEqual("502", self.result_of(folder)["reason"])
+                self.assertFalse((folder / "raw" / "old.json").exists())
+                self.assertFalse((folder / "result-last-attempt.json").exists())
+                self.assertEqual([], self.leftovers())
+
+    def test_a_previous_folder_without_a_readable_result_is_replaced(self):
+        folder = self.run_dir / "tools" / "http"
+        (folder / "raw").mkdir(parents=True)
+        (folder / "raw" / "old.json").write_text("{}", encoding="utf-8")
+        (folder / "result.json").write_text("{not json", encoding="utf-8")
+        self.attempt("http", status="failed")
+        self.assertFalse((folder / "raw" / "old.json").exists())
+        self.assertEqual("failed", self.result_of(folder)["status"])
+
+    def test_the_followup_folder_is_settled_on_its_own(self):
+        sweep, followup = self.previous("http"), self.previous("http-followup")
+        result = self.attempt("http", "--followup", status="failed")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(self.OLD_START, self.result_of(followup)["started_at"])
+        self.assertTrue((followup / "result-last-attempt.json").is_file())
+        self.assertFalse((sweep / "result-last-attempt.json").exists())
+        self.assertEqual("ok", self.result_of(sweep)["status"])
+
+    def test_all_settles_every_tool_it_launches(self):
+        kept = [self.previous(tool) for tool in ("http", "assets")]
+        result = self.launch("all", str(self.run_dir), CQA_STUB_RESULT="failed")
+        self.assertEqual(0, result.returncode, result.stderr)
+        for folder in kept:
+            self.assertEqual(self.OLD_START, self.result_of(folder)["started_at"], folder.name)
+            self.assertTrue((folder / "result-last-attempt.json").is_file(), folder.name)
+        self.assertEqual([], self.leftovers())
+        self.assertEqual("failed", self.result_of(self.run_dir / "tools" / "lighthouse")["status"])
+
+    def test_a_folder_set_aside_by_an_interrupted_launch_is_settled_by_the_next_one(self):
+        good = self.previous("assets")
+        good.rename(self.run_dir / "tools" / "assets.prev")
+        partial = self.run_dir / "tools" / "assets"
+        (partial / "raw").mkdir(parents=True)
+        result = self.attempt("http", status="ok")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], self.leftovers())
+        self.assertEqual("ok", self.result_of(good)["status"])
+        self.assertTrue((good / "raw" / "old.json").is_file())
+        self.assertFalse((good / "raw" / "new.json").exists())
+
+    def test_an_interrupted_launch_that_left_no_new_folder_is_restored(self):
+        good = self.previous("a11y")
+        good.rename(self.run_dir / "tools" / "a11y.prev")
+        self.attempt("http", status="ok")
+        self.assertEqual(self.OLD_START, self.result_of(good)["started_at"])
+        self.assertEqual([], self.leftovers())
+
+    def test_a_folder_set_aside_next_to_a_good_new_result_is_dropped(self):
+        old = self.previous("assets")
+        old.rename(self.run_dir / "tools" / "assets.prev")
+        new = self.run_dir / "tools" / "assets"
+        (new / "raw").mkdir(parents=True)
+        (new / "result.json").write_text('{"status": "ok", "started_at": "z"}', encoding="utf-8")
+        self.attempt("http", status="ok")
+        self.assertEqual("z", self.result_of(new)["started_at"])
+        self.assertEqual([], self.leftovers())
+
+    def test_a_folder_set_aside_that_was_not_good_is_dropped(self):
+        bad = self.previous("assets", status="failed")
+        bad.rename(self.run_dir / "tools" / "assets.prev")
+        self.attempt("http", status="ok")
+        self.assertEqual([], self.leftovers())
+        self.assertFalse((self.run_dir / "tools" / "assets").exists())
+
+    def test_the_folder_set_aside_never_leaves_a_launch_that_ended_normally(self):
+        for tool, flags in (("testssl", ()), ("gitleaks", ()), ("mobile", ("--followup",))):
+            with self.subTest(tool=tool):
+                self.previous(tool if not flags else "mobile-followup")
+                self.attempt(tool, *flags, status="failed")
+                self.assertEqual([], self.leftovers())
 
 
 class ToolCommandsTest(LauncherCase):
@@ -372,7 +556,7 @@ class ToolCommandsTest(LauncherCase):
         for name in ("mobile", "mobile-followup"):
             (tools / name / "raw").mkdir(parents=True)
             (tools / name / "raw" / "old.json").write_text("{}", encoding="utf-8")
-            (tools / name / "result.json").write_text('{"status": "ok"}', encoding="utf-8")
+            (tools / name / "result.json").write_text('{"status": "failed"}', encoding="utf-8")
         self.assertEqual(0, self.run_tool("mobile").returncode)
         self.assertFalse((tools / "mobile" / "raw" / "old.json").exists())
         self.assertFalse((tools / "mobile" / "result.json").exists())

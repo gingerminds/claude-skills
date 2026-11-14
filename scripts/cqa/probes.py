@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin, urlsplit
 
+from cqa import contract
 from cqa.findings import (
     PHP_FILE_REASON,
     UTF8_REASON,
@@ -80,15 +81,75 @@ def is_prod_run(context: dict) -> bool:
     )
 
 
+PREPROD_IS_PROD = (
+    "context.json : « target.preprod_url » (ou le domaine d'un site de « sites ») désigne le même "
+    "site que « target.prod_url » (même hôte, à « www. » près, et même port) alors que l'audit "
+    "ne cible pas la prod : la prod serait auditée comme une préprod (robots.txt ignoré, crawl "
+    "et tests complets sur le site en ligne). Corriger « target.preprod_url » avec l'adresse de "
+    "la préprod ; pour un site en recette sur son domaine final avant son ouverture, laisser "
+    "« target.prod_url » vide ; pour auditer la prod, lancer l'audit avec la phase « MEL J0 » ou "
+    "« Post-MEL J+7 » et la prod en ligne."
+)
+
+
+def preprod_is_prod(context: dict) -> bool:
+    """Whether the audit targets the preprod while target.preprod_url, or the domain of an entry
+    of sites, is the site of target.prod_url: the same host and port, whatever the scheme, the
+    path, the case and a leading "www." (the http and the https address of one site are one
+    site, and so are the apex and the www of a domain). A prod run never is.
+
+    A domain of sites has no port: it is compared by its host.
+    """
+    target = context.get("target")
+    if not isinstance(target, dict) or is_prod_run(context):
+        return False
+    prod = _site(target.get("prod_url"))
+    if prod is None:
+        return False
+    if _site(target.get("preprod_url")) == prod:
+        return True
+    sites = context.get("sites")
+    for site in sites if isinstance(sites, list) else []:
+        if not isinstance(site, dict):
+            continue
+        domain = site.get("domain")
+        if isinstance(domain, str) and _bare(url_host(f"https://{domain}")) == prod[0]:
+            return True
+    return False
+
+
+def _site(url) -> Optional[tuple]:
+    """Return (host, port) of a URL, without a leading "www." and the port None when it is the
+    default one of its scheme."""
+    host = _bare(url_host(url))
+    if host is None:
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if port == _DEFAULT_PORTS.get(parts.scheme.lower()):
+        port = None
+    return host, port
+
+
+def _bare(host: Optional[str]) -> Optional[str]:
+    return host[4:] if host and host.startswith("www.") and len(host) > 4 else host
+
+
 def target_url(context: dict) -> str:
     """Return the base URL of the audit: the prod when is_prod_run, else the preprod.
 
     Raises ValueError, with a message that never quotes the URL, when the URL is missing, not a
-    plain http(s) URL, or carries a query or a fragment (a token could hide there).
+    plain http(s) URL, or carries a query or a fragment (a token could hide there), or when the
+    audit targets the preprod and its URL is the prod (preprod_is_prod).
     """
     target = context.get("target")
     if not isinstance(target, dict):
         raise ValueError("context.json : « target » est absent.")
+    if preprod_is_prod(context):
+        raise ValueError(PREPROD_IS_PROD)
     key = "prod_url" if is_prod_run(context) else "preprod_url"
     url = target.get(key)
     if not isinstance(url, str) or not url:
@@ -103,6 +164,43 @@ def app_path(context: dict) -> str:
         return urlsplit(target_url(context)).path
     except ValueError:
         return ""
+
+
+def target_hosts(context: dict, *, pages: bool = False) -> list:
+    """Return the hosts of the audit target, sorted: the evidence of a finding is on one of them.
+
+    The host of target.preprod_url, the one of target.prod_url on a prod run (is_prod_run), and
+    the domain and the home host of each entry of sites. With pages, also the host of each URL of
+    key_pages, which the browser may visit (a back-office on its own host): a page evidence may
+    be there, an http evidence never (it is a probe of the toolbox). An unreadable URL is left
+    out.
+    """
+    target = context.get("target")
+    target = target if isinstance(target, dict) else {}
+    urls = [target.get("preprod_url")]
+    if is_prod_run(context):
+        urls.append(target.get("prod_url"))
+    sites = context.get("sites")
+    for site in sites if isinstance(sites, list) else []:
+        if isinstance(site, dict):
+            domain = site.get("domain")
+            urls.extend([site.get("home"), f"https://{domain}" if isinstance(domain, str) else None])
+    key_pages = context.get("key_pages") if pages else None
+    for page in key_pages if isinstance(key_pages, list) else []:
+        if isinstance(page, dict):
+            urls.append(page.get("url"))
+    return sorted({host for host in (url_host(url) for url in urls) if host})
+
+
+def url_host(url) -> Optional[str]:
+    """Return the host of a URL in lower case, without a trailing dot, None when it has none."""
+    if not isinstance(url, str):
+        return None
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return None
+    return host.lower().rstrip(".") if host else None
 
 
 def build_probes(
@@ -227,16 +325,30 @@ def pending_lots(run_dir: Path, lots: list, app_path: str = "") -> list:
 
 def _pending(run_dir: Path, lots: list, app_path: str):
     """Yield (lot id, ref, probe) for each needs_probes entry of the valid first-round findings."""
-    for lot in lots:
-        document = _first_round(run_dir, lot["id"])
-        valid, _ = (
-            validate_document(document, set(lot["refs"]), app_path=app_path)
-            if document
-            else ([], [])
+    for lot, document, strict in first_round_files(run_dir, lots):
+        valid, _ = validate_document(
+            document,
+            set(lot["refs"]),
+            app_path=app_path,
+            agent_file=strict,
+            lot_id=lot["id"] if strict else None,
         )
         for item in valid:
             for probe in item["needs_probes"]:
                 yield lot["id"], item["ref"], probe
+
+
+def first_round_files(run_dir: Path, lots: list):
+    """Yield (lot, document, strict) for each readable first-round findings file of the lots.
+
+    strict tells whether the file is read under the rules of 0.18.1 (cqa.contract): a file of a run
+    started before them that validate never checked is not read as an agent file.
+    """
+    context = contract.run_context(run_dir)
+    for lot in lots:
+        document = _first_round(run_dir, lot["id"])
+        if document:
+            yield lot, document, contract.strict_file(run_dir, context, lot["id"], f"{lot['id']}.json")
 
 
 class _Collected:

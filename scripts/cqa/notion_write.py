@@ -17,6 +17,7 @@ ASSIGNEE_PROPERTY = "Assignée à"
 REFUSED_MESSAGE = "écriture refusée : data source du modèle"
 REFUSED_PAGE_MESSAGE = "écriture refusée : page du modèle"
 STATUS_CHANGED = "statut changé depuis le lancement"
+ASSIGNEES_CHANGED = "assignation changée depuis le lancement"
 AUDIT_CHANGED = "commentaire d'audit changé depuis le plan"
 
 _KIND_ORDER = {"status": 0, "assign": 1, "comment": 2, "fix_comment": 3, "page_comment": 4}
@@ -47,6 +48,7 @@ def apply_plan(
     known_secrets: list[str],
     bot_id: Optional[str] = None,
     reference_page_id: Optional[str] = None,
+    keep_human: bool = False,
     log: Callable[[str], None] = print,
 ) -> dict:
     """Write the operations of a plan to Notion and return its report.
@@ -64,9 +66,17 @@ def apply_plan(
     edit, all skill comments of the kind are deleted and a new one is created; when it refuses
     the deletion too, the comment is created anyway.
 
-    A status operation with "expected" reads the status of the page first and writes only
-    when it is still expected: otherwise it is skipped (status_changed, not journaled, so a
-    rerun reads it again); a page that already has the target status is skipped and journaled.
+    A status operation with "expected" (the audit's: the status read in the copy) reads the
+    status of the page first and writes only when it is still expected: otherwise it is
+    skipped (status_changed, not journaled, so a rerun reads it again, but noted under
+    "left_aside" in the journal so that it does not hold the plan as unwritten); a page that
+    already has the target status is skipped and journaled, as a write whose answer was lost.
+    With keep_human (the consent keeps the statuses a person set), a page whose status
+    operation was skipped as changed is left alone: its assignment and comments are skipped
+    too and noted under "left_aside" like the status. An "assign" operation with "expected"
+    (the assignees read in the copy) is skipped the same way when the page no longer has
+    them (assignees_changed, present in the report only then), or journaled when it already
+    has the target list.
     A comment with "replaces" (text_digest of the audit comment its plan read) rewrites the
     audit comment only while it is still that text: otherwise, or when it is gone, it is
     skipped without being journaled, and nothing is created.
@@ -83,7 +93,9 @@ def apply_plan(
 
     notion/applied.json in run_dir lists what was written and is rewritten after each success
     (entries accumulate across applies; a "status" entry carries "value", the status written,
-    and a "comment" entry "comment_id" and "mode"; older journals have neither):
+    and a "comment" entry "comment_id" and "mode"; older journals have neither; "left_aside"
+    lists {"key", "plan_id", "ref", "current", "at"} for the status operations skipped as
+    changed, and loses an operation once it is written):
     its keys are skipped on a rerun of the same plan: an entry carries the "plan_id" of the plan
     that wrote it and only matches a plan with the same plan_id (an entry without plan_id, from
     an older run, matches only a plan without one). A comment is also skipped when the page already shows a
@@ -102,6 +114,7 @@ def apply_plan(
     allowed = {_normalize(page_id) for page_id in row_page_ids}
     journal = Path(run_dir) / "notion" / "applied.json"
     entries = _load_journal(journal)
+    aside = _load_aside(journal)
     options = _live_options(client, plan, ops)
     journal.parent.mkdir(parents=True, exist_ok=True)
     plan_id = plan.get("plan_id")
@@ -109,10 +122,17 @@ def apply_plan(
     result = {"done": 0, "skipped": 0, "blocked": [], "errors": [], "replace_failed": [],
               "status_changed": []}
     failed_pages = set()
+    left_alone = {}
     for item in sorted(ops, key=_order):
         key, label = item["key"], _describe(item)
         if key in recorded:
             result["skipped"] += 1
+            continue
+        if item["page_id"] in left_alone:
+            result["skipped"] += 1
+            log(f"{label} : non écrit, la page garde le statut posé depuis le lancement")
+            _note_aside(aside, item, plan_id, left_alone[item["page_id"]])
+            _save_journal(journal, entries, aside)
             continue
         labels = _blocking_labels(item, options, allowed, copy_page_id, known_secrets)
         if labels:
@@ -144,6 +164,21 @@ def apply_plan(
                 {"key": key, "ref": item.get("ref"), "current": current, "reason": STATUS_CHANGED}
             )
             log(f"{label} : non écrit, {STATUS_CHANGED} (« {current or 'aucun'} »)")
+            _note_aside(aside, item, plan_id, current)
+            _save_journal(journal, entries, aside)
+            if keep_human:
+                left_alone[item["page_id"]] = current
+            continue
+        if "assignees_changed" in sent:
+            current = sent["assignees_changed"]
+            result["skipped"] += 1
+            result.setdefault("assignees_changed", []).append(
+                {"key": key, "ref": item.get("ref"), "current": current,
+                 "reason": ASSIGNEES_CHANGED}
+            )
+            log(f"{label} : non écrit, {ASSIGNEES_CHANGED} ({', '.join(current) or 'aucune'})")
+            _note_aside(aside, item, plan_id, current)
+            _save_journal(journal, entries, aside)
             continue
         if sent.get("audit_changed"):
             result["skipped"] += 1
@@ -151,7 +186,8 @@ def apply_plan(
             continue
         recorded.add(key)
         entries.append(_entry(item, sent, plan_id))
-        write_json(journal, {"applied": entries})
+        aside[:] = [entry for entry in aside if not _same(entry, key, plan_id)]
+        _save_journal(journal, entries, aside)
         for reason in sent.get("failed", []):
             result["replace_failed"].append({"key": key, "ref": item.get("ref"), "reason": reason})
             log(f"{label} : ancien commentaire conservé ({reason})")
@@ -217,6 +253,8 @@ def _problem(item) -> Optional[str]:
         not isinstance(expected, str) or not expected.strip()
     ):
         return "« expected » doit être le nom d'un statut"
+    if kind == "assign" and expected is not None and not _is_names(expected):
+        return "« expected » doit être la liste des noms assignés"
     replaces = item.get("replaces")
     if replaces is not None and (
         kind != "comment" or not isinstance(replaces, str) or not _DIGEST.fullmatch(replaces)
@@ -266,7 +304,8 @@ def _send(client, item: dict, bot_id: Optional[str]) -> dict:
     A comment gives {"comment_id", "mode", "failed"}, or {"skipped": True, "failed"} when the
     text was already on the page. A status with "expected" gives {"skipped": True} when the
     page already has the target status, {"skipped": True, "status_changed": <status>} when it
-    has neither; the other operations give {}.
+    has neither; an assignment with "expected" does the same with {"assignees_changed":
+    <names>}; the other operations give {}.
     """
     kind, page_id = item["kind"], item["page_id"]
     if kind == "status":
@@ -279,6 +318,13 @@ def _send(client, item: dict, bot_id: Optional[str]) -> dict:
                 return {"skipped": True, "status_changed": current}
         client.update_page(page_id, {STATUS_PROPERTY: {"status": {"name": item["after"]}}})
     elif kind == "assign":
+        expected = item.get("expected")
+        if expected is not None:
+            current = _current_assignees(client, page_id)
+            if current is not None and sorted(current) == sorted(item["after"]):
+                return {"skipped": True}
+            if current is not None and sorted(current) != sorted(expected):
+                return {"skipped": True, "assignees_changed": current}
         names = [{"name": name} for name in item["after"]]
         client.update_page(page_id, {ASSIGNEE_PROPERTY: {"multi_select": names}})
     else:
@@ -300,6 +346,19 @@ def _current_status(client, page_id: str):
     prop = (client.page(page_id).get("properties") or {}).get(STATUS_PROPERTY) or {}
     value = prop.get(prop.get("type") or "status")
     return value.get("name") if isinstance(value, dict) else None
+
+
+def _current_assignees(client, page_id: str) -> Optional[list]:
+    """Return the « Assignée à » names of a page as Notion has it now (None when not shown)."""
+    prop = (client.page(page_id).get("properties") or {}).get(ASSIGNEE_PROPERTY)
+    options = prop.get("multi_select") if isinstance(prop, dict) else None
+    if not isinstance(options, list):
+        return None
+    return [
+        item["name"]
+        for item in options
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    ]
 
 
 def _write_comment(client, page_id: str, text: str, own: list) -> dict:
@@ -390,13 +449,44 @@ def _load_journal(path: Path) -> list:
     return entries
 
 
+def _load_aside(path: Path) -> list:
+    """Return the "left_aside" notes of the journal; nothing when absent, damaged or unreadable."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    notes = document.get("left_aside") if isinstance(document, dict) else None
+    return [note for note in notes if isinstance(note, dict)] if isinstance(notes, list) else []
+
+
+def _save_journal(path: Path, entries: list, aside: list) -> None:
+    write_json(path, {"applied": entries, **({"left_aside": aside} if aside else {})})
+
+
+def _note_aside(aside: list, item: dict, plan_id, current) -> None:
+    """Record an operation left unwritten on purpose, replacing an earlier note of the same plan."""
+    aside[:] = [entry for entry in aside if not _same(entry, item["key"], plan_id)]
+    aside.append(
+        {"key": item["key"], "plan_id": plan_id, "ref": item.get("ref"), "current": current,
+         "at": _now()}
+    )
+
+
+def _same(note: dict, key: str, plan_id) -> bool:
+    return note.get("key") == key and note.get("plan_id") == plan_id
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _entry(item: dict, sent: dict, plan_id=None) -> dict:
     entry = {
         "key": item["key"],
         "kind": item["kind"],
         "ref": item.get("ref"),
         "verdict": item.get("verdict"),
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "at": _now(),
     }
     if plan_id is not None:
         entry["plan_id"] = plan_id

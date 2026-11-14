@@ -11,9 +11,10 @@ import cqa_notion
 import cqa_plan
 import cqa_ssh_ro
 from cqa import (
-    categories, context_docs, docs_link, docs_verdicts, fix_guard, fix_mr, fix_names, fix_state,
-    fix_summary, ssh_ro,
+    categories, checked, context_docs, docs_link, docs_verdicts, fix_guard, fix_mr, fix_names,
+    fix_state, fix_summary, probes, report, ssh_ro,
 )
+from cqa import secrets as secret_scan
 from cqa.lots import DOCUMENT_LOT_ID, MOBILE_TERMS
 from cqa.findings import (
     MAX_SCENARIOS, MAX_SELECTOR, MAX_STEPS, SCENARIO_PRESS_KEYS, SCENARIO_PROFILES,
@@ -627,12 +628,103 @@ class SkillTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, section)
 
-    def test_every_rebuild_of_a_recette_plan_keeps_the_recette_option(self):
+    def test_every_rebuild_of_a_recette_plan_keeps_the_recette_by_itself(self):
         text = _text(SKILL)
-        self.assertIn("every rebuild of the plan keeps `--recette <NN>`", _section(text, "11. Recette").replace("Every", "every"))
-        self.assertIn("`--recette <NN>`", _section(text, "7. Plan and confirmation"))
-        self.assertIn("`--recette <that NN>`", _section(text, "3. Resume"))
-        self.assertIn("Statut humain conservé", _section(text, "11. Recette"))
+        recette = _section(text, "11. Recette")
+        self.assertIn("every rebuild after it", recette)
+        self.assertIn("keeps it by itself, without the option", recette)
+        self.assertIn("keeps its recette in the rebuild by itself", _section(text, "7. Plan and confirmation"))
+        self.assertIn("keeps the recette of `notion/plan.json`", _section(text, "3. Resume"))
+        self.assertIn("Statut humain conservé", recette)
+
+    def test_a_rerun_plan_is_built_without_the_recette_of_an_earlier_one(self):
+        section = _section(_text(SKILL), "10. Rerun")
+        step = section.split("\n11. ")[1].split("\n12. ")[0]
+        self.assertIn('cqa_plan.py" plan "$RUN" --no-recette', step)
+        self.assertIn("A rerun is never a recette", step)
+        recette = _section(_text(SKILL), "11. Recette")
+        self.assertIn('cqa_plan.py" plan "$RUN" --recette <NN>', recette)
+        self.assertIn("build the plan with `--no-recette` (no rerun of this recette is closed", recette)
+
+    def test_only_a_rerun_opened_for_a_recette_lets_the_plan_take_the_recette_over(self):
+        text = _text(SKILL)
+        recette = _section(text, "11. Recette")
+        opening = recette[recette.index("3. Run the diagnostic of section 5"):]
+        opening = opening[:opening.index("4. Present before anything")]
+        self.assertIn('cqa_plan.py" rerun-start "$RUN" --recette', opening)
+        self.assertIn("only for a rerun opened that way", opening)
+        step7 = recette[recette.index("7. Build the plan with the recette option"):]
+        self.assertIn("one opened with `rerun-start --recette`", step7[:step7.index("<NN>` is the rerun")])
+        self.assertIn("`plan` then says on stderr that it does not take the recette over", step7)
+        rerun = _section(text, "10. Rerun")
+        open_step = rerun[rerun.index("4. Open the rerun."):rerun.index("5. List the rows worth")]
+        self.assertNotIn("--recette", open_step.split("`rerun` is the number")[1].split("```bash")[1])
+        self.assertIn("`kind`", open_step)
+        end = _section(text, "8. Writing and synthesis")
+        end = end[end.index("**5. Deferred"):end.index("**6. Final scan**")]
+        self.assertIn("Invoked as a recette, open it with `rerun-start \"$RUN\" --recette`", end)
+        self.assertIn("one opened with `rerun-start --recette`", _section(text, "3. Resume"))
+
+    def test_skip_keeps_a_good_result_and_the_rerun_says_so(self):
+        rerun = _section(_text(SKILL), "10. Rerun")
+        self.assertIn("`skip` itself keeps such a result and writes the skip in "
+                      "`tools/<tool>/result-last-attempt.json`", rerun)
+        self.assertNotIn("`skip` would replace its `result.json`", rerun)
+
+    def test_the_synthesis_applies_the_consent_so_the_rebuild_is_optional(self):
+        text = _text(SKILL)
+        plan = _section(text, "7. Plan and confirmation")
+        self.assertIn("the rebuild is optional: `apply` and `synthesis` leave those pages out", plan)
+        self.assertIn("`synthesis` describes the plan without them", plan)
+        self.assertNotIn("so that the synthesis matches what is written", text)
+
+    def test_the_consents_hold_for_a_copy_of_the_audit_plan_and_a_dry_run_must_be_a_boolean(self):
+        context = _text(REFERENCES / "context.md")
+        self.assertIn("neither `true` nor `false`", context)
+        self.assertIn("by its content (`rows` and `summary`) as well as by its path", context)
+
+    def test_a_page_whose_status_changed_is_left_alone_under_the_human_consent(self):
+        text = _text(SKILL)
+        writing = _section(text, "8. Writing and synthesis")
+        apply_step = writing[writing.index("**1. Apply**"):writing.index("**2. Synthesis**")]
+        self.assertIn("unless the consent keeps the statuses set by a human", apply_step)
+        self.assertIn("`assignees_changed`", apply_step)
+        verdicts = _text(VERDICTS_MD)
+        self.assertIn("`assignees_changed`", verdicts)
+        self.assertIn("which leaves the whole page alone", verdicts)
+
+    def test_scripts_hold_the_notion_consents_so_no_option_is_repeated(self):
+        skill = _text(SKILL)
+        rules = _section(skill, "1. Imperative rules")
+        for needle in ("`dry_run` is true", "`notion_write` is `none`", "`keep_human`",
+                       "`all` in autonomous mode"):
+            with self.subTest(rules=needle):
+                self.assertIn(needle, rules)
+        writing = _section(skill, "8. Writing and synthesis")
+        step = writing[writing.index("**1. Apply**"):writing.index("**2. Synthesis**")]
+        for needle in ("takes no option for it", "`kept_human`", "`dry_run` is true"):
+            with self.subTest(apply=needle):
+                self.assertIn(needle, step)
+        for path in _skill_files():
+            for block in _BASH_BLOCK.findall(_text(path)):
+                if _NOTION_WRITE.search(block):
+                    with self.subTest(file=path.name, block=block.splitlines()[-1]):
+                        self.assertNotIn("--skip-human-overrides", block)
+        verdicts = _text(VERDICTS_MD)
+        for needle in ("`kept_human`", "`dry_run` true", "applied as `keep_human`"):
+            with self.subTest(verdicts=needle):
+                self.assertIn(needle, verdicts)
+        context = _text(REFERENCES / "context.md")
+        self.assertIn("refuse to write (exit 2) while it is true", context)
+        self.assertIn("holds `notion_write`", context)
+
+    def test_assign_writes_its_dry_run_before_it_can_write(self):
+        skill = _section(_text(SKILL), "9. Assignment")
+        self.assertIn("Write the current `dry_run` in `context.json` first", skill)
+        self.assertIn("refuses to write while the file holds `true`", skill)
+        assign = _text(REFERENCES / "assign.md")
+        self.assertIn("Write the current `dry_run` in `context.json`", assign)
+        self.assertLess(assign.index("Write the current `dry_run`"), assign.index(_ASSIGN_QUESTION))
 
     def test_toolbox_1_2_gate_is_documented(self):
         diagnostic = _text(REFERENCES / "diagnostic.md")
@@ -693,19 +785,65 @@ class SkillTest(unittest.TestCase):
         step4 = recette.split("\n4. ")[1].split("\n5. ")[0]
         self.assertIn("keep only the candidates whose reasons include `lead`", step4)
 
-    def test_rerun_and_recette_never_replace_human_statuses_unasked(self):
+    def test_no_run_replaces_human_statuses_unasked(self):
         plan = _section(_text(SKILL), "7. Plan and confirmation")
         step1 = plan.split("\n1. ")[1].split("\n2. ")[0]
         for needle in (
-            "In a rerun or a recette",
+            "Whenever `notion_write` is `all` (audit, rerun or recette)",
+            "in interactive mode, after that list, ask once",
             "« <n> statuts posés par un humain seront remplacés (liste ci-dessus). Continuer ? »",
             "« Continuer »", "« Sans toucher aux statuts posés par un humain »", "« Annuler »",
-            "`keep_human`", "`--skip-human-overrides`", "`--recette <NN>`",
-            "never writes a status set by a human",
+            "`keep_human`",
+            "In autonomous mode no run ever writes a status set by a human",
+            "`kept_human`",
             "« Statut humain conservé »",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, step1)
+
+    def test_the_status_is_read_again_at_the_write_and_the_skipped_rows_are_said(self):
+        skill = _text(SKILL)
+        self.assertNotIn("The copy does not change during the audit", skill)
+        self.assertNotIn("the copy does not change during the audit", skill)
+        launch = _section(skill, "4. Context")
+        self.assertIn("`apply` reads the status of each row again before writing it", launch)
+        self.assertIn("`status_changed`", launch)
+        rules = _section(skill, "1. Imperative rules")
+        self.assertIn("`apply` reads the status of a row again before writing it", rules)
+        self.assertIn("never replaced", rules)
+        resume = _section(skill, "3. Resume")
+        self.assertIn("not as a change made by a person", resume)
+        writing = _section(skill, "8. Writing and synthesis")
+        step1 = writing[writing.index("**1. Apply**"):writing.index("**2. Synthesis**")]
+        self.assertIn("`done`, `skipped`, `blocked`, `errors`, `status_changed`", step1)
+        self.assertIn("a person changed the status of the row", step1)
+        step3 = writing[writing.index("**3. Remarques**"):writing.index("**4.")]
+        self.assertIn("the rows of `status_changed` at step 1", step3)
+        self.assertIn("statut changé dans Notion depuis la lecture de la copie", step3)
+        verdicts = _text(VERDICTS_MD)
+        for needle in ("`status_changed`", "never holds the run as unwritten",
+                       "statut changé dans Notion depuis la lecture de la copie"):
+            with self.subTest(verdicts=needle):
+                self.assertIn(needle, verdicts)
+
+    def test_a_todo_put_back_by_a_person_is_a_protected_human_status(self):
+        plan = _section(_text(SKILL), "7. Plan and confirmation")
+        step1 = plan.split("\n1. ")[1].split("\n2. ")[0]
+        for needle in ("put back to « À traiter » after the skill wrote another status on it",
+                       "`notion/applied.json`", "a false negative",
+                       "A « À traiter » the skill never wrote over"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, step1)
+        self.assertIn("that a person put back after the skill wrote another status",
+                      _text(VERDICTS_MD))
+
+    def test_the_copy_is_read_again_before_the_end_block_rebuilds_the_plan(self):
+        end = self._end_block()
+        step = end[end.index("\n5. Only when this invocation already wrote to Notion"):
+                   end.index("\n6. Write it again")]
+        self.assertIn('cqa_notion.py" rows "$RUN"', step)
+        self.assertLess(step.index('cqa_notion.py" rows "$RUN"'), step.index('cqa_plan.py" plan "$RUN"'))
+        self.assertIn("would look changed by a person", step)
 
     def test_resume_is_offered_for_an_incomplete_run_of_any_date(self):
         skill = _text(SKILL)
@@ -733,7 +871,9 @@ class SkillTest(unittest.TestCase):
                         end.index('cqa_plan.py" rerun-candidates "$RUN" --refs'))
         self.assertIn('cqa_plan.py" rerun-close "$RUN" <NN> --rows CQ-3,CQ-12', end)
         self.assertIn("« aucun fichier de la relance NN »", end)
-        self.assertIn("in a recette, pass `--recette <recette.rerun of notion/plan.json>`", end)
+        self.assertIn("a recette plan keeps its recette", end)
+        self.assertNotIn('cqa_plan.py" plan "$RUN" --recette', end)
+        self.assertIn('rerun-start "$RUN" --recette', end)
 
     def test_held_lots_of_a_rerun_join_the_rerun_of_the_end_block(self):
         end = self._end_block()
@@ -841,6 +981,23 @@ class SkillTest(unittest.TestCase):
                 with self.subTest(file=path.name):
                     self.assertIn(_SESSION_CREDENTIALS, text)
                     self.assertNotIn("when `target.access` is `basic_auth`", text)
+
+    def test_the_secret_checks_receive_the_identifier_and_the_password(self):
+        found = 0
+        for path in _skill_files():
+            for block in _BASH_BLOCK.findall(_text(path)):
+                if _NOTION_WRITE.search(block) or re.search(r'cqa_plan\.py" scan\b', block):
+                    for line in block.splitlines():
+                        if "GM_AUDIT_AUTH_PASS=" in line:
+                            found += 1
+                            with self.subTest(file=path.name, line=line):
+                                self.assertIn("GM_AUDIT_AUTH_USER='<identifiant>' ", line)
+        self.assertGreaterEqual(found, 4)
+        skill = _text(SKILL)
+        self.assertIn("Both variables also go, the same way, to the secret checks", skill)
+        self.assertNotIn("`GM_AUDIT_AUTH_PASS` alone", skill)
+        self.assertIn("GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>'`",
+                      _text(REFERENCES / "assign.md"))
 
     def test_launch_asks_mode_then_notion_consent(self):
         section = _section(_text(SKILL), "4. Context")
@@ -971,14 +1128,13 @@ class SkillTest(unittest.TestCase):
             "`all`",
             "`keep_human`",
             "`none`",
-            "`--skip-human-overrides`",
-            "`--recette <NN>`",
+            'cqa_plan.py" plan "$RUN" --skip-human-overrides',
             "`mode` is `autonome`",
             "no presentation",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, section)
-        self.assertIn("Never ask when `notion_write` is set", section)
+        self.assertIn("Never ask the write question when `notion_write` is set", section)
         self.assertIn("current invocation", section)
         self.assertIn("never counts", section)
 
@@ -4036,6 +4192,178 @@ class StaleToolsContract(unittest.TestCase):
 
 
 
+class FrozenEvidenceContract(unittest.TestCase):
+    """The instructions say what the code does with the evidence and with the tool results."""
+
+    def test_the_record_and_the_key_names_are_the_ones_of_the_code(self):
+        self.assertEqual(checked.record_path(Path("run"), "lot-id").name, "lot-id.checked.json")
+        toolbox = _text(TOOLBOX)
+        self.assertIn(report._LAST_ATTEMPT, toolbox)
+        self.assertIn('"$dir.prev"', toolbox)
+
+    def test_validation_freezes_the_evidence_and_the_readers_rely_on_it(self):
+        skill = _text(SKILL)
+        step = skill[skill.index("\n7. After each lot,"):skill.index("\n8. Follow-ups,")]
+        self.assertIn("findings/<lot>.checked.json", step)
+        self.assertIn("`plan`, `rerun-candidates` and `recette` rely on that record", step)
+        self.assertNotIn("A finding refused at `validate` stays refused", step)
+        self.assertIn("`plan` checks again the tool and probe evidence refused at `validate`", step)
+        self.assertIn("A findings file changed after its `validate` is validated again", step)
+        lots = _text(REFERENCES / "lots.md")
+        validation = lots[lots.index("## 5. Validation"):lots.index("## 6. Follow-ups")]
+        self.assertIn("findings/<lot>.checked.json", validation)
+        self.assertIn("run without the record", validation)
+        self.assertIn("findings/<lot>.checked.json", _text(VERDICTS_MD))
+
+    def test_plan_names_what_it_sets_aside(self):
+        verdicts = _text(VERDICTS_MD)
+        plan = verdicts[verdicts.index("### Plan"):verdicts.index("### Confirmation")]
+        for needle in ("`discarded`", "`discarded_count`", "never silently", "left as it is",
+                       "printed on stderr", "frozen at `validate`"):
+            self.assertIn(needle, plan)
+        plan_step = _section(_text(SKILL), "7. Plan and confirmation")
+        self.assertIn("`discarded`", plan_step)
+        self.assertIn("`discarded_count`", plan_step)
+        recap = _section(_text(SKILL), "8. Writing and synthesis")
+        self.assertIn("rows set aside by `plan` (`discarded`)", recap)
+
+    def test_a_relaunched_tool_keeps_its_previous_good_result(self):
+        sec10 = _text(SKILL)
+        sec10 = sec10[sec10.index("## 10. Rerun"):]
+        step7 = sec10[sec10.index("\n7. "):sec10.index("\n8. ")]
+        for needle in ("keeps the previous good result", "result-last-attempt.json", "`last_attempt`",
+                       "no `ok` or `not_applicable` result yet"):
+            self.assertIn(needle, step7)
+        lots = _text(REFERENCES / "lots.md")
+        for needle in ("tools/<tool>.prev", "result-last-attempt.json", "`last_attempt`",
+                       "`ok` or `not_applicable`"):
+            self.assertIn(needle, lots)
+
+    def test_the_new_lines_carry_no_long_dash(self):
+        for path in (SKILL, REFERENCES / "lots.md", VERDICTS_MD, TOOLBOX):
+            self.assertNotIn(EM_DASH, _text(path), path.name)
+
+    def test_the_record_follows_the_content_and_the_retry_is_said(self):
+        lots = _text(REFERENCES / "lots.md")
+        validation = lots[lots.index("## 5. Validation"):lots.index("## 6. Follow-ups")]
+        self.assertIn("digest of its JSON content", validation)
+        self.assertIn("checks again the tool and probe evidence", validation)
+        verdicts = _text(VERDICTS_MD)
+        plan = verdicts[verdicts.index("### Plan"):verdicts.index("### Confirmation")]
+        self.assertIn("tool and probe evidence refused at `validate`", plan)
+
+
+class RequestOrderContract(unittest.TestCase):
+    """R-17: for a favourable verdict the auditor asks a probe first, since its own request is no
+    evidence the code accepts."""
+
+    def test_the_sources_table_asks_a_probe_first_for_a_favourable_verdict(self):
+        text = _text(AUDITOR)
+        row = next(line for line in text.splitlines() if line.startswith("| HTTP |"))
+        self.assertNotIn("Missing answer: your own GET or HEAD (see \"HTTP\"), else `needs_probes`.", row)
+        first = "for a favourable verdict (`ok`, `na`), ask it in `needs_probes` first"
+        self.assertIn(first, row)
+        self.assertLess(row.index(first), row.index("your own GET or HEAD"))
+
+    def test_the_http_section_says_the_same(self):
+        text = _text(AUDITOR)
+        section_http = text[text.index("## HTTP"):text.index("## Security rows")]
+        self.assertIn("for a favourable verdict, `needs_probes` first", section_http)
+
+
+EVIDENCE_RULES = (
+    "The code checks every piece of evidence at `validate`: a `file` exists in its repo, a `tool` "
+    "has its `summary.json` and a `result.json` that is `ok` or `not_applicable`, a `page` URL "
+    "is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` "
+    "and the `key_pages` of `context.json`), and an `http` URL is on such a host, `key_pages` aside, "
+    "and is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`). A missing file "
+    "or tool summary refuses the finding; "
+    "any other piece of evidence that fails is dropped, and the finding stays without it (an `ok` "
+    "left without evidence becomes `ok_human`, an `na` becomes `unknown`). A request you made "
+    "yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like "
+    "`ok`, needs at least one piece of evidence."
+)
+
+
+class VerifiedVerdictsContract(unittest.TestCase):
+    """The instructions say which evidence the code checks and what a report may give."""
+
+    def test_the_reference_and_both_agents_say_the_same_evidence_rules(self):
+        for path in (VERDICTS_MD, AUDITOR, BROWSER):
+            with self.subTest(path=path.name):
+                self.assertIn(EVIDENCE_RULES, _text(path))
+
+    def test_the_reference_no_longer_lets_an_na_go_without_evidence(self):
+        text = _text(VERDICTS_MD)
+        self.assertNotIn("May be empty, except for `ok`.", text)
+        self.assertIn("May be empty, except for `ok` and `na`", text)
+        na = text[text.index("### `na`: not applicable"):text.index("### `unknown`: cannot be evaluated")]
+        self.assertIn("at least one piece of evidence", na)
+        self.assertIn("An `na` without evidence becomes `unknown`", na)
+        guardrails = text[text.index("## Guardrails of the merge script"):text.index("## From verdict to Notion")]
+        self.assertIn("7. `na` without evidence becomes `unknown`.", guardrails)
+        self.assertIn("8. An `ok` built from a context document", guardrails)
+
+    def test_the_evidence_table_names_the_checks_of_each_type(self):
+        text = _text(VERDICTS_MD)
+        table = text[text.index("| `type` | Keys | Rules |"):text.index("## Several repos")]
+        for needle in ("on a host of the target", "whose `result.json` is `ok` or `not_applicable`",
+                       "A URL that a probe of the toolbox requested", "or of a key page"):
+            self.assertIn(needle, table)
+        self.assertIn("a `page` evidence may cite", _text(CONTEXT_MD))
+
+    def test_the_agent_files_hold_nothing_the_code_writes(self):
+        text = _text(VERDICTS_MD)
+        self.assertIn("no other key than the optional `needs_scenarios`, `tool_dates` and `in_repo`", text)
+        self.assertIn("a `source`, a `guardrail` or a `document` evidence", text)
+        self.assertIn("a file whose `lot` is not the lot it is validated for", text)
+        schema = _text(ROOT / SCHEMA)
+        self.assertIn('"additionalProperties": false', schema)
+
+    def test_a_conforming_report_is_ok_human_in_every_instruction(self):
+        verdicts = _text(VERDICTS_MD)
+        documents = _text(DOCUMENTS_MD)
+        for text in (verdicts, documents):
+            self.assertIn("Conforme d'après le rapport d1 du <date>, à confirmer sur la version actuelle", text)
+            self.assertIn("de date inconnue", text)
+        self.assertIn("gives `ok_human`, or `na` when all are `na`", documents)
+        self.assertIn("`ok_human` when every criterion of the row is covered", verdicts)
+        self.assertIn("never `ok`", _text(CONTEXT_MD))
+        readme = _text(ROOT / "README.md")
+        self.assertIn("jamais repris en « Ok / Recetté »", readme)
+        self.assertNotIn("`ko` (un `ko` du rapport n'est jamais perdu : `partial` quand un autre critère de la ligne est conforme), `ok` ou `na`", readme)
+
+    def test_validation_lists_the_new_refusals(self):
+        lots = _text(REFERENCES / "lots.md")
+        validation = lots[lots.index("## 5. Validation"):lots.index("## 6. Follow-ups")]
+        for needle in ("a `lot` field that is not the lot", "a key a lot never writes",
+                       "a `document` evidence", "a tool that failed or was skipped",
+                       "outside the target", "no probe of the toolbox answered"):
+            self.assertIn(needle, validation)
+
+    def test_the_confirmation_text_is_the_one_of_the_code(self):
+        check = docs_verdicts._confirmation(
+            [{"document": {"id": "d1", "date": "2026-10-30"}, "verdict": "ok"}], "ok_human"
+        )
+        self.assertEqual(
+            check, "Conforme d'après le rapport d1 du 2026-10-30, à confirmer sur la version actuelle."
+        )
+        self.assertTrue(_text(VERDICTS_MD).count("à confirmer sur la version actuelle") >= 1)
+
+    def test_the_schema_says_what_it_refuses(self):
+        schema = json.loads(_text(ROOT / SCHEMA))
+        finding = schema["$defs"]["finding"]["properties"]
+        self.assertIn("an na without evidence becomes unknown", finding["evidence"]["description"])
+        self.assertIn("is refused", finding["evidence"]["description"])
+        self.assertIn("at least one piece of evidence", finding["verdict"]["description"])
+        self.assertIn("validate refuses it in a lot file", finding["source"]["description"])
+        self.assertIn("is refused", schema["properties"]["lot"]["description"])
+
+    def test_the_new_lines_carry_no_long_dash(self):
+        for path in (VERDICTS_MD, DOCUMENTS_MD, CONTEXT_MD, AUDITOR, BROWSER, ROOT / SCHEMA):
+            self.assertNotIn(EM_DASH, _text(path), path.name)
+
+
 class FirstContextContract(unittest.TestCase):
     def test_wp_plugins_needs_a_first_context_written_before_step_8(self):
         skill = SKILL.read_text(encoding="utf-8")
@@ -4085,6 +4413,243 @@ class ThirdPartyWordingContract(unittest.TestCase):
         self.assertIn("a plugin added since is custom by default", ref)
         self.assertNotIn("so an earlier answer is proposed again", ref)
         self.assertIn("(SSH alias, preprod URL, Notion copy, key pages, excluded third-party plugins)", SKILL.read_text(encoding="utf-8"))
+
+
+class PreprodIsProdContract(unittest.TestCase):
+    """The instructions say what the code refuses and what the lead is asked about the target."""
+
+    def test_the_target_step_asks_whether_an_open_unmarked_host_is_the_prod(self):
+        skill = _text(SKILL)
+        step = skill[skill.index("\n3. Target:"):skill.index("\n4. SSH alias")]
+        reference = _section(_text(CONTEXT_MD), "3. Target")
+        for text in (step, reference):
+            self.assertIn("« Cette URL est-elle la prod ? »", text)
+            for word in ("`preprod`", "`staging`", "`recette`", "`dev`"):
+                self.assertIn(word, text)
+        self.assertIn("Access `open`", step)
+        self.assertIn("A host behind `basic_auth` or `ip_filtered` is not asked", reference)
+        self.assertIn("no extra request is made", reference)
+
+    def test_the_instructions_name_what_the_code_refuses(self):
+        skill = _text(SKILL)
+        step = skill[skill.index("\n3. Target:"):skill.index("\n4. SSH alias")]
+        self.assertIn("the same host and port as `prod_url`", step)
+        self.assertIn("exit 6", step)
+        reference = _section(_text(CONTEXT_MD), "3. Target")
+        for needle in ("`context --check`", "`toolbox-env`", "`crawl-estimate`", "`key-pages-check`",
+                       "the same host and port as `prod_url`", "exit 6",
+                       "A prod run (`prod_live` true with a J0 or J+7 phase) may target `prod_url`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, reference)
+        for phase in ("MEL J0", "Post-MEL J+7"):
+            self.assertIn(phase, probes.PREPROD_IS_PROD)
+        self.assertNotIn(EM_DASH, probes.PREPROD_IS_PROD)
+        self.assertIn("laisser « target.prod_url » vide", probes.PREPROD_IS_PROD)
+        self.assertIn("`sites[].domain`", step)
+        self.assertIn("a site in recette on its final domain before it opens has no `prod_url`", step)
+        self.assertIn("`domain` of an entry of `sites`", reference)
+        self.assertIn("the apex and its `www.` count as one host", reference)
+        self.assertIn("has no `prod_url` to give: leave it empty", reference)
+
+    def test_the_commands_the_reference_names_refuse_a_preprod_that_is_the_prod(self):
+        commands = _python_commands(cqa_plan)
+        for name in ("context", "toolbox-env", "crawl-estimate", "key-pages-check"):
+            self.assertIn(name, commands)
+
+
+class FixCiToolingContract(unittest.TestCase):
+    """The instructions say what the guard of the fix mode holds for the lead on the CI."""
+
+    NOTICE = "« CI ou outillage modifié : <chemin> »"
+    FAMILIES = (
+        ".gitlab-ci.yml", ".gitlab/ci", ".github/workflows", "Makefile", "Dockerfile",
+        "docker-compose*", ".husky",
+    )
+    REFERENCE_FAMILIES = (
+        ".gitlab-ci*", ".gitlab/ci", ".github/workflows", "Makefile", "Dockerfile*",
+        "docker-compose*", ".husky",
+    )
+
+    def test_the_names_are_the_ones_of_the_code(self):
+        self.assertEqual(fix_state.CI_LABEL, "ci_tooling")
+        self.assertEqual(fix_guard.CI_LABEL, "ci_tooling")
+        self.assertIn(fix_state.CI_LABEL, fix_state.WAIVABLE_LABELS)
+        self.assertNotIn(fix_state.CI_LABEL, fix_guard.HEURISTIC_SECRET_LABELS)
+        self.assertIn(fix_guard.CI_TOOLING, _text(FIX_MD))
+        self.assertIn("la CI s'exécute au push, avant toute relecture", fix_guard.CI_TOOLING)
+        for path in (".gitlab-ci.yml", ".gitlab/ci/a.yml", ".github/workflows/a.yml", "Makefile",
+                     "Dockerfile", "docker-compose.yml", ".husky/pre-push", "deploy.sh"):
+            with self.subTest(path=path):
+                self.assertEqual(fix_guard.path_reason(path, {}), fix_guard.CI_TOOLING)
+
+    def test_the_fixer_touches_a_ci_file_only_when_the_row_needs_it(self):
+        fixer = _text(FIXER)
+        for needle in (
+            "`kind` `suspect` with `label` `ci_tooling` and `waivable` true",
+            "only when the row cannot be fixed without it",
+            self.NOTICE,
+            "(the path, never the content)",
+            "the lead judges it, never you",
+            "With `waivable` false (a deleted file) it is handled as `content`",
+            "only the lead waives an alert of the guard (a secret, or a CI file)",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, fixer)
+        for family in self.FAMILIES:
+            with self.subTest(family=family):
+                self.assertIn(f"`{family}`", fixer)
+
+    def test_the_reviewer_reads_a_ci_change_line_by_line(self):
+        reviewer = _text(FIX_REVIEWER)
+        for needle in (self.NOTICE, "`ci_tooling` in the guard", "read line by line",
+                       "adds a command, a download or a variable the row does not need"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, reviewer)
+
+    def test_the_reference_lists_the_family_and_says_how_the_lead_lifts_it(self):
+        text = _text(FIX_MD)
+        commits = _section(text, "3. Commits")
+        self.assertIn("`ci_tooling`", commits)
+        self.assertIn(self.NOTICE, commits)
+        correction = _section(text, "6. Correction pass")
+        for needle in ("**A CI or build tooling file**", "`publish` exits 5 and pushes nothing",
+                       "`--line 1 --label ci_tooling`", "is not waivable", "No sub-agent ever runs"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, correction)
+        rails = _section(text, "7. Guard rails")
+        self.assertIn("**Paths held for the lead**", rails)
+        for family in self.REFERENCE_FAMILIES:
+            with self.subTest(family=family):
+                self.assertIn(f"`{family}`", rails)
+        for needle in ("`bitbucket-pipelines.yml`, `azure-pipelines*.yml`, `netlify.toml`, `vercel.json`",
+                       "`.platform.app.yaml`", "`Taskfile.yml`",
+                       "the deploy scripts `deploy.sh`, `deploy.rb`, `deploy.yml`, `deploy-*.sh` and "
+                       "`deploy_*.sh` at any depth", "`deploy.php`, `bin/deploy` and the folder `deploy`",
+                       "`scripts/ci`", "`scripts/release.sh`",
+                       "`Deploy.php` under `src/`", "it does not close it"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, rails)
+        for path in ("bitbucket-pipelines.yml", "azure-pipelines.yml", "netlify.toml", "vercel.json",
+                     ".platform.app.yaml", "Taskfile.yml", "scripts/ci/run.sh", "scripts/release.sh",
+                     "deploy.php", "bin/deploy", "config/deploy/production.rb", "ansible/deploy.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(fix_guard.path_reason(path, {}), fix_guard.CI_TOOLING)
+        for path in ("src/Deploy/DeployService.php", "resources/js/Pages/Deploy.vue", "docs/deploy.md"):
+            with self.subTest(path=path):
+                self.assertIsNone(fix_guard.path_reason(path, {}))
+        self.assertIn("a `Makefile` under `vendor/` is « dossier de dépendances »", rails)
+        self.assertIn("--line 1 --label ci_tooling`", rails)
+
+    def test_the_skill_asks_the_lead_and_waives_with_the_ci_label(self):
+        skill = _text(SKILL)
+        problems = skill[skill.index("f. Problems, once the reviews"):skill.index("g. Publication")]
+        for needle in (
+            "`suspect` with `label` `ci_tooling`",
+            "« Ce changement de la CI ou de l'outillage est-il voulu ? »",
+            "« Oui, le laisser partir »", "« Non, retirer le correctif »",
+            "« <repo> : Changement de la CI à confirmer par le lead : <chemin> (ci_tooling) »",
+            "`publish` pushes nothing while the guard holds it",
+            "`waive-secret` with `--line 1 --label ci_tooling`",
+            "Never waive without that answer",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, problems)
+        self.assertIn("« CI ou outillage modifié : <chemin> »", skill)
+        for needle in ("« <repo> : Changement de la CI à confirmer par le lead : ... »",):
+            self.assertGreaterEqual(skill.count(needle), 2)
+        self.assertIn("`ci_tooling`, `line` 1", skill)
+
+    def test_the_new_lines_carry_no_long_dash(self):
+        for path in (FIXER, FIX_REVIEWER, FIX_MD, SKILL):
+            self.assertNotIn(EM_DASH, _text(path), path.name)
+        readme = _text(ROOT / "README.md")
+        line = next(item for item in readme.splitlines() if item.startswith("- **CI et outillage**"))
+        self.assertNotIn(EM_DASH, line)
+        self.assertIn("« Ce changement de la CI ou de l'outillage est-il voulu ? »", line)
+
+
+class SecretFilesContract(unittest.TestCase):
+    """The instructions list the files the SSH guard refuses and the forms the output masks."""
+
+    SAMPLES = {
+        "settings*.py": "/srv/app/settings.py",
+        "local_settings*": "/srv/app/local_settings.py",
+        "docker-compose*": "/srv/app/docker-compose.yml",
+        "compose*.yml": "/srv/app/compose.prod.yml",
+        ".npmrc": "/srv/app/.npmrc",
+        "parameters.yml": "/srv/app/parameters.yml",
+        "local.settings.php": "/srv/app/local.settings.php",
+        "env.php": "/srv/app/env.php",
+        "*.sql": "/srv/backup.sql",
+        "*.sql.*": "/srv/backup.sql.gz",
+        "*.tfvars": "/srv/prod.tfvars",
+        "shadow-": "/etc/shadow-",
+        "/run/secrets": "/run/secrets/db_password",
+    }
+
+    def test_server_reference_lists_every_file_the_guard_refuses(self):
+        server = _text(REFERENCES / "server.md")
+        for name, path in self.SAMPLES.items():
+            with self.subTest(name=name):
+                self.assertIn(f"`{name}`", server)
+                allowed, reason = ssh_ro.check_command(["cat", path])
+                self.assertFalse(allowed)
+                self.assertIn("porteur de secrets", reason)
+
+    def test_server_reference_says_the_backup_copies_are_refused_and_a_pattern_is_not_a_file(self):
+        server = _text(REFERENCES / "server.md")
+        self.assertIn("with their backup copies (`settings.py.bak`, `env.php.bak`, `.npmrc.old`", server)
+        self.assertIn("The pattern of a `grep` is text to look for, not a file", server)
+        for path in ("/srv/app/settings.py.bak", "/srv/app/env.php.bak", "/srv/app/.npmrc.old",
+                     "/srv/app/secrets.yml~", "/srv/app/config/settings/production.py.orig"):
+            with self.subTest(path=path):
+                self.assertFalse(ssh_ro.check_command(["cat", path])[0])
+        self.assertTrue(ssh_ro.check_command(["grep", "-c", "credentials", "/var/log/x.log"])[0])
+        self.assertFalse(ssh_ro.check_command(["grep", "-c", "x", "/srv/app/settings.py"])[0])
+
+    def test_server_reference_says_which_names_stay_allowed_to_list(self):
+        server = _text(REFERENCES / "server.md")
+        self.assertIn("naming them in `ls`, `stat`, `find -name` or `docker compose -f` stays allowed", server)
+        for argv in (["ls", "-l", "/srv/app/docker-compose.yml"], ["find", "/srv", "-name", "*.sql"],
+                     ["docker", "compose", "-f", "/srv/app/docker-compose.yml", "ps"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(ssh_ro.check_command(argv)[0])
+
+    def test_instructions_forbid_copying_a_value_read(self):
+        for path in (REFERENCES / "server.md", AUDITOR):
+            with self.subTest(path=path.name):
+                text = _text(path)
+                self.assertIn("Never copy a value you read", text)
+                self.assertIn("a URL with `user:password@`", text)
+                self.assertIn("safety net, not a licence to read those files", text)
+        auditor = _text(AUDITOR)
+        for name in ("settings*.py", "local_settings*", "docker-compose*", ".npmrc", "*.sql",
+                     "/run/secrets/*"):
+            with self.subTest(name=name):
+                self.assertIn(f"`{name}`", auditor)
+
+    def test_server_reference_names_the_masked_forms(self):
+        text = _text(REFERENCES / "server.md")
+        masked = text[text.index("- Masked in every output"):].split("\n", 1)[0]
+        for needle in ("`DB_PASS`", "`scheme://user:<mot de passe>@host`", "`--password <valeur>`",
+                       "`SetEnv`", "`fastcgi_param`", "`curl -u user:<valeur>`",
+                       "`redis-cli -a <valeur>`", "`Cookie:`", "`sk_live_...`", "`password_policy: strong`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, masked)
+        for line in ("SetEnv DB_PASSWORD x1y2z3", "curl -u admin:x1y2z3 https://example.org",
+                     "redis-cli -a x1y2z3 ping", "mysql --password x1y2z3 app",
+                     "DATABASE_URL=mysql://app:x1y2z3@db/app", "Cookie: sid=x1y2z3"):
+            with self.subTest(line=line):
+                self.assertNotIn("x1y2z3", secret_scan.redact(line, []))
+        self.assertEqual(secret_scan.redact("password_policy: strong", []), "password_policy: strong")
+
+    def test_verdicts_reference_lists_every_secret_label(self):
+        text = _text(VERDICTS_MD)
+        labels = {label for label, _ in secret_scan._PATTERNS} | {"known_value"}
+        item = text[text.index("- A secret label ("):].split("\n", 1)[0]
+        for label in sorted(labels):
+            with self.subTest(label=label):
+                self.assertIn(f"`{label}`", item)
 
 
 class DocumentHintsContract(unittest.TestCase):

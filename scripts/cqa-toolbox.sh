@@ -127,6 +127,7 @@ load_run() {
     esac
   done <<<"$env_lines"
 
+  settle_leftovers
   repos_tsv="$(python3 "$S/cqa_plan.py" repos-tsv "$RUN_DIR")" || exit 2
   REPO_NAMES=()
   REPO_PATHS=()
@@ -147,12 +148,93 @@ load_run() {
   done <<<"$repos_tsv"
 }
 
-# Wipe the previous output of a tool so that stale files never reach the summary, and create
-# raw/ as the current user (a missing bind mount source would be created by Docker as root).
+# Start the output of a tool from nothing so that stale files never reach the summary, and
+# create raw/ as the current user (a missing bind mount source would be created by Docker as
+# root). The previous folder was set aside by run_tool (stash_tool): it stays whole until the new
+# attempt has succeeded.
 prepare_tool() {
   local dir="$RUN_DIR/tools/$1"
   rm -rf -- "$dir" || return 1
   mkdir -p -- "$dir/raw" || return 1
+}
+
+# The folder a launch of <tool> <0|1> writes in: the tool, or its follow-up.
+tool_folder() {
+  case "$1:$2" in
+    http:1) printf '%s' http-followup ;;
+    mobile:1) printf '%s' mobile-followup ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# result_field <folder> <key>: a text key of the result.json of a tool folder, "" when unreadable.
+result_field() {
+  python3 -c 'import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2])
+except (OSError, ValueError, AttributeError):
+    value = None
+print(" ".join(value.split()) if isinstance(value, str) else "")' "$1/result.json" "$2" </dev/null
+}
+
+# True when the result.json of a tool folder says ok or not_applicable: a result worth keeping.
+is_good_result() {
+  case "$(result_field "$1" status)" in
+    ok | not_applicable) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Set the folder of a tool aside (tools/<tool>.prev) before a new attempt, after settling what an
+# interrupted launch left behind.
+stash_tool() {
+  local dir="$RUN_DIR/tools/$1"
+  settle_tool "$1"
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    mv -- "$dir" "$dir.prev" || return 1
+  fi
+}
+
+# Decide which folder a tool keeps once its attempt is over. A good new result (ok or
+# not_applicable) replaces the previous folder. Else a good previous result comes back, the new
+# attempt being written next to it in result-last-attempt.json, and the message says so. Without a
+# good previous result the new failure stays installed, visible. Safe to call with nothing set aside.
+settle_tool() {
+  local name="$1" dir="$RUN_DIR/tools/$1" status reason shown
+  [ -d "$dir.prev" ] || return 0
+  if is_good_result "$dir" || ! is_good_result "$dir.prev"; then
+    rm -rf -- "$dir.prev"
+    return 0
+  fi
+  status="$(result_field "$dir" status)"
+  reason="$(result_field "$dir" reason)"
+  if [ -n "$status" ]; then
+    cp -- "$dir/result.json" "$dir.prev/result-last-attempt.json" || true
+  else
+    status="aucun résultat"
+    printf '{"tool": "%s", "status": "failed", "reason": "result.json absent ou illisible"}\n' \
+      "$name" >"$dir.prev/result-last-attempt.json" || true
+  fi
+  case "$status" in
+    failed) shown="en échec" ;;
+    skipped) shown="ignoré" ;;
+    *) shown="$status" ;;
+  esac
+  if rm -rf -- "$dir" && mv -- "$dir.prev" "$dir"; then
+    say "$name : le nouvel essai n'a pas abouti ($shown${reason:+ : $reason}), le résultat précédent est conservé (détail de l'essai : tools/$name/result-last-attempt.json)."
+  else
+    say "$name : le résultat précédent n'a pas pu être remis en place, il reste dans tools/$name.prev."
+  fi
+}
+
+# Settle every folder an interrupted launch set aside, whatever the tool.
+settle_leftovers() {
+  local path
+  for path in "$RUN_DIR"/tools/*.prev; do
+    if [ -d "$path" ]; then
+      settle_tool "$(basename "${path%.prev}")"
+    fi
+  done
 }
 
 skip_tool() {
@@ -448,7 +530,17 @@ tool_crawl() {
   tolerate crawl docker_tool agence crawl -- crawl --max-minutes "$CRAWL_MINUTES" --max-urls "$CRAWL_MAX_URLS"
 }
 
+# run_tool <tool> <0|1>: one attempt, the previous folder of the tool being kept until it succeeds.
 run_tool() {
+  local folder rc=0
+  folder="$(tool_folder "$1" "$2")"
+  stash_tool "$folder" || return 1
+  run_tool_body "$1" "$2" || rc=$?
+  settle_tool "$folder"
+  return "$rc"
+}
+
+run_tool_body() {
   case "$1" in
     http) tool_http "$2" ;;
     lighthouse | a11y | yellowlab) tool_pages "$1" ;;

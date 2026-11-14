@@ -8,7 +8,7 @@
     "lot": {
       "type": "string",
       "pattern": "\\S",
-      "description": "Id of the lot, as given in the dispatch."
+      "description": "Id of the lot, as given in the dispatch. A file whose lot is another one is refused."
     },
     "findings": {
       "type": "array",
@@ -19,6 +19,7 @@
   "$defs": {
     "finding": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
         "ref",
         "verdict",
@@ -37,7 +38,7 @@
         },
         "verdict": {
           "enum": ["ko", "partial", "unknown", "ok_human", "ok", "na"],
-          "description": "ko: not compliant. partial: partly compliant. unknown: cannot be evaluated (say why in summary). ok_human: compliant as far as the audit can tell, a human must validate (say what in human_check). ok: compliant, verified without human judgement; needs at least one piece of evidence and high confidence, and todo and human_check must be null, otherwise it is lowered to ok_human. na: not applicable; na needs high confidence, otherwise it becomes unknown. When several repos give different results, keep the worst in this order: ko, partial, unknown, ok_human, ok, na."
+          "description": "ko: not compliant. partial: partly compliant. unknown: cannot be evaluated (say why in summary). ok_human: compliant as far as the audit can tell, a human must validate (say what in human_check). ok: compliant, verified without human judgement; needs at least one piece of evidence and high confidence, and todo and human_check must be null, otherwise it is lowered to ok_human. na: not applicable; na needs high confidence and at least one piece of evidence, otherwise it becomes unknown. When several repos give different results, keep the worst in this order: ko, partial, unknown, ok_human, ok, na."
         },
         "confidence": {
           "enum": ["high", "medium", "low"],
@@ -61,7 +62,7 @@
               {"$ref": "#/$defs/evidence_document"}
             ]
           },
-          "description": "What the verdict rests on. May be empty, but an ok without evidence is lowered to ok_human. The sub-agents never write a document evidence: cqa_plan.py does, for the rows it judges from a context document."
+          "description": "What the verdict rests on. May be empty, but an ok without evidence is lowered to ok_human and an na without evidence becomes unknown. A file must exist in its repo and a tool must have its summary.json: a finding with other evidence is refused. A tool must also have a result.json that is ok or not_applicable, a page URL must be on a host of the target (target.preprod_url, target.prod_url on a prod run, sites, key_pages), an http URL must be on such a host (key_pages aside) and be a probe of the toolbox that ran: any other piece of evidence is dropped from the finding, which stays without it. The sub-agents never write a document evidence: cqa_plan.py does, for the rows it judges from a context document, and validate refuses it in a lot file."
         },
         "todo": {
           "type": ["string", "null"],
@@ -100,7 +101,7 @@
         },
         "source": {
           "const": "context_doc",
-          "description": "Optional. Set by cqa_plan.py only, on a finding it built from the verdict of a context document (findings/context-docs.json). The sub-agents never write it."
+          "description": "Optional. Set by cqa_plan.py only, on a finding it built from the verdict of a context document (findings/context-docs.json). The sub-agents never write it: validate refuses it in a lot file."
         },
         "in_repo": {
           "type": "boolean",
@@ -235,7 +236,7 @@
     "evidence_document": {
       "type": "object",
       "required": ["type", "doc", "ref"],
-      "description": "Written by cqa_plan.py only, for a row judged from a context document (a third-party audit report, a pentest). Never write it.",
+      "description": "Written by cqa_plan.py only, for a row judged from a context document (a third-party audit report, a pentest). Never write it: validate refuses it in a lot file.",
       "properties": {
         "type": {"const": "document"},
         "doc": {

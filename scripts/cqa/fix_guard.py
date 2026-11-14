@@ -11,9 +11,10 @@ caller gives it, reads the same content once per call; its findings ("gitleaks:<
 are content, never waivable. Each problem has a kind: "form" (the message:
 convention, section, length, attribution, ref) is fixed by rewriting the message; "content"
 (paths, secrets, merge, rewritten history) drops the row; "suspect" is a heuristic secret
-alert (HEURISTIC_SECRET_LABELS) that the lead may waive for one line of a file (waivable, see
-cqa_fix.py waive-secret) or treat as content. A waiver is keyed on the content of the file
-(its blob): it holds while the file is unchanged, whatever its commit.
+alert (HEURISTIC_SECRET_LABELS) or a CI or build tooling file (CI_TOOLING, label CI_LABEL, line
+1) that the lead may waive for one line of a file (waivable, see cqa_fix.py waive-secret) or
+treat as content. A waiver is keyed on the content of the file (its blob): it holds while the
+file is unchanged, whatever its commit.
 """
 import bisect
 import fnmatch
@@ -51,7 +52,12 @@ SUSPECT = "suspect"
 # read from a request, a constant read from the environment): the lead may waive them. A
 # known value, a private key or a provider token is never waived. The state checks the
 # waivers it loads against the same set.
-HEURISTIC_SECRET_LABELS = fix_state.WAIVABLE_LABELS
+HEURISTIC_SECRET_LABELS = fix_state.WAIVABLE_LABELS - {fix_state.CI_LABEL}
+# A path the CI or the build runs: the pipeline of the project starts at the push, with its
+# variables, before any human review. A suspect the lead waives, like a heuristic secret alert,
+# with the label CI_LABEL and line 1 (the whole file).
+CI_LABEL = fix_state.CI_LABEL
+CI_TOOLING = "CI ou outillage d'exécution (la CI s'exécute au push, avant toute relecture)"
 
 # Core and contributed code of each stack (repos[].stack of context.json). Patterns are
 # matched segment by segment, case aside: "**" stands for any number of folders, and a
@@ -81,6 +87,22 @@ INSTALL_FILES = ("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.ya
                  "composer.json", "composer.lock")
 SUBMODULE_FILES = ("**/.gitmodules",)
 MINIFIED_FILES = ("**/*.min.*",)
+# CI and execution tooling: pipelines, build files, git hooks, deploy scripts. "ci", ".ci",
+# "scripts/ci", the "deploy" folder (also under "config/"), "bin/deploy", "scripts/release.sh"
+# and "deploy.php" are the paths of the repo root only. A deploy file is held by its script
+# extension: Deploy.php under src/, Deploy.vue or deploy.md are source or documentation.
+CI_FILES = (
+    "**/.gitlab-ci*", "**/.gitlab/ci", "**/.github/workflows", "**/.github/actions",
+    "**/.circleci", "**/jenkinsfile",
+    "**/bitbucket-pipelines.yml", "**/azure-pipelines*.yml", "**/netlify.toml", "**/vercel.json",
+    "**/.platform.app.yaml", "**/taskfile.yml", "**/taskfile.yaml",
+    "**/makefile", "**/gnumakefile", "**/dockerfile*", "**/*.dockerfile",
+    "**/docker-compose*", "**/compose.y*ml", "**/compose.*.y*ml",
+    "**/.husky", "**/.githooks",
+    "**/deploy.sh", "**/deploy.rb", "**/deploy.yml", "**/deploy.yaml", "deploy.php",
+    "**/deploy-*.sh", "**/deploy_*.sh", "deploy", "config/deploy", "bin/deploy",
+    "ci", ".ci", "scripts/ci", "scripts/release.sh",
+)
 
 REPORT_OUTCOMES = ("fixed", "skipped", "question", "needs_command")
 # What a fixed row says of each report point it was given (context_items); the note of the
@@ -156,6 +178,8 @@ def path_reason(path: str, repo: dict, *, gitlink: bool = False) -> Optional[str
         return MINIFIED
     if _matches_any(DEPENDENCY_FILES, parts):
         return DEPENDENCIES
+    if _matches_any(CI_FILES, parts):
+        return CI_TOOLING
     return None
 
 
@@ -169,11 +193,12 @@ def check_commits(worktree: Path, start_sha: str, rows: dict, repo: dict, known:
     "reason", "kind", "waivable"}: ref is the ref of the commit subject (the stray one for
     "Réf hors de cette MR"), path is None for a problem of the whole commit; a secret has its
     label and its line (in the file, or in the message when path is None), other problems
-    None; kind is FORM, CONTENT or SUSPECT, and only a suspect of a file is waivable. Every
-    file a commit changes is scanned whole, as committed; a secret is reported, at the line
-    where it starts, when one of its lines is added by the commit. The messages are scanned
-    whole. gitleaks, when given, is called once with all that content joined
-    (fix_gitleaks.Gitleaks) and its findings come last, as content problems.
+    None; kind is FORM, CONTENT or SUSPECT, and only a suspect of a file is waivable (a CI or
+    build tooling file is a suspect with label CI_LABEL and line 1, not waivable when the commit
+    deletes it). Every file a commit changes is scanned whole, as committed; a secret is
+    reported, at the line where it starts, when one of its lines is added by the commit. The
+    messages are scanned whole. gitleaks, when given, is called once with all that content
+    joined (fix_gitleaks.Gitleaks) and its findings come last, as content problems.
     """
     worktree = Path(worktree)
     problems, segments = [], []
@@ -454,6 +479,14 @@ def _problem(sha, ref, path, reason: str, kind: str) -> dict:
             "reason": reason, "kind": kind, "waivable": False}
 
 
+def _ci_problem(sha, ref, path, *, waivable: bool) -> dict:
+    """A CI or build tooling problem: a suspect for the whole file (line 1), which the lead may
+    waive; a waiver is keyed on a blob, so a deleted file has none and is never waivable."""
+    found = _problem(sha, ref, path, CI_TOOLING, SUSPECT)
+    found.update(line=1, label=CI_LABEL, waivable=waivable)
+    return found
+
+
 def _secret(sha, ref, path, label: str, line: int) -> dict:
     """A secret problem: a heuristic label is a suspect, waivable when it is in a file."""
     heuristic = label in HEURISTIC_SECRET_LABELS
@@ -478,9 +511,11 @@ def _change_problems(sha, ref, message: str, rows: dict, repo: dict, known: list
     problems += [_secret(sha, ref, None, label, line) for label, line in scan_lines(message, known)]
     segments.append((sha, ref, None, None, message))
     gitlinks = set()
-    for path, gitlink in paths:
+    for path, gitlink, deleted in paths:
         reason = path_reason(path, repo, gitlink=gitlink)
-        if reason:
+        if reason == CI_TOOLING:
+            problems.append(_ci_problem(sha, ref, path, waivable=not deleted))
+        elif reason:
             problems.append(_problem(sha, ref, path, reason, CONTENT))
         if gitlink:
             gitlinks.add(path)
@@ -577,7 +612,8 @@ def _staged_blobs(worktree: Path, run) -> dict:
 
 
 def _changed_paths(worktree: Path, run, label: str, *args: str) -> list:
-    """Return (path, is a submodule) for every path a raw diff (-z) adds, changes or deletes."""
+    """Return (path, is a submodule, is deleted) for every path a raw diff (-z) adds, changes or
+    deletes."""
     result = fix_names.git(worktree, run, *args)
     if result.returncode != 0:
         raise fix_git.GitRefused(f"{label} a échoué : {result.stderr.strip()}")
@@ -590,7 +626,8 @@ def _changed_paths(worktree: Path, run, label: str, *args: str) -> list:
             continue
         count = 2 if meta[4][:1] in ("R", "C") else 1
         gitlink = _GITLINK in (meta[0][1:], meta[1])
-        changes.extend((path, gitlink) for path in fields[index:index + count])
+        deleted = meta[4][:1] == "D"
+        changes.extend((path, gitlink, deleted) for path in fields[index:index + count])
         index += count
     return changes
 

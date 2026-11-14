@@ -3,7 +3,7 @@ import copy
 import json
 import re
 from collections import Counter
-from typing import Iterable
+from typing import Iterable, Optional
 from urllib.parse import unquote, unquote_plus, urlsplit
 
 from cqa.checklist import ref_label
@@ -21,6 +21,21 @@ REQUIRED_FINDING_KEYS = (
     "divergence",
     "needs_probes",
 )
+# The keys the sub-agents may write (the schema documents them): a finding of a lot file holds no
+# other. "source", "guardrail" and the keys the reader of the findings sets are the code's own
+# (see CODE_KEYS).
+AGENT_FINDING_KEYS = REQUIRED_FINDING_KEYS + ("needs_scenarios", "tool_dates", "in_repo")
+# Set by the reader of the findings (cqa.rerun): true on a finding read under the rules of a run
+# started before 0.18.1 (cqa.contract), and the evidence it dropped, each as {"evidence": <the
+# piece of evidence>, "problem": <French text>, "label": <short French reason>}.
+LEGACY_KEY = "legacy_contract"
+REFUSED_KEY = "refused_evidence"
+CODE_KEYS = {
+    "source": "cqa_plan.py l'écrit seul, d'après le verdict d'un document de contexte",
+    "guardrail": "le script de plan le calcule seul",
+    LEGACY_KEY: "le lecteur des constats l'écrit seul, d'après la version du run",
+    REFUSED_KEY: "le lecteur des constats l'écrit seul, d'après le contrôle des preuves",
+}
 EVIDENCE_REQUIRED = {
     "file": ("repo", "path"),
     "page": ("url",),
@@ -28,6 +43,7 @@ EVIDENCE_REQUIRED = {
     "http": ("url", "detail"),
     "document": ("doc", "ref"),
 }
+CONTEXT_DOC_SOURCE = "context_doc"
 PROBE_METHODS = ("GET", "HEAD")
 # Scenario requests (needs_scenarios): data validated by whitelist and caps, never code. The step
 # types, the keys and the caps copy STEP_TYPES, PRESS_KEYS and FOLLOWUP_LIMITS of the gm-audit
@@ -183,6 +199,8 @@ def validate_document(
     app_path: str = "",
     optional_refs: frozenset = frozenset(),
     forbidden_refs: frozenset = frozenset(),
+    agent_file: bool = False,
+    lot_id: Optional[str] = None,
 ) -> tuple[list[dict], list[str]]:
     """Return (valid findings, errors in French) for a findings/<lot>.json document.
 
@@ -192,6 +210,12 @@ def validate_document(
     finding the file gives for it is validated like any other. forbidden_refs are rows of the lot
     that the file must not give (the same rows, in a first-round or follow-up file: only a rerun
     judges them again): a finding for one is an error and is never returned.
+
+    agent_file is true for a file a sub-agent writes (every findings/<lot>*.json but
+    findings/context-docs.json, which the code writes): it holds no evidence of type document, no
+    key of CODE_KEYS and no key other than AGENT_FINDING_KEYS, so a finding that breaks one is
+    invalid. lot_id is the id of the lot the file is validated for: a "lot" field that
+    holds another id refuses the whole file (no finding is returned).
 
     Every problem of the document is reported in one pass, because the sub-agent gets to fix
     its file once. A finding is returned (as a deep copy) only when it has no problem. A ref
@@ -205,10 +229,16 @@ def validate_document(
     if not isinstance(doc, dict):
         return [], ['le document doit être un objet JSON {"lot": ..., "findings": [...]}']
     errors = []
+    other_lot = False
     if "lot" not in doc:
         errors.append("champ « lot » manquant")
     elif not _is_text(doc["lot"]):
         errors.append("« lot » doit être un texte non vide")
+    elif lot_id is not None and doc["lot"] != lot_id:
+        other_lot = True
+        errors.append(
+            f"« lot » vaut {_show(doc['lot'])} mais le fichier est validé pour le lot {_show(lot_id)}"
+        )
     if "findings" not in doc:
         return [], errors + ["champ « findings » manquant"]
     items = doc["findings"]
@@ -227,7 +257,7 @@ def validate_document(
         ref = item.get("ref")
         in_lot = _is_int(ref) and ref in lot_refs
         label = ref_label(ref) if _is_int(ref) else f"n° {index}"
-        problems = _finding_problems(item, app_path)
+        problems = _finding_problems(item, app_path, agent_file)
         if _is_int(ref) and not in_lot:
             problems.insert(0, "Réf hors du lot")
         elif in_lot and ref in forbidden_refs:
@@ -252,7 +282,7 @@ def validate_document(
     errors.extend(
         f"constat manquant : {ref_label(ref)}" for ref in sorted(lot_refs - seen - optional_refs)
     )
-    return valid, errors
+    return ([] if other_lot else valid), errors
 
 
 def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
@@ -267,12 +297,19 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     4. needs_probes or needs_scenarios still filled after the follow-up cap the verdict at unknown:
        ko and partial are kept, ok_human, ok and na become unknown;
     5. an ok whose todo or human_check is filled becomes ok_human (contradictory finding);
-    6. an na whose confidence is not high becomes unknown.
-    A guardrail the sub-agent wrote itself is always overwritten.
+    6. an na whose confidence is not high becomes unknown;
+    7. an na without evidence becomes unknown;
+    8. an ok built from a context document (source) becomes ok_human: a report may be older than
+       the code.
+    A finding read under the rules of a run started before 0.18.1 (LEGACY_KEY true, see
+    cqa.contract) skips rules 7 and 8, which that run was not audited under. The evidence the reader
+    dropped (REFUSED_KEY) is named first: the rules then judge the evidence left. A guardrail the
+    sub-agent wrote itself is always overwritten.
     """
     result = copy.deepcopy(finding)
     verdict = result["verdict"]
-    reasons = []
+    legacy = result.get(LEGACY_KEY) is True
+    reasons = _refused_problems(result.get(REFUSED_KEY))
     if verdict == "ok" and not result.get("evidence"):
         verdict = "ok_human"
         reasons.append("aucune preuve : ok abaissé à ok_human")
@@ -297,9 +334,26 @@ def apply_guardrails(finding: dict, row: dict, *, followup_done: bool) -> dict:
     if verdict == "na" and result.get("confidence") != "high":
         verdict = "unknown"
         reasons.append("confiance non haute : na abaissé à unknown")
+    if not legacy and verdict == "na" and not result.get("evidence"):
+        verdict = "unknown"
+        reasons.append("aucune preuve : na abaissé à unknown")
+    if not legacy and verdict == "ok" and result.get("source") == CONTEXT_DOC_SOURCE:
+        verdict = "ok_human"
+        reasons.append("conforme d'après un rapport tiers : ok abaissé à ok_human")
     result["verdict"] = verdict
     result["guardrail"] = "; ".join(reasons) if reasons else None
     return result
+
+
+def _refused_problems(refused) -> list:
+    """Return the French texts of the evidence the reader dropped (REFUSED_KEY), [] when none."""
+    if not isinstance(refused, list):
+        return []
+    return [
+        entry["problem"]
+        for entry in refused
+        if isinstance(entry, dict) and isinstance(entry.get("problem"), str)
+    ]
 
 
 def requests_php_file(url: str, app_path: str = "") -> bool:
@@ -422,8 +476,10 @@ def _show(value) -> str:
     return text.encode("utf-8", "replace").decode("utf-8")
 
 
-def _finding_problems(item: dict, app_path: str) -> list[str]:
+def _finding_problems(item: dict, app_path: str, agent_file: bool = False) -> list[str]:
     problems = []
+    if agent_file:
+        problems.extend(_agent_key_problems(item))
     missing = [key for key in REQUIRED_FINDING_KEYS if key not in item]
     if missing:
         noun = "champ manquant" if len(missing) == 1 else "champs manquants"
@@ -447,7 +503,7 @@ def _finding_problems(item: dict, app_path: str) -> list[str]:
         if key in item:
             problems.extend(_optional_text_problems(key, item[key]))
     if "evidence" in item:
-        problems.extend(_evidence_problems(item["evidence"]))
+        problems.extend(_evidence_problems(item["evidence"], agent_file))
     if "needs_probes" in item:
         problems.extend(_probe_problems(item["needs_probes"], app_path))
     if "needs_scenarios" in item:
@@ -456,6 +512,19 @@ def _finding_problems(item: dict, app_path: str) -> list[str]:
         problems.extend(_tool_dates_problems(item["tool_dates"]))
     if "in_repo" in item and not isinstance(item["in_repo"], bool):
         problems.append("« in_repo » doit être un booléen (true ou false)")
+    return problems
+
+
+def _agent_key_problems(item: dict) -> list[str]:
+    problems = []
+    admitted = ", ".join(AGENT_FINDING_KEYS)
+    for key in item:
+        if key in AGENT_FINDING_KEYS:
+            continue
+        if key in CODE_KEYS:
+            problems.append(f"clé {_show(key)} refusée : {CODE_KEYS[key]}, un lot ne l'écrit jamais")
+        else:
+            problems.append(f"clé {_show(key)} non admise (clés admises : {admitted})")
     return problems
 
 
@@ -493,7 +562,7 @@ def _optional_text_problems(key: str, value) -> list[str]:
     return []
 
 
-def _evidence_problems(evidence) -> list[str]:
+def _evidence_problems(evidence, agent_file: bool = False) -> list[str]:
     if not isinstance(evidence, list):
         return ["« evidence » doit être une liste"]
     problems = []
@@ -511,6 +580,11 @@ def _evidence_problems(evidence) -> list[str]:
             problems.append(f"{place} : type {_show(kind)} inconnu ({kinds})")
             continue
         place = f"{place} ({kind})"
+        if agent_file and kind == "document":
+            problems.append(
+                f"{place} : cqa_plan.py écrit seul une preuve « document », un lot n'en écrit jamais"
+            )
+            continue
         problems.extend(_required_text_problems(place, item, EVIDENCE_REQUIRED[kind]))
         problems.extend(_evidence_extras(place, kind, item))
     return problems

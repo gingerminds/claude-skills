@@ -41,14 +41,26 @@ _COMPONENT_SEPARATORS = re.compile(r"[/=:, ]+")
 _GLOB = re.compile(r"[*?\[{]")
 _PSEUDO_FS = re.compile(r"/+(?:proc|sys|dev)(?:/|$)")
 _SECRET_NAME = re.compile(
-    r"^\.env|\.env$|\.env\.|wp-config|^settings.*\.php|htpasswd|auth\.json"
+    r"^\.env|\.env$|\.env\.|wp-config|^settings.*\.php|\.settings\.php$|htpasswd|auth\.json"
     r"|\.(?:key|pem|p12|pfx)(?:\.|$)|^id_|_history$"
+    r"|^settings.*\.py|^local_settings|^\.npmrc|^parameters\.ya?ml|^env\.php"
+    r"|\.tfvars(?:\.|$)|\.tfstate|^secrets?\.ya?ml|^credentials(?:\.|$)"
+    r"|^service[-_]?account.*\.json"
 )
-_SECRET_NAMES = frozenset(
-    {"shadow", "gshadow", ".my.cnf", "debian.cnf", ".pgpass", ".netrc", ".git-credentials"}
-)
-_SECRET_PAIRS = frozenset(
-    {(".git", "config"), (".docker", "config.json"), (".aws", "credentials"), (".kube", "config")}
+_SECRET_NAMES = frozenset({
+    "shadow", "gshadow", "shadow-", "gshadow-", ".my.cnf", "debian.cnf", ".pgpass", ".netrc",
+    ".git-credentials",
+})
+_SECRET_PAIRS = frozenset({
+    (".git", "config"), (".docker", "config.json"), (".aws", "credentials"), (".kube", "config"),
+    ("run", "secrets"),
+})
+# A file of a "settings" folder (Django: config/settings/production.py).
+_SETTINGS_DIR = "settings"
+# Names that hold secrets but are listed, searched by name and passed to docker compose -f: only
+# their content is refused (cat, head, tail, grep).
+_SECRET_CONTENT_NAME = re.compile(
+    r"^docker-compose|^compose[\w.-]*\.ya?ml$|\.sql(?:\.|$)"
 )
 # Session ids are file names: a "sessions" folder or a PHP "sess_<id>" file is never listed,
 # searched or read, whatever the command.
@@ -96,7 +108,12 @@ def _check_token(token, *, secrets: bool = True) -> None:
         return
     for index, part in enumerate(lowered):
         pair = tuple(lowered[index:index + 2])
-        if _SECRET_NAME.search(part) or part in _SECRET_NAMES or pair in _SECRET_PAIRS:
+        if pair in _SECRET_PAIRS or _is_settings_file(lowered, index):
+            raise Refused(
+                f"fichier porteur de secrets refusé (« {'/'.join(components[index:index + 2])} ») : "
+                "lire les clés utiles avec --env-keys"
+            )
+        if _SECRET_NAME.search(part) or part in _SECRET_NAMES:
             raise Refused(
                 f"fichier porteur de secrets refusé (« {components[index]} ») : "
                 "lire les clés utiles avec --env-keys"
@@ -106,6 +123,14 @@ def _check_token(token, *, secrets: bool = True) -> None:
                 f"dossier ou fichier de sessions refusé (« {components[index]} ») : les noms "
                 "des fichiers de session sont les identifiants de session"
             )
+
+
+def _is_settings_file(lowered: list, index: int) -> bool:
+    return (
+        lowered[index] == _SETTINGS_DIR
+        and index + 1 < len(lowered)
+        and ".py" in lowered[index + 1]
+    )
 
 
 def _check_listing_root(command: str, path: str) -> None:
@@ -135,6 +160,12 @@ def _check_path(path: str, *, content: bool = False) -> None:
     if content and _PSEUDO_FS.match(posixpath.normpath(path)):
         raise Refused(
             f"lecture d'un pseudo-fichier système refusée (/proc, /sys, /dev) : « {path} »"
+        )
+    name = posixpath.basename(path)
+    if content and _SECRET_CONTENT_NAME.search(name.lower()):
+        raise Refused(
+            f"fichier porteur de secrets refusé (« {name} ») : fichier de composition ou dump "
+            "de base de données, à lire dans le dépôt"
         )
 
 
@@ -456,8 +487,9 @@ def check_command(argv: list[str]) -> tuple[bool, str]:
 def _check(argv) -> None:
     if not isinstance(argv, (list, tuple)) or not argv:
         raise Refused("commande vide ou mal formée")
-    for token in argv:
-        _check_token(token)
+    patterns = _grep_patterns(argv)
+    for index, token in enumerate(argv):
+        _check_token(token, secrets=index not in patterns)
     name, args = argv[0], list(argv[1:])
     if name in _DENIED:
         raise Refused(f"« {name} » refusé : {_DENIED[name]}")
@@ -471,6 +503,74 @@ def _check(argv) -> None:
         _HANDLERS[name](args)
     else:
         raise Refused(f"« {name} » est hors de la liste blanche des commandes de lecture")
+
+
+def _grep_patterns(argv, offset: int = 0) -> set:
+    """Return the positions of the grep patterns in argv, also in a container command.
+
+    A pattern is text to look for, not a file to read: a file name in it (credentials,
+    settings.py) is no reason to refuse the command. The files it searches keep their checks,
+    and so does everything else in the pattern (metacharacters, "..", non ASCII). The positions
+    only free the check of secret file names: _grep refuses a malformed command.
+    """
+    if not isinstance(argv, (list, tuple)) or not argv or not all(
+        isinstance(item, str) for item in argv
+    ):
+        return set()
+    if argv[0] == "grep":
+        return {offset + index for index in _grep_pattern_indexes(argv[1:], 1)}
+    start = _inner_command(argv)
+    return set() if start is None else _grep_patterns(argv[start:], offset + start)
+
+
+def _grep_pattern_indexes(args: list, first: int) -> set:
+    found, operands, explicit = set(), [], False
+    index = 0
+    while index < len(args):
+        token = args[index]
+        index += 1
+        if not token.startswith("-"):
+            operands.append(index - 1)
+        elif token.startswith("--"):
+            name, has_value, _ = token.partition("=")
+            if name == "--regexp":
+                explicit = True
+                found.add(index - 1 if has_value else index)
+            if name in _GREP.long_valued and not has_value:
+                index += 1
+        else:
+            for position, char in enumerate(token[1:]):
+                if char in _GREP.flags:
+                    continue
+                if char in _GREP.valued:
+                    attached = bool(token[position + 2:])
+                    if char == "e":
+                        explicit = True
+                        found.add(index - 1 if attached else index)
+                    index += 0 if attached else 1
+                break
+    if not explicit and operands:
+        found.add(operands[0])
+    return {first + position for position in found}
+
+
+def _inner_command(argv) -> Optional[int]:
+    """Return where the command run in a container starts in a docker exec or compose exec."""
+    if argv[0] != "docker" or len(argv) < 2:
+        return None
+    index = 2
+    if argv[1] == "compose":
+        while index < len(argv) and argv[index].startswith("-"):
+            name, has_value, _ = argv[index].partition("=")
+            index += 1 if has_value or name not in _COMPOSE_GLOBAL else 2
+        if argv[index:index + 1] != ["exec"]:
+            return None
+        index += 1
+    elif argv[1] != "exec":
+        return None
+    while index < len(argv) and argv[index].startswith("-"):
+        index += 2 if argv[index] == "-w" else 1
+    return index + 1 if index + 1 < len(argv) else None
 
 
 _BINARY_FORMS = {

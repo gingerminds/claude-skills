@@ -14,6 +14,7 @@ from cqa.checklist import (
     STATUS_TODO,
     ref_label,
 )
+from cqa.findings import REFUSED_KEY
 from cqa.git_tools import blob_url
 
 VERDICT_LABELS = {
@@ -92,6 +93,8 @@ def format_comment(
     becomes "et N autres preuves". A text still too long loses evidence from the end, then
     the summary is cut with an ellipsis, then the other lines if that is not enough. It never
     carries the "MR :" block of the v2 fix mode: the fix comment (format_fix_comment) does.
+    The evidence the check dropped from the finding (REFUSED_KEY) comes after the evidence kept,
+    each marked « preuve écartée » with its reason.
     """
     verdict = VERDICT_LABELS[finding["verdict"]]
     confidence = CONFIDENCE_LABELS[finding["confidence"]]
@@ -99,7 +102,8 @@ def format_comment(
         head=_header(run_date, lead_option),
         verdict=f"{verdict} (confiance {confidence})",
         summary=finding["summary"],
-        evidence=[_evidence_line(item, repos) for item in finding.get("evidence") or []],
+        evidence=[_evidence_line(item, repos) for item in finding.get("evidence") or []]
+        + _refused_lines(finding.get(REFUSED_KEY), repos),
         extras=[(label, finding.get(key)) for key, label in _OPTIONAL_LINES],
         foot=_footer(row, repos, plugin_version),
     )
@@ -619,6 +623,15 @@ def _footer(row: dict, repos: list[dict], plugin_version: str) -> str:
         parts.append(", ".join(f"{repo['name']}@{repo['audited_sha'][:7]}" for repo in repos))
     parts.append(f"{_SKILL} {plugin_version}")
     return " · ".join(parts)
+
+
+def _refused_lines(refused, repos: list[dict]) -> list:
+    lines = []
+    for entry in refused if isinstance(refused, list) else []:
+        evidence = entry.get("evidence") if isinstance(entry, dict) else None
+        if isinstance(evidence, dict) and isinstance(entry.get("label"), str):
+            lines.append(f"{_evidence_line(evidence, repos)} (preuve écartée : {entry['label']})")
+    return lines
 
 
 def _evidence_line(item: dict, repos: list[dict]) -> str:

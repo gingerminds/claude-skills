@@ -47,7 +47,13 @@ from cqa.notion_write import (
     text_digest,
     validate_plan,
 )
-from cqa.plan import filter_plan, operation_key, plan_digest
+from cqa.plan import (
+    consented_plan,
+    filter_plan,
+    keeps_human_statuses,
+    operation_key,
+    plan_digest,
+)
 from cqa.rerun import (
     comment_dates,
     latest_findings,
@@ -65,6 +71,9 @@ EXIT_API = 3
 EXIT_SCHEMA = 6
 EXIT_BLOCKED = 7
 EXIT_REFUSED = 8
+
+AUDIT_PLAN = Path("notion") / "plan.json"
+FIX_PLAN = Path("fix") / "notion-plan.json"
 
 
 class UsageError(Exception):
@@ -145,7 +154,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="seulement les retours des MR fermées (--closed), sans passe ni commentaire de page",
     )
     sub.set_defaults(handler=_cmd_fix_plan)
-    sub = commands.add_parser("apply", help="écrit un plan dans la copie (reprise possible)")
+    sub = commands.add_parser(
+        "apply", help="écrit un plan dans la copie (reprise possible, refusé avec dry_run)"
+    )
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument(
         "--plan",
@@ -156,7 +167,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument(
         "--skip-human-overrides",
         action="store_true",
-        help="ne touche pas aux pages dont le statut a été posé par un humain",
+        help="ne touche pas aux pages dont le statut a été posé par un humain (apply le fait "
+        "déjà seul avec notion_write « keep_human », ou « all » en mode autonome)",
     )
     sub.set_defaults(handler=_cmd_apply)
     sub = commands.add_parser("comment-page", help="écrit un commentaire sur la page de la copie")
@@ -367,7 +379,7 @@ def _cmd_fix_plan(args, client) -> int:
         raise UsageError("--closed-only attend les Réf des MR fermées sans fusion (--closed CQ-12).")
     if args.closed_only:
         _refuse_when_none(run_dir)
-        if isinstance(context, dict) and context.get("dry_run") is True:
+        if isinstance(context, dict) and _dry_run(context):
             raise UsageError("context.json : dry_run vaut true (--dry-run) : rien n'est préparé "
                              "pour Notion.")
     common = {
@@ -748,43 +760,112 @@ def _optional_json(path: Path, consequence: str = ""):
         return None
 
 
-def _refuse_when_none(run_dir: Path) -> None:
-    """Refuse the audit writes when the lead declined them at launch (notion_write "none")."""
+def _context_of(run_dir: Path) -> dict:
     context = _read_json(run_dir / "context.json")
-    if isinstance(context, dict) and context.get("notion_write") == "none":
+    return context if isinstance(context, dict) else {}
+
+
+def _same_plan(run_dir: Path, given: Path, expected: Path) -> bool:
+    return (run_dir / given).resolve() == (run_dir / expected).resolve()
+
+
+def _refuse_when_none(run_dir: Path, context: Optional[dict] = None) -> None:
+    """Refuse the audit writes when the lead declined them at launch (notion_write "none")."""
+    if context is None:
+        context = _context_of(run_dir)
+    if context.get("notion_write") == "none":
         raise UsageError(
             "context.json : notion_write vaut « none » (le lead a refusé l'écriture dans "
             "Notion au lancement) : rien n'est écrit."
         )
 
 
+def _dry_run(context: dict) -> bool:
+    """Return context.json dry_run; a value that is neither a boolean nor null is refused."""
+    value = context.get("dry_run")
+    if value is not None and not isinstance(value, bool):
+        raise UsageError(
+            f"context.json : dry_run doit valoir true ou false (valeur lue : {value!r}) : "
+            "rien n'est écrit dans Notion."
+        )
+    return value is True
+
+
+def _is_audit_plan(plan: dict) -> bool:
+    """True for a plan that holds the rows or the summary only cqa_plan.py plan writes.
+
+    A damaged copy of the audit plan (one of them missing) counts too: it must meet the
+    consents, and fail on its structure, rather than slip through them.
+    """
+    return "rows" in plan or "summary" in plan
+
+
+def _refuse_when_dry_run(context: dict) -> None:
+    """Refuse every write of a run launched with --dry-run (context.json dry_run)."""
+    if _dry_run(context):
+        raise UsageError(
+            "context.json : dry_run vaut true (--dry-run) : rien n'est écrit dans Notion. "
+            "Pour écrire, relancer sans --dry-run."
+        )
+
+
 def _cmd_apply(args, client) -> int:
-    if args.plan == Path("notion/plan.json"):
-        _refuse_when_none(args.run_dir)
-    plan = _read_json(args.run_dir / args.plan, "lancer d'abord cqa_plan.py plan")
+    """Apply a plan, after the consents the run holds in context.json.
+
+    The audit plan is known by its shape (the rows and the summary only cqa_plan.py plan
+    writes) as well as by its path (notion/plan.json). The fix plan (fix/notion-plan.json,
+    without them) has its own consent (fix/state.json): the dry_run of the audit does not
+    apply to it. Any other plan refuses a run launched with --dry-run. The audit plan also
+    refuses notion_write "none" and, for "keep_human" or "all" in autonomous mode, leaves
+    alone the pages whose status a person set, whether or not the plan was rebuilt without
+    them and whether or not --skip-human-overrides is given.
+    """
+    run_dir = args.run_dir
+    plan = _read_json(run_dir / args.plan, "lancer d'abord cqa_plan.py plan")
     if not isinstance(plan, dict):
         raise UsageError(f"{args.plan.name} : un objet JSON est attendu.")
+    audit = _same_plan(run_dir, args.plan, AUDIT_PLAN) or _is_audit_plan(plan)
+    context = {}
+    if audit or not _same_plan(run_dir, args.plan, FIX_PLAN):
+        context = _context_of(run_dir)
+        if audit:
+            _refuse_when_none(run_dir, context)
+        _refuse_when_dry_run(context)
     validate_plan(plan)
-    if args.skip_human_overrides:
-        try:
-            plan = filter_plan(plan, skip_human_overrides=True)
-        except KeyError as error:
-            raise UsageError(f"{args.plan.name} : la clé « {error.args[0]} » est absente.")
-        except (TypeError, AttributeError):
-            raise UsageError(f"{args.plan.name} : « rows » ou « summary » est invalide.")
-    notion = _notion_context(args.run_dir, "bot_id")
+    try:
+        if args.skip_human_overrides:
+            written = filter_plan(plan, skip_human_overrides=True)
+        else:
+            written = consented_plan(plan, context) if audit else plan
+    except KeyError as error:
+        raise UsageError(f"{args.plan.name} : la clé « {error.args[0]} » est absente.")
+    except (TypeError, AttributeError):
+        raise UsageError(f"{args.plan.name} : « rows » ou « summary » est invalide.")
+    kept = len(plan["ops"]) - len(written["ops"])
+    if audit and context.get("notion_write") == "all" and context.get("mode") == "autonome":
+        _log(
+            "Mode autonome : « Tout écrire » vaut « Sans toucher aux statuts posés par un "
+            "humain » (un audit autonome ne remplace jamais un statut posé par un humain)."
+            + (f" Opérations retirées du plan : {kept}." if kept else "")
+        )
+    notion = _notion_context(run_dir, "bot_id")
     row_page_ids = {
         item["page_id"]
-        for item in _read_rows(args.run_dir)
+        for item in _read_rows(run_dir)
         if isinstance(item, dict) and isinstance(item.get("page_id"), str)
     }
-    return _write_plan(client, args.run_dir, plan, notion, row_page_ids)
+    keep_human = bool(args.skip_human_overrides) or (audit and keeps_human_statuses(context))
+    return _write_plan(
+        client, run_dir, written, notion, row_page_ids, {"kept_human": kept} if kept else {},
+        keep_human=keep_human,
+    )
 
 
 def _cmd_comment_page(args, client) -> int:
-    _refuse_when_none(args.run_dir)
-    context = _read_json(args.run_dir / "context.json")
-    section = context.get("notion") if isinstance(context, dict) else None
+    context = _context_of(args.run_dir)
+    _refuse_when_none(args.run_dir, context)
+    _refuse_when_dry_run(context)
+    section = context.get("notion")
     if isinstance(section, dict) and "copy_page_id" in section and section["copy_page_id"] is None:
         print(
             "La copie est donnée par l'URL de la base (copy_page_id absent) : "
@@ -818,8 +899,11 @@ def _cmd_comment_page(args, client) -> int:
     return _write_plan(client, args.run_dir, plan, notion, set())
 
 
-def _write_plan(client, run_dir: Path, plan: dict, notion: dict, row_page_ids: set) -> int:
-    """Apply a plan with the safety gates, print its report and return the exit code."""
+def _write_plan(
+    client, run_dir: Path, plan: dict, notion: dict, row_page_ids: set,
+    extra: Optional[dict] = None, keep_human: bool = False,
+) -> int:
+    """Apply a plan with the safety gates, print its report (plus extra) and return the exit code."""
     reference_ds_id, reference_page_id = _reference(client, notion)
     result = apply_plan(
         client,
@@ -831,8 +915,10 @@ def _write_plan(client, run_dir: Path, plan: dict, notion: dict, row_page_ids: s
         known_secrets=known_values_from_env(),
         bot_id=notion["bot_id"],
         reference_page_id=reference_page_id,
+        keep_human=keep_human,
         log=_log,
     )
+    result.update(extra or {})
     _emit(result)
     if result["errors"]:
         return EXIT_API

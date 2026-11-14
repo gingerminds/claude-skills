@@ -3,7 +3,7 @@ import copy
 import hashlib
 import json
 from collections import Counter
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -39,13 +39,20 @@ _STATUS_ORDER = (
 )
 
 
-def is_human_set(row: dict) -> bool:
+def is_human_set(row: dict, written: Optional[dict] = None) -> bool:
     """Return True when the status of the row was set by a person.
 
-    That is a status other than "À traiter" whose last edit is not the integration's. A missing
-    value counts as human, so that a doubtful row is never overwritten silently.
+    The last edit of the row is not the integration's, and the status is another one than
+    "À traiter" (the default of a copy), or is "À traiter" while written, the status the skill
+    last wrote by ref, holds another status for the row: a person put it back. A missing value
+    counts as human, so that a doubtful row is never overwritten silently.
     """
-    return row.get("status") != STATUS_TODO and not row.get("last_edited_by_bot")
+    if row.get("last_edited_by_bot"):
+        return False
+    if row.get("status") != STATUS_TODO:
+        return True
+    last = (written or {}).get(row.get("ref"))
+    return last is not None and last != STATUS_TODO
 
 
 def operation_key(kind: str, page_id: str, after, text: str) -> str:
@@ -72,9 +79,75 @@ def load_history(cache_root: Path, slug: str, copy_ds_id: str, exclude_run: str)
     "comment" entries of notion/applied.json are read; a file that cannot be read is skipped.
     """
     history = {}
+    for _, entries in _copy_journals(cache_root, slug, copy_ds_id, exclude_run):
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("kind") != "comment":
+                continue
+            ref, verdict = entry.get("ref"), entry.get("verdict")
+            if _is_ref(ref) and isinstance(verdict, str):
+                history[ref] = verdict
+    return history
+
+
+def load_written_statuses(
+    cache_root: Path, slug: str, copy_ds_id: str, read_at: Optional[float] = None
+) -> dict[int, str]:
+    """Return, for each ref, the last status the skill wrote on the row in the runs of this copy.
+
+    Every run counts, the current one too, as in load_history. Only the "status" entries of
+    notion/applied.json are read: the status is their "value", or, in a journal that predates
+    it, the "after" of the operation with the same key in notion/plan.json of the run. The
+    latest "at" wins. A file that cannot be read is skipped.
+
+    read_at is the time the copy was read (epoch seconds, the mtime of rows.json): a row read
+    before a write cannot show what a person did after it, so only the writes made up to then
+    count, and an entry without a readable date does not. None counts every write.
+    """
+    last = {}
+    for run_dir, entries in _copy_journals(cache_root, slug, copy_ds_id):
+        planned = None
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("kind") != "status":
+                continue
+            ref, value, at = entry.get("ref"), entry.get("value"), entry.get("at")
+            if read_at is not None and not (_epoch(at) <= read_at):
+                continue
+            if not isinstance(value, str):
+                if planned is None:
+                    planned = _planned_statuses(run_dir)
+                value = planned.get(entry.get("key"))
+            if not _is_ref(ref) or not isinstance(value, str):
+                continue
+            stamp = at if isinstance(at, str) else ""
+            if ref not in last or stamp >= last[ref][0]:
+                last[ref] = (stamp, value)
+    return {ref: value for ref, (_, value) in last.items()}
+
+
+def load_written_refs(cache_root: Path, slug: str, copy_ds_id: str) -> frozenset:
+    """Return the refs the skill already wrote a real verdict on, in any run of this copy.
+
+    Every run counts, the current one too: the "status" entries of notion/applied.json and its
+    "comment" entries but the ones that wrote "unknown" (the comment a row without finding gets:
+    planning the row again gives the same comment, which keeps a rebuilt plan identical to the
+    plan whose writes the journal holds). A file that cannot be read is skipped.
+    """
+    refs = set()
+    for _, entries in _copy_journals(cache_root, slug, copy_ds_id):
+        for entry in entries:
+            if not isinstance(entry, dict) or not _is_ref(entry.get("ref")):
+                continue
+            kind = entry.get("kind")
+            if kind == "status" or (kind == "comment" and entry.get("verdict") != "unknown"):
+                refs.add(entry["ref"])
+    return frozenset(refs)
+
+
+def _copy_journals(cache_root: Path, slug: str, copy_ds_id: str, exclude_run: Optional[str] = None):
+    """Yield (run_dir, entries of notion/applied.json) for the runs of the copy, in name order."""
     project_dir = Path(cache_root) / slug
     if not project_dir.is_dir():
-        return history
+        return
     for run_dir in sorted(project_dir.iterdir(), key=lambda path: path.name):
         if run_dir.name == exclude_run or not run_dir.is_dir():
             continue
@@ -82,13 +155,32 @@ def load_history(cache_root: Path, slug: str, copy_ds_id: str, exclude_run: str)
         if not isinstance(applied, dict) or _copy_of(run_dir) != copy_ds_id:
             continue
         entries = applied.get("applied")
-        for entry in entries if isinstance(entries, list) else []:
-            if not isinstance(entry, dict) or entry.get("kind") != "comment":
-                continue
-            ref, verdict = entry.get("ref"), entry.get("verdict")
-            if isinstance(ref, int) and not isinstance(ref, bool) and isinstance(verdict, str):
-                history[ref] = verdict
-    return history
+        yield run_dir, entries if isinstance(entries, list) else []
+
+
+def _planned_statuses(run_dir: Path) -> dict:
+    plan = _read_json(run_dir / "notion" / "plan.json")
+    ops = plan.get("ops") if isinstance(plan, dict) else None
+    if not isinstance(ops, list):
+        return {}
+    return {
+        op.get("key"): op.get("after")
+        for op in ops
+        if isinstance(op, dict) and op.get("kind") == "status"
+    }
+
+
+def _is_ref(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _epoch(stamp) -> float:
+    """Return the epoch seconds of an ISO 8601 date (UTC when it has no offset), NaN if unreadable."""
+    try:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return float("nan")
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
 
 
 def build_plan(
@@ -105,6 +197,8 @@ def build_plan(
     missing_in_copy: Optional[list] = None,
     recette_refs: frozenset = frozenset(),
     comment_dates: Optional[dict] = None,
+    written_statuses: Optional[dict] = None,
+    written_refs: frozenset = frozenset(),
 ) -> dict:
     """Return the plan.json document: the Notion writes the run proposes, and their summary.
 
@@ -112,13 +206,18 @@ def build_plan(
     operations, in this order: status (the target of its verdict when it differs from the
     current status), assign (the lead, on ok_human) and comment. A comment is written when the
     status changes, or when neither the visible comments of the integration nor the history of
-    earlier runs already carry the verdict. A kept row without finding counts as unknown.
+    earlier runs already carry the verdict. A kept row without finding counts as unknown, and gets
+    a comment saying so, unless written_refs (the rows the journal of the copy holds a written
+    verdict for, see load_written_refs) has it: its page is left as it is.
     Excluded rows: techno gets the status "Non applicable" and a comment, no_tools a comment,
     standby, phase and no_fiche nothing. A row of another category than the scope (category)
     gets nothing either, whatever its status, and is left out of "rows" and of the summary. A
-    row without ref never gets an operation. A status operation carries human_override when the
-    status it replaces was set by a person, except for the refs of recette_refs: the devs set
-    their status on purpose, the recette may change it.
+    row without ref never gets an operation. A status operation carries "expected", the status
+    read in the copy, which apply checks again before writing (a status changed since is left
+    as it is), and human_override when the status it replaces was set by a person (see
+    is_human_set; written_statuses is the ref -> status the skill last wrote, from
+    load_written_statuses), except for the refs of recette_refs: the devs set their status on
+    purpose, the recette may change it.
 
     Operations come by ref. Besides the keys of the exchange format the plan carries "rows",
     the status of every row before and after the run, which filter_plan needs to recompute
@@ -153,11 +252,15 @@ def build_plan(
                 visible_verdicts,
                 history,
                 ref in recette_refs,
+                written_statuses,
+                ref in written_refs,
             )
             if verdict == "unknown":
                 unknown.append(ref)
         else:
-            row_ops = _excluded_operations(row, entry, common, visible_verdicts, history)
+            row_ops = _excluded_operations(
+                row, entry, common, visible_verdicts, history, written_statuses
+            )
             if entry["reason"] == "no_tools":
                 unknown.append(ref)
             elif entry["reason"] == "phase":
@@ -212,41 +315,97 @@ def filter_plan(plan: dict, *, skip_human_overrides: bool) -> dict:
     return result
 
 
-def _finding_operations(row, finding, common, followup_done, visible_verdicts, history, recette=False):
+def keeps_human_statuses(context) -> bool:
+    """True when the consent of the run forbids replacing a status a person set.
+
+    notion_write "keep_human" says it; "all" says it in autonomous mode too, where nobody
+    sees the list before the write. A run without the consent (null or absent) keeps the old
+    behavior.
+    """
+    if not isinstance(context, dict):
+        return False
+    write = context.get("notion_write")
+    return write == "keep_human" or (write == "all" and context.get("mode") == "autonome")
+
+
+def consented_plan(plan: dict, context) -> dict:
+    """Return the plan the consent of the run allows to write.
+
+    The plan without the pages whose status a person set when the consent keeps them, else
+    the plan itself (also when no operation is such a status: nothing to leave out).
+    """
+    if keeps_human_statuses(context) and any(op.get("human_override") for op in plan["ops"]):
+        result = filter_plan(plan, skip_human_overrides=True)
+        if isinstance(result.get("recette"), dict):
+            result["recette"]["kept"] = kept_human_statuses(plan, result)
+            if "plan_id" in result:
+                result["plan_id"] = plan_digest(result)
+        return result
+    return plan
+
+
+def kept_human_statuses(built: dict, filtered: dict) -> list:
+    """Return the judged rows of the recette whose human status the filter kept, with the verdict."""
+    recette = built["recette"]
+    judged = set(recette["judged"]) - set(recette["refs"])
+    written = {op["key"] for op in filtered["ops"]}
+    return [
+        {"ref": op["ref"], "verdict": op["verdict"], "status": op["before"]}
+        for op in built["ops"]
+        if op["kind"] == "status"
+        and op["human_override"]
+        and op["ref"] in judged
+        and op["key"] not in written
+    ]
+
+
+def _finding_operations(
+    row, finding, common, followup_done, visible_verdicts, history, recette=False, written=None,
+    already_written=False,
+):
     ref = row["ref"]
     if finding is None:
+        if already_written:
+            return [], "unknown"
         finding = _missing_finding(ref)
     finding = apply_guardrails(finding, row, followup_done=ref in followup_done)
     verdict = finding["verdict"]
-    ops = _status_operation(row, verdict, STATUS_FOR_VERDICT[verdict], recette)
+    ops = _status_operation(row, verdict, STATUS_FOR_VERDICT[verdict], recette, written)
     status_changed = bool(ops)
     assignees = list(row.get("assignees") or [])
     lead = common["lead_option"]
     if verdict == "ok_human" and lead and lead not in assignees:
-        ops.append(_operation("assign", row, verdict, assignees, assignees + [lead]))
+        ops.append(
+            _operation("assign", row, verdict, assignees, assignees + [lead], expected=assignees)
+        )
     if _needs_comment(ref, verdict, status_changed, visible_verdicts, history):
         text = format_comment(finding=finding, row=row, **common)
         ops.append(_operation("comment", row, verdict, None, None, text))
     return ops, verdict
 
 
-def _excluded_operations(row, entry, common, visible_verdicts, history):
+def _excluded_operations(row, entry, common, visible_verdicts, history, written=None):
     reason = entry["reason"]
     if reason not in ("techno", "no_tools"):
         return []
     verdict = entry["verdict"]
-    ops = _status_operation(row, verdict, STATUS_NA) if reason == "techno" else []
+    ops = _status_operation(row, verdict, STATUS_NA, written=written) if reason == "techno" else []
     if _needs_comment(row["ref"], verdict, bool(ops), visible_verdicts, history):
         text = format_excluded_comment(row=row, verdict=verdict, detail=entry["detail"], **common)
         ops.append(_operation("comment", row, verdict, None, None, text))
     return ops
 
 
-def _status_operation(row, verdict, target, recette=False):
+def _status_operation(row, verdict, target, recette=False, written=None):
     if target is None or target == row.get("status"):
         return []
-    override = is_human_set(row) and not recette
-    return [_operation("status", row, verdict, row.get("status"), target, human_override=override)]
+    override = not recette and is_human_set(row, written)
+    return [
+        _operation(
+            "status", row, verdict, row.get("status"), target, human_override=override,
+            expected=row.get("status"),
+        )
+    ]
 
 
 def _needs_comment(ref, verdict, status_changed, visible_verdicts, history) -> bool:
@@ -255,8 +414,10 @@ def _needs_comment(ref, verdict, status_changed, visible_verdicts, history) -> b
     return verdict not in visible_verdicts.get(ref, ()) and history.get(ref) != verdict
 
 
-def _operation(kind, row, verdict, before, after, text="", human_override=False) -> dict:
-    return {
+def _operation(
+    kind, row, verdict, before, after, text="", human_override=False, expected=None
+) -> dict:
+    operation = {
         "key": operation_key(kind, row["page_id"], after, text),
         "kind": kind,
         "page_id": row["page_id"],
@@ -267,6 +428,9 @@ def _operation(kind, row, verdict, before, after, text="", human_override=False)
         "text": text,
         "human_override": human_override,
     }
+    if expected or isinstance(expected, list):
+        operation["expected"] = expected
+    return operation
 
 
 def _missing_finding(ref: int) -> dict:

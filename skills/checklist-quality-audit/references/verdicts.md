@@ -10,7 +10,7 @@ The contract is the JSON Schema `skills/checklist-quality-audit/schemas/finding.
 - Shape: `{"lot": "<lot id>", "findings": [<finding>, ...]}`, valid JSON in UTF-8.
 - Always one finding for every row of the lot: every ref of the lot entry in `lots.json`, no other ref, never the same ref twice. A ref outside the lot or given twice is rejected, and the row counts as not evaluated.
 - The follow-up file is a complete lot document too, with one finding for every row of the lot. Copy unchanged the first-round finding of every row that asked for no probe.
-- Every finding has the nine keys below, none missing, and no other key than the optional `needs_scenarios` (and the keys the agents' own instructions name).
+- Every finding has the nine keys below, none missing, and no other key than the optional `needs_scenarios`, `tool_dates` and `in_repo`. `validate` refuses a finding that holds any other key, a `source`, a `guardrail` or a `document` evidence (the code writes them, never a lot), and a file whose `lot` is not the lot it is validated for.
 
 | Key | Type | Rule |
 |---|---|---|
@@ -18,7 +18,7 @@ The contract is the JSON Schema `skills/checklist-quality-audit/schemas/finding.
 | `verdict` | `ko`, `partial`, `unknown`, `ok_human`, `ok`, `na` | See "Verdicts". |
 | `confidence` | `high`, `medium`, `low` | See "Confidence". |
 | `summary` | text, 1 to 600 characters | What was found. |
-| `evidence` | list | See "Evidence". May be empty, except for `ok`. |
+| `evidence` | list | See "Evidence". May be empty, except for `ok` and `na`, which need at least one piece of evidence. |
 | `todo` | text of 400 characters at most, or `null` | What to do to make the row compliant. `null` when nothing is left to do. |
 | `human_check` | text of 400 characters at most, or `null` | What a human must validate, and where. `null` when nothing. |
 | `divergence` | text of 400 characters at most, or `null` | Difference between the code and the preprod. See "Code and preprod". |
@@ -144,7 +144,7 @@ Use it when what the fiche asks is missing or broken where it matters.
 
 Use it when the subject of the row does not exist in the project: no payment, no form, no API, no user account.
 
-- Always with `confidence: "high"`, and a `summary` that says what you searched and did not find.
+- Always with `confidence: "high"`, at least one piece of evidence (the file or the result that shows the subject is absent) and a `summary` that says what you searched and did not find. An `na` without evidence becomes `unknown`.
 - Never use `na` for "not checked": that is `unknown`.
 - Rows outside the project technos never reach you: the scripts already set them aside.
 
@@ -200,11 +200,12 @@ List the strongest evidence first: the comment shows the first 5.
 | `type` | Keys | Rules |
 |---|---|---|
 | `file` | `repo`, `path`, `line` (optional: integer from 1, or `null`) | `repo` is a `repos[].name` of `context.json`. `path` is relative to the repo root and names an existing file (never a folder nor the root `.`); never absolute, never `..`. The comment links it to GitLab at the audited commit. |
-| `page` | `url`, `detail` (optional) | A page seen in the browser. `detail` says what was observed, in French. |
-| `tool` | `tool`, `ref` | `tool` is a folder of `tools/` that holds a `summary.json`. `ref` is relative to `tools/<tool>/`, for example `summary.json#home/3`. |
-| `http` | `url`, `detail` | A URL requested. `detail` gives the status, the header or a short excerpt, in French and without any secret. |
+| `page` | `url`, `detail` (optional) | A page seen in the browser, on a host of the target or of a key page (`key_pages`, a back-office on its own host for example). `detail` says what was observed, in French. |
+| `tool` | `tool`, `ref` | `tool` is a folder of `tools/` that holds a `summary.json` and whose `result.json` is `ok` or `not_applicable` (a tool that failed or was skipped is no evidence). `ref` is relative to `tools/<tool>/`, for example `summary.json#home/3`. |
+| `http` | `url`, `detail` | A URL that a probe of the toolbox requested (`tools/http/`, `tools/http-followup/`), on a host of the target. `detail` gives the status, the header or a short excerpt, in French and without any secret. |
 
-- Never cite a file, a repo or a tool that the run does not hold: `cqa_plan.py` checks them, and a finding with such evidence is rejected.
+- The code checks every piece of evidence at `validate`: a `file` exists in its repo, a `tool` has its `summary.json` and a `result.json` that is `ok` or `not_applicable`, a `page` URL is on a host of the target (`target.preprod_url`, `target.prod_url` on a prod run, the `sites` and the `key_pages` of `context.json`), and an `http` URL is on such a host, `key_pages` aside, and is a probe of the toolbox that ran (`tools/http/`, `tools/http-followup/`). A missing file or tool summary refuses the finding; any other piece of evidence that fails is dropped, and the finding stays without it (an `ok` left without evidence becomes `ok_human`, an `na` becomes `unknown`). A request you made yourself is not `http` evidence: write its status, header or size in `summary`. `na`, like `ok`, needs at least one piece of evidence.
+- Never cite a file, a repo or a tool that the run does not hold: `cqa_plan.py validate` checks them and a finding with such evidence is rejected. The check is made once, at `validate`, and frozen in `findings/<lot>.checked.json`.
 - Never put credentials or a token in a URL.
 
 ## Several repos: the worst verdict
@@ -276,8 +277,12 @@ Use it when the verdict of a row depends on what a menu, a panel or the focus do
 4. `needs_probes` or `needs_scenarios` still filled after the follow-up turns `ok_human`, `ok` and `na` into `unknown`; `ko` and `partial` stay.
 5. `ok` with a filled `todo` or `human_check` becomes `ok_human`.
 6. `na` with a confidence other than `high` becomes `unknown`.
+7. `na` without evidence becomes `unknown`.
+8. An `ok` built from a context document (its `source`) becomes `ok_human`: a report may be older than the code.
 
-A row of the lot without a valid finding (missing, invalid, rejected for its evidence, ref given twice) counts as `unknown`.
+The rules judge the evidence the check left: a piece of evidence dropped at `validate` (« preuve n° <N> (<type>) écartée ») no longer counts, so an `ok` that only had it becomes `ok_human` and an `na` becomes `unknown`, while a `ko` or a `partial` keeps its verdict. A run started before 0.18.1 (`plugin_version` of `context.json`, an absent one counting as older) keeps the rules it was audited under for its findings files that `validate` has not checked since: only the checks of that version (a cited file exists, a cited tool has its summary), and no rules 7 and 8. Reading such a run again (`plan`, `rerun-candidates`, `recette`, `fix`) changes none of the findings it validated; a file `validate` checked after the update follows the current rules.
+
+A row of the lot without a valid finding (missing, invalid, rejected for a missing file or tool summary, ref given twice) counts as `unknown`.
 
 ## From verdict to Notion
 
@@ -297,10 +302,10 @@ A status set by a human changes only with the lead's agreement.
 
 ### Rows judged from a context document
 
-A row can take its verdict from a context document, a third-party audit report (SKILL.md, section 6, step 1, and `references/documents.md`). The sub-agents never write such a finding: they never write `source` nor a `document` evidence (the schema says so). `cqa_plan.py lots` writes these findings in `findings/context-docs.json` from `context-docs/verdicts.json`, and the plan and the Notion write take them like any other finding.
+A row can take its verdict from a context document, a third-party audit report (SKILL.md, section 6, step 1, and `references/documents.md`). The sub-agents never write such a finding: they never write `source` nor a `document` evidence (the schema says so, and `validate` refuses them in a lot file). `cqa_plan.py lots` writes these findings in `findings/context-docs.json` from `context-docs/verdicts.json`, and the plan and the Notion write take them like any other finding.
 
-- Shape: `source: "context_doc"`, `confidence: "high"`, one piece of evidence of type `document` per report (`doc` is the id of the document in the run, `ref` the criteria such as « critères 7.3 », else the places of its points), a `summary` that names the report and its date (« Rapport « <label> » (<date>) : ... ») and paraphrases its points, a `todo` made of the suggested fixes for `ko` and `partial`, and `human_check` and `divergence` at `null`.
-- Verdict: `ko` when a `ko` point of the report is linked to the row and no criterion of the row is `ok`, `partial` when one is (a `ko` of the report is never lost); `ok` when every criterion of the row is covered and `ok` or `na` in the report, `na` when all are `na`; no verdict otherwise (a criterion the report leaves undetermined, or a report of findings without a `ko` for the row): the skill audits the row, the points of the report being hints. With several reports the worst verdict wins.
+- Shape: `source: "context_doc"`, `confidence: "high"`, one piece of evidence of type `document` per report (`doc` is the id of an imported document of `context-docs/`, which the code checks, `ref` the criteria such as « critères 7.3 », else the places of its points), a `summary` that names the report and its date (« Rapport « <label> » (<date>) : ... ») and paraphrases its points, a `todo` made of the suggested fixes for `ko` and `partial`, and `human_check` and `divergence` at `null`.
+- Verdict: `ko` when a `ko` point of the report is linked to the row and no criterion of the row is `ok`, `partial` when one is (a `ko` of the report is never lost); `ok_human` when every criterion of the row is covered and `ok` or `na` in the report (a conforming report is never an `ok`: it may be older than the code, so `human_check` says « Conforme d'après le rapport d1 du <date>, à confirmer sur la version actuelle », and the date is « de date inconnue » when the report has none), `na` when all are `na`; no verdict otherwise (a criterion the report leaves undetermined, or a report of findings without a `ko` for the row): the skill audits the row, the points of the report being hints. With several reports the worst verdict wins.
 - `in_repo` is `false` only when every linked point is for the content, a third party or the infrastructure: the `todo` then starts with « À traiter par <propriétaires> : » and the fix mode leaves the row to the devs with that reason.
 - Notion: the table above applies, and so do the guardrails (an `ok` on a row whose tools include « Intervention humaine » becomes `ok_human`). The comment lists the line « Rapport d1 : critères 7.3 » among its evidence. In Notion and in the merge requests only the name of the document, the reference and the paraphrased fix are written, never a raw excerpt of the document and never an exploitation detail.
 - A rerun or a recette ignores these verdicts: the agents judge the code as it is, and their finding replaces the one of the document.
@@ -317,7 +322,7 @@ RUN="<run_dir>"
 python3 "$S/cqa_plan.py" plan "$RUN"
 ```
 
-- It merges the findings (after the guardrails above), the rows and the exclusions into `notion/plan.json`, and prints its `summary`: `{"by_status_after", "blocking_non_conform", "unknown", "human_overrides": [{"ref", "before", "after"}], "deferred", "missing_in_copy"}`.
+- It merges the findings (after the guardrails above), the rows and the exclusions into `notion/plan.json`, and prints its `summary`: `{"by_status_after", "blocking_non_conform", "unknown", "human_overrides": [{"ref", "before", "after"}], "deferred", "missing_in_copy"}`, plus `discarded` (`[{"ref", "reason"}]`, in French) and `discarded_count`: the rows whose finding it set aside, or kept without a piece of evidence the check dropped (the reason ends « le constat est gardé sans cette preuve »), never silently. A row without a valid finding (a missing file or tool summary, a row the file does not hold, a lot that wrote nothing) is written « Non évaluable », except a row on which the journal of the copy already holds a verdict written by the skill (a status, or a comment other than « Non évaluable »), which is left as it is (its reason says so); a finding refused in a later file leaves the earlier one in place and is listed too. The same list is printed on stderr. It is not part of `notion/plan.json`. The comment of a finding lists the evidence dropped after the evidence kept, each line ending « (preuve écartée : <raison>) ». The evidence of a finding is not checked again against the workstation: it was frozen at `validate` (`findings/<lot>.checked.json`), except the tool and probe evidence refused at `validate`, which `plan` checks again (a tool that had not finished then: accepted once it holds), and only a finding without a record is; in a run started before 0.18.1, a file without a record keeps the checks of that version (« Guardrails of the merge script » above).
 - A comment is planned only when the status changes, or when neither the visible comments of the integration (`comments.json`) nor the earlier runs of this copy already carry the verdict: a run again does not repeat comments.
 - The header of a comment gives the date of the run; for a row whose latest finding comes from a rerun, the date of the rerun (recorded by `rerun-close` in `reruns.json`), so that the lead sees when it was judged again. The footer keeps the audited commit.
 - Exit 6: `context.json` incomplete for the comments (`lead.option`, `audited_sha`, `run_id`): fix it. Exit 2: a file of the run is missing (the message names the command).
@@ -340,15 +345,15 @@ What the lead sees, in French:
 1. « Statuts après écriture : À traiter <n>, Mise en place partielle <n>, Mis en place <n>, Ok / Recetté <n>, Non applicable <n>, En standby <n>. »
 2. « Lignes bloquantes non conformes : » then one line per ref, `CQ-<ref> : <titre>`.
 3. « Lignes non évaluées : <n> » (the reasons are in the synthesis).
-4. « Statuts posés par un humain que l'audit changerait : » then `CQ-<ref> : <titre> (« <before> » vers « <after> »)`, or « aucun ».
+4. « Statuts posés par un humain que l'audit changerait : » then `CQ-<ref> : <titre> (« <before> » vers « <after> »)`, or « aucun ». A « À traiter » that a person put back after the skill wrote another status on the row (journal of this run or of an earlier run of the copy) is listed here; a « À traiter » the skill never wrote over is not.
 5. « Reportées à J0 / J+7 : <n>. Lignes du modèle absentes de la copie : <n>. »
 
 ### Confirmation
 
-The consent is given at launch (`notion_write` in `context.json`, SKILL.md section 4): when it is set, the question is not asked and the matching choice below applies (`all`, `keep_human`, `none`). In autonomous mode the summary above is not shown before the write but as a recap after it. Only when `notion_write` is `null`, one question, « Écrire le plan dans la copie Notion ? »:
+The consent is given at launch (`notion_write` in `context.json`, SKILL.md section 4): when it is set, the write question is not asked and the matching choice below applies (`all`, `keep_human`, `none`). `cqa_notion.py apply` holds that consent itself, so no option has to be repeated: it refuses `none` and a run with `dry_run` true (exit 2), and with `keep_human` it leaves alone the pages whose status a human set, whether or not the plan was rebuilt. With `all`, a plan that would replace statuses set by a human is confirmed first in interactive mode (SKILL.md section 7, step 1); in autonomous mode `all` is applied as `keep_human`, the kept statuses go to the recap and to « Remarques », and `apply` counts the operations it left out in `kept_human`. In autonomous mode the summary above is not shown before the write but as a recap after it. Only when `notion_write` is `null`, one question, « Écrire le plan dans la copie Notion ? »:
 
-- « Tout écrire »: statuses, assignments of the lead and comments, the human statuses listed included.
-- « Sans toucher aux statuts posés par un humain »: offered only when `human_overrides` is not empty. Those pages are left as they are, comments included. Keep the list shown above: the rebuilt plan no longer holds it, and SKILL.md section 8, step 3, adds it to `remarques.md`, which the synthesis injects as « Remarques ». Rebuild the plan first, so that the synthesis describes what is written, then apply with the same option:
+- « Tout écrire »: statuses, assignments of the lead and comments, the human statuses listed included (not in autonomous mode, where it is applied as the next choice).
+- « Sans toucher aux statuts posés par un humain »: offered only when `human_overrides` is not empty. Those pages are left as they are, comments included. Keep the list shown above: the rebuilt plan no longer holds it, and SKILL.md section 8, step 3, adds it to `remarques.md`, which the synthesis injects as « Remarques ». Rebuild the plan first, so that `notion/plan.json` matches what is written (optional: `apply` and the synthesis leave those pages out by themselves), then apply:
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
@@ -360,7 +365,7 @@ python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
 
 ### Exit codes of `cqa_notion.py apply`
 
-`apply` prints `{"done", "skipped", "blocked": [{"key", "labels"}], "errors": [{"key", "message"}]}`. `done` and `skipped` are numbers: operations written now, and operations already written (listed in `notion/applied.json`, or a comment already on the page). It prints one French line per operation on stderr. The `key` of an operation is in `notion/plan.json`, with its `ref` and `kind`.
+`apply` prints `{"done", "skipped", "blocked": [{"key", "labels"}], "errors": [{"key", "message"}], "replace_failed", "status_changed": [{"key", "ref", "current", "reason"}]}`, plus `kept_human` (the operations left out to keep the statuses set by a human) when there are some. `done` and `skipped` are numbers: operations written now, and operations already written (listed in `notion/applied.json`, a comment already on the page, a status the row already has). It prints one French line per operation on stderr. `apply` reads the status of a row again before writing it: when a person changed it since the copy was read, the status operation is left unwritten and listed in `status_changed` (exit code unchanged; the comments and assignments of the row are written, except when the consent keeps the statuses set by a human, which leaves the whole page alone); it never holds the run as unwritten, and a later write of the same plan reads the status again. An assignment is read the same way: when the assignees of the page changed since the copy was read, it is left unwritten and listed in `assignees_changed` (present only then). Say each one to the lead: « CQ-<ref> : statut changé dans Notion depuis la lecture de la copie (« <current> »), non réécrit. » The `key` of an operation is in `notion/plan.json`, with its `ref` and `kind`.
 
 | Exit | Meaning | What to tell the lead |
 |---|---|---|
@@ -368,12 +373,12 @@ python3 "$S/cqa_plan.py" plan "$RUN" --skip-human-overrides
 | exit 7 | at least one operation blocked, without any request; the others are written | for each entry of `blocked`, from its labels (`blocked[].labels`): « CQ-<ref> (<kind>) non écrit : <raison> », reasons below |
 | exit 3 | stopped on a network or Notion API error, or an operation refused by Notion; wins over 7 | « Écriture interrompue (<message>). Relancer : la reprise saute ce qui est déjà écrit. » Run the same command once more, only once the cause is fixed: `notion/applied.json` makes it resume where it stopped. Still exit 3: stop, without synthesis; the run stays resumable at section 7. An operation refused by Notion skips the later operations of the same page. |
 | exit 8 | the plan targets the reference template (its data source, or its page for a comment) | « Écriture refusée : la cible est le modèle de référence. » Nothing is written: stop; a new run with the URL of the copy. |
-| exit 2 | plan or `context.json` unreadable or invalid, environment variable missing | show the message, fix, run again |
+| exit 2 | plan or `context.json` unreadable or invalid, environment variable missing, `dry_run` true or `notion_write` `none` (nothing is written) | show the message, fix, run again |
 
 Labels of `blocked[].labels`:
 
 - `page_outside_copy`: « page hors de la copie » (not a row of `rows.json`, or not the page of the copy).
 - `unknown_option`: « option de « Assignée à » absente de la copie » (removed since the plan; Notion would create it, so the skill does not write it).
-- A secret label (`known_value`, `private_key`, `aws_key`, `gitlab_token`, `github_token`, `notion_token`, `jwt`, `credential_assignment`, `authorization_header`): « le texte contient ce qui ressemble à un secret (<label>) ». Never show the text. The lead writes that comment by hand if needed, without the secret.
+- A secret label (`known_value`, `private_key`, `aws_key`, `gitlab_token`, `github_token`, `notion_token`, `jwt`, `credential_assignment`, `credential_define`, `provider_key`, `url_credentials`, `authorization_header`, `cookie_header`, `mysql_password_option`, `kube_client_key`): « le texte contient ce qui ressemble à un secret (<label>) ». Never show the text. The lead writes that comment by hand if needed, without the secret.
 
 A blocked operation stays blocked when run again. `cqa_notion.py comment-page` follows the same codes and the same journal.

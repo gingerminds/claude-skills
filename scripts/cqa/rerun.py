@@ -6,8 +6,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from cqa import checked, contract
 from cqa.checklist import STATUS_IMPLEMENTED, ref_label
-from cqa.findings import validate_document
+from cqa.findings import LEGACY_KEY, REFUSED_KEY, validate_document
+from cqa.grounding import Grounding
 from cqa.lots import DOCUMENT_LOT_ID, build_lots, lot_document_refs
 from cqa.probes import app_path
 
@@ -17,7 +19,15 @@ _DATE = re.compile(
     r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]+))?Z"
 )
 _TOOL_NAME = re.compile(r"[a-z0-9-]+")
-_EVIDENCE_TOOL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+_REFUSED_EVIDENCE = re.compile(r"constat CQ-[0-9]+ : preuve n° [0-9]+ \([a-z]+\) écartée : ")
+
+
+def is_refused_evidence(error: str) -> bool:
+    """Whether an error of read_grounded_findings names a piece of evidence dropped from a finding
+    that is kept (cqa.grounding), not a finding set aside."""
+    return bool(_REFUSED_EVIDENCE.match(error))
 
 
 def _default_reader(run_dir: Path, lot: dict, name: str) -> Optional[tuple]:
@@ -27,12 +37,32 @@ def _default_reader(run_dir: Path, lot: dict, name: str) -> Optional[tuple]:
         return None
     except (OSError, ValueError) as error:
         return [], [f"findings/{name} est illisible : {error}"]
-    return validate_document(
+    strict = contract.strict_file(run_dir, contract.run_context(run_dir), lot["id"], name)
+    valid, errors = validate_document(
         document,
         set(lot["refs"]),
         optional_refs=frozenset(lot_document_refs(lot)),
         forbidden_refs=_document_refs_of_round(lot, name),
+        agent_file=strict and _is_agent_file(lot),
+        lot_id=lot["id"] if strict else None,
     )
+    for item in valid:
+        _mark_contract(item, strict)
+    return valid, errors
+
+
+def _mark_contract(item: dict, strict: bool) -> None:
+    """Set the keys the reader owns on a finding it returns, whatever the file held."""
+    item.pop(REFUSED_KEY, None)
+    if strict:
+        item.pop(LEGACY_KEY, None)
+    else:
+        item[LEGACY_KEY] = True
+
+
+def _is_agent_file(lot: dict) -> bool:
+    """Whether the findings files of the lot are written by a sub-agent: all but the documents'."""
+    return lot.get("id") != DOCUMENT_LOT_ID
 
 
 def _document_refs_of_round(lot: dict, name: str) -> frozenset:
@@ -46,26 +76,54 @@ def _document_refs_of_round(lot: dict, name: str) -> frozenset:
     return frozenset(lot_document_refs(lot))
 
 
-def read_grounded_findings(run_dir: Path, context: dict, lot: dict, name: str) -> Optional[tuple]:
+def read_grounded_findings(
+    run_dir: Path, context: dict, lot: dict, name: str, *, freeze: Optional[str] = None
+) -> Optional[tuple]:
     """Return (valid findings, errors) of findings/<name>, None when it does not exist.
 
-    The valid findings are those of validate_document, with the path the application is served
-    under (context.json target), whose evidence also holds against the run: a cited file exists
-    in a repo of context.json, a cited tool has its summary. Every reader of the findings of a
-    run that decides something (plan, rerun-candidates, recette) uses it.
+    The valid findings are those of validate_document (as an agent file, but for the virtual lot
+    of the documents), with the path the application is served under (context.json target), whose
+    evidence also holds against the run (cqa.grounding): a cited file exists in a repo of
+    context.json, a cited tool succeeded and has its summary, a page or an http request is on a
+    host of the target and an http request is a probe the toolbox ran, a document is in
+    context-docs/. A cited file, a tool summary or a document that is missing sets the finding
+    aside; any other refused piece of evidence is only dropped from the finding, which carries it
+    in REFUSED_KEY, and its error says « écartée » (is_refused_evidence). Every reader of the
+    findings of a run that decides something (plan, rerun-candidates, recette, fix) uses it.
+
+    The rules are those of the run (cqa.contract): a file of a run started before 0.18.1 that
+    validate never checked keeps the checks of 0.18.0 (a cited file, a tool summary), is not read
+    as an agent file, and its findings carry LEGACY_KEY (the guardrails then skip their rules 7
+    and 8); such a file is never recorded. validate (freeze "refresh") always applies the rules of
+    0.18.1, so a file it checked follows them since, whatever the run.
+
+    The check is frozen when the file is validated (cqa.checked, findings/<lot>.checked.json):
+    while the record of the file holds for its JSON content, the recorded problems stand in
+    for the check against the run, which has moved since (a file deleted by a merged fix, a tool
+    relaunched). The problems of a tool or of a probe recorded then (retry: a tool that had not
+    finished) are checked again: a piece of evidence that now holds is accepted, one that still
+    fails keeps its recorded problem, so a reading never makes a finding worse than its
+    validation. A file, or a finding, that no record covers is checked against the run.
+    freeze "refresh" checks every finding against the run and records the result (validate);
+    "ensure" does the same only when no record covers the file (rerun-close); None never writes.
     """
+    path = run_dir / "findings" / name
     try:
-        document = json.loads((run_dir / "findings" / name).read_text(encoding="utf-8"))
+        data = path.read_bytes()
+        document = json.loads(data.decode("utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as error:
         return [], [f"findings/{name} est illisible : {error}"]
+    strict = freeze == "refresh" or contract.strict_file(run_dir, context, lot["id"], name)
     valid, errors = validate_document(
         document,
         set(lot["refs"]),
         app_path=app_path(context),
         optional_refs=frozenset(lot_document_refs(lot)),
         forbidden_refs=_document_refs_of_round(lot, name),
+        agent_file=strict and _is_agent_file(lot),
+        lot_id=lot["id"] if strict else None,
     )
     repos = context.get("repos") if isinstance(context.get("repos"), list) else []
     roots = {
@@ -74,62 +132,75 @@ def read_grounded_findings(run_dir: Path, context: dict, lot: dict, name: str) -
         if isinstance(repo, dict) and isinstance(repo.get("name"), str)
         and isinstance(repo.get("path"), str)
     }
-    grounded = []
+    grounding = Grounding(run_dir, context, roots, strict=strict)
+    file_digest = checked.digest(document)
+    recorded = None
+    if strict and freeze != "refresh":
+        recorded = checked.load(run_dir, lot["id"], name, file_digest)
+    moment = checked.now()
+    grounded, entries = [], []
     for item in valid:
-        problems = _evidence_problems(item["evidence"], roots, run_dir)
-        errors.extend(f"constat {ref_label(item['ref'])} : {problem}" for problem in problems)
+        found = recorded.get(item["ref"]) if recorded is not None else None
+        if found is None:
+            found = _checked(grounding, item["evidence"])
+        else:
+            found = _retried(grounding, item["evidence"], found)
+        problems, refused = found["problems"], found["refused"]
+        entries.append(
+            checked.entry(item["ref"], item["evidence"], problems, moment, refused, found["retry"])
+        )
+        label = ref_label(item["ref"])
+        errors.extend(f"constat {label} : {text}" for text in problems)
+        errors.extend(f"constat {label} : {refusal['problem']}" for refusal in refused)
         if not problems:
-            grounded.append(item)
+            grounded.append(_without_refused(item, refused, strict))
+    if strict and entries and (freeze == "refresh" or (freeze == "ensure" and recorded is None)):
+        checked.freeze(run_dir, lot["id"], name, file_digest, entries)
     return grounded, errors
 
 
-def _evidence_problems(evidence: list, roots: dict, run_dir: Path) -> list:
-    """Return what the evidence of a valid finding claims that the run does not hold."""
-    problems = []
-    for number, item in enumerate(evidence, start=1):
-        kind = item["type"]
-        if kind == "file":
-            problem = _file_problem(item, roots)
-        elif kind == "tool":
-            problem = _tool_problem(item, run_dir)
+def _checked(grounding: Grounding, evidence: list) -> dict:
+    """Return {"problems", "refused", "retry"} of the evidence of a finding, checked against the run."""
+    problems, refused, retry = [], [], []
+    for problem in grounding.check(evidence):
+        if problem.drops:
+            refused.append({"evidence": problem.number, "problem": problem.text, "label": problem.label})
         else:
-            problem = None
-        if problem:
-            problems.append(f"preuve n° {number} ({kind}) : {problem}")
-    return problems
+            problems.append(problem.text)
+        if problem.retry:
+            retry.append({"evidence": problem.number, "problem": problem.text})
+    return {"problems": problems, "refused": refused, "retry": retry}
 
 
-def _file_problem(item: dict, roots: dict) -> Optional[str]:
-    repo, path = item["repo"], item["path"]
-    if repo not in roots:
-        return f"repo {_quoted(repo)} absent de context.json (repos : {', '.join(roots)})"
-    relative = Path(path)
-    if relative.is_absolute() or ".." in relative.parts:
-        return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
-    if relative.parts == ():
-        return f"chemin {_quoted(path)} : la racine du repo {_quoted(repo)} n'est pas une preuve"
-    candidate = roots[repo] / relative
-    if not candidate.exists():
-        return f"chemin {_quoted(path)} introuvable dans le repo {_quoted(repo)}"
-    if not candidate.resolve().is_relative_to(roots[repo].resolve()):
-        return f"chemin {_quoted(path)} hors du repo {_quoted(repo)}"
-    if not candidate.is_file():
-        return f"chemin {_quoted(path)} : pas un fichier dans le repo {_quoted(repo)} (dossier ?)"
-    return None
+def _retried(grounding: Grounding, evidence: list, recorded: dict) -> dict:
+    """Return the recorded check of a finding, less the tool and probe problems the run no longer
+    holds (recorded["retry"]): only those pieces of evidence are checked again."""
+    lifted = set()
+    for again in recorded["retry"]:
+        number = again["evidence"]
+        if number <= len(evidence) and not grounding.check_one(number, evidence[number - 1]):
+            lifted.add(again["problem"])
+    return {
+        "problems": [text for text in recorded["problems"] if text not in lifted],
+        "refused": [item for item in recorded["refused"] if item["problem"] not in lifted],
+        "retry": [again for again in recorded["retry"] if again["problem"] not in lifted],
+    }
 
 
-def _tool_problem(item: dict, run_dir: Path) -> Optional[str]:
-    tool = item["tool"]
-    if not _EVIDENCE_TOOL.fullmatch(tool):
-        return f"nom d'outil {_quoted(tool)} invalide"
-    if not (run_dir / "tools" / tool / "summary.json").is_file():
-        return f"outil {_quoted(tool)} sans résumé (tools/{tool}/summary.json est introuvable)"
-    return None
-
-
-def _quoted(value) -> str:
-    text = str(value)
-    return f"« {text if len(text) <= 60 else text[:59] + '…'} »"
+def _without_refused(item: dict, refused: list, strict: bool) -> dict:
+    """Return the finding without the evidence refused, which REFUSED_KEY then names."""
+    _mark_contract(item, strict)
+    evidence = item["evidence"]
+    numbers = {refusal["evidence"] for refusal in refused if refusal["evidence"] <= len(evidence)}
+    if not numbers:
+        return item
+    item[REFUSED_KEY] = [
+        {"evidence": evidence[refusal["evidence"] - 1], "problem": refusal["problem"], "label": refusal["label"]}
+        for refusal in refused
+        if refusal["evidence"] in numbers
+    ]
+    item["evidence"] = [piece for number, piece in enumerate(evidence, start=1) if number not in numbers]
+    return item
 
 
 def finding_files(run_dir: Path, lot_id: str) -> list[str]:

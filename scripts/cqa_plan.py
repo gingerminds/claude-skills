@@ -25,6 +25,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 
 from cqa import (
     categories,
+    checked,
     context_docs,
     deferred,
     docs_link,
@@ -36,7 +37,7 @@ from cqa import (
     scenarios,
 )
 from cqa.checklist import STATUS_IMPLEMENTED, parse_refs, ref_label
-from cqa.findings import VERDICTS, apply_guardrails, validate_document
+from cqa.findings import REFUSED_KEY, VERDICTS, apply_guardrails, validate_document
 from cqa.git_tools import (
     alignment,
     deployed_from_gitlab,
@@ -47,9 +48,20 @@ from cqa.git_tools import (
 from cqa.lots import TOOLS, build_lots, coverage, lot_document_refs, select_rows
 from cqa.names import match_option, normalize, propose_assignment
 from cqa.notion_read import write_json, write_text
-from cqa.plan import build_plan, filter_plan, load_history, operation_key, plan_digest
+from cqa.plan import (
+    build_plan,
+    consented_plan,
+    filter_plan,
+    kept_human_statuses,
+    load_history,
+    load_written_refs,
+    load_written_statuses,
+    operation_key,
+    plan_digest,
+)
 from cqa.rerun import (
     comment_dates,
+    is_refused_evidence,
     latest_findings,
     read_grounded_findings,
     rerun_candidates,
@@ -86,6 +98,8 @@ _SPEC_SKIPPED_DIRS = frozenset({"vendor", "node_modules", ".git"})
 _EXCLUDED_KEYS = ("ref", "page_id", "reason", "verdict", "detail")
 _MISSING_ROW = "constat manquant : "
 _RERUN_FILE = re.compile(r"(.+)-rerun-([0-9]{2})\.json")
+_RERUN_KINDS = ("rerun", "recette")
+_GOOD_TOOL_STATUSES = ("ok", "not_applicable")
 _MAX_COMMENT = 1500
 _EM_DASH = chr(0x2014)
 _CONTEXT_DOC_ACTIONS = ("add", "read", "merge", "ignore", "link", "verdicts")
@@ -265,11 +279,17 @@ def _register_audit(commands) -> None:
     _run_command(
         commands, "snapshot", "copie findings/ et notion/ dans history/", _cmd_snapshot
     )
-    _run_command(
+    sub = _run_command(
         commands,
         "rerun-start",
         "ouvre une relance : écarte les relances non closes, sauvegarde, donne NN",
         _cmd_rerun_start,
+    )
+    sub.add_argument(
+        "--recette",
+        action="store_true",
+        help="la relance appartient à une recette : le plan qui la suit reprend la recette du "
+        "notion/plan.json existant (sans cette option, une relance n'est jamais une recette)",
     )
     sub = _run_command(
         commands, "rerun-close", "clôt une relance : écarte les fichiers invalides", _cmd_rerun_close
@@ -296,13 +316,24 @@ def _register_audit(commands) -> None:
         default=None,
         help="plan d'une recette : NN est le numéro de la relance qui a jugé les lignes de "
         "notion/recette.json ; celles qui sont « Mis en place » et jugées peuvent changer "
-        "ce statut posé par un dev",
+        "ce statut posé par un dev. Sans cette option, le plan reprend la recette du "
+        "notion/plan.json existant tant que la dernière relance est celle de la recette ou a "
+        "été ouverte avec rerun-start --recette",
+    )
+    sub.add_argument(
+        "--no-recette",
+        action="store_true",
+        help="plan sans recette, même si le notion/plan.json existant en porte une (le plan ne "
+        "reprend déjà pas la recette quand la dernière relance n'a pas été ouverte avec "
+        "rerun-start --recette)",
     )
     _run_command(commands, "manifest", "résultats des outils (tools/manifest.json)", _cmd_manifest)
     _run_command(commands, "synthesis", "synthese.md et commentaire de la page", _cmd_synthesis)
     _run_command(commands, "scan", "contrôle anti-secret du dossier du run", _cmd_scan)
     _run_command(commands, "openapi-specs", "specs OpenAPI des repos", _cmd_openapi_specs)
-    sub = _run_command(commands, "skip", "marque un outil comme ignoré", _cmd_skip)
+    sub = _run_command(
+        commands, "skip", "marque un outil comme ignoré (sans remplacer un résultat ok)", _cmd_skip
+    )
     sub.add_argument("tool", help="nom de l'outil")
     sub.add_argument("reason", help="raison, affichée dans la synthèse")
     sub.add_argument(
@@ -475,6 +506,7 @@ def _cmd_key_pages(args, services) -> int:
     target = context.get("target")
     if not isinstance(target, dict):
         raise ContextError("context.json : « target » est absent.")
+    _refuse_preprod_as_prod(context)
     home = _target_url(target, "prod_url" if probes.is_prod_run(context) else "preprod_url")
     if not urlsplit(home).path:
         home += "/"
@@ -912,7 +944,14 @@ def _toolbox_target(context: dict) -> tuple:
         raise ContextError("context.json : « target » est absent.")
     if probes.is_prod_run(context):
         return _target_url(target, "prod_url"), "respect"
+    _refuse_preprod_as_prod(context)
     return _target_url(target, "preprod_url"), "ignore"
+
+
+def _refuse_preprod_as_prod(context: dict) -> None:
+    """Raise a ContextError when the audit would treat the prod as a preprod."""
+    if probes.preprod_is_prod(context):
+        raise ContextError(probes.PREPROD_IS_PROD)
 
 
 def _cmd_toolbox_env(args, services) -> int:
@@ -1179,6 +1218,37 @@ def _closed_reruns(run_dir: Path) -> set:
     return {item for item in closed if isinstance(item, str)} if isinstance(closed, list) else set()
 
 
+def _rerun_kinds(run_dir: Path) -> dict:
+    """Return {NN: "rerun" | "recette"}: what each rerun opened by rerun-start was opened for."""
+    kinds = _read_json_object(run_dir / "reruns.json").get("kinds")
+    if not isinstance(kinds, dict):
+        return {}
+    return {
+        key: value
+        for key, value in kinds.items()
+        if isinstance(key, str) and key.isdigit() and value in _RERUN_KINDS
+    }
+
+
+def _save_reruns(run_dir: Path, closed, dates: dict, kinds: dict) -> None:
+    document = {"closed": sorted(closed), "dates": dict(sorted(dates.items()))}
+    if kinds:
+        document["kinds"] = dict(sorted(kinds.items()))
+    write_json(run_dir / "reruns.json", document)
+
+
+def _recette_is_inherited(run_dir: Path, number: int) -> tuple:
+    """Return (does a plan without option take over the recette of rerun number, last rerun).
+
+    It does when no rerun was opened after the recette, or when the last one was opened for a
+    recette (rerun-start --recette): the deferred rerun of its end block. Any other rerun, or
+    one whose kind was never recorded, is not a recette.
+    """
+    kinds = _rerun_kinds(run_dir)
+    last = max([_highest_rerun(run_dir), *(int(key) for key in kinds)])
+    return last <= number or kinds.get(f"{last:02d}") == "recette", last
+
+
 def _rerun_dates(run_dir: Path) -> dict:
     """Return {NN: date} of the closed reruns that recorded their date (rerun-close)."""
     return rerun_dates(run_dir)
@@ -1227,15 +1297,21 @@ def _cmd_rerun_start(args, services) -> int:
         raise UsageError("Il y a déjà 99 relances dans ce run : lancer un nouveau run.")
     target = _new_history_dir(run_dir)
     closed = _closed_reruns(run_dir)
+    kind = "recette" if args.recette else "rerun"
     abandoned = []
     for path in _rerun_files(run_dir):
         if _RERUN_FILE.fullmatch(path.name).group(2) in closed:
             continue
         (target / "abandoned").mkdir(exist_ok=True)
         shutil.move(str(path), str(target / "abandoned" / path.name))
+        checked.forget(run_dir, _RERUN_FILE.fullmatch(path.name).group(1), path.name)
         abandoned.append(path.name)
     _copy_state(run_dir, target)
-    _emit({"snapshot": str(target), "rerun": f"{number:02d}", "abandoned": abandoned})
+    kinds = {key: value for key, value in _rerun_kinds(run_dir).items() if key in closed}
+    kinds[f"{number:02d}"] = kind
+    dates = {key: value.isoformat() for key, value in _rerun_dates(run_dir).items()}
+    _save_reruns(run_dir, closed, dates, kinds)
+    _emit({"snapshot": str(target), "rerun": f"{number:02d}", "kind": kind, "abandoned": abandoned})
     return EXIT_OK
 
 
@@ -1253,15 +1329,20 @@ def _cmd_rerun_close(args, services) -> int:
     lots = {item["id"]: item for item in _read_lots(run_dir)["lots"]}
     discarded = []
     for path in files:
-        lot = lots.get(_RERUN_FILE.fullmatch(path.name).group(1))
-        if lot is None or _rerun_errors(run_dir, context, lot, path.name, rows):
+        lot_id = _RERUN_FILE.fullmatch(path.name).group(1)
+        lot = lots.get(lot_id)
+        errors = [] if lot is None else _rerun_errors(
+            run_dir, context, lot, path.name, rows, freeze="ensure"
+        )
+        if lot is None or [error for error in errors if not is_refused_evidence(error)]:
             folder = _new_history_dir(run_dir, f"-rerun-{number}-invalid")
             shutil.move(str(path), str(folder / path.name))
+            checked.forget(run_dir, lot_id, path.name)
             discarded.append(path.name)
-    closed = sorted(_closed_reruns(run_dir) | {number})
+    closed = _closed_reruns(run_dir) | {number}
     dates = {key: value.isoformat() for key, value in _rerun_dates(run_dir).items()}
     dates.setdefault(number, datetime.now().date().isoformat())
-    write_json(run_dir / "reruns.json", {"closed": closed, "dates": dict(sorted(dates.items()))})
+    _save_reruns(run_dir, closed, dates, _rerun_kinds(run_dir))
     _emit({"closed": number, "discarded": discarded})
     return EXIT_OK
 
@@ -1270,9 +1351,9 @@ def _parse_rows(text: str) -> set:
     return set(parse_refs(text))
 
 
-def _rerun_errors(run_dir, context, lot, name, rows) -> list:
+def _rerun_errors(run_dir, context, lot, name, rows, freeze=None) -> list:
     """Return the errors of a rerun file: only the rows it holds count, none is required."""
-    found = _read_findings_file(run_dir, context, lot, name)
+    found = _read_findings_file(run_dir, context, lot, name, freeze=freeze)
     if found is None:
         return [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
     errors = [error for error in found[1] if not error.startswith(_MISSING_ROW)]
@@ -1307,10 +1388,10 @@ def _cmd_validate(args, services) -> int:
     if args.rerun is not None:
         name = f"{lot['id']}-rerun-{args.rerun:02d}.json"
         rows = _parse_rows(args.rows) if args.rows is not None else None
-        errors = _rerun_errors(args.run_dir, context, lot, name, rows)
+        errors = _rerun_errors(args.run_dir, context, lot, name, rows, freeze="refresh")
     else:
         name = _findings_name(lot["id"], args.followup)
-        found = _read_findings_file(args.run_dir, context, lot, name)
+        found = _read_findings_file(args.run_dir, context, lot, name, freeze="refresh")
         if found is None:
             errors = [f"findings/{name} est introuvable : le sous-agent n'a pas écrit son fichier."]
         else:
@@ -1325,19 +1406,53 @@ def _cmd_plan(args, services) -> int:
     rows, missing = _read_rows(run_dir)
     lots = _read_lots(run_dir)
     visible = _read_visible_verdicts(run_dir)
-    sources = {}
-    findings, followup_done = _collect_findings(run_dir, context, lots["lots"], sources)
+    sources, left_out = {}, []
+    findings, followup_done = _collect_findings(
+        run_dir, context, lots["lots"], sources, left_out
+    )
     copy_ds_id = context["notion"]["copy_data_source_id"]
-    history = load_history(run_dir.parent.parent, run_dir.parent.name, copy_ds_id, run_dir.name)
+    cache_root, slug = run_dir.parent.parent, run_dir.parent.name
+    history = load_history(cache_root, slug, copy_ds_id, run_dir.name)
+    written = load_written_statuses(cache_root, slug, copy_ds_id, _read_at(run_dir / "rows.json"))
+    written_refs = load_written_refs(cache_root, slug, copy_ds_id)
     recette = {"refs": frozenset(), "judged": [], "unjudged": []}
     if args.recette == 0:
         raise UsageError(
             "--recette demande le numéro de la relance qui a jugé les lignes (par exemple "
             "--recette 01) : celle que rerun-close vient de clore."
         )
-    if args.recette is not None:
-        _check_closed(run_dir, args.recette)
-        recette = _recette_scope(run_dir, context, lots["lots"], rows, args.recette)
+    if args.recette is not None and args.no_recette:
+        raise UsageError("--recette et --no-recette ne se combinent pas.")
+    number = args.recette
+    inherited = number is None and not args.no_recette
+    if inherited:
+        number = _recette_of(_read_json_object(run_dir / "notion" / "plan.json"))
+        taken, last = _recette_is_inherited(run_dir, number) if number is not None else (True, 0)
+        if not taken:
+            print(
+                f"Recette du notion/plan.json existant (relance {number:02d}) non reprise : la "
+                f"dernière relance ({last:02d}) n'a pas été ouverte pour une recette "
+                f"(rerun-start --recette). --recette {number:02d} la reprend.",
+                file=sys.stderr,
+            )
+            number, inherited = None, False
+    if number is not None:
+        try:
+            _check_closed(run_dir, number)
+            recette = _recette_scope(run_dir, context, lots["lots"], rows, number)
+        except UsageError as error:
+            if not inherited:
+                raise
+            raise UsageError(
+                f"{error} Ce plan reprend la recette (relance {number:02d}) du notion/plan.json "
+                "existant : --no-recette construit un plan sans recette."
+            ) from None
+        if inherited:
+            print(
+                f"Recette reprise du notion/plan.json existant (relance {number:02d}) : "
+                "--no-recette construit un plan sans recette.",
+                file=sys.stderr,
+            )
     plan = build_plan(
         rows=rows,
         findings=findings,
@@ -1351,19 +1466,40 @@ def _cmd_plan(args, services) -> int:
         missing_in_copy=missing,
         recette_refs=recette["refs"],
         comment_dates=_comment_dates(run_dir, sources),
+        written_statuses=written,
+        written_refs=written_refs,
     )
-    if args.recette is not None:
-        plan["recette"] = {**recette, "rerun": f"{args.recette:02d}"}
+    if number is not None:
+        plan["recette"] = {**recette, "rerun": f"{number:02d}"}
         plan["recette"]["refs"] = sorted(recette["refs"])
     built = plan
     plan = filter_plan(plan, skip_human_overrides=args.skip_human_overrides)
-    if args.recette is not None:
-        plan["recette"]["kept"] = _kept_human_statuses(built, plan)
+    if number is not None:
+        plan["recette"]["kept"] = kept_human_statuses(built, plan)
     plan["plan_id"] = plan_digest(plan)
     (run_dir / "notion").mkdir(exist_ok=True)
     write_json(run_dir / "notion" / "plan.json", plan)
-    _emit(plan["summary"])
+    discarded = _discarded(left_out, written_refs)
+    _say_discarded(discarded)
+    _emit({**plan["summary"], "discarded": discarded, "discarded_count": len(discarded)})
     return EXIT_OK
+
+
+def _read_at(rows_path: Path) -> float:
+    """Return when the copy was read: the mtime of rows.json (0 when unknown: no write counts)."""
+    try:
+        return rows_path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _recette_of(plan: dict) -> Optional[int]:
+    """Return the number of the rerun a plan was built as a recette of, None when it was not."""
+    recette = plan.get("recette")
+    number = recette.get("rerun") if isinstance(recette, dict) else None
+    if isinstance(number, str) and re.fullmatch(r"[0-9]+", number) and int(number) >= 1:
+        return int(number)
+    return None
 
 
 def _comment_dates(run_dir: Path, sources: dict) -> dict:
@@ -1389,21 +1525,6 @@ def _check_closed(run_dir: Path, number: int) -> None:
             f"(relances closes dans reruns.json : {listed}). Clore la relance avec "
             "rerun-close d'abord."
         )
-
-
-def _kept_human_statuses(built: dict, filtered: dict) -> list:
-    """Return the judged rows of the recette whose human status the filter kept, with the verdict."""
-    recette = built["recette"]
-    judged = set(recette["judged"]) - set(recette["refs"])
-    written = {op["key"] for op in filtered["ops"]}
-    return [
-        {"ref": op["ref"], "verdict": op["verdict"], "status": op["before"]}
-        for op in built["ops"]
-        if op["kind"] == "status"
-        and op["human_override"]
-        and op["ref"] in judged
-        and op["key"] not in written
-    ]
 
 
 def _recette_scope(run_dir: Path, context: dict, lots: list, rows: list, number: int) -> dict:
@@ -1928,7 +2049,16 @@ def _cmd_skip(args, services) -> int:
     }
     folder = args.run_dir / "tools" / args.tool
     folder.mkdir(parents=True, exist_ok=True)
-    write_json(folder / "result.json", result)
+    earlier = _read_json_object(folder / "result.json").get("status")
+    if earlier in _GOOD_TOOL_STATUSES:
+        write_json(folder / "result-last-attempt.json", result)
+        print(
+            f"{args.tool} : son résultat « {earlier} » est conservé, l'essai est dans "
+            f"tools/{args.tool}/result-last-attempt.json.",
+            file=sys.stderr,
+        )
+    else:
+        write_json(folder / "result.json", result)
     _emit(result)
     return EXIT_OK
 
@@ -2157,6 +2287,9 @@ def _write_pending(run_dir: Path) -> bool:
     It catches a rerun or a recette whose write stopped (exit 3) in a run already done. A key
     counts as written only when the journal holds it under the plan_id of notion/plan.json, as
     apply skips it; an operation blocked by a safety gate is never journaled and keeps it true.
+    The operations are those apply writes: without the statuses set by a person when the
+    consent of the run keeps them. A status operation apply left aside because the status had
+    changed ("left_aside" of the journal) is settled too: a person did that on purpose.
     """
     plan = _read_json_object(run_dir / "notion" / "plan.json")
     ops = plan.get("ops")
@@ -2165,13 +2298,21 @@ def _write_pending(run_dir: Path) -> bool:
     context = _read_json_object(run_dir / "context.json")
     if context.get("notion_write") == "none" or context.get("dry_run") is True:
         return False
-    journal = _read_json_object(run_dir / "notion" / "applied.json").get("applied")
+    try:
+        plan = consented_plan(plan, context)
+    except (KeyError, TypeError, AttributeError):
+        pass
+    ops = plan["ops"]
+    document = _read_json_object(run_dir / "notion" / "applied.json")
     plan_id = plan.get("plan_id")
-    written = {
-        entry.get("key")
-        for entry in (journal if isinstance(journal, list) else [])
-        if isinstance(entry, dict) and entry.get("plan_id") == plan_id
-    }
+    written = set()
+    for name in ("applied", "left_aside"):
+        entries = document.get(name)
+        written.update(
+            entry.get("key")
+            for entry in (entries if isinstance(entries, list) else [])
+            if isinstance(entry, dict) and entry.get("plan_id") == plan_id
+        )
     return any(isinstance(op, dict) and op.get("key") not in written for op in ops)
 
 
@@ -2230,6 +2371,8 @@ def validate_context(context: dict) -> list:
     target = context.get("target")
     if isinstance(target, dict) and target.get("prod_live") is True and not target.get("prod_url"):
         errors.append(_invalid("target.prod_url", "est vide alors que target.prod_live est vrai"))
+    if probes.preprod_is_prod(context):
+        errors.append(probes.PREPROD_IS_PROD)
     return errors
 
 
@@ -2730,21 +2873,32 @@ def _findings_name(lot_id: str, followup: bool) -> str:
     return f"{lot_id}-followup.json" if followup else f"{lot_id}.json"
 
 
-def _read_findings(run_dir: Path, context: dict, lot: dict, *, followup: bool) -> Optional[tuple]:
+def _read_findings(
+    run_dir: Path, context: dict, lot: dict, *, followup: bool, freeze: Optional[str] = None
+) -> Optional[tuple]:
     """Return (valid findings, errors) of a lot file, None when the file does not exist."""
-    return _read_findings_file(run_dir, context, lot, _findings_name(lot["id"], followup))
+    name = _findings_name(lot["id"], followup)
+    return _read_findings_file(run_dir, context, lot, name, freeze=freeze)
 
 
-def _read_findings_file(run_dir: Path, context: dict, lot: dict, name: str) -> Optional[tuple]:
+def _read_findings_file(
+    run_dir: Path, context: dict, lot: dict, name: str, *, freeze: Optional[str] = None
+) -> Optional[tuple]:
     """Return (valid findings, errors) of a findings file, None when it does not exist.
 
-    The valid findings are those of validate_document whose evidence also holds against the run.
+    The valid findings are those of validate_document whose evidence also holds: as it was frozen
+    when the file was validated, else against the run (read_grounded_findings says what freeze
+    does).
     """
-    return read_grounded_findings(run_dir, context, lot, name)
+    return read_grounded_findings(run_dir, context, lot, name, freeze=freeze)
 
 
 def _collect_findings(
-    run_dir: Path, context: dict, lots: list, sources: Optional[dict] = None
+    run_dir: Path,
+    context: dict,
+    lots: list,
+    sources: Optional[dict] = None,
+    left_out: Optional[list] = None,
 ) -> tuple:
     """Return ({ref: finding}, refs of the lots that went through a follow-up).
 
@@ -2755,17 +2909,22 @@ def _collect_findings(
     scenarios-followup.json exists and the lot still asked for scenarios: if every request was
     discarded, or the tool of one of the two follow-ups failed, no relaunch has any use, but what
     the lot waited for will not come either. sources, when given, receives {ref: name of the
-    findings file of its latest finding}.
+    findings file of its latest finding}. left_out, when given, receives what the reading set
+    aside (_Reading.left_out).
     """
+    seen = _Reading()
 
     def read(lot, name):
         found = _read_findings_file(run_dir, context, lot, name)
+        seen.note(lot["id"], name, found)
         if sources is not None:
             for item in found[0] if found else []:
                 sources[item["ref"]] = name
         return found
 
     findings = latest_findings(run_dir, lots, read)
+    if left_out is not None:
+        left_out.extend(seen.left_out(lots, findings))
     followup_done = set()
     requested = set()
     app_path = probes.app_path(context)
@@ -2779,6 +2938,133 @@ def _collect_findings(
         ] in requested:
             followup_done.update(lot["refs"])
     return findings, followup_done
+
+
+_FINDING_ERROR = re.compile(r"constat CQ-([0-9]+) : (.*)", re.DOTALL)
+_ERROR_REF = re.compile(r"CQ-([0-9]+)")
+_MAX_REASONS = 3
+
+
+class _Reading:
+    """What the reading of the findings files of a run saw, to say what it set aside.
+
+    note() is given each file read, in reading order (latest_findings'): the finding of a ref
+    comes from the last file that holds a valid one, and an error of a later file means a
+    finding that file held for the ref was set aside. A row a file does not hold is no error
+    here: a rerun file holds the rows of its rerun only.
+    """
+
+    def __init__(self) -> None:
+        self.position = 0
+        self.files: dict = {}
+        self.kept: dict = {}
+        self.errors: dict = {}
+        self.general: dict = {}
+
+    def note(self, lot_id: str, name: str, found: Optional[tuple]) -> None:
+        self.position += 1
+        if found is None:
+            return
+        self.files.setdefault(lot_id, []).append(name)
+        for item in found[0]:
+            self.kept[item["ref"]] = (self.position, name)
+        for error in found[1]:
+            if error.startswith(_MISSING_ROW):
+                continue
+            refs, text = _error_refs(error)
+            for ref in refs:
+                self.errors.setdefault(ref, []).append((self.position, name, text))
+            if not refs:
+                self.general.setdefault(lot_id, []).append((name, text))
+
+    def left_out(self, lots: list, findings: dict) -> list:
+        """Return [{"ref", "reason", "lost"}] for the rows of the lots whose finding was set aside,
+        or kept without a piece of evidence the check refused (REFUSED_KEY).
+
+        lost is true when the row has no finding left (the plan treats it as not evaluated), false
+        when an earlier file gives one that is kept, or when the finding kept lost only evidence.
+        """
+        left = []
+        for lot in lots:
+            for ref in lot["refs"]:
+                if ref not in findings:
+                    left.append({"ref": ref, "reason": self._why_none(lot["id"], ref), "lost": True})
+                    continue
+                position, kept_name = self.kept.get(ref, (0, None))
+                if not kept_name:
+                    continue
+                later = [item for item in self.errors.get(ref, []) if item[0] > position]
+                reasons = []
+                if later:
+                    reasons.append(f"{_joined(later)} (le constat de findings/{kept_name} est gardé)")
+                refused = [
+                    entry["problem"] for entry in findings[ref].get(REFUSED_KEY) or []
+                ]
+                if refused:
+                    without = "sans cette preuve" if len(refused) == 1 else "sans ces preuves"
+                    reasons.append(
+                        f"findings/{kept_name} : {' ; '.join(refused)} (le constat est gardé {without})"
+                    )
+                if reasons:
+                    left.append({"ref": ref, "reason": " ; ".join(reasons), "lost": False})
+        return left
+
+    def _why_none(self, lot_id: str, ref: int) -> str:
+        if self.errors.get(ref):
+            return _joined(self.errors[ref])
+        names = self.files.get(lot_id, [])
+        if not names:
+            return f"findings/{lot_id}.json est introuvable : le lot n'a rien écrit"
+        if self.general.get(lot_id):
+            name, text = self.general[lot_id][0]
+            return f"findings/{name} : {text}"
+        return f"aucun constat pour cette ligne dans {', '.join(f'findings/{name}' for name in names)}"
+
+
+def _joined(errors: list) -> str:
+    texts = list(dict.fromkeys(f"findings/{name} : {text}" for _, name, text in errors))
+    return " ; ".join(texts[:_MAX_REASONS])
+
+
+def _error_refs(error: str) -> tuple:
+    """Return ([refs], text) of an error of a findings file: the rows it names, none for a file."""
+    found = _FINDING_ERROR.fullmatch(error)
+    if found:
+        return [int(found.group(1))], found.group(2)
+    return [int(number) for number in _ERROR_REF.findall(error)], error
+
+
+def _discarded(left_out: list, written: frozenset) -> list:
+    """Return [{"ref", "reason"}]: the rows plan set aside, with what happens to each.
+
+    A row without finding is written "Non évaluable", unless the journal already holds a verdict
+    written on it: its page is left as it is.
+    """
+    found = []
+    for item in left_out:
+        reason = item["reason"].rstrip(".")
+        if item["lost"]:
+            if item["ref"] in written:
+                reason += (
+                    ". La ligne garde le commentaire déjà écrit dans Notion, "
+                    "aucun commentaire de remplacement."
+                )
+            else:
+                reason += ". La ligne est notée « Non évaluable »."
+        found.append({"ref": item["ref"], "reason": reason})
+    return found
+
+
+def _say_discarded(discarded: list) -> None:
+    """Print the rows plan set aside on stderr, the rows that share a reason on one line."""
+    if not discarded:
+        return
+    print(f"Constats écartés : {len(discarded)}.", file=sys.stderr)
+    by_reason: dict = {}
+    for item in discarded:
+        by_reason.setdefault(item["reason"], []).append(ref_label(item["ref"]))
+    for reason, labels in by_reason.items():
+        print(f"- {', '.join(labels)} : {reason}", file=sys.stderr)
 
 
 def _verdicts(run_dir: Path, context: dict, rows: list) -> dict:

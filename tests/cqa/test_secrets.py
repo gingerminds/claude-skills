@@ -1,11 +1,13 @@
+import base64
 import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import quote, quote_plus
 
-from cqa.secrets import (known_values_from_env, redact, scan_lines, scan_spans, scan_text,
+from cqa.secrets import (MASK, known_values_from_env, redact, scan_lines, scan_spans, scan_text,
                          scan_tree)
 
 JWT = ".".join(["eyJhbGciOiJub25lIn0", "eyJzdWIiOiJ0ZXN0In0", "c2lnbmF0dXJlLXZhbHVl"])
@@ -284,7 +286,7 @@ class NonSecretTest(unittest.TestCase):
                 self.assertIn(literal, text)
                 labels = scan_text(text, [])
                 self.assertEqual(labels[0], "credential_assignment")
-                self.assertTrue(set(labels[1:]) <= {"mysql_password_option"}, labels)
+                self.assertTrue(set(labels[1:]) <= {"mysql_password_option", "provider_key"}, labels)
                 masked = redact(text, [])
                 self.assertIn("[secret masqué]", masked)
                 self.assertNotIn(literal, masked)
@@ -493,6 +495,367 @@ class ProcessAndKubeSecretsTest(unittest.TestCase):
         self.assertEqual(redact(certificate, []), certificate)
 
 
+PASSWORD = "Sup3rS3cretDb"
+SALT = "Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4"
+APP_KEY = "base64:Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4Zm9vYmFyYmE="
+LIVE_KEY = "sk_live_" + "51H8abcdEFGHijklMNOPqrstUVWX"
+
+
+class CommonSecretFormsTest(unittest.TestCase):
+    """The secrets a plain read of a configuration file or a process list puts in the output (B-02)."""
+
+    def assert_masked(self, text, literal, expected=None):
+        masked = redact(text, [])
+        self.assertNotIn(literal, masked, text)
+        self.assertIn(MASK, masked, text)
+        if expected is not None:
+            self.assertEqual(masked, expected)
+        self.assertNotEqual(scan_text(text, []), [], text)
+        self.assertEqual(scan_text(masked, []), [], masked)
+        self.assertEqual(redact(masked, []), masked, text)
+
+    def assert_untouched(self, text):
+        self.assertEqual(redact(text, []), text)
+        self.assertEqual(scan_text(text, []), [], text)
+
+    def test_redact_database_url_credentials(self):
+        for text, expected in (
+            (f"DATABASE_URL=mysql://app:{PASSWORD}@db:3306/app",
+             f"DATABASE_URL=mysql://app:{MASK}@db:3306/app"),
+            (f'DATABASE_URL: "postgres://app:{PASSWORD}@db/app"',
+             f'DATABASE_URL: "postgres://app:{MASK}@db/app"'),
+            (f"root 12 0.0 curl https://admin:{PASSWORD}@example.org/x",
+             f"root 12 0.0 curl https://admin:{MASK}@example.org/x"),
+            (f"psql postgresql://app:{PASSWORD}@db/app", f"psql postgresql://app:{MASK}@db/app"),
+            (f"REDIS_URL=redis://:{PASSWORD}@cache:6379/0", f"REDIS_URL=redis://:{MASK}@cache:6379/0"),
+            ("amqp://guest:p%40ss%3Aw0rd@mq:5672/%2f", f"amqp://guest:{MASK}@mq:5672/%2f"),
+            (f"mongodb+srv://app:{PASSWORD}@cluster.example.org/db?retryWrites=true",
+             f"mongodb+srv://app:{MASK}@cluster.example.org/db?retryWrites=true"),
+            ("psql postgresql://app:Sup3r@S3cret@db/app", f"psql postgresql://app:{MASK}@db/app"),
+        ):
+            with self.subTest(text=text):
+                literal = text.split("://")[1].split(":", 1)[1].rsplit("@", 1)[0]
+                self.assert_masked(text, literal, expected)
+        self.assertEqual(scan_text(f"mysql://app:{PASSWORD}@db/app", []), ["url_credentials"])
+
+    def test_url_without_credentials_or_with_a_placeholder_is_kept(self):
+        for text in (
+            "https://example.org:8080/path",
+            "ssh://git@example.org:22/org/repo.git",
+            "git@example.org:org/repo.git",
+            "mysql://app@db/app",
+            "mysql://app:${DB_PASSWORD}@db/app",
+            "mysql://app:$DB_PASSWORD@db/app",
+            "postgres://user:<password>@host/db",
+            "https://example.org/a@b",
+            "Le lien https://example.org:443 est valide, écrire à camille@example.org.",
+        ):
+            with self.subTest(text=text):
+                self.assert_untouched(text)
+
+    def test_redact_pass_suffix_names(self):
+        for text, expected in (
+            (f"DB_PASS={PASSWORD}", f"DB_PASS={MASK}"),
+            (f"smtp_pass: {PASSWORD}", f"smtp_pass: {MASK}"),
+            (f"pass: {PASSWORD}", f"pass: {MASK}"),
+            (f"'smtp_pass' => '{PASSWORD}',", f"'smtp_pass' => '{MASK}',"),
+            (f"dbPass = '{PASSWORD}'", f"dbPass = '{MASK}'"),
+            ("DB_PASS=hunter", f"DB_PASS={MASK}"),
+            (f"mot_de_passe = {PASSWORD}", f"mot_de_passe = {MASK}"),
+            (f"credentials: admin:{PASSWORD}", f"credentials: {MASK}"),
+            ('auth: "YWRtaW46U3VwM3JTM2NyZXREYg=="', f'auth: "{MASK}"'),
+            (f"APP_KEY={APP_KEY}", f"APP_KEY={MASK}"),
+            ("ENCRYPTION_KEY=0123abcd4567ef89", f"ENCRYPTION_KEY={MASK}"),
+            (f"$databases['default']['default']['password'] = '{PASSWORD}';",
+             f"$databases['default']['default']['password'] = '{MASK}';"),
+        ):
+            with self.subTest(text=text):
+                literal = next(part for part in (PASSWORD, "hunter", "YWRtaW46U3VwM3JTM2NyZXREYg==",
+                                                 APP_KEY, "0123abcd4567ef89") if part in text)
+                self.assert_masked(text, literal, expected)
+
+    def test_a_short_value_after_a_password_name_is_masked(self):
+        for text, expected in (
+            ("MAIL_PASSWORD=abc", f"MAIL_PASSWORD={MASK}"),
+            ("password=abc", f"password={MASK}"),
+            ('"passwd": "xyz"', f'"passwd": "{MASK}"'),
+            ("DB_PASS=abc", f"DB_PASS={MASK}"),
+        ):
+            with self.subTest(text=text):
+                self.assert_masked(text, text[-4:].strip('"=: '), expected)
+        for text in ("token=abc", "password: ***", "password: ...", "password=no", "password: "):
+            with self.subTest(text=text):
+                self.assert_untouched(text)
+
+    def test_redact_hash_salt(self):
+        for text, expected in (
+            (f"$settings['hash_salt'] = '{SALT}';", f"$settings['hash_salt'] = '{MASK}';"),
+            (f"hash_salt: {SALT}", f"hash_salt: {MASK}"),
+            (f"SALT={SALT}", f"SALT={MASK}"),
+            (f"hashSalt: '{SALT}'", f"hashSalt: '{MASK}'"),
+        ):
+            with self.subTest(text=text):
+                self.assert_masked(text, SALT, expected)
+        for text in ("salt: 10", "saltRounds: 12", "hash_salt: from_env", "hash_salt: ${HASH_SALT}"):
+            with self.subTest(text=text):
+                self.assert_untouched(text)
+
+    def test_redact_space_separated_setenv_and_cli_options(self):
+        for text, expected in (
+            (f"SetEnv DB_PASSWORD {PASSWORD}", f"SetEnv DB_PASSWORD {MASK}"),
+            (f"fastcgi_param DB_PASSWORD {PASSWORD};", f"fastcgi_param DB_PASSWORD {MASK};"),
+            (f'fastcgi_param DB_PASSWORD "{PASSWORD}";', f'fastcgi_param DB_PASSWORD "{MASK}";'),
+            (f"env[DB_PASS] = {PASSWORD}", f"env[DB_PASS] = {MASK}"),
+            (f"ENV DB_PASSWORD {PASSWORD}", f"ENV DB_PASSWORD {MASK}"),
+            (f"root 12 0.0 mysqldump --user=root --password {PASSWORD} app",
+             f"root 12 0.0 mysqldump --user=root --password {MASK} app"),
+            (f"mysql --password '{PASSWORD}' app", f"mysql --password '{MASK}' app"),
+            (f"app --api-key {PASSWORD} --verbose", f"app --api-key {MASK} --verbose"),
+        ):
+            with self.subTest(text=text):
+                self.assert_masked(text, PASSWORD, expected)
+        for text in (
+            "mysqldump --password $DB_PASS app",
+            'mysqldump --password "$DB_PASS" app',
+            "mysqldump --password=$DB_PASS app",
+            "mysqldump --password --single-transaction app",
+            "mysql --no-password",
+            "mysql --password-file /etc/mysql/pw.cnf",
+            "SetEnv DB_PASSWORD ${DB_PASSWORD}",
+            "SetEnv APP_ENV production",
+            "export token expired yesterday",
+            "the env password changed yesterday",
+            "fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;",
+            "fastcgi_param HTTP_AUTHORIZATION $http_authorization;",
+        ):
+            with self.subTest(text=text):
+                self.assert_untouched(text)
+
+    def test_redact_curl_user_and_redis_auth(self):
+        for text, expected in (
+            (f"root 12 0.0 curl -u admin:{PASSWORD} https://example.org",
+             f"root 12 0.0 curl -u admin:{MASK} https://example.org"),
+            (f"curl -s --user admin:{PASSWORD} https://example.org",
+             f"curl -s --user admin:{MASK} https://example.org"),
+            (f"curl -u 'admin:{PASSWORD}' https://example.org",
+             f"curl -u 'admin:{MASK}' https://example.org"),
+            (f"redis-cli -a {PASSWORD} ping", f"redis-cli -a {MASK} ping"),
+            (f"redis-cli -h cache -p 6379 -a {PASSWORD} ping",
+             f"redis-cli -h cache -p 6379 -a {MASK} ping"),
+            (f"redis-cli --pass {PASSWORD} ping", f"redis-cli --pass {MASK} ping"),
+            (f"sshpass -p {PASSWORD} ssh deploy@example.org",
+             f"sshpass -p {MASK} ssh deploy@example.org"),
+        ):
+            with self.subTest(text=text):
+                self.assert_masked(text, PASSWORD, expected)
+        for text in (
+            "curl -u admin https://example.org",
+            "curl -u admin:$PASS https://example.org",
+            "redis-cli -a $REDIS_PASS ping",
+            "redis-cli -h cache ping",
+            "grep -a pattern /var/log/syslog",
+        ):
+            with self.subTest(text=text):
+                self.assert_untouched(text)
+
+    def test_redact_cookie_header(self):
+        for text, expected in (
+            (f"Cookie: SESSabcdef0123456789={SALT}", f"Cookie: SESSabcdef0123456789={MASK}"),
+            (f"Cookie: lang=fr; session={PASSWORD}", f"Cookie: lang={MASK}; session={MASK}"),
+            (f'"Cookie": "SESS={PASSWORD}"', f'"Cookie": "SESS={MASK}"'),
+            (f"curl -H 'Cookie: sid={PASSWORD}' https://example.org",
+             f"curl -H 'Cookie: sid={MASK}' https://example.org"),
+            ("Cookie : _ga=GA1.2.123456.789 déposé avant consentement",
+             f"Cookie : _ga={MASK} déposé avant consentement"),
+            ("cookie: tarteaucitron=!gtag=wait présent, pas de cookie tiers",
+             f"cookie: tarteaucitron={MASK} présent, pas de cookie tiers"),
+            ("Requête sans en-tête Cookie: PHPSESSID=abc123 ; réponse 200",
+             f"Requête sans en-tête Cookie: PHPSESSID={MASK} ; réponse 200"),
+            ("Cookie: a=1;b=2; c=3", f"Cookie: a={MASK};b={MASK}; c={MASK}"),
+            (f"Cookie: a={MASK}; b=2", f"Cookie: a={MASK}; b={MASK}"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(redact(text, []), expected)
+                self.assertNotEqual(scan_text(text, []), [])
+                self.assertEqual(scan_text(expected, []), [])
+        for text in (
+            "Cookie: ",
+            "en-tête Cookie: absent",
+            "Set-Cookie: sid=abc123; Path=/; Secure; HttpOnly; SameSite=Lax",
+            "$headers['Cookie'] = $cookie;",
+            "Cookie: sid=${SESSION_ID}; lang=",
+            f"Cookie: _ga={MASK}",
+        ):
+            with self.subTest(text=text):
+                self.assert_untouched(text)
+
+    def test_redact_prefixed_live_key(self):
+        for key in (
+            LIVE_KEY,
+            "rk_live_" + "51H8abcdEFGHijklMNOPqrstUVWX",
+            "sk_test_" + "51H8abcdEFGHijklMNOPqrstUVWX",
+            "whsec_" + "abcdEFGHijklMNOPqrstUVWX0123",
+            "xoxb-" + "1234567890-abcdefghijKLMN",
+        ):
+            for template in ("{}", "STRIPE_KEY: {}", "clé {} fin"):
+                text = template.format(key)
+                with self.subTest(text=text):
+                    self.assert_masked(text, key)
+        for text in ("task_live_status", "sk_live", "disk_live_reload: on", "risk_test_plan"):
+            with self.subTest(text=text):
+                self.assert_untouched(text)
+
+    def test_scan_text_raises_on_each_form_that_redact_masks(self):
+        forms = (
+            f"DATABASE_URL=mysql://app:{PASSWORD}@db:3306/app",
+            f"DB_PASS={PASSWORD}",
+            f"smtp_pass: {PASSWORD}",
+            f"$settings['hash_salt'] = '{SALT}';",
+            f"SetEnv DB_PASSWORD {PASSWORD}",
+            f"fastcgi_param DB_PASSWORD {PASSWORD};",
+            f"env[DB_PASS] = {PASSWORD}",
+            f"mysqldump --user=root --password {PASSWORD} app",
+            f"redis-cli -a {PASSWORD} ping",
+            f"curl -u admin:{PASSWORD} https://example.org",
+            f"Cookie: SESS={PASSWORD}",
+            f"STRIPE_KEY: {LIVE_KEY}",
+            LIVE_KEY,
+            f"APP_KEY={APP_KEY}",
+            f"credentials: admin:{PASSWORD}",
+            "MAIL_PASSWORD=abc",
+        )
+        for text in forms:
+            with self.subTest(text=text):
+                self.assertNotEqual(scan_text(text, []), [])
+                self.assertNotEqual(scan_text("Résumé : " + text + "\nfin", []), [])
+                masked = redact(text, [])
+                self.assertNotEqual(masked, text)
+                self.assertEqual(scan_text(masked, []), [])
+        text = "\n".join(forms)
+        self.assertEqual(scan_text(redact(text, []), []), [])
+        self.assertEqual(sorted({label for label, _ in scan_lines(text, [])}),
+                         sorted(scan_text(text, [])))
+
+    def test_the_named_forms_stay_waivable_by_the_lead(self):
+        text = f"<?php\n// x\nDB_PASS={PASSWORD}\n"
+        self.assertEqual(scan_lines(text, []), [("credential_assignment", 3)])
+
+    def test_redact_does_not_mask_benign_policy_lines(self):
+        for text in (
+            "password_policy: strong",
+            "password_hash: bcrypt",
+            "password_hashing: argon2id",
+            "password_min_length: 12",
+            "password_required: true",
+            "password_file: /run/credentials/db",
+            "'password_algorithm' => 'sha512',",
+            "token_lifetime: 3600",
+            "token_type: Bearer",
+            "secret_name: db_credentials",
+            "auth: required",
+            "auth: basic",
+            "credentials: include",
+            "fetch(url, {credentials: 'include'})",
+            "smoke_pass: true",
+            "pass: true",
+            "passenger: nginx",
+            "pass_through: on",
+            "compass: north-12345",
+            "bypass: Sup3rS3cretDb-is-not-a-name",
+            "ssh_key: /home/deploy/.ssh/id_ed25519",
+            "primary_key: id",
+            "cache_key: user-list",
+            "salt: 10",
+            "Le mot de passe est haché avec bcrypt ; la politique impose 12 caractères.",
+            "Champ password: non masqué à la saisie",
+            "password: oui",
+            "pwd: non",
+            "mot_de_passe: requis (min 8)",
+            "password: yes",
+            "password: none",
+            "password: empty",
+            "password: required.",
+            "mot-de-passe: absent",
+            "passwd: vide",
+            "DB_PASS: absent",
+            "Auth: Basic realm=\"Préprod\"",
+            "WWW-Authenticate: Basic realm=\"Restricted\"",
+            "auth: Sanctum + cookie de session",
+            "session.cookie_secure=1, session.cookie_httponly=1",
+            "autocomplete=\"new-password\" absent sur le champ password",
+        ):
+            with self.subTest(text=text):
+                self.assert_untouched(text)
+
+    def test_a_state_word_never_unmasks_a_real_password(self):
+        for text in (
+            "password: oui123",
+            "password: Oui",
+            "password: nonon",
+            "pwd: requis-2024",
+            "mot_de_passe: hunter22",
+            "MAIL_PASSWORD=abc",
+            "DB_PASS=abc",
+        ):
+            with self.subTest(text=text):
+                self.assertNotEqual(redact(text, []), text)
+                self.assertNotEqual(scan_text(text, []), [])
+
+    def test_code_that_only_looks_like_a_secret_name_is_kept(self):
+        for text in (
+            'NO_PASS = "Aucune passe fix en cours : lancez d\'abord cqa_fix.py open."',
+            'OUT_OF_PASS = "commit hors de la passe {number} : {sha}"',
+            'published_pass = key.get("pass") or 0',
+            '_emit({"pass": args.number, "base": base})',
+            'f"pass-start --pass {args.number}."',
+            "values[token] = args[index]",
+            'key["secret_waivers"] = waivers',
+            "auth: Optional[tuple] = None,",
+            "auth = _auth_from_env() if args.auth_env else None",
+            'LEFT_KEY = "- {repo} : {reason} (branche {branch})."',
+            "_SQL_CREDENTIAL = re.compile(",
+            "MYSQL_PASSWORD_FILE: /run/secrets/db_password",
+            "AUTH_TOKEN_URL=https://auth.example.org/token",
+            "grep -a pattern /var/log/syslog",
+            "auth_basic_user_file /etc/nginx/.htpasswd;",
+            "proxy_set_header Authorization $http_authorization;",
+            "SetEnv SYMFONY_SECRET_PLACEHOLDER",
+            "GM_AUDIT_AUTH_PASS='<mot de passe>' python3 cqa_plan.py scan",
+        ):
+            with self.subTest(text=text):
+                self.assert_untouched(text)
+
+    def test_a_secret_in_an_array_index_is_masked_when_it_looks_like_one(self):
+        for text, expected in (
+            (f"$conf['password'] = '{PASSWORD}';", f"$conf['password'] = '{MASK}';"),
+            (f"$conf['smtp']['password'] = '{PASSWORD}';", f"$conf['smtp']['password'] = '{MASK}';"),
+            (f"env['DB_PASSWORD'] = {PASSWORD}", f"env['DB_PASSWORD'] = {MASK}"),
+        ):
+            with self.subTest(text=text):
+                self.assert_masked(text, PASSWORD, expected)
+
+    def test_new_forms_stay_fast_on_pathological_input(self):
+        for text in (
+            "pass" * 20000, "_PASS" * 20000, "curl -u " * 20000, "redis-cli " * 20000,
+            "SetEnv " * 20000, "--password " * 20000, "a://:" * 20000, "x://" + "u:" * 50000,
+            "Cookie: a=" * 20000, "A_" * 50000 + "B", "sk_live_" + "a" * 200000,
+        ):
+            with self.subTest(text=text[:20]):
+                started = time.monotonic()
+                scan_text(text, [])
+                redact(text, [])
+                self.assertLess(time.monotonic() - started, 5)
+
+    def test_a_policy_name_with_a_real_looking_value_is_still_masked(self):
+        for text in (
+            f"password_hash: {PASSWORD}",
+            "password_hash=$2y$10$abcdefghijklmnopqrstuv",
+            f"password_policy: {PASSWORD}",
+        ):
+            with self.subTest(text=text):
+                self.assert_masked(text, text.split(": ")[-1].split("=")[-1])
+
+
 class RedactTest(unittest.TestCase):
     def test_redact_keeps_label(self):
         self.assertEqual(redact("token=abcdef123456", []), "token=[secret masqué]")
@@ -617,6 +980,40 @@ class KnownValuesFromEnvTest(unittest.TestCase):
     def test_defaults_to_the_process_environment(self):
         with mock.patch.dict(os.environ, {"NOTION_TOKEN": "ntn_from_env"}, clear=True):
             self.assertEqual(known_values_from_env(), ["ntn_from_env"])
+
+    def test_known_values_include_basic_base64_and_url_encoded_password(self):
+        password = "p@ss w/rd:2026"
+        env = {"GM_AUDIT_AUTH_USER": "camille", "GM_AUDIT_AUTH_PASS": password}
+        basic = base64.b64encode(f"camille:{password}".encode()).decode()
+        values = known_values_from_env(env)
+        self.assertEqual(values[0], password)
+        self.assertIn(basic, values)
+        self.assertIn(quote(password, safe=""), values)
+        self.assertIn(quote_plus(password), values)
+        self.assertEqual(len(values), len(set(values)))
+        text = (f"Authorization: Basic {basic}\ncurl https://camille:{quote(password, safe='')}"
+                f"@example.org\nform={quote_plus(password)}\npassword {password}")
+        masked = redact(text, values)
+        for secret in (basic, quote(password, safe=""), quote_plus(password), password):
+            self.assertNotIn(secret, masked)
+        self.assertIn("known_value", scan_text(f"x {basic} y", values))
+        self.assertEqual(scan_text(masked, values), [])
+
+    def test_derived_forms_need_what_they_derive_from(self):
+        self.assertEqual(known_values_from_env({"GM_AUDIT_AUTH_PASS": "auth-pass-1"}), ["auth-pass-1"])
+        self.assertEqual(
+            known_values_from_env({"GM_AUDIT_AUTH_USER": "camille", "GM_AUDIT_AUTH_PASS": "  "}), [])
+        basic = base64.b64encode(b"camille:auth-pass-1").decode()
+        self.assertEqual(
+            known_values_from_env({"GM_AUDIT_AUTH_USER": "camille",
+                                   "GM_AUDIT_AUTH_PASS": "auth-pass-1"}),
+            ["auth-pass-1", basic])
+
+    def test_a_short_password_still_masks_its_basic_form(self):
+        basic = base64.b64encode(b"camille:abc").decode()
+        self.assertEqual(
+            known_values_from_env({"GM_AUDIT_AUTH_USER": "camille", "GM_AUDIT_AUTH_PASS": "abc"}),
+            [basic])
 
 
 class ScanTreeTest(unittest.TestCase):

@@ -59,6 +59,7 @@ OP_KEYS = {
     "text",
     "human_override",
 }
+STATUS_OP_KEYS = OP_KEYS | {"expected"}
 PROBE_KEYS = {"id", "method", "path", "headers", "body", "sensitive"}
 SENSITIVE_PATHS = [
     "/.env",
@@ -87,6 +88,11 @@ ESCAPING_URLS = [
     f"{BASE}/\\\\evil.example.net/x",
     f"{BASE}//evil.example.net",
 ]
+
+
+def without_discarded(summary):
+    """The summary of a plan as notion/plan.json holds it: what plan prints, less what it names."""
+    return {key: value for key, value in summary.items() if not key.startswith("discarded")}
 
 
 def origin_of(url):
@@ -935,11 +941,12 @@ class FollowupProbesTest(AuditCase):
 
     def test_command_writes_the_contract_file_and_reports_the_rest(self):
         run_dir = self.make_run()
+        sweep = (run_dir / "probes.json").read_bytes()
         result = self.run_json(["probes", run_dir, "--followup"])
         document = self.read(run_dir, "probes-followup.json")
         self.assertEqual(set(document), {"base_url", "probes"})
         self.assertEqual(len(document["probes"]), 2)
-        self.assertFalse((run_dir / "probes.json").exists())
+        self.assertEqual((run_dir / "probes.json").read_bytes(), sweep)
         self.assertEqual(result["file"], "probes-followup.json")
         self.assertEqual(result["count"], 2)
         self.assertEqual(result["lots"], ["code-performance", "code-securite"])
@@ -986,6 +993,7 @@ class FollowupScenariosTest(AuditCase):
 
     def test_scenarios_followup_writes_the_contract_file_and_reports_the_rest(self):
         run_dir = self.make_run()
+        sweep = (run_dir / "probes.json").read_bytes()
         far = make_scenario(id="far", url="https://other.example.net/p")
         self.ask(run_dir, "code-securite", 103, make_scenario(), make_scenario(id="menu-2"), far)
         result = self.run_json(["scenarios", run_dir, "--followup"])
@@ -1008,7 +1016,7 @@ class FollowupScenariosTest(AuditCase):
             [("code-securite", 103, "far", "https://other.example.net/p")],
         )
         self.assertFalse((run_dir / "probes-followup.json").exists())
-        self.assertFalse((run_dir / "probes.json").exists())
+        self.assertEqual((run_dir / "probes.json").read_bytes(), sweep)
 
     def test_scenarios_followup_discards_action_urls_with_their_reason(self):
         run_dir = self.make_run()
@@ -1389,13 +1397,13 @@ class ValidateTest(AuditCase):
             self.set_evidence(run_dir, [{"type": "tool", "tool": name, "ref": "x"}])
             self.assertTrue(self.validate_errors(run_dir), repr(name))
 
-    def test_other_evidence_types_are_not_checked_against_the_run(self):
+    def test_page_and_http_evidence_are_checked_against_the_target_and_the_probes(self):
         run_dir = self.make_run()
         self.set_evidence(
             run_dir,
             [
-                {"type": "page", "url": "https://elsewhere.example.net/", "detail": None},
-                {"type": "http", "url": "https://elsewhere.example.net/", "detail": "x"},
+                {"type": "page", "url": "https://preprod.example.org/a", "detail": None},
+                {"type": "http", "url": "https://preprod.example.org/", "detail": "x"},
             ],
         )
         self.assertEqual(self.validate_errors(run_dir), [])
@@ -1405,7 +1413,7 @@ class ValidateTest(AuditCase):
         self.set_evidence(
             run_dir,
             [
-                {"type": "page", "url": "https://elsewhere.example.net/", "detail": None},
+                {"type": "page", "url": "https://preprod.example.org/", "detail": None},
                 {"type": "file", "repo": "ghost", "path": "a.php"},
                 {"type": "tool", "tool": "ghost", "ref": "x"},
             ],
@@ -1458,7 +1466,7 @@ class PlanTest(AuditCase):
         missing = [{"ref": 190, "title": "Auditer les sauvegardes"}]
         self.assertEqual(summary["missing_in_copy"], missing)
         plan = self.read(run_dir, "notion/plan.json")
-        self.assertEqual(plan["summary"], summary)
+        self.assertEqual(plan["summary"], without_discarded(summary))
         self.assertEqual(
             set(plan),
             {
@@ -1511,8 +1519,11 @@ class PlanTest(AuditCase):
             ],
         )
         for op in ops.values():
-            self.assertEqual(set(op), OP_KEYS)
+            self.assertEqual(set(op), STATUS_OP_KEYS if op["kind"] == "status" else OP_KEYS)
         self.assertEqual(ops[(102, "status")]["after"], "Ok / Recetté")
+        self.assertEqual(ops[(102, "status")]["expected"], "Mis en place")
+        self.assertEqual(ops[(103, "status")]["expected"], "À traiter")
+        self.assertEqual(ops[(105, "status")]["expected"], "À traiter")
         self.assertTrue(ops[(102, "status")]["human_override"])
         self.assertEqual(ops[(103, "status")]["after"], "Mise en place partielle")
         self.assertFalse(ops[(103, "status")]["human_override"])
@@ -1520,6 +1531,87 @@ class PlanTest(AuditCase):
         self.assertEqual(ops[(104, "comment")]["verdict"], "unknown")
         self.assertEqual(ops[(106, "comment")]["verdict"], "unknown")
         self.assertIn("outils indisponibles : Navigateur", ops[(106, "comment")]["text"])
+
+    JOURNAL_AT = "2026-10-19T09:00:00+00:00"
+
+    def write_journal(self, run_dir, *entries, copy_read="2026-10-20T08:00:00+00:00"):
+        """Journal the writes of the skill (at JOURNAL_AT); the copy is read at copy_read."""
+        document = {"applied": [
+            {"key": f"status:page-{ref}:abcdefabcdef", "kind": "status", "ref": ref,
+             "verdict": "ok", "value": value, "at": self.JOURNAL_AT}
+            for ref, value in entries
+        ]}
+        self.write(run_dir, "notion/applied.json", document)
+        if copy_read:
+            self.set_copy_read(run_dir, copy_read)
+
+    def set_copy_read(self, run_dir, stamp):
+        moment = datetime.fromisoformat(stamp).timestamp()
+        os.utime(run_dir / "rows.json", (moment, moment))
+
+    def test_a_todo_set_back_by_a_person_after_a_skill_write_is_a_human_status(self):
+        run_dir = self.make_run()
+        self.write_journal(run_dir, (103, "Ok / Recetté"))
+        summary = self.plan(run_dir)
+        ops = self.ops(run_dir)
+        self.assertTrue(ops[(103, "status")]["human_override"])
+        self.assertEqual(ops[(103, "status")]["expected"], "À traiter")
+        self.assertEqual(
+            summary["human_overrides"],
+            [
+                {"ref": 102, "before": "Mis en place", "after": "Ok / Recetté"},
+                {"ref": 103, "before": "À traiter", "after": "Mise en place partielle"},
+            ],
+        )
+
+    def test_a_todo_the_skill_wrote_in_an_earlier_run_of_the_copy_is_a_human_status_too(self):
+        run_dir = self.make_run()
+        earlier = run_dir.parent / "2026-10-19-0900"
+        earlier.mkdir()
+        self.write(earlier, "context.json", {"notion": {"copy_data_source_id": "ds-copy"}})
+        self.write_journal(earlier, (103, "Ok / Recetté"), copy_read=None)
+        self.set_copy_read(run_dir, "2026-10-20T08:00:00+00:00")
+        self.plan(run_dir)
+        self.assertTrue(self.ops(run_dir)[(103, "status")]["human_override"])
+
+    def test_the_journal_of_another_copy_marks_nothing(self):
+        run_dir = self.make_run()
+        other = run_dir.parent / "2026-10-19-0900"
+        other.mkdir()
+        self.write(other, "context.json", {"notion": {"copy_data_source_id": "ds-other"}})
+        self.write_journal(other, (103, "Ok / Recetté"), copy_read=None)
+        self.set_copy_read(run_dir, "2026-10-20T08:00:00+00:00")
+        self.plan(run_dir)
+        self.assertFalse(self.ops(run_dir)[(103, "status")]["human_override"])
+
+    def test_a_write_made_after_the_copy_was_read_is_not_a_person_putting_the_row_back(self):
+        run_dir = self.make_run()
+        self.write_journal(run_dir, (103, "Ok / Recetté"), copy_read="2026-10-18T08:00:00+00:00")
+        self.plan(run_dir)
+        self.assertFalse(self.ops(run_dir)[(103, "status")]["human_override"])
+
+    def test_a_todo_last_edited_by_the_integration_stays_non_human(self):
+        run_dir = self.make_run()
+        self.edit_row(run_dir, 103, last_edited_by_bot=True)
+        self.write_journal(run_dir, (103, "Ok / Recetté"))
+        self.plan(run_dir)
+        self.assertFalse(self.ops(run_dir)[(103, "status")]["human_override"])
+
+    def test_a_run_with_an_unreadable_journal_plans_as_before(self):
+        run_dir = self.make_run()
+        (run_dir / "notion").mkdir(exist_ok=True)
+        (run_dir / "notion" / "applied.json").write_text("{not json", encoding="utf-8")
+        self.plan(run_dir)
+        self.assertFalse(self.ops(run_dir)[(103, "status")]["human_override"])
+
+    def test_the_audit_leaves_a_human_todo_alone_with_the_human_filter(self):
+        run_dir = self.make_run()
+        self.write_journal(run_dir, (103, "Ok / Recetté"))
+        summary = self.plan(run_dir, "--skip-human-overrides")
+        refs = {op["ref"] for op in self.read(run_dir, "notion/plan.json")["ops"]}
+        self.assertNotIn(103, refs)
+        self.assertNotIn(102, refs)
+        self.assertEqual(summary["human_overrides"], [])
 
     def test_comments_json_keys_are_read_as_integers(self):
         run_dir = self.make_run()
@@ -1544,7 +1636,7 @@ class PlanTest(AuditCase):
         text = self.ops(run_dir)[(103, "comment")]["text"]
         self.assertIn("Audit PRE-MEL · 02/03/2026 · lancé par Côme D", text)
         self.assertIn("develop@3f2a1c9", text)
-        self.assertIn("gm:checklist-quality-audit 0.9.0", text)
+        self.assertIn("gm:checklist-quality-audit 0.18.1", text)
         self.assertLessEqual(len(text), 1500)
 
     def rerun_101(self, run_dir, dates):
@@ -1603,7 +1695,9 @@ class PlanTest(AuditCase):
             summary["by_status_after"],
             {"À traiter": 3, "Mise en place partielle": 1, "Mis en place": 1, "Non applicable": 1},
         )
-        self.assertEqual(self.read(run_dir, "notion/plan.json")["summary"], summary)
+        self.assertEqual(
+            self.read(run_dir, "notion/plan.json")["summary"], without_discarded(summary)
+        )
 
     def test_history_of_earlier_runs_spares_repeated_comments(self):
         run_dir = self.make_run()
@@ -2262,6 +2356,35 @@ class SynthesisTest(AuditCase):
         self.assertIn("Aucun.", text.split("## Statuts posés par un humain")[1].split("##")[0])
 
 
+    def synthesis_of(self, run_dir):
+        return report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+
+    def test_synthesis_applies_the_consent_without_a_rebuild_of_the_plan(self):
+        for write, mode in (("keep_human", "interactif"), ("all", "autonome")):
+            with self.subTest(write=write, mode=mode):
+                run_dir = self.make_run()
+                self.edit(run_dir, "context.json",
+                          lambda context: context.update(notion_write=write, mode=mode))
+                self.run_json(["plan", run_dir])
+                full = self.read(run_dir, "notion/plan.json")
+                self.assertEqual([item["ref"] for item in full["summary"]["human_overrides"]], [102])
+                text, comment = self.synthesis_of(run_dir)
+                self.run_json(["plan", run_dir, "--skip-human-overrides"])
+                self.assertEqual((text, comment), self.synthesis_of(run_dir))
+                section = text.split("## Statuts posés par un humain")[1].split("##")[0]
+                self.assertIn("Aucun.", section)
+                self.assertEqual(self.read(run_dir, "notion/plan.json")["summary"]["human_overrides"], [])
+
+    def test_synthesis_keeps_the_human_overrides_when_the_consent_replaces_them(self):
+        run_dir = self.make_run()
+        self.edit(run_dir, "context.json",
+                  lambda context: context.update(notion_write="all", mode="interactif"))
+        self.run_json(["plan", run_dir])
+        text, _ = self.synthesis_of(run_dir)
+        section = text.split("## Statuts posés par un humain")[1].split("\n## ")[0]
+        self.assertIn("CQ-102", section)
+
+
 class RecetteTest(AuditCase):
     LOTS = {101: "code-performance", 102: "code-performance", 103: "code-securite", 104: "code-securite"}
 
@@ -2277,7 +2400,7 @@ class RecetteTest(AuditCase):
             for ref in refs
         ]
         self.write(run_dir, "notion/recette.json", {"rows": rows})
-        self.write(run_dir, "reruns.json", {"closed": ["01"]})
+        self.write(run_dir, "reruns.json", {"closed": ["01"], "kinds": {"01": "recette"}})
         for ref in refs:
             self.edit_row(run_dir, ref, status="Mis en place")
         for ref in judged:
@@ -2305,8 +2428,149 @@ class RecetteTest(AuditCase):
         self.assertEqual(
             recette, {"rerun": "01", "refs": [102], "judged": [102], "unjudged": [], "kept": []}
         )
-        self.run_json(["plan", run_dir, "--skip-human-overrides"])
+        self.run_json(["plan", run_dir, "--no-recette", "--skip-human-overrides"])
         self.assertNotIn(102, self.status_ops(run_dir))
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+
+    def test_plan_reuses_recette_from_existing_plan(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        first = self.read(run_dir, "notion/plan.json")
+        code, out, err = self.run_main(["plan", run_dir, "--skip-human-overrides"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("01", err)
+        self.assertIn("--no-recette", err)
+        again = self.read(run_dir, "notion/plan.json")
+        self.assertEqual(again["recette"], first["recette"])
+        self.assertEqual(again["plan_id"], first["plan_id"])
+        self.assertEqual(self.status_ops(run_dir)[102], "Ok / Recetté")
+
+    def test_plan_reuses_recette_when_the_rebuild_drops_the_human_filter_too(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01"])
+        self.run_json(["plan", run_dir])
+        self.assertEqual(self.read(run_dir, "notion/plan.json")["recette"]["rerun"], "01")
+
+    def test_explicit_recette_wins_over_the_one_of_the_existing_plan(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.write(run_dir, "reruns.json", {"closed": ["01", "02"]})
+        self.run_json(["plan", run_dir, "--recette", "01"])
+        code, out, err = self.run_main(["plan", run_dir, "--recette", "02"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(run_dir, "notion/plan.json")["recette"]["rerun"], "02")
+        self.assertNotIn("reprise", err)
+
+    def test_plan_no_recette_drops_it(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.run_json(["plan", run_dir, "--no-recette", "--skip-human-overrides"])
+        plan = self.read(run_dir, "notion/plan.json")
+        self.assertNotIn("recette", plan)
+        self.assertNotIn(102, self.status_ops(run_dir))
+        self.run_json(["plan", run_dir])
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+
+    def later_rerun(self, run_dir, *flags, verdict="ko"):
+        """Open rerun 02 (with flags), judge CQ-102 in it and close it, as the skill does."""
+        self.assertEqual(self.run_json(["rerun-start", run_dir, *flags])["rerun"], "02")
+        source = next(
+            item for item in self.read(run_dir, "findings/code-performance.json")["findings"]
+            if item["ref"] == 102
+        )
+        self.write(run_dir, "findings/code-performance-rerun-02.json", {
+            "lot": "code-performance",
+            "findings": [{**source, "verdict": verdict, "todo": "Refaire.", "summary": "Régression."}],
+        })
+        self.run_json(["rerun-close", run_dir, "02", "--rows", "CQ-102"])
+
+    def test_a_plain_rerun_after_a_recette_never_takes_over_the_recette(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.later_rerun(run_dir)
+        code, out, err = self.run_main(["plan", run_dir, "--skip-human-overrides"])
+        self.assertEqual(code, 0, err)
+        plan = self.read(run_dir, "notion/plan.json")
+        self.assertNotIn("recette", plan)
+        self.assertNotIn(102, self.status_ops(run_dir))
+        self.assertIn("01", err)
+        self.assertIn("non reprise", err)
+        self.run_json(["plan", run_dir])
+        plan = self.read(run_dir, "notion/plan.json")
+        self.assertEqual([item["ref"] for item in plan["summary"]["human_overrides"]], [102])
+        status = next(op for op in plan["ops"] if op["kind"] == "status" and op["ref"] == 102)
+        self.assertTrue(status["human_override"])
+
+    def test_a_rerun_opened_for_the_recette_keeps_the_recette_in_the_rebuild(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.later_rerun(run_dir, "--recette", verdict="ok")
+        code, out, err = self.run_main(["plan", run_dir, "--skip-human-overrides"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(run_dir, "notion/plan.json")["recette"]["rerun"], "01")
+        self.assertIn("reprise", err)
+
+    def test_a_rerun_without_a_kind_record_does_not_take_over_the_recette(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.write(run_dir, "reruns.json", {"closed": ["01", "02"]})
+        self.write(run_dir, "findings/code-performance-rerun-02.json", {
+            "lot": "code-performance",
+            "findings": self.read(run_dir, "findings/code-performance-rerun-01.json")["findings"],
+        })
+        self.run_json(["plan", run_dir, "--skip-human-overrides"])
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+
+    def test_a_rebuild_before_any_later_rerun_keeps_the_recette_without_a_kind_record(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.write(run_dir, "reruns.json", {"closed": ["01"]})
+        self.run_json(["plan", run_dir, "--skip-human-overrides"])
+        self.assertEqual(self.read(run_dir, "notion/plan.json")["recette"]["rerun"], "01")
+
+    def test_a_rerun_opened_and_never_closed_ends_the_inheritance_too(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.assertEqual(self.run_json(["rerun-start", run_dir])["rerun"], "02")
+        self.run_json(["plan", run_dir, "--skip-human-overrides"])
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+
+    def test_plan_no_recette_cannot_be_combined_with_recette(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        code, out, err = self.run_main(["plan", run_dir, "--recette", "01", "--no-recette"])
+        self.assertEqual(code, 2)
+        self.assertIn("--no-recette", err)
+        self.assertFalse((run_dir / "notion" / "plan.json").exists())
+
+    def test_plan_without_an_earlier_recette_is_a_plain_plan(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir])
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+        self.run_json(["plan", run_dir])
+        self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+
+    def test_plan_cannot_reuse_a_recette_whose_rerun_is_not_closed(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir, "--recette", "01"])
+        before = self.read(run_dir, "notion/plan.json")
+        self.write(run_dir, "reruns.json", {"closed": []})
+        code, out, err = self.run_main(["plan", run_dir])
+        self.assertEqual(code, 2)
+        self.assertIn("relance close", err)
+        self.assertIn("--no-recette", err)
+        self.assertEqual(self.read(run_dir, "notion/plan.json"), before)
+        self.run_json(["plan", run_dir, "--no-recette"])
+
+    def test_plan_ignores_a_damaged_recette_of_the_existing_plan(self):
+        run_dir = self.make_recette_run([102], judged=[102])
+        self.run_json(["plan", run_dir])
+        for damaged in ("x", "", 1, "00", None, ["01"]):
+            with self.subTest(rerun=damaged):
+                self.edit(run_dir, "notion/plan.json",
+                          lambda plan: plan.update(recette={"rerun": damaged}))
+                self.run_json(["plan", run_dir])
+                self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
+        self.write(run_dir, "notion/plan.json", ["not", "a", "plan"])
+        self.run_json(["plan", run_dir])
         self.assertNotIn("recette", self.read(run_dir, "notion/plan.json"))
 
     def test_recette_ref_without_a_new_finding_stays_protected(self):
@@ -2415,6 +2679,21 @@ class RecetteTest(AuditCase):
         self.edit_row(run_dir, 102, status="Ok / Recetté")
         self.run_json(["plan", run_dir, "--recette", "01"])
         self.assertEqual(self.read(run_dir, "notion/plan.json")["recette"]["kept"], [])
+
+    def test_synthesis_of_a_recette_names_the_human_statuses_the_consent_keeps(self):
+        run_dir = self.make_recette_run(
+            [102], judged=[102], changes={102: {"verdict": "ko", "todo": "Corriger."}}
+        )
+        self.edit_row(run_dir, 102, status="Ok / Recetté")
+        self.edit(run_dir, "context.json", lambda context: context.update(notion_write="keep_human"))
+        self.run_json(["plan", run_dir, "--recette", "01"])
+        self.assertEqual(self.read(run_dir, "notion/plan.json")["recette"]["kept"], [])
+        text, _ = report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))
+        section = text.split("## Recette")[1].split("\n## ")[0]
+        where = [part.split("\n")[0] for part in section.split("### ")[1:] if "CQ-102" in part]
+        self.assertEqual(where, ["Statut humain conservé"])
+        self.run_json(["plan", run_dir, "--recette", "01", "--skip-human-overrides"])
+        self.assertEqual(text, report.synthesis(run_dir, now=datetime(2026, 10, 20, 15, 0))[0])
 
     def test_recette_section_in_synthesis(self):
         run_dir = self.make_recette_run(
@@ -2662,10 +2941,39 @@ class SkipTest(AuditCase):
         self.run_json(["skip", run_dir, "schemathesis", "aucune spec"])
         self.assertEqual(self.read(run_dir, "tools/schemathesis/result.json")["status"], "skipped")
 
-    def test_skip_overwrites_an_earlier_result(self):
+    def test_skip_replaces_a_result_that_is_not_good(self):
         run_dir = self.make_run()
+        for status in ("failed", "skipped", "running"):
+            with self.subTest(status=status):
+                self.edit(run_dir, "tools/http/result.json", lambda result: result.update(status=status))
+                self.run_json(["skip", run_dir, "http", "relance"])
+                self.assertEqual(self.read(run_dir, "tools/http/result.json")["status"], "skipped")
+                self.assertFalse((run_dir / "tools" / "http" / "result-last-attempt.json").exists())
+        (run_dir / "tools" / "http" / "result.json").write_text("{", encoding="utf-8")
         self.run_json(["skip", run_dir, "http", "relance"])
         self.assertEqual(self.read(run_dir, "tools/http/result.json")["status"], "skipped")
+
+    def test_skip_keeps_a_good_result_and_writes_the_attempt_beside_it(self):
+        run_dir = self.make_run()
+        for status in ("ok", "not_applicable"):
+            with self.subTest(status=status):
+                self.edit(run_dir, "tools/http/result.json", lambda result: result.update(status=status))
+                before = self.read(run_dir, "tools/http/result.json")
+                code, out, err = self.run_main(["skip", run_dir, "http", "relance", "--not-applicable"])
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.read(run_dir, "tools/http/result.json"), before)
+                attempt = self.read(run_dir, "tools/http/result-last-attempt.json")
+                self.assertEqual((attempt["status"], attempt["reason"]), ("not_applicable", "relance"))
+                self.assertEqual(json.loads(out), attempt)
+                self.assertIn("http", err)
+                self.assertIn("conservé", err)
+
+    def test_skip_keeps_the_good_result_in_the_manifest(self):
+        run_dir = self.make_run()
+        self.run_json(["skip", run_dir, "http", "relance"])
+        tool = {item["tool"]: item for item in report.manifest(run_dir)["tools"]}["http"]
+        self.assertEqual(tool["status"], "ok")
+        self.assertEqual(tool["last_attempt"]["status"], "skipped")
 
     def test_skip_refuses_unsafe_tool_names_and_empty_reasons(self):
         run_dir = self.make_run()
@@ -3008,11 +3316,19 @@ class AssignPlanTest(AuditCase):
 
 
 class FakeNotion:
-    """The part of the Notion client that apply_plan uses, recording what it writes."""
+    """The part of the Notion client that apply_plan uses, recording what it writes.
 
-    def __init__(self, options):
+    statuses maps a page id to its « Statut » now; a page not listed has none.
+    """
+
+    def __init__(self, options, statuses=None):
         self.options = options
         self.writes = []
+        self.statuses = statuses or {}
+
+    def page(self, page_id):
+        status = {"type": "status", "status": {"name": self.statuses.get(page_id)}}
+        return {"properties": {"Statut": status}}
 
     def data_source(self, data_source_id):
         options = [{"name": name} for name in self.options]
@@ -3030,9 +3346,11 @@ class FakeNotion:
 
 
 class ApplyContractTest(AuditCase):
-    def apply(self, run_dir, name):
+    def apply(self, run_dir, name, statuses=None):
         plan = self.read(run_dir, name)
-        client = FakeNotion(["Inès", "Marc", "Côme D"])
+        if statuses is None:
+            statuses = {row["page_id"]: row["status"] for row in self.read(run_dir, "rows.json")["rows"]}
+        client = FakeNotion(["Inès", "Marc", "Côme D"], statuses)
         context = self.read(run_dir, "context.json")
         rows = self.read(run_dir, "rows.json")["rows"]
         result = apply_plan(
@@ -3054,6 +3372,38 @@ class ApplyContractTest(AuditCase):
         plan, result, client = self.apply(run_dir, "notion/plan.json")
         self.assertEqual(result, apply_report(8, 0))
         self.assertEqual(len(client.writes), 8)
+
+    def test_apply_skips_row_whose_status_changed_since_read(self):
+        run_dir = self.make_run()
+        self.run_json(["plan", run_dir])
+        rows = self.read(run_dir, "rows.json")["rows"]
+        live = {row["page_id"]: row["status"] for row in rows}
+        live["page-103"] = "Ok / Recetté"
+        plan, result, client = self.apply(run_dir, "notion/plan.json", statuses=live)
+        patched = [write[1] for write in client.writes
+                   if write[0] == "update" and "Statut" in write[2]]
+        self.assertNotIn("page-103", patched)
+        self.assertEqual(sorted(patched), ["page-102", "page-105"])
+        self.assertEqual([item["ref"] for item in result["status_changed"]], [103])
+        self.assertEqual(result["status_changed"][0]["current"], "Ok / Recetté")
+        self.assertEqual((result["done"], result["errors"]), (7, []))
+
+    def test_rebuilding_the_plan_after_a_write_keeps_the_rows_the_skill_wrote_non_human(self):
+        run_dir = self.make_run()
+        self.run_json(["plan", run_dir])
+        first = self.read(run_dir, "notion/plan.json")
+        long_ago = datetime.now().timestamp() - 3600
+        os.utime(run_dir / "rows.json", (long_ago, long_ago))
+        self.apply(run_dir, "notion/plan.json")
+        self.run_json(["plan", run_dir])
+        rebuilt = self.read(run_dir, "notion/plan.json")
+        self.assertEqual(rebuilt["plan_id"], first["plan_id"])
+        self.assertEqual(rebuilt["summary"]["human_overrides"], first["summary"]["human_overrides"])
+        self.assertEqual([(op["ref"], op["human_override"]) for op in rebuilt["ops"]],
+                         [(op["ref"], op["human_override"]) for op in first["ops"]])
+        plan, result, client = self.apply(run_dir, "notion/plan.json")
+        self.assertEqual((result["done"], result["status_changed"]), (0, []))
+        self.assertEqual(client.writes, [])
 
     def test_assign_plan_is_applicable(self):
         run_dir = self.make_run()
@@ -3161,7 +3511,9 @@ class RerunValidateAndSnapshotTest(AuditCase):
         run_dir = self.make_run()
         errors = self.rerun_errors(run_dir, 3)
         self.assertIn("code-performance-rerun-03.json", errors[0])
-        self.write(run_dir, "findings/code-performance-rerun-03.json", {"lot": "x", "findings": []})
+        self.write(
+            run_dir, "findings/code-performance-rerun-03.json", {"lot": "code-performance", "findings": []}
+        )
         self.assertTrue(any("aucun constat" in error for error in self.rerun_errors(run_dir, 3)))
 
     def test_validate_rerun_rejects_a_bad_number_and_followup_together(self):
@@ -3233,6 +3585,44 @@ class RerunValidateAndSnapshotTest(AuditCase):
         self.assertEqual(first["rerun"], "02")
         self.assertEqual(second["rerun"], "03")
         self.assertNotEqual(first["snapshot"], second["snapshot"])
+
+    def test_rerun_start_records_the_kind_of_the_rerun(self):
+        run_dir = self.make_run()
+        plain = self.run_json(["rerun-start", run_dir])
+        self.assertEqual(plain["kind"], "rerun")
+        self.assertEqual(self.read(run_dir, "reruns.json")["kinds"], {"01": "rerun"})
+        self.write_rerun(run_dir, "01", 101)
+        self.run_json(["rerun-close", run_dir, "1"])
+        recette = self.run_json(["rerun-start", run_dir, "--recette"])
+        self.assertEqual((recette["rerun"], recette["kind"]), ("02", "recette"))
+        document = self.read(run_dir, "reruns.json")
+        self.assertEqual(document["kinds"], {"01": "rerun", "02": "recette"})
+        self.assertEqual(document["closed"], ["01"])
+
+    def test_rerun_close_keeps_the_kinds_and_the_dates(self):
+        run_dir = self.make_run()
+        self.run_json(["rerun-start", run_dir, "--recette"])
+        self.write_rerun(run_dir, "01", 101)
+        self.run_json(["rerun-close", run_dir, "1"])
+        document = self.read(run_dir, "reruns.json")
+        self.assertEqual((document["closed"], document["kinds"]), (["01"], {"01": "recette"}))
+        self.assertEqual(list(document["dates"]), ["01"])
+
+    def test_rerun_start_forgets_the_kind_of_a_rerun_left_open(self):
+        run_dir = self.make_run()
+        self.run_json(["rerun-start", run_dir, "--recette"])
+        self.assertEqual(self.run_json(["rerun-start", run_dir])["rerun"], "01")
+        self.assertEqual(self.read(run_dir, "reruns.json")["kinds"], {"01": "rerun"})
+
+    def test_rerun_start_keeps_a_reruns_file_without_kinds_readable(self):
+        run_dir = self.make_run()
+        self.write(run_dir, "reruns.json", {"closed": ["01"], "dates": {"01": "2026-10-21"}})
+        self.write_rerun(run_dir, "01", 101)
+        self.assertEqual(self.run_json(["rerun-start", run_dir])["rerun"], "02")
+        document = self.read(run_dir, "reruns.json")
+        self.assertEqual(document["closed"], ["01"])
+        self.assertEqual(document["dates"], {"01": "2026-10-21"})
+        self.assertEqual(document["kinds"], {"02": "rerun"})
 
     def test_rerun_start_refuses_a_hundredth_rerun(self):
         run_dir = self.make_run()
@@ -3366,7 +3756,7 @@ CLOSED_URL = "https://gitlab.example.org/acme/back/-/merge_requests/9"
 FRONT_URL = "https://gitlab.example.org/acme/front/-/merge_requests/5"
 OLDER_URL = "https://gitlab.example.org/acme/back/-/merge_requests/4"
 SHA_A, SHA_B, SHA_C, SHA_D = "1" * 40, "2" * 40, "3" * 40, "4" * 40
-FIX_FOOT = "Réf CQ-{ref} · develop@3f2a1c9 · gm:checklist-quality-audit 0.9.0"
+FIX_FOOT = "Réf CQ-{ref} · develop@3f2a1c9 · gm:checklist-quality-audit 0.18.1"
 FIX_HEAD = "Correctif automatique · {day} · lancé par Côme D"
 STATUSES = ("À traiter", "En standby", "Mise en place partielle", "Mis en place", "En review",
             "Ok / Recetté", "Non applicable")
@@ -4860,13 +5250,13 @@ class ContextDocsCommandTest(ContextDocsFixtures, AuditCase):
             json.loads(out),
             {
                 "rows": 2,
-                "by_verdict": {"ko": 1, "ok": 1},
+                "by_verdict": {"ko": 1, "ok_human": 1},
                 "documents": [{"id": "d1", "rows": 2}],
             },
         )
         stored = self.stored_verdicts()
         self.assertEqual(sorted(stored), ["112", "113"])
-        self.assertEqual((stored["112"]["verdict"], stored["113"]["verdict"]), ("ko", "ok"))
+        self.assertEqual((stored["112"]["verdict"], stored["113"]["verdict"]), ("ko", "ok_human"))
         finding = stored["112"]["finding"]
         self.assertEqual(finding["source"], "context_doc")
         self.assertEqual(
@@ -4982,9 +5372,9 @@ class NeutralStatusTest(ContextDocsFixtures, AuditCase):
         self.assertEqual(
             self.coverage("7.3"), {"ok": 1, "na": 1, "ko": 0, "undetermined": 0, "points": []}
         )
-        self.assertEqual(self.stored_verdicts()["113"]["verdict"], "ok")
+        self.assertEqual(self.stored_verdicts()["113"]["verdict"], "ok_human")
         self.assertEqual(self.stored_verdicts()["112"]["verdict"], "ko")
-        self.assertEqual(summary["by_verdict"], {"ko": 1, "ok": 1})
+        self.assertEqual(summary["by_verdict"], {"ko": 1, "ok_human": 1})
 
     def test_a_ko_point_attached_to_that_criterion_makes_the_row_ko(self):
         self.judge(neutral=True, ko_on_7_3=True)
@@ -5114,7 +5504,7 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         self.assertEqual(document["lot"], "context-docs")
         self.assertEqual(
             [(item["ref"], item["verdict"]) for item in document["findings"]],
-            [(112, "ko"), (113, "ok")],
+            [(112, "ko"), (113, "ok_human")],
         )
         verdicts = self.read(self.run_dir, "context-docs/verdicts.json")["verdicts"]
         self.assertEqual(document["findings"][0], verdicts["112"]["finding"])
@@ -5318,7 +5708,7 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         verdicts = self.read(self.run_dir, "context-docs/verdicts.json")["verdicts"]
         self.assertEqual(
             {ref: entry["verdict"] for ref, entry in verdicts.items()},
-            {"112": "ko", "113": "ok", "115": "partial"},
+            {"112": "ko", "113": "ok_human", "115": "partial"},
         )
         self.lots()
         self.write_lot_findings(
@@ -5331,7 +5721,7 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
             after,
             {
                 112: "À traiter",
-                113: "Ok / Recetté",
+                113: "Mis en place",
                 114: "Ok / Recetté",
                 115: "Mise en place partielle",
             },
@@ -5342,6 +5732,75 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         self.assertIn("Rapport d1 : critères 1.1, 7.3", comments[115])
         self.assertNotIn(112, plan["summary"]["unknown"])
         validate_plan(plan)
+
+    def test_a_conforming_report_is_planned_as_ok_human_never_as_ok_recette(self):
+        self.judged(rows=[(114, ())])
+        for ref in (112, 113, 114):
+            self.edit_row(self.run_dir, ref, status="À traiter", last_edited_by_bot=True)
+        self.lots()
+        self.write_lot_findings(
+            "code-accessibilite", "code-accessibilite", self.skill_finding(114, "ok")
+        )
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
+        self.assertEqual(after[113], "Mis en place")
+        self.assertEqual(after[114], "Ok / Recetté")
+        verdicts = {op["ref"]: op["verdict"] for op in plan["ops"] if op["kind"] == "comment"}
+        self.assertEqual((verdicts[112], verdicts[113]), ("ko", "ok_human"))
+        comments = {op["ref"]: op["text"] for op in plan["ops"] if op["kind"] == "comment"}
+        self.assertIn("Conforme d'après le rapport d1 du 2026-10-01", comments[113])
+        self.assertIn("à confirmer sur la version actuelle", comments[113])
+        self.assertIn("Rapport d1 : critères 7.3", comments[113])
+
+    def test_an_ok_of_a_report_written_by_an_older_run_is_still_planned_as_ok_human(self):
+        self.judged()
+        self.edit_row(self.run_dir, 113, status="À traiter", last_edited_by_bot=True)
+        self.lots()
+        document = self.read(self.run_dir, "findings/context-docs.json")
+        for item in document["findings"]:
+            if item["ref"] == 113:
+                item["verdict"], item["human_check"] = "ok", None
+        self.write(self.run_dir, "findings/context-docs.json", document)
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
+        self.assertEqual(after[113], "Mis en place")
+        verdicts = {op["ref"]: op["verdict"] for op in plan["ops"] if op["kind"] == "comment"}
+        self.assertEqual(verdicts[113], "ok_human")
+
+    def test_a_ko_of_a_report_is_still_taken_over_by_plan(self):
+        self.judged()
+        self.edit_row(self.run_dir, 112, status="Mis en place", last_edited_by_bot=True)
+        self.lots()
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
+        self.assertEqual(after[112], "À traiter")
+
+    def test_context_docs_file_still_validates(self):
+        self.judged(rows=[(114, ())])
+        self.lots()
+        virtual = rerun.document_lot(self.stored_lots()["lots"])
+        found = rerun.read_grounded_findings(
+            self.run_dir, self.read(self.run_dir, "context.json"), virtual, "context-docs.json",
+            freeze="refresh",
+        )
+        self.assertEqual(found[1], [])
+        self.assertEqual([(item["ref"], item["verdict"]) for item in found[0]], [(112, "ko"), (113, "ok_human")])
+        self.assertTrue(all(item["source"] == "context_doc" for item in found[0]))
+        recorded = self.read(self.run_dir, "findings/context-docs.checked.json")
+        self.assertEqual(
+            [entry["problems"] for entry in recorded["files"]["context-docs.json"]["findings"]], [[], []]
+        )
+
+    def test_a_document_evidence_of_a_missing_document_is_refused_at_plan(self):
+        self.judged()
+        self.lots()
+        shutil.rmtree(self.run_dir / "context-docs" / "d1")
+        self.run_json(["plan", self.run_dir])
+        plan = self.read(self.run_dir, "notion/plan.json")
+        self.assertTrue({112, 113} <= set(plan["summary"]["unknown"]))
 
     def test_the_skill_finding_of_a_rerun_replaces_the_one_of_the_document(self):
         self.judged(rows=[(114, ())])
@@ -5369,7 +5828,7 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
         plan = self.read(self.run_dir, "notion/plan.json")
         self.assertEqual(plan["summary"]["unknown"], [104, 106, 114, 120])
         after = {state["ref"]: state["after"] for state in plan["rows"] if state["ref"] >= 112}
-        self.assertEqual((after[112], after[113]), ("À traiter", "Ok / Recetté"))
+        self.assertEqual((after[112], after[113]), ("À traiter", "Mis en place"))
 
 
     def synthesis_text(self, mode=None):
@@ -5402,7 +5861,7 @@ class DocumentLotsTest(ContextDocsFixtures, AuditCase):
                 "  - Rattachés à une ligne : 2 (dont 1 proposé par le skill)",
                 "  - Sans ligne : 1",
                 "    - d1-002 : Contraste insuffisant du pied de page (Transverses, critère 3.1)",
-                "  - Lignes jugées d'après le document : 3 (CQ-112 : ko, CQ-113 : ok, CQ-115 : partial)",
+                "  - Lignes jugées d'après le document : 3 (CQ-112 : ko, CQ-113 : ok_human, CQ-115 : partial)",
                 "  - Rattachements proposés par le skill, acceptés en mode autonome :",
                 "    - d1-003 : CQ-114",
             ],

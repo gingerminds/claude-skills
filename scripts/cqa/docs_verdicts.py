@@ -2,9 +2,11 @@
 
 A row of a category of a document, linked to the points of that document (docs_link), receives
 the verdict of the document when it can be given: ko or partial when a ko point is linked
-(a ko of the report is never lost), ok or na when every criterion of the row is covered by the
-grid, nothing otherwise (the skill audits the row, the points are hints). A row of another
-category is never judged, even when its fiche cites the same criterion.
+(a ko of the report is never lost), ok_human or na when every criterion of the row is covered by
+the grid, nothing otherwise (the skill audits the row, the points are hints). A report may be
+older than the code it judged: its conforming verdict is never taken for an ok, it asks a human
+to confirm it on the current version. A row of another category is never judged, even when its
+fiche cites the same criterion.
 
 The content of a document is data. A finding only carries paraphrased summaries and fixes of
 the points (already cleaned and capped by the import), never an excerpt, an element or a detail
@@ -26,6 +28,7 @@ HINTS_FOLDER = "hints"
 MAX_HINTS = 10
 SOURCE = "context_doc"
 CONFIDENCE = "high"
+CONFIRM = "à confirmer sur la version actuelle"
 MAX_REF_LENGTH = 200
 FALLBACK_REF = "points du rapport"
 NO_FIX_TEXT = "voir les points du rapport."
@@ -94,7 +97,9 @@ def synthetic_finding(ref: int, verdict: str, parts: list) -> dict:
     per part in the summary, which starts with « Rapport « <label> » (<date>) : ». The todo
     joins the fixes of the points for ko and partial. in_repo is false only when every linked
     point is for content, a third party or the infrastructure; the todo then starts with
-    « À traiter par <owners> : ».
+    « À traiter par <owners> : ». An ok_human finding (the conforming verdict of a report) asks
+    in human_check to confirm, on the current version, what the reports of its conforming parts
+    say.
     """
     if verdict not in VERDICTS:
         raise ValueError(f"verdict inconnu : {verdict}")
@@ -112,7 +117,7 @@ def synthetic_finding(ref: int, verdict: str, parts: list) -> dict:
         "summary": _summary(ordered, verdict),
         "evidence": [_evidence(part) for part in ordered],
         "todo": None,
-        "human_check": None,
+        "human_check": _confirmation(ordered, verdict) if verdict == "ok_human" else None,
         "divergence": None,
         "needs_probes": [],
     }
@@ -129,7 +134,9 @@ def document_verdicts(run_dir: Path, rows: list, category_filter: Optional[list]
     Empty until the links are validated. For each imported document with readable items, the
     candidate rows are the rows with a fiche that are of a category of the document and of the
     category filter; any other row is left alone. Several documents on a row: the worst verdict
-    wins (findings.worst), every document keeps its evidence and its date in the summary.
+    wins (findings.worst), every document keeps its evidence and its date in the summary. A
+    verdict ok of the documents is given as ok_human (see _reported); ko, partial and na are not
+    changed.
     """
     links = docs_link.read_links(run_dir)
     if not links:
@@ -173,12 +180,17 @@ def document_verdicts(run_dir: Path, rows: list, category_filter: Optional[list]
             found.setdefault(ref, []).append((verdict, part))
     result: dict = {}
     for ref in sorted(found):
-        verdict = worst(item[0] for item in found[ref])
+        verdict = _reported(worst(item[0] for item in found[ref]))
         result[ref] = {
             "verdict": verdict,
             "finding": synthetic_finding(ref, verdict, [item[1] for item in found[ref]]),
         }
     return result
+
+
+def _reported(verdict: str) -> str:
+    """Return the verdict a row takes from the documents: their ok is only ok_human."""
+    return "ok_human" if verdict == "ok" else verdict
 
 
 def write_verdicts(run_dir: Path, verdicts: dict) -> None:
@@ -411,6 +423,16 @@ def _detail(part: dict, verdict: str) -> str:
     criteria = ", ".join(_criteria(part))
     label = "critères non applicables" if own == "na" else "critères conformes ou non applicables"
     return f"{label} : {criteria}" if criteria else label
+
+
+def _confirmation(parts: list, verdict: str) -> str:
+    """Return what a human confirms: the conforming reports of the parts, and their dates."""
+    conforming = [part for part in parts if _part_verdict(part, verdict) == "ok"] or parts
+    names = []
+    for part in conforming:
+        date = _text(_document_of(part).get("date"), 10)
+        names.append(f"le rapport {_doc_id(part)} " + (f"du {date}" if date else "de date inconnue"))
+    return _cut(f"Conforme d'après {' et '.join(names)}, {CONFIRM}.", MAX_FIELD_LENGTH)
 
 
 def _summary(parts: list, verdict: str) -> str:
