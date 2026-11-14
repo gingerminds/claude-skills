@@ -4539,15 +4539,19 @@ class FixCiToolingContract(unittest.TestCase):
                        "the deploy scripts `deploy.sh`, `deploy.rb`, `deploy.yml`, `deploy-*.sh` and "
                        "`deploy_*.sh` at any depth", "`deploy.php`, `bin/deploy` and the folder `deploy`",
                        "`scripts/ci`", "`scripts/release.sh`",
-                       "`Deploy.php` under `src/`", "it does not close it"):
+                       "`Deploy.php` under `src/`", "it does not close it",
+                       "`.travis.yml`, `.platform`, `.upsun`", "(also `deploy.py`, `deploy.js`",
+                       "`scripts/deploy`, `tools/deploy`", "nor a folder `deploy` under `src/`"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, rails)
         for path in ("bitbucket-pipelines.yml", "azure-pipelines.yml", "netlify.toml", "vercel.json",
                      ".platform.app.yaml", "Taskfile.yml", "scripts/ci/run.sh", "scripts/release.sh",
-                     "deploy.php", "bin/deploy", "config/deploy/production.rb", "ansible/deploy.yml"):
+                     "deploy.php", "bin/deploy", "config/deploy/production.rb", "ansible/deploy.yml",
+                     "deploy.py", "scripts/deploy/prod.sh", ".travis.yml", ".platform/routes.yaml"):
             with self.subTest(path=path):
                 self.assertEqual(fix_guard.path_reason(path, {}), fix_guard.CI_TOOLING)
-        for path in ("src/Deploy/DeployService.php", "resources/js/Pages/Deploy.vue", "docs/deploy.md"):
+        for path in ("src/Deploy/DeployService.php", "resources/js/Pages/Deploy.vue", "docs/deploy.md",
+                     "src/deploy/index.ts"):
             with self.subTest(path=path):
                 self.assertIsNone(fix_guard.path_reason(path, {}))
         self.assertIn("a `Makefile` under `vendor/` is « dossier de dépendances »", rails)

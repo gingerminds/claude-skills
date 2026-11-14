@@ -46,6 +46,12 @@ CI_PATHS = (
     "bitbucket-pipelines.yml", "azure-pipelines.yml", "ci/azure-pipelines-build.yml",
     "netlify.toml", "vercel.json", ".platform.app.yaml", "Taskfile.yml", "taskfile.yaml",
     "scripts/ci/run.sh", "scripts/release.sh",
+    "deploy.py", "deploy.js", "deploy.ts", "tools/deploy.mjs", "scripts/deploy.py", "Deploy.py",
+    "scripts/deploy/prod.sh", "ansible/deploy/site.yml", "tools/deploy/run.sh", "ops/deploy/push.sh",
+    "infra/deploy/main.tf", "bin/deploy/release.sh", ".deploy/hooks.sh",
+    ".travis.yml", ".platform/routes.yaml", ".upsun/config.yaml", ".drone.yml", ".woodpecker.yml",
+    ".woodpecker/build.yaml", ".buildkite/pipeline.yml", "appveyor.yml", ".appveyor.yml",
+    "cloudbuild.yaml", "bitrise.yml",
 )
 
 
@@ -170,6 +176,9 @@ class GuardPathTest(RepoCase):
             "app/Http/Controllers/DeploymentController.php", ".gitlab/merge_request_templates/a.md",
             ".github/CODEOWNERS", ".github/ISSUE_TEMPLATE/bug.md", ".gitignore", "docs/makefile.md",
             "web/modules/custom/z/z.module", "tests/DockerCommandTest.php", "public/js/app.js",
+            "src/deploy/helpers/index.js", "app/Deploy/deploy.php", "docs/deploy.py.md",
+            "resources/js/utils/deployment.js", "src/platform/Config.php", "docs/travis.md",
+            "docs/appveyor.md", "web/modules/custom/platform/platform.module", "assets/deploy.json",
         )
         for path in normal:
             with self.subTest(path=path):
