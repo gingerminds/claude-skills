@@ -88,9 +88,10 @@ INSTALL_FILES = ("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.ya
 SUBMODULE_FILES = ("**/.gitmodules",)
 MINIFIED_FILES = ("**/*.min.*",)
 # CI and execution tooling: pipelines, build files, git hooks, deploy scripts. "ci", ".ci",
-# "scripts/ci", the "deploy" folder (also under "config/"), "bin/deploy", "scripts/release.sh"
-# and "deploy.php" are the paths of the repo root only. A deploy file is held by its script
-# extension: Deploy.php under src/, Deploy.vue or deploy.md are source or documentation.
+# "scripts/ci", the "deploy" folder (also under "config/", "scripts/", "tools/", "ops/", "infra/",
+# "ansible/" and "bin/"), "scripts/release.sh" and "deploy.php" are the paths of the repo root
+# only. A deploy file is held by its script extension: Deploy.php under src/, Deploy.vue,
+# deploy.md or a "deploy" folder under src/ are source or documentation.
 CI_FILES = (
     "**/.gitlab-ci*", "**/.gitlab/ci", "**/.github/workflows", "**/.github/actions",
     "**/.circleci", "**/jenkinsfile",
@@ -99,8 +100,12 @@ CI_FILES = (
     "**/makefile", "**/gnumakefile", "**/dockerfile*", "**/*.dockerfile",
     "**/docker-compose*", "**/compose.y*ml", "**/compose.*.y*ml",
     "**/.husky", "**/.githooks",
+    "**/.travis.y*ml", "**/.platform", "**/.upsun", "**/.drone.y*ml", "**/.woodpecker*",
+    "**/.buildkite", "**/appveyor.yml", "**/.appveyor.yml", "**/cloudbuild.y*ml", "**/bitrise.yml",
     "**/deploy.sh", "**/deploy.rb", "**/deploy.yml", "**/deploy.yaml", "deploy.php",
-    "**/deploy-*.sh", "**/deploy_*.sh", "deploy", "config/deploy", "bin/deploy",
+    "**/deploy.py", "**/deploy.js", "**/deploy.mjs", "**/deploy.cjs", "**/deploy.ts",
+    "**/deploy-*.sh", "**/deploy_*.sh", "deploy", "config/deploy", "bin/deploy", ".deploy",
+    "scripts/deploy", "tools/deploy", "ops/deploy", "infra/deploy", "ansible/deploy",
     "ci", ".ci", "scripts/ci", "scripts/release.sh",
 )
 
