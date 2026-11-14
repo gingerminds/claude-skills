@@ -491,6 +491,7 @@ def _cmd_key_pages(args, services) -> int:
     target = context.get("target")
     if not isinstance(target, dict):
         raise ContextError("context.json : « target » est absent.")
+    _refuse_preprod_as_prod(context)
     home = _target_url(target, "prod_url" if probes.is_prod_run(context) else "preprod_url")
     if not urlsplit(home).path:
         home += "/"
@@ -928,7 +929,14 @@ def _toolbox_target(context: dict) -> tuple:
         raise ContextError("context.json : « target » est absent.")
     if probes.is_prod_run(context):
         return _target_url(target, "prod_url"), "respect"
+    _refuse_preprod_as_prod(context)
     return _target_url(target, "preprod_url"), "ignore"
+
+
+def _refuse_preprod_as_prod(context: dict) -> None:
+    """Raise a ContextError when the audit would treat the prod as a preprod."""
+    if probes.preprod_is_prod(context):
+        raise ContextError(probes.PREPROD_IS_PROD)
 
 
 def _cmd_toolbox_env(args, services) -> int:
@@ -2306,6 +2314,8 @@ def validate_context(context: dict) -> list:
     target = context.get("target")
     if isinstance(target, dict) and target.get("prod_live") is True and not target.get("prod_url"):
         errors.append(_invalid("target.prod_url", "est vide alors que target.prod_live est vrai"))
+    if probes.preprod_is_prod(context):
+        errors.append(probes.PREPROD_IS_PROD)
     return errors
 
 

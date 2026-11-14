@@ -12,7 +12,7 @@ import cqa_plan
 import cqa_ssh_ro
 from cqa import (
     categories, checked, context_docs, docs_link, docs_verdicts, fix_guard, fix_mr, fix_names,
-    fix_state, fix_summary, report, ssh_ro,
+    fix_state, fix_summary, probes, report, ssh_ro,
 )
 from cqa import secrets as secret_scan
 from cqa.lots import DOCUMENT_LOT_ID, MOBILE_TERMS
@@ -4315,6 +4315,42 @@ class ThirdPartyWordingContract(unittest.TestCase):
         self.assertIn("a plugin added since is custom by default", ref)
         self.assertNotIn("so an earlier answer is proposed again", ref)
         self.assertIn("(SSH alias, preprod URL, Notion copy, key pages, excluded third-party plugins)", SKILL.read_text(encoding="utf-8"))
+
+
+class PreprodIsProdContract(unittest.TestCase):
+    """The instructions say what the code refuses and what the lead is asked about the target."""
+
+    def test_the_target_step_asks_whether_an_open_unmarked_host_is_the_prod(self):
+        skill = _text(SKILL)
+        step = skill[skill.index("\n3. Target:"):skill.index("\n4. SSH alias")]
+        reference = _section(_text(CONTEXT_MD), "3. Target")
+        for text in (step, reference):
+            self.assertIn("« Cette URL est-elle la prod ? »", text)
+            for word in ("`preprod`", "`staging`", "`recette`", "`dev`"):
+                self.assertIn(word, text)
+        self.assertIn("Access `open`", step)
+        self.assertIn("A host behind `basic_auth` or `ip_filtered` is not asked", reference)
+        self.assertIn("no extra request is made", reference)
+
+    def test_the_instructions_name_what_the_code_refuses(self):
+        skill = _text(SKILL)
+        step = skill[skill.index("\n3. Target:"):skill.index("\n4. SSH alias")]
+        self.assertIn("the same host and port as `prod_url`", step)
+        self.assertIn("exit 6", step)
+        reference = _section(_text(CONTEXT_MD), "3. Target")
+        for needle in ("`context --check`", "`toolbox-env`", "`crawl-estimate`", "`key-pages-check`",
+                       "the same host and port as `prod_url`", "exit 6",
+                       "A prod run (`prod_live` true with a J0 or J+7 phase) may target `prod_url`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, reference)
+        for phase in ("MEL J0", "Post-MEL J+7"):
+            self.assertIn(phase, probes.PREPROD_IS_PROD)
+        self.assertNotIn(EM_DASH, probes.PREPROD_IS_PROD)
+
+    def test_the_commands_the_reference_names_refuse_a_preprod_that_is_the_prod(self):
+        commands = _python_commands(cqa_plan)
+        for name in ("context", "toolbox-env", "crawl-estimate", "key-pages-check"):
+            self.assertIn(name, commands)
 
 
 class SecretFilesContract(unittest.TestCase):

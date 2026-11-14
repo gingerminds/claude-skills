@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 import cqa_plan
-from cqa import target
+from cqa import probes, target
 from cqa.lots import TOOLS
 from cqa.plan import filter_plan, plan_digest
 from cqa.version import plugin_version
@@ -1003,6 +1003,85 @@ class ContextCheckTest(RunDirCase):
                 self.assertIn(needle, report["errors"][0])
                 self.assertNotIn(chr(0x2014), report["errors"][0])
 
+    def with_target(self, preprod, prod, phase=None, live=False):
+        context = valid_context()
+        context["phase_filter"] = phase
+        context["target"].update(preprod_url=preprod, prod_url=prod, prod_live=live)
+        return context
+
+    def test_context_refuses_preprod_same_origin_as_prod(self):
+        prod = "https://www.example.org"
+        cases = {
+            "same url": (prod, prod, None, False),
+            "trailing slash": (prod + "/", prod, None, False),
+            "a path of the same origin": (prod + "/fr", prod, None, False),
+            "host case": ("https://WWW.Example.org", prod, None, False),
+            "trailing dot": ("https://www.example.org.", prod, None, False),
+            "explicit default port": ("https://www.example.org:443", prod, None, False),
+            "http address of the same host": ("http://www.example.org", prod, None, False),
+            "prod live on a preprod phase": (prod, prod, "Recette J-30", True),
+            "prod not live on a prod phase": (prod, prod, "MEL J0", False),
+            "other port, same on both": ("https://x.example.org:8443", "https://x.example.org:8443",
+                                         "Build", True),
+        }
+        for label, (preprod, prod_url, phase, live) in cases.items():
+            with self.subTest(label):
+                code, report, _ = self.check(self.with_target(preprod, prod_url, phase, live))
+                self.assertEqual(code, 6)
+                self.assertFalse(report["ok"])
+                self.assertEqual(len(report["errors"]), 1, report["errors"])
+                message = report["errors"][0]
+                self.assertIn("target.preprod_url", message)
+                self.assertIn("target.prod_url", message)
+                self.assertIn("MEL J0", message)
+                self.assertNotIn("example.org", message)
+                self.assertNotIn(chr(0x2014), message)
+
+    def test_context_allows_distinct_preprod_and_prod(self):
+        cases = {
+            "preprod host": ("https://preprod.example.org", "https://www.example.org"),
+            "other port": ("https://www.example.org:8443", "https://www.example.org"),
+            "no prod url": ("https://www.example.org", None),
+            "empty prod url": ("https://www.example.org", ""),
+            "apex and www": ("https://example.org", "https://www.example.org"),
+            "other domain": ("https://www.example.net", "https://www.example.org"),
+        }
+        for label, (preprod, prod) in cases.items():
+            for phase, live in ((None, False), ("Recette J-30", bool(prod)), ("MEL J0", bool(prod))):
+                with self.subTest(label, phase=phase):
+                    code, report, _ = self.check(self.with_target(preprod, prod, phase, live))
+                    self.assertEqual((code, report["errors"]), (0, []))
+
+    def test_the_target_of_the_probes_is_never_a_preprod_that_is_the_prod(self):
+        context = self.with_target("https://www.example.org/", "https://www.example.org")
+        self.assertTrue(probes.preprod_is_prod(context))
+        with self.assertRaises(ValueError) as caught:
+            probes.target_url(context)
+        self.assertEqual(str(caught.exception), probes.PREPROD_IS_PROD)
+        context = self.with_target("https://www.example.org/", "https://www.example.org",
+                                   "MEL J0", True)
+        self.assertFalse(probes.preprod_is_prod(context))
+        self.assertEqual(probes.target_url(context), "https://www.example.org")
+        for target_value in (None, "x", {"preprod_url": 3, "prod_url": ["a"]},
+                             {"preprod_url": "https://www.example.org:99999",
+                              "prod_url": "https://www.example.org:99999"}):
+            with self.subTest(target=target_value):
+                self.assertFalse(probes.preprod_is_prod({"target": target_value}))
+
+    def test_prod_run_may_target_prod_url(self):
+        for phase in ("MEL J0", "Post-MEL J+7"):
+            with self.subTest(phase):
+                context = self.with_target("https://www.example.org", "https://www.example.org",
+                                           phase, True)
+                code, report, _ = self.check(context)
+                self.assertEqual((code, report["errors"]), (0, []))
+                code, out, err = self.run_main(["toolbox-env", self.run_dir])
+                self.assertEqual(code, 0, err)
+                lines = out.splitlines()
+                self.assertEqual(lines[:2], ["GM_AUDIT_TARGET=https://www.example.org",
+                                             "GM_AUDIT_ROBOTS=respect"])
+                self.assertIn("GM_CQA_PROD_RUN=1", lines)
+
     def test_duplicate_repo_names_are_rejected(self):
         context = valid_context()
         context["repos"][1]["name"] = "laravel"
@@ -1689,6 +1768,20 @@ class ToolboxEnvTest(RunDirCase):
         )
         self.assertFalse(any(line.startswith("GM_AUDIT_PROD_ORIGIN") for line in lines))
 
+    def test_toolbox_env_refuses_a_preprod_that_is_the_prod(self):
+        prod = "https://www.example.org"
+        for label, changes in {
+            "no phase": {},
+            "live prod on a preprod phase": {"phase_filter": "Recette J-30", "target__prod_live": True},
+            "prod not live on a prod phase": {"phase_filter": "MEL J0"},
+        }.items():
+            with self.subTest(label):
+                self.write_context(target__preprod_url=prod, target__prod_url=prod, **changes)
+                code, out, err = self.run_main(["toolbox-env", self.run_dir])
+                self.assertEqual((code, out), (6, ""))
+                self.assertIn("target.preprod_url", err)
+                self.assertNotIn("example.org", err)
+
     def test_toolbox_env_flags_a_prod_run(self):
         for phase in ("MEL J0", "Post-MEL J+7"):
             with self.subTest(phase=phase):
@@ -2226,6 +2319,16 @@ class KeyPagesCheckTest(RunDirCase):
         self.assertEqual(code, 2)
         self.assertEqual(opener.requests, [])
 
+    def test_a_preprod_that_is_the_prod_is_never_requested(self):
+        opener = SiteOpener({HOME: (200, "")})
+        code, out, err = self.check_pages(
+            [HOME], opener, target__preprod_url="https://www.example.org",
+            target__prod_url="https://www.example.org",
+        )
+        self.assertEqual((code, out), (6, ""))
+        self.assertIn("target.preprod_url", err)
+        self.assertEqual(opener.requests, [])
+
     def test_unreachable_page_has_a_null_status(self):
         class Down:
             def open(self, request, timeout=None):
@@ -2438,6 +2541,14 @@ class CrawlEstimateTest(RunDirCase):
                 ["crawl-estimate", self.run_dir, *(extra or [])],
                 env={**self.fast, **(env or {})},
             )
+
+    def test_crawl_estimate_refuses_a_preprod_that_is_the_prod(self):
+        self.serve({"/": b"home"})
+        self.write_context(target__preprod_url=self.base, target__prod_url=self.base + "/")
+        code, out, err = self.estimate()
+        self.assertEqual((code, out), (6, ""))
+        self.assertIn("target.preprod_url", err)
+        self.assertEqual(self.server.requests, [])
 
     def test_crawl_estimate_counts_the_sitemap_and_times_the_key_pages(self):
         prod = "https://www.example.org"

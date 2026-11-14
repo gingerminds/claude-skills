@@ -98,12 +98,17 @@ It gives `{"status", "access"}`, plus `location` for a redirect it did not follo
 
 | `access` | Answer | What to do |
 |---|---|---|
-| `open` | 2xx or 3xx | nothing |
+| `open` | 2xx or 3xx | the host check below |
 | `basic_auth` | 401 | ask the credentials (below) |
 | `ip_filtered` | 403 | say « HTTP indisponible hors réseau agence » |
 | `unreachable` | no answer, or another status | say « La préprod ne répond pas depuis ce poste (<status>) : vérifier l'URL ou le VPN. » |
 
 With `location`, the preprod redirects to another origin: show it and ask « La préprod redirige vers <location>. Quelle adresse auditer ? » with « <location> » and « <preprod_url> ».
+
+The preprod is never the prod. The toolbox ignores robots.txt, crawls up to 240 minutes and runs the mobile and the TLS tests on a preprod, so a prod audited as a preprod is a live site under full load:
+
+- `preprod_url` with the same host and port as `prod_url` (the scheme, the path and the case do not count), outside a prod run: `context --check` and the commands that send requests to the target (`toolbox-env`, `crawl-estimate`, `key-pages-check`) refuse it, exit 6, the message names what to correct. A prod run (`prod_live` true with a J0 or J+7 phase) may target `prod_url`. When `PROJECT.md` gives one address for both, do not go on: ask « URL de la préprod (saisir la valeur dans « Autre ») ? » with « Annuler l'audit ».
+- Access `open` and a host that contains none of `preprod`, `staging`, `recette`, `dev` (the code does not read robots or `noindex` signals: no extra request is made): ask « Cette URL est-elle la prod ? » with « Non, c'est la préprod » and « Oui, c'est la prod ». « Oui »: audit nothing on it as a preprod; say « Cette adresse est la prod : indiquer l'URL de la préprod, ou lancer l'audit de la prod avec --phase "MEL J0" ou --phase "Post-MEL J+7". » and ask the preprod URL again (« Autre », or « Annuler l'audit »). A host behind `basic_auth` or `ip_filtered` is not asked.
 
 Prod run (`prod_live` true with a J0 or J+7 phase): the toolbox and the sub-agents target `prod_url`. Run `probe-target` on `prod_url` as well; `target.access` is then the answer of the prod.
 

@@ -80,15 +80,53 @@ def is_prod_run(context: dict) -> bool:
     )
 
 
+PREPROD_IS_PROD = (
+    "context.json : « target.preprod_url » désigne le même site que « target.prod_url » (même hôte "
+    "et même port) alors que l'audit ne cible pas la prod : la prod serait auditée comme une "
+    "préprod (robots.txt ignoré, crawl et tests complets sur le site en ligne). Corriger "
+    "« target.preprod_url » avec l'adresse de la préprod ; pour auditer la prod, lancer l'audit "
+    "avec la phase « MEL J0 » ou « Post-MEL J+7 » et la prod en ligne."
+)
+
+
+def preprod_is_prod(context: dict) -> bool:
+    """Whether the audit targets the preprod while target.preprod_url is the site of
+    target.prod_url: the same host and port, whatever the scheme, the path and the case (the
+    http and the https address of one site are one site). A prod run never is."""
+    target = context.get("target")
+    if not isinstance(target, dict) or is_prod_run(context):
+        return False
+    preprod, prod = _site(target.get("preprod_url")), _site(target.get("prod_url"))
+    return preprod is not None and preprod == prod
+
+
+def _site(url) -> Optional[tuple]:
+    """Return (host, port) of a URL, the port None when it is the default one of its scheme."""
+    host = url_host(url)
+    if host is None:
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    if port == _DEFAULT_PORTS.get(parts.scheme.lower()):
+        port = None
+    return host, port
+
+
 def target_url(context: dict) -> str:
     """Return the base URL of the audit: the prod when is_prod_run, else the preprod.
 
     Raises ValueError, with a message that never quotes the URL, when the URL is missing, not a
-    plain http(s) URL, or carries a query or a fragment (a token could hide there).
+    plain http(s) URL, or carries a query or a fragment (a token could hide there), or when the
+    audit targets the preprod and its URL is the prod (preprod_is_prod).
     """
     target = context.get("target")
     if not isinstance(target, dict):
         raise ValueError("context.json : « target » est absent.")
+    if preprod_is_prod(context):
+        raise ValueError(PREPROD_IS_PROD)
     key = "prod_url" if is_prod_run(context) else "preprod_url"
     url = target.get(key)
     if not isinstance(url, str) or not url:
