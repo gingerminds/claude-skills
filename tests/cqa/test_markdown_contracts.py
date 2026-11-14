@@ -4515,7 +4515,22 @@ class FixCiToolingContract(unittest.TestCase):
         for family in self.REFERENCE_FAMILIES:
             with self.subTest(family=family):
                 self.assertIn(f"`{family}`", rails)
-        self.assertIn("the deploy scripts `deploy`, `deploy.*`, `deploy-*.sh` and `deploy_*.sh`", rails)
+        for needle in ("`bitbucket-pipelines.yml`, `azure-pipelines*.yml`, `netlify.toml`, `vercel.json`",
+                       "`.platform.app.yaml`", "`Taskfile.yml`",
+                       "the deploy scripts `deploy.sh`, `deploy.rb`, `deploy.yml`, `deploy-*.sh` and "
+                       "`deploy_*.sh` at any depth", "`deploy.php`, `bin/deploy` and the folder `deploy`",
+                       "`scripts/ci`", "`scripts/release.sh`",
+                       "`Deploy.php` under `src/`", "it does not close it"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, rails)
+        for path in ("bitbucket-pipelines.yml", "azure-pipelines.yml", "netlify.toml", "vercel.json",
+                     ".platform.app.yaml", "Taskfile.yml", "scripts/ci/run.sh", "scripts/release.sh",
+                     "deploy.php", "bin/deploy", "config/deploy/production.rb", "ansible/deploy.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(fix_guard.path_reason(path, {}), fix_guard.CI_TOOLING)
+        for path in ("src/Deploy/DeployService.php", "resources/js/Pages/Deploy.vue", "docs/deploy.md"):
+            with self.subTest(path=path):
+                self.assertIsNone(fix_guard.path_reason(path, {}))
         self.assertIn("a `Makefile` under `vendor/` is « dossier de dépendances »", rails)
         self.assertIn("--line 1 --label ci_tooling`", rails)
 
@@ -4574,6 +4589,17 @@ class SecretFilesContract(unittest.TestCase):
                 allowed, reason = ssh_ro.check_command(["cat", path])
                 self.assertFalse(allowed)
                 self.assertIn("porteur de secrets", reason)
+
+    def test_server_reference_says_the_backup_copies_are_refused_and_a_pattern_is_not_a_file(self):
+        server = _text(REFERENCES / "server.md")
+        self.assertIn("with their backup copies (`settings.py.bak`, `env.php.bak`, `.npmrc.old`", server)
+        self.assertIn("The pattern of a `grep` is text to look for, not a file", server)
+        for path in ("/srv/app/settings.py.bak", "/srv/app/env.php.bak", "/srv/app/.npmrc.old",
+                     "/srv/app/secrets.yml~", "/srv/app/config/settings/production.py.orig"):
+            with self.subTest(path=path):
+                self.assertFalse(ssh_ro.check_command(["cat", path])[0])
+        self.assertTrue(ssh_ro.check_command(["grep", "-c", "credentials", "/var/log/x.log"])[0])
+        self.assertFalse(ssh_ro.check_command(["grep", "-c", "x", "/srv/app/settings.py"])[0])
 
     def test_server_reference_says_which_names_stay_allowed_to_list(self):
         server = _text(REFERENCES / "server.md")

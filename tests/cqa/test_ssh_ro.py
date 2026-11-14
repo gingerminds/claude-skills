@@ -1257,6 +1257,75 @@ class SecretFilesTest(unittest.TestCase):
                 self.assertIn("porteur de secrets", reason)
                 self.assertNotIn(chr(0x2014), reason)
 
+    BACKUPS = [
+        ["cat", "/var/www/app/settings.py.bak"],
+        ["cat", "/var/www/app/settings.py~"],
+        ["cat", "/var/www/app/settings.pyc"],
+        ["cat", "/var/www/app/config/settings/production.py.orig"],
+        ["cat", "/var/www/app/config/settings/production.py~"],
+        ["cat", "/var/www/app/app/etc/env.php.bak"],
+        ["cat", "/var/www/app/.npmrc.old"],
+        ["cat", "/var/www/app/secrets.yml.bak"],
+        ["cat", "/var/www/app/secrets.yaml.enc"],
+        ["cat", "/var/www/app/storage/app/service-account-prod.json.bak"],
+        ["cat", "/var/www/app/credentials.json.bak"],
+        ["docker", "exec", "app", "cat", "/app/config/settings/production.py.orig"],
+    ]
+    PATTERNS = [
+        ["grep", "-c", "credentials", "/var/www/app/storage/logs/laravel.log"],
+        ["grep", "-i", "credentials", "/var/log/nginx/error.log"],
+        ["grep", "settings.py", "/var/log/syslog"],
+        ["grep", "-n", "-e", "settings.py", "-e", ".env", "/var/log/syslog"],
+        ["grep", "-ie", "wp-config", "/var/log/syslog"],
+        ["grep", "-ewp-config", "/var/log/syslog"],
+        ["grep", "--regexp=htpasswd", "/var/log/nginx/error.log"],
+        ["grep", "--regexp", "auth.json", "/var/log/nginx/error.log"],
+        ["grep", "-A", "2", "-m", "5", "sess_", "/var/log/php-fpm.log"],
+        ["docker", "exec", "app", "grep", "-c", "credentials", "/var/log/app.log"],
+        ["docker", "compose", "-f", "/srv/app/docker-compose.yml", "exec", "-T", "app", "grep",
+         "settings.py", "/var/log/x.log"],
+    ]
+    PATTERN_DOES_NOT_FREE_THE_FILES = [
+        ["grep", "credentials", "/var/www/app/settings.py"],
+        ["grep", "-e", "x", "/var/www/app/settings.py.bak"],
+        ["grep", "-n", "password", "/var/www/app/.env"],
+        ["grep", "--regexp=x", "/var/www/app/wp-config.php"],
+        ["grep", "-ex", "/var/www/app/app/etc/env.php.bak"],
+        ["grep", "x", "/var/lib/php/sessions/sess_abc"],
+        ["docker", "exec", "app", "grep", "credentials", "/app/settings.py"],
+        ["docker", "exec", "app", "grep", "-e", "x", "/app/.env"],
+    ]
+
+    def test_ssh_ro_refuses_the_backup_copies_of_the_secret_files(self):
+        for argv in self.BACKUPS:
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertFalse(allowed)
+                self.assertIn("porteur de secrets", reason)
+
+    def test_a_secret_file_name_in_a_grep_pattern_is_not_a_read(self):
+        for argv in self.PATTERNS:
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertTrue(allowed, reason)
+
+    def test_a_grep_pattern_never_frees_the_file_it_searches(self):
+        for argv in self.PATTERN_DOES_NOT_FREE_THE_FILES:
+            with self.subTest(argv=argv):
+                allowed, reason = check_command(argv)
+                self.assertFalse(allowed)
+
+    def test_the_other_checks_still_apply_to_a_grep_pattern(self):
+        for argv in (
+            ["grep", "a;b", "/var/log/syslog"],
+            ["grep", "$HOME", "/var/log/syslog"],
+            ["grep", "..", "/var/log/syslog"],
+            ["grep", "-e", "a|b", "/var/log/syslog"],
+            ["grep", "é", "/var/log/syslog"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertFalse(check_command(argv)[0])
+
     def test_ssh_ro_refuses_run_secrets_on_host_and_docker_exec(self):
         for argv in self.RUN_SECRETS:
             with self.subTest(argv=argv):

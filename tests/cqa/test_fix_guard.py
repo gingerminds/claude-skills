@@ -40,8 +40,12 @@ CI_PATHS = (
     "Makefile", "web/Makefile", "Dockerfile", "docker/php/Dockerfile", "Dockerfile.prod",
     "docker-compose.yml", "docker-compose.override.yml", "docker/docker-compose.dev.yaml",
     "compose.yaml", "compose.prod.yml", ".husky/pre-push", ".husky/_/husky.sh", ".githooks/pre-commit",
-    "deploy.sh", "scripts/deploy.php", "deploy/run.sh", "scripts/deploy-prod.sh", "ci/test.sh",
-    "Jenkinsfile", ".circleci/config.yml",
+    "deploy.sh", "deploy.php", "scripts/deploy.sh", "config/deploy.rb", "ansible/deploy.yml",
+    "deploy/run.sh", "config/deploy/production.rb", "bin/deploy", "scripts/deploy-prod.sh",
+    "ci/test.sh", "Jenkinsfile", ".circleci/config.yml",
+    "bitbucket-pipelines.yml", "azure-pipelines.yml", "ci/azure-pipelines-build.yml",
+    "netlify.toml", "vercel.json", ".platform.app.yaml", "Taskfile.yml", "taskfile.yaml",
+    "scripts/ci/run.sh", "scripts/release.sh",
 )
 
 
@@ -159,6 +163,9 @@ class GuardPathTest(RepoCase):
         repo = {"name": "front", "stack": "wordpress"}
         normal = (
             "README.md", "src/Service/DeployService.php", "web/app/themes/t/functions.php",
+            "app/Console/Commands/Deploy.php", "resources/js/Pages/Deploy.vue", "docs/deploy.md",
+            "src/Deploy/DeployService.php", "scripts/deploy.php", "src/deploy/index.ts",
+            "tools/ci/job.yml", "scripts/build.sh", "docs/release.sh.md",
             "web/app/themes/t/style.css", "docs/ci.md", "docs/deploy-notes.md", "src/ci/Runner.php",
             "app/Http/Controllers/DeploymentController.php", ".gitlab/merge_request_templates/a.md",
             ".github/CODEOWNERS", ".github/ISSUE_TEMPLATE/bug.md", ".gitignore", "docs/makefile.md",

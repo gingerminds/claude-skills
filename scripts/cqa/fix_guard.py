@@ -87,16 +87,21 @@ INSTALL_FILES = ("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.ya
                  "composer.json", "composer.lock")
 SUBMODULE_FILES = ("**/.gitmodules",)
 MINIFIED_FILES = ("**/*.min.*",)
-# CI and execution tooling: pipelines, build files, git hooks, deploy scripts. "ci" and ".ci"
-# are the folders of the repo root only.
+# CI and execution tooling: pipelines, build files, git hooks, deploy scripts. "ci", ".ci",
+# "scripts/ci", the "deploy" folder (also under "config/"), "bin/deploy", "scripts/release.sh"
+# and "deploy.php" are the paths of the repo root only. A deploy file is held by its script
+# extension: Deploy.php under src/, Deploy.vue or deploy.md are source or documentation.
 CI_FILES = (
     "**/.gitlab-ci*", "**/.gitlab/ci", "**/.github/workflows", "**/.github/actions",
     "**/.circleci", "**/jenkinsfile",
+    "**/bitbucket-pipelines.yml", "**/azure-pipelines*.yml", "**/netlify.toml", "**/vercel.json",
+    "**/.platform.app.yaml", "**/taskfile.yml", "**/taskfile.yaml",
     "**/makefile", "**/gnumakefile", "**/dockerfile*", "**/*.dockerfile",
     "**/docker-compose*", "**/compose.y*ml", "**/compose.*.y*ml",
     "**/.husky", "**/.githooks",
-    "**/deploy", "**/deploy.*", "**/deploy-*.sh", "**/deploy_*.sh",
-    "ci", ".ci",
+    "**/deploy.sh", "**/deploy.rb", "**/deploy.yml", "**/deploy.yaml", "deploy.php",
+    "**/deploy-*.sh", "**/deploy_*.sh", "deploy", "config/deploy", "bin/deploy",
+    "ci", ".ci", "scripts/ci", "scripts/release.sh",
 )
 
 REPORT_OUTCOMES = ("fixed", "skipped", "question", "needs_command")
