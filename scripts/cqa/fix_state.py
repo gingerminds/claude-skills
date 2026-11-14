@@ -30,9 +30,11 @@ _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _ALIAS = re.compile(r"[a-z0-9]+")
 _BLOB = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
-# The secret labels the lead may waive (key["secret_waivers"]): the heuristic ones of the
-# guard (fix_guard.HEURISTIC_SECRET_LABELS, kept equal there).
-WAIVABLE_LABELS = frozenset({"credential_assignment", "credential_define"})
+# The label of a CI or build tooling file the guard holds for the lead (fix_guard.CI_TOOLING).
+CI_LABEL = "ci_tooling"
+# The labels the lead may waive (key["secret_waivers"]): the heuristic secret ones of the guard
+# (fix_guard.HEURISTIC_SECRET_LABELS) and the CI one.
+WAIVABLE_LABELS = frozenset({"credential_assignment", "credential_define", CI_LABEL})
 
 
 class StateError(ValueError):

@@ -68,6 +68,7 @@ PRODUCTION_SECTIONS = {
 }
 ADD_FORMAT = "--add attend « <repo>|<dossier>|<image>|<type>|<commande> » (type : install, build, lint ou test)."
 DOCKER_UNCHECKED = "Docker ne répond pas : présence des images non vérifiée."
+_CI_SHOWN = 5
 KEY_HELP = "clé de la passe : le nom du repo (fix/candidates.json)"
 SECTION_HELP = "alias de la section (securite, qualite...)"
 # Push settings of the dev's config that could send more than the branch, trigger GitLab
@@ -189,16 +190,17 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--message-file", type=Path,
                      help="fichier du message du commit prévu (avec --staged)")
     sub = _command(commands, "waive-secret",
-                   "lève une alerte de secret heuristique sur une ligne, avec l'accord du lead",
+                   "lève une alerte de secret heuristique, ou un fichier de CI, avec l'accord du lead",
                    _cmd_waive_secret)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
     sub.add_argument("key", help=KEY_HELP)
     sub.add_argument("--sha", required=True,
                      help="SHA du commit (ou blob indexé, avec guard --staged) du problème")
     sub.add_argument("--path", required=True, help="chemin du fichier du problème")
-    sub.add_argument("--line", type=int, required=True, help="ligne du problème")
+    sub.add_argument("--line", type=int, required=True,
+                     help="ligne du problème (1 pour un fichier de CI)")
     sub.add_argument("--label", required=True,
-                     help="label du problème (credential_assignment, credential_define)")
+                     help="label du problème (credential_assignment, credential_define, ci_tooling)")
     sub = _command(commands, "review-scope", "diff d'une passe : relecture allégée ou non",
                    _cmd_review_scope)
     sub.add_argument("run_dir", type=Path, help="dossier du run")
@@ -1386,6 +1388,7 @@ def _cmd_guard(args, services: Services) -> int:
     if problems:
         print(f"Garde-fou : {len(problems)} problème(s) {where}, détail dans « problems ».",
               file=sys.stderr)
+        _print_ci_notice(problems)
         return EXIT_REFUSED
     return EXIT_OK
 
@@ -1405,6 +1408,32 @@ def _staged_problems(run_dir: Path, key: dict, worktree: Path, message: str, run
                                   known_values_from_env(), run, gitleaks=gitleaks)
 
 
+def _ci_notice(problems: list) -> str:
+    """Return the notice for the lead on the CI or build tooling files a guard run holds, in
+    French (which file, why, how to lift), or "" when it holds none. Only paths are quoted."""
+    held = [item for item in problems if item.get("label") == fix_guard.CI_LABEL and item["path"]]
+    if not held:
+        return ""
+    paths = sorted({item["path"] for item in held})
+    shown = ", ".join(json.dumps(path, ensure_ascii=False) for path in paths[:_CI_SHOWN])
+    if len(paths) > _CI_SHOWN:
+        shown += f" et {len(paths) - _CI_SHOWN} autre(s)"
+    text = (f"Fichier de CI ou d'outillage modifié ({shown}) : la CI s'exécute au push, avant "
+            "toute relecture. Seul le lead peut le laisser partir, après l'avoir relu : "
+            "cqa_fix.py waive-secret <dossier du run> <clé> --sha <sha> --path <chemin> "
+            f"--line 1 --label {fix_guard.CI_LABEL} (sha et chemin dans « problems »). Sans "
+            "levée rien n'est poussé ; le lead peut aussi retirer le correctif (cqa_fix.py drop).")
+    if not all(item["waivable"] for item in held):
+        text += " Un fichier supprimé ne se lève pas : retirer le correctif."
+    return text
+
+
+def _print_ci_notice(problems: list) -> None:
+    notice = _ci_notice(problems)
+    if notice:
+        print(notice, file=sys.stderr)
+
+
 def _note(scanner) -> None:
     """Tell the lead, on stderr, when gitleaks did not run (the home rules ran alone)."""
     if scanner.note:
@@ -1412,19 +1441,20 @@ def _note(scanner) -> None:
 
 
 def _cmd_waive_secret(args, services: Services) -> int:
-    """Record the lead's waiver of one heuristic secret alert that the guard reports now.
+    """Record the lead's waiver of one heuristic secret alert, or of one CI or build tooling
+    file (label ci_tooling, line 1), that the guard reports now.
 
     The alert is named by the sha of its commit in <start_sha>..HEAD (or the blob of its path
     in the index, as guard --staged prints it), its path, line and label. Only a label of
-    fix_guard.HEURISTIC_SECRET_LABELS may be waived. The waiver is keyed on the blob of the
+    fix_state.WAIVABLE_LABELS may be waived. The waiver is keyed on the blob of the
     path (its content): it holds while the file is unchanged, in whatever commit a drop
     replays it, and ends with any change of the file. It keeps no text of the line.
     """
-    heuristic = sorted(fix_guard.HEURISTIC_SECRET_LABELS)
-    if args.label not in fix_guard.HEURISTIC_SECRET_LABELS:
-        raise UsageError(f"--label {args.label} : seule une alerte heuristique "
-                         f"({', '.join(heuristic)}) peut être levée ; un autre secret ne "
-                         "l'est jamais, son correctif est retiré.")
+    waivable = sorted(fix_state.WAIVABLE_LABELS)
+    if args.label not in fix_state.WAIVABLE_LABELS:
+        raise UsageError(f"--label {args.label} : seule une alerte heuristique de secret ou un "
+                         f"fichier de CI ({', '.join(waivable)}) peut être levé ; un autre "
+                         "problème ne l'est jamais, son correctif est retiré.")
     if args.line < 1:
         raise UsageError("--line : un numéro de ligne à partir de 1 est attendu.")
     run_dir = args.run_dir.resolve()
@@ -2382,6 +2412,7 @@ def _cmd_publish(args, services: Services) -> int:
         _emit({"ok": False, "problems": problems, "note": scanner.note})
         print(f"Garde-fou : {len(problems)} problème(s) sur la branche {branch}, rien n'a été "
               "poussé : détail dans « problems ».", file=sys.stderr)
+        _print_ci_notice(problems)
         return EXIT_REFUSED
     unreported = _unreported(worktree, key, run)
     if unreported:

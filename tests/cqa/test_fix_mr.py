@@ -11,7 +11,7 @@ import cqa_fix
 from cqa import fix_mr, fix_state
 from tests.cqa.test_cli_fix import GITLEAKS_DOWN
 from tests.cqa.test_fix_git import BASE, GitCase, HOST, KEY, PREFIX, flight, mr
-from tests.cqa.test_fix_guard import GITLEAKS, VENDOR_KEY, problem, secret
+from tests.cqa.test_fix_guard import CI_TOOLING, GITLEAKS, VENDOR_KEY, problem, secret
 from tests.cqa.test_git_tools import commit, git as real_git
 
 SECTION = ["--section", "securite"]
@@ -1779,6 +1779,59 @@ class PublishTest(MrCase):
         self.assertEqual(self.remote(self.branch), "")
         self.assertEqual(self.glab_args("mr"), [])
         self.assertEqual(self.key()["step"], "reviewed")
+
+    def ci_commit(self):
+        """Commit a CI file as a fix of CQ-3, recorded in the state like the fixer's commits."""
+        sha = self.fixer_commit(self.worktree, ".gitlab-ci.yml",
+                                "fix(securite CQ-3): run the audit in the pipeline")
+        state = self.state()
+        state["keys"][KEY]["rows"]["3"]["commits"].append(sha)
+        fix_state.save(self.run_dir, state)
+        return sha
+
+    def test_ci_change_is_suspect_and_blocks_push_until_lifted(self):
+        self.reviewed()
+        sha = self.ci_commit()
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 5)
+        self.assertEqual(json.loads(out)["problems"], [
+            problem(sha, 3, ".gitlab-ci.yml", CI_TOOLING, "suspect", 1, "ci_tooling", True)])
+        self.assertIn('".gitlab-ci.yml"', err)
+        self.assertIn("la CI s'exécute au push, avant toute relecture", err)
+        self.assertIn("--line 1 --label ci_tooling", err)
+        self.assertEqual(self.remote(self.branch), "")
+        self.assertFalse([command for command in self.gitlab.git if "push" in command])
+        self.assertEqual(self.glab_args("mr"), [])
+        self.assertEqual(self.key()["step"], "reviewed")
+        code, out, err = self.cli("waive-secret", KEY, "--sha", sha, "--path", ".gitlab-ci.yml",
+                                  "--line", "1", "--label", "ci_tooling")
+        self.assertEqual(code, 0, err)
+        again = self.fixer_commit(self.worktree, ".gitlab-ci.yml",
+                                  "fix(securite CQ-3): add a job to the pipeline")
+        state = self.state()
+        state["keys"][KEY]["rows"]["3"]["commits"].append(again)
+        fix_state.save(self.run_dir, state)
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 5)
+        self.assertEqual([item["sha"] for item in json.loads(out)["problems"]], [again])
+        self.assertEqual(self.remote(self.branch), "")
+        self.assertEqual(self.glab_args("mr"), [])
+
+    def test_ci_change_lifted_by_lead_passes(self):
+        self.reviewed()
+        sha = self.ci_commit()
+        self.assertEqual(self.cli("mr-body", KEY)[0], 0)
+        self.assertEqual(self.cli("publish", KEY)[0], 5)
+        code, out, err = self.cli("waive-secret", KEY, "--sha", sha, "--path", ".gitlab-ci.yml",
+                                  "--line", "1", "--label", "ci_tooling")
+        self.assertEqual(code, 0, err)
+        code, out, err = self.cli("publish", KEY)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.remote(self.branch), self.head(self.worktree))
+        self.assertEqual(len(self.glab_args("mr", "create")), 1)
+        self.assertEqual(self.key()["step"], "published")
 
     def test_publish_refuses_a_stale_description(self):
         self.reviewed()

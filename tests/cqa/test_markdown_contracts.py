@@ -4353,6 +4353,102 @@ class PreprodIsProdContract(unittest.TestCase):
             self.assertIn(name, commands)
 
 
+class FixCiToolingContract(unittest.TestCase):
+    """The instructions say what the guard of the fix mode holds for the lead on the CI."""
+
+    NOTICE = "« CI ou outillage modifié : <chemin> »"
+    FAMILIES = (
+        ".gitlab-ci.yml", ".gitlab/ci", ".github/workflows", "Makefile", "Dockerfile",
+        "docker-compose*", ".husky",
+    )
+    REFERENCE_FAMILIES = (
+        ".gitlab-ci*", ".gitlab/ci", ".github/workflows", "Makefile", "Dockerfile*",
+        "docker-compose*", ".husky",
+    )
+
+    def test_the_names_are_the_ones_of_the_code(self):
+        self.assertEqual(fix_state.CI_LABEL, "ci_tooling")
+        self.assertEqual(fix_guard.CI_LABEL, "ci_tooling")
+        self.assertIn(fix_state.CI_LABEL, fix_state.WAIVABLE_LABELS)
+        self.assertNotIn(fix_state.CI_LABEL, fix_guard.HEURISTIC_SECRET_LABELS)
+        self.assertIn(fix_guard.CI_TOOLING, _text(FIX_MD))
+        self.assertIn("la CI s'exécute au push, avant toute relecture", fix_guard.CI_TOOLING)
+        for path in (".gitlab-ci.yml", ".gitlab/ci/a.yml", ".github/workflows/a.yml", "Makefile",
+                     "Dockerfile", "docker-compose.yml", ".husky/pre-push", "deploy.sh"):
+            with self.subTest(path=path):
+                self.assertEqual(fix_guard.path_reason(path, {}), fix_guard.CI_TOOLING)
+
+    def test_the_fixer_touches_a_ci_file_only_when_the_row_needs_it(self):
+        fixer = _text(FIXER)
+        for needle in (
+            "`kind` `suspect` with `label` `ci_tooling` and `waivable` true",
+            "only when the row cannot be fixed without it",
+            self.NOTICE,
+            "(the path, never the content)",
+            "the lead judges it, never you",
+            "With `waivable` false (a deleted file) it is handled as `content`",
+            "only the lead waives an alert of the guard (a secret, or a CI file)",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, fixer)
+        for family in self.FAMILIES:
+            with self.subTest(family=family):
+                self.assertIn(f"`{family}`", fixer)
+
+    def test_the_reviewer_reads_a_ci_change_line_by_line(self):
+        reviewer = _text(FIX_REVIEWER)
+        for needle in (self.NOTICE, "`ci_tooling` in the guard", "read line by line",
+                       "adds a command, a download or a variable the row does not need"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, reviewer)
+
+    def test_the_reference_lists_the_family_and_says_how_the_lead_lifts_it(self):
+        text = _text(FIX_MD)
+        commits = _section(text, "3. Commits")
+        self.assertIn("`ci_tooling`", commits)
+        self.assertIn(self.NOTICE, commits)
+        correction = _section(text, "6. Correction pass")
+        for needle in ("**A CI or build tooling file**", "`publish` exits 5 and pushes nothing",
+                       "`--line 1 --label ci_tooling`", "is not waivable", "No sub-agent ever runs"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, correction)
+        rails = _section(text, "7. Guard rails")
+        self.assertIn("**Paths held for the lead**", rails)
+        for family in self.REFERENCE_FAMILIES:
+            with self.subTest(family=family):
+                self.assertIn(f"`{family}`", rails)
+        self.assertIn("the deploy scripts `deploy`, `deploy.*`, `deploy-*.sh` and `deploy_*.sh`", rails)
+        self.assertIn("a `Makefile` under `vendor/` is « dossier de dépendances »", rails)
+        self.assertIn("--line 1 --label ci_tooling`", rails)
+
+    def test_the_skill_asks_the_lead_and_waives_with_the_ci_label(self):
+        skill = _text(SKILL)
+        problems = skill[skill.index("f. Problems, once the reviews"):skill.index("g. Publication")]
+        for needle in (
+            "`suspect` with `label` `ci_tooling`",
+            "« Ce changement de la CI ou de l'outillage est-il voulu ? »",
+            "« Oui, le laisser partir »", "« Non, retirer le correctif »",
+            "« <repo> : Changement de la CI à confirmer par le lead : <chemin> (ci_tooling) »",
+            "`publish` pushes nothing while the guard holds it",
+            "`waive-secret` with `--line 1 --label ci_tooling`",
+            "Never waive without that answer",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, problems)
+        self.assertIn("« CI ou outillage modifié : <chemin> »", skill)
+        for needle in ("« <repo> : Changement de la CI à confirmer par le lead : ... »",):
+            self.assertGreaterEqual(skill.count(needle), 2)
+        self.assertIn("`ci_tooling`, `line` 1", skill)
+
+    def test_the_new_lines_carry_no_long_dash(self):
+        for path in (FIXER, FIX_REVIEWER, FIX_MD, SKILL):
+            self.assertNotIn(EM_DASH, _text(path), path.name)
+        readme = _text(ROOT / "README.md")
+        line = next(item for item in readme.splitlines() if item.startswith("- **CI et outillage**"))
+        self.assertNotIn(EM_DASH, line)
+        self.assertIn("« Ce changement de la CI ou de l'outillage est-il voulu ? »", line)
+
+
 class SecretFilesContract(unittest.TestCase):
     """The instructions list the files the SSH guard refuses and the forms the output masks."""
 

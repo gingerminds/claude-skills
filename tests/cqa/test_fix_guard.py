@@ -11,6 +11,7 @@ from tests.cqa.test_cli_fix import GITLEAKS_DOWN
 from tests.cqa.test_fix_git import BASE, GitCase, IDENTITY, KEY, flight, mr
 from tests.cqa.test_git_tools import commit, git as real_git
 
+EM_DASH = chr(0x2014)
 SCHEMAS = Path(__file__).resolve().parents[2] / "skills" / "checklist-quality-audit" / "schemas"
 SECTION = ["--section", "securite"]
 # A made-up Square-shaped key: gitleaks flags it (square-access-token), the home rule does not
@@ -32,6 +33,16 @@ ATTRIBUTION = "ligne d'attribution dans le message"
 SECTION_MISMATCH = "section du commit différente de celle de la ligne"
 SUBJECT_TOO_LONG = "sujet de plus de 72 caractères"
 REWRITTEN = "historique réécrit : le départ de la passe n'est plus dans la branche"
+CI_TOOLING = "CI ou outillage d'exécution (la CI s'exécute au push, avant toute relecture)"
+CI_PATHS = (
+    ".gitlab-ci.yml", ".gitlab-ci.yaml", "back/.gitlab-ci.yml", ".gitlab/ci/build.yml",
+    ".gitlab/ci/deploy/review.yaml", ".github/workflows/ci.yml", ".github/actions/setup/action.yml",
+    "Makefile", "web/Makefile", "Dockerfile", "docker/php/Dockerfile", "Dockerfile.prod",
+    "docker-compose.yml", "docker-compose.override.yml", "docker/docker-compose.dev.yaml",
+    "compose.yaml", "compose.prod.yml", ".husky/pre-push", ".husky/_/husky.sh", ".githooks/pre-commit",
+    "deploy.sh", "scripts/deploy.php", "deploy/run.sh", "scripts/deploy-prod.sh", "ci/test.sh",
+    "Jenkinsfile", ".circleci/config.yml",
+)
 
 
 def problem(sha, ref, path, reason, kind, line=None, label=None, waivable=False):
@@ -124,6 +135,58 @@ class GuardPathTest(RepoCase):
         self.assertEqual(self.reasons(later), {**refused, "libs/sub": SUBMODULE})
         self.assertEqual({problem["ref"] for problem in later}, {12})
         self.assertEqual({problem["kind"] for problem in later}, {"content"})
+
+    def test_path_reason_flags_gitlab_ci_makefile_dockerfile_husky_and_workflows(self):
+        repo = {"name": "front"}
+        for path in CI_PATHS:
+            with self.subTest(path=path):
+                self.assertEqual(fix_guard.path_reason(path, repo), CI_TOOLING)
+        for path in ("makefile", "DOCKERFILE", ".GitLab-CI.yml", ".Github/Workflows/ci.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(fix_guard.path_reason(path, repo), CI_TOOLING)
+        self.assertEqual(fix_guard.path_reason("vendor/acme/Makefile", repo), DEPENDENCY_DIR)
+        self.assertEqual(fix_guard.path_reason("web/modules/contrib/x/Dockerfile",
+                                               {"name": "front", "stack": "drupal"}), CORE)
+        self.assertEqual(
+            fix_guard.path_reason("web/app/plugins/acme/Dockerfile",
+                                  {"name": "front", "third_party_paths": ["web/app/plugins/acme"]}),
+            THIRD_PARTY)
+        self.assertEqual(fix_guard.path_reason("composer.json", repo), DEPENDENCIES)
+        self.assertEqual(fix_guard.CI_TOOLING, CI_TOOLING)
+        self.assertEqual(fix_guard.CI_LABEL, "ci_tooling")
+
+    def test_normal_source_path_is_unaffected(self):
+        repo = {"name": "front", "stack": "wordpress"}
+        normal = (
+            "README.md", "src/Service/DeployService.php", "web/app/themes/t/functions.php",
+            "web/app/themes/t/style.css", "docs/ci.md", "docs/deploy-notes.md", "src/ci/Runner.php",
+            "app/Http/Controllers/DeploymentController.php", ".gitlab/merge_request_templates/a.md",
+            ".github/CODEOWNERS", ".github/ISSUE_TEMPLATE/bug.md", ".gitignore", "docs/makefile.md",
+            "web/modules/custom/z/z.module", "tests/DockerCommandTest.php", "public/js/app.js",
+        )
+        for path in normal:
+            with self.subTest(path=path):
+                self.assertIsNone(fix_guard.path_reason(path, repo))
+        self.add("fix(securite CQ-3): touch the sources", {path: "x" for path in normal})
+        self.assertEqual(self.check(repo), [])
+
+    def test_the_guard_reports_a_ci_change_as_a_waivable_suspect(self):
+        sha = self.add("fix(securite CQ-3): run the audit in the pipeline",
+                       {".gitlab-ci.yml": "stages: [test]\n", "Dockerfile": "FROM php:8.2\n",
+                        "web/app/themes/t/functions.php": "<?php\n"})
+        expected = [
+            problem(sha, 3, ".gitlab-ci.yml", CI_TOOLING, "suspect", 1, "ci_tooling", True),
+            problem(sha, 3, "Dockerfile", CI_TOOLING, "suspect", 1, "ci_tooling", True),
+        ]
+        self.assertCountEqual(self.check(), expected)
+
+    def test_a_deleted_ci_file_is_a_suspect_that_cannot_be_waived(self):
+        self.start = self.add("chore: add the pipeline", {".gitlab-ci.yml": "stages: [test]\n"})
+        real_git(self.repo, "rm", "-q", "--", ".gitlab-ci.yml")
+        real_git(self.repo, "commit", "-q", "-m", "fix(securite CQ-3): drop the pipeline")
+        sha = real_git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(self.check(), [
+            problem(sha, 3, ".gitlab-ci.yml", CI_TOOLING, "suspect", 1, "ci_tooling", False)])
 
     def test_guard_refuses_core_paths_per_stack(self):
         wordpress = ["wp-includes/x.php", "wp-admin/y.php", "wp-login.php", "web/wp/wp-settings.php"]
@@ -576,6 +639,31 @@ class GuardCommandTest(GitCase):
                 self.assertEqual(code, 2, err)
                 self.assertEqual(out, "")
 
+    def test_guard_staged_holds_a_ci_file_of_the_index_for_the_lead(self):
+        self.open_pass()
+        worktree = Path(self.start_ok()["worktree"])
+        head = self.head(worktree)
+        message = self.root / "message.txt"
+        message.write_text("fix(securite CQ-3): harden the image\n", encoding="utf-8")
+        write(worktree, "Dockerfile", "FROM php:8.2\n")
+        write(worktree, "web/a.php", "<?php\n")
+        for path in ("Dockerfile", "web/a.php"):
+            self.assertEqual(fix_names.git(worktree, subprocess.run, "add", "--", path).returncode, 0)
+        blob = real_git(worktree, "rev-parse", ":Dockerfile")
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 5, err)
+        self.assertEqual(json.loads(out), {"ok": False, "problems": [
+            problem(blob, 3, "Dockerfile", CI_TOOLING, "suspect", 1, "ci_tooling", True)],
+            "note": None})
+        self.assertIn("Dockerfile", err)
+        code, out, err = self.run_main(["waive-secret", self.run_dir, KEY, "--sha", blob, "--path",
+                                        "Dockerfile", "--line", "1", "--label", "ci_tooling"])
+        self.assertEqual(code, 0, err)
+        code, out, err = self.guard_staged("--staged", "--message-file", str(message))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out), {"ok": True, "problems": [], "note": None})
+        self.assertEqual(self.head(worktree), head)
+
     def test_guard_reports_gitleaks_findings_without_the_value(self):
         self.gitleaks = {VENDOR_KEY: "square-access-token"}
         self.open_pass()
@@ -736,6 +824,55 @@ class SecretWaiverTest(GitCase):
             secret(again, 3, "web/copy.php", "credential_assignment", 2),
             secret(again, 3, "web/profile.php", "credential_assignment", 3),
         ]))
+
+    def test_a_ci_change_is_waived_by_the_lead_like_an_alert(self):
+        sha = self.commit("fix(securite CQ-3): run the audit in the pipeline",
+                          {".gitlab-ci.yml": "stages: [test]\n", "web/a.php": "<?php\n"})
+        expected = problem(sha, 3, ".gitlab-ci.yml", CI_TOOLING, "suspect", 1, "ci_tooling", True)
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual((code, json.loads(out)["problems"]), (5, [expected]))
+        self.assertIn('".gitlab-ci.yml"', err)
+        self.assertIn("la CI s'exécute au push, avant toute relecture", err)
+        self.assertIn("waive-secret", err)
+        self.assertIn("--line 1 --label ci_tooling", err)
+        self.assertNotIn(EM_DASH, err)
+        for case, args in {
+            "autre label": (sha, ".gitlab-ci.yml", 1, "credential_assignment"),
+            "autre ligne": (sha, ".gitlab-ci.yml", 2, "ci_tooling"),
+            "autre chemin": (sha, "web/a.php", 1, "ci_tooling"),
+        }.items():
+            with self.subTest(case=case):
+                code, out, err = self.waive(*args)
+                self.assertEqual((code, out), (2, ""))
+                self.assertNotIn("secret_waivers", self.key())
+        code, out, err = self.waive(sha, ".gitlab-ci.yml", 1, "ci_tooling")
+        self.assertEqual(code, 0, err)
+        waiver = json.loads(out)["waiver"]
+        blob = real_git(self.worktree, "rev-parse", f"{sha}:.gitlab-ci.yml")
+        self.assertEqual((waiver["blob"], waiver["path"], waiver["line"], waiver["label"]),
+                         (blob, ".gitlab-ci.yml", 1, "ci_tooling"))
+        self.assertEqual(self.guard(), (0, []))
+        again = self.commit("fix(securite CQ-3): add a job", {".gitlab-ci.yml": "stages: [test, x]\n"})
+        self.assertEqual(self.guard(), (5, [
+            problem(again, 3, ".gitlab-ci.yml", CI_TOOLING, "suspect", 1, "ci_tooling", True)]))
+
+    def test_a_deleted_ci_file_cannot_be_waived(self):
+        self.commit("chore: add the pipeline", {".gitlab-ci.yml": "stages: [test]\n"})
+        state = self.state_text()
+        state["keys"][KEY]["start_sha"] = self.head(self.worktree)
+        fix_state.save(self.run_dir, state)
+        fix_names.git(self.worktree, subprocess.run, "rm", "-q", "--", ".gitlab-ci.yml")
+        done = fix_names.git(self.worktree, subprocess.run, "commit", "-q", "-m",
+                             "fix(securite CQ-3): drop the pipeline")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        sha = self.head(self.worktree)
+        expected = problem(sha, 3, ".gitlab-ci.yml", CI_TOOLING, "suspect", 1, "ci_tooling", False)
+        code, out, err = self.run_main(["guard", self.run_dir, KEY])
+        self.assertEqual((code, json.loads(out)["problems"]), (5, [expected]))
+        self.assertIn("supprimé", err)
+        code, out, err = self.waive(sha, ".gitlab-ci.yml", 1, "ci_tooling")
+        self.assertEqual((code, out), (2, ""))
+        self.assertNotIn("secret_waivers", self.key())
 
     def test_a_malformed_waiver_in_the_state_is_refused(self):
         sha = self.commit("fix(securite CQ-3): read the password field",
