@@ -278,3 +278,29 @@ python3 "$S/cqa_plan.py" context "$RUN" --check
 ```
 
 It prints `{"ok", "errors"}`. Exit 6: fix every error listed, write the file again and check again, until `ok` is true.
+
+## 8. Departure notice
+
+Autonomous mode only: show it only when `mode` is `autonome`; interactive mode shows nothing. It tells the lead, in one place and without any doubt, that they may leave the workstation. Show it as soon as the last question of section 4 is answered and `context --check` passes (SKILL.md, section 4, step 9), whatever the diagnostic finds next: in autonomous mode the diagnostic, the audit and the context documents ask nothing more. `--dry-run` skips the Notion question, so the notice then follows the answer to the mode question and the check. Show it again, unchanged, after a resume whose stored `mode` is `autonome`, once the questions of the resume are over (SKILL.md, section 3, step 4).
+
+Print the content of the block below as plain text of your reply, word for word, before any other call: the heading line first, then the framed block, then the points and the closing sentence. No summary, no rewording, no question after it, and no other message between the last answer and the notice.
+
+````markdown
+# 🟢 VOUS POUVEZ QUITTER LE POSTE MAINTENANT
+
+```text
+╔══════════════════════════════════════════════════════════════╗
+║                                                              ║
+║   LE SKILL NE VOUS POSERA PLUS AUCUNE QUESTION.              ║
+║   L'AUDIT TOURNE SEUL, DE BOUT EN BOUT.                      ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+Pour que l'audit aille au bout, avant de partir :
+- laissez le poste allumé, connecté, avec l'écran ouvert (sur un Mac, rabattre l'écran met en veille) ;
+- ne fermez ni cette session Claude Code ni Chrome ;
+- si Claude Code affiche une demande d'autorisation (elle ne vient pas du skill), répondez-y d'abord : l'audit attend votre réponse.
+
+À la fin, le skill écrit dans Notion selon votre choix. À votre retour, il vous présente ce qu'il a mis de côté (connexions Chrome du back-office, commandes SSH à confirmer, écarts).
+````

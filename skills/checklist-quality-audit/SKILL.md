@@ -9,7 +9,7 @@ disable-model-invocation: true
 
 You orchestrate the audit of a project's quality checklist before launch. You decide and you write. The sub-agents `gm:cqa-auditor` and `gm:cqa-browser` analyse, the Docker toolbox measures, and all of them exchange through files in the run directory `~/.cache/gm-audit/<slug>/<AAAA-MM-JJ-HHMM>/`.
 
-The lead is needed at the start (questions, login in Chrome). Everything in between runs without them. In autonomous mode (section 4) the lead may leave once the questions of section 4 are answered: the audit, diagnostic included, never stops to ask, it sets aside what needs them (`cqa_plan.py defer`) and handles it with them at the end (section 8, step 5).
+The lead is needed at the start (questions, login in Chrome). Everything in between runs without them. In autonomous mode (section 4) the lead may leave once the questions of section 4 are answered, and the skill says so with a departure notice (section 4, step 9): the audit, diagnostic included, never stops to ask, it sets aside what needs them (`cqa_plan.py defer`) and handles it with them at the end (section 8, step 5).
 
 Load each reference with Read when its section starts, not before.
 
@@ -64,7 +64,7 @@ A run is complete once its final scan has run: section 8 then writes `done.json`
 1. `RUN` is its `path`.
 2. The current invocation wins over what the run stored. A `--phase` other than its `phase_filter` cannot reuse its lots and findings: say « Ce run a été lancé pour une autre phase : nouveau run. » and start a new run. The same goes for the categories, once the run has a `lots.json` (before it there is nothing to protect: section 5 stores the filter of this invocation): run `cqa_plan.py categories "$RUN"`, with one `--category "<catégorie>"` per name of the invocation. It writes nothing without `--write` and prints `{"available", "category_filter", "same", "unknown"}`; `same` is true only when the run stores that very filter (none stored and none asked included). `same` false: say « Ce run a été lancé pour une autre catégorie : nouveau run. » and start a new run. Exit 2 (a name unknown to the copy): show its message and stop. A `--context` given to the resumed run is taken only while the run has no `lots.json`: run step 2b of section 4 for those files (they are imported at section 6, step 1). With a `lots.json`, say « Ce run a déjà ses lots : nouveau run pour les documents de contexte. » and start a new run. Otherwise write the current `dry_run` in `context.json`. `mode` and `notion_write` are those of the invocation being resumed and are reused as stored, without asking again (a new invocation asks both questions again: section 4, section 10 step 6, section 11 step 4; a run without them is interactive and section 7 asks the consent); `deferred.json` keeps its open entries, which section 8, step 5 handles.
 3. Run `cqa_plan.py context "$RUN" --check`. On errors, ask « Le contexte du run <run_id> est invalide (<erreurs>). » with « Lancer un nouveau run » and « Arrêter ». `warnings` (a relative `ssh.app_dirs` folder left by an older run) do not block: say them to the lead in one line and ask that folder again before any server command.
-4. If `target.access` is `basic_auth`, ask the Basic Auth credentials again (they are never stored) and check them with `probe-target --auth-env`, as in section 4.
+4. If `target.access` is `basic_auth`, ask the Basic Auth credentials again (they are never stored) and check them with `probe-target --auth-env`, as in section 4. Once these questions are over, when `mode` is `autonome` and step 5 does not go back to section 4 (which shows it itself), show the departure notice (`references/context.md`, section 8).
 5. Restart at the first stage it lacks:
    - `context` false: section 4, in this folder.
    - `lots` false: section 5 (the diagnostic is redone: the workstation may have changed).
@@ -119,6 +119,8 @@ S="${CLAUDE_SKILL_DIR}/../../scripts"
 RUN="<run_dir>"
 python3 "$S/cqa_plan.py" context "$RUN" --check
 ```
+
+9. Autonomous mode only (`mode` is `autonome`): once the check passes, the questions are over. Show the departure notice, word for word (`references/context.md`, section 8), before the diagnostic: it is the one place where the lead is told that they may leave the workstation. Interactive mode: show nothing.
 
 ## 5. Diagnostic
 

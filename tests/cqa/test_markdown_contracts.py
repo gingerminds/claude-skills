@@ -5211,5 +5211,96 @@ class ContextDocumentsInstructionsTest(unittest.TestCase):
                 self.assertNotIn(EM_DASH, _text(path))
 
 
+class DepartureNoticeTest(unittest.TestCase):
+    """The notice that tells the lead, in autonomous mode, when they may leave the workstation."""
+
+    TITLE = "# 🟢 VOUS POUVEZ QUITTER LE POSTE MAINTENANT"
+    WIDTH = 62
+    POINTS = (
+        "Pour que l'audit aille au bout, avant de partir :",
+        "- laissez le poste allumé, connecté, avec l'écran ouvert (sur un Mac, rabattre l'écran met en veille) ;",
+        "- ne fermez ni cette session Claude Code ni Chrome ;",
+        "- si Claude Code affiche une demande d'autorisation (elle ne vient pas du skill), "
+        "répondez-y d'abord : l'audit attend votre réponse.",
+        "À la fin, le skill écrit dans Notion selon votre choix. À votre retour, il vous présente ce qu'il a "
+        "mis de côté (connexions Chrome du back-office, commandes SSH à confirmer, écarts).",
+    )
+
+    def box(self) -> str:
+        def line(text: str) -> str:
+            return "║" + ("   " + text).ljust(self.WIDTH) + "║"
+
+        return "\n".join((
+            "╔" + "═" * self.WIDTH + "╗",
+            line(""),
+            line("LE SKILL NE VOUS POSERA PLUS AUCUNE QUESTION."),
+            line("L'AUDIT TOURNE SEUL, DE BOUT EN BOUT."),
+            line(""),
+            "╚" + "═" * self.WIDTH + "╝",
+        ))
+
+    def notice(self) -> str:
+        return _section(_text(CONTEXT_MD), "8. Departure notice")
+
+    def test_the_context_reference_words_the_notice_once_and_exactly(self):
+        notice = self.notice()
+        for needle in (self.TITLE, self.box(), *self.POINTS):
+            with self.subTest(needle=needle[:40]):
+                self.assertEqual(notice.count(needle), 1)
+        self.assertIn("```text", notice)
+        self.assertLess(notice.index(self.TITLE), notice.index(self.box()))
+        self.assertLess(notice.index(self.box()), notice.index(self.POINTS[0]))
+
+    def test_every_line_of_the_box_has_the_same_width(self):
+        lines = [line for line in self.notice().splitlines() if line and line[0] in "╔║╚"]
+        self.assertEqual(len(lines), 6)
+        self.assertEqual({len(line) for line in lines}, {self.WIDTH + 2})
+
+    def test_the_reference_says_when_to_show_it_and_to_whom(self):
+        notice = self.notice()
+        for needle in (
+            "only when `mode` is `autonome`",
+            "interactive mode shows nothing",
+            "`--dry-run` skips the Notion question",
+            "word for word",
+            "before any other call",
+            "after a resume",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, notice)
+
+    def test_the_audit_shows_it_after_the_last_question_and_before_the_diagnostic(self):
+        text = _text(SKILL)
+        consent = text.index("7. Mode and Notion consent")
+        check = text.index("8. Write `context.json`")
+        step = text.index("9. Autonomous mode only")
+        diagnostic = text.index("## 5. Diagnostic")
+        self.assertLess(consent, check)
+        self.assertLess(check, step)
+        self.assertLess(step, diagnostic)
+        body = text[step:diagnostic]
+        for needle in ("`mode` is `autonome`", "the questions are over", "departure notice, word for word",
+                       "`references/context.md`, section 8", "before the diagnostic",
+                       "Interactive mode: show nothing"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, body)
+
+    def test_a_resume_shows_it_once_its_own_questions_are_over(self):
+        text = _text(SKILL)
+        resume = text[text.index("## 3. Resume"):text.index("## 4. Context")]
+        step = resume[resume.index("4. If `target.access` is `basic_auth`"):resume.index("5. Restart at the first stage")]
+        for needle in ("when `mode` is `autonome`", "does not go back to section 4",
+                       "show the departure notice", "`references/context.md`, section 8"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, step)
+
+    def test_the_introduction_of_the_skill_mentions_the_notice(self):
+        intro = _text(SKILL).split("## 1. Imperative rules", 1)[0]
+        self.assertIn("departure notice (section 4, step 9)", intro)
+
+    def test_the_notice_holds_no_em_dash(self):
+        self.assertNotIn(EM_DASH, self.notice())
+
+
 if __name__ == "__main__":
     unittest.main()
