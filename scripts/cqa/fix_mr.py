@@ -53,6 +53,10 @@ _IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
 _LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _MENTION = re.compile(r"(?<![\w@])@(?=\w)")
 _HTML_TAG = re.compile(r"<(?=[A-Za-z/!?])")
+# A code span, left as it is, or an HTML tag written as it is (« <title> », « </main> », a comment).
+_SPAN_OR_TAG = re.compile(
+    r"(`+)[^`\n]*\1"
+    r"|(?P<tag></?[A-Za-z][A-Za-z0-9-]*(?:[ \t/][^<>`\n]*)?>|<[!?][^<>`\n]*>)")
 _FALLBACK_REF = "un point"
 _DISAGREEMENTS = {"already_ok": ALREADY_OK, "not_found": NOT_FOUND}
 
@@ -709,7 +713,11 @@ def _render(level: int, parts: list) -> str:
 
 
 def _clean(text: str) -> str:
-    return text.replace("\u2014", "-")
+    """Return a text of the merge request without long dash, each HTML tag in a code span:
+    GitLab reads a bare tag as HTML, so it hides, and « <title> » swallows what follows."""
+    return _SPAN_OR_TAG.sub(
+        lambda found: f"`{found.group('tag')}`" if found.group("tag") else found.group(0),
+        text.replace("\u2014", "-"))
 
 
 def _row_info(key: dict, candidates: dict, notion_rows: list) -> dict:

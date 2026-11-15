@@ -5211,6 +5211,13 @@ class ContextDocumentsInstructionsTest(unittest.TestCase):
                 self.assertNotIn(EM_DASH, _text(path))
 
 
+class MrDescriptionTagsTest(unittest.TestCase):
+    def test_skill_says_a_bare_tag_goes_in_a_code_span(self):
+        text = _text(SKILL)
+        self.assertIn("An HTML tag written as it is in a text of the description", text)
+        self.assertIn("is put in a code span", text)
+
+
 class DepartureNoticeTest(unittest.TestCase):
     """The notice that tells the lead, in autonomous mode, when they may leave the workstation."""
 

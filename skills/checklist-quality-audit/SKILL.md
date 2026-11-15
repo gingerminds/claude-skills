@@ -1155,6 +1155,7 @@ It needs every section of the key settled or failed (exit 2 names the one that i
 - An `already_ok` or a `not_found` becomes one line under « Points d'attention » (« CQ-112 : le rapport <label> signale 7.3, mais le code est déjà conforme. » or « ..., mais l'élément n'a pas été retrouvé dans le code. »), never a question.
 - The `ko` points of a report that no row holds, for a report whose categories meet a section of the merge request, go under « Hors-scope » as « - Rapport <label> : <références> : <résumé> (<propriétaire>) », 30 lines at most, then « - et <n> autres points du rapport sans ligne ».
 - Only the name of the report, the references, the counts and the paraphrased summary are written, never an excerpt, an exploitation detail or a note of the fixer; the Markdown of a text of the report (an image, a link, a mention) is flattened to its plain text. A secret in one of these texts makes `mr-body` exit 7.
+- An HTML tag written as it is in a text of the description (« `<title>` » in the title of a row, in a finding, in a change) is put in a code span: GitLab reads a bare tag as HTML, hides it, and « `<title>` » swallows the text that follows. A tag already in a code span stays as it is.
 
 ```bash
 S="${CLAUDE_SKILL_DIR}/../../scripts"
