@@ -203,6 +203,67 @@ class TitleAndBodyTest(unittest.TestCase):
                                          waiting=[], left=[]), "")
 
 
+class HtmlTagsTest(unittest.TestCase):
+    """A tag written as it is (« <title> ») is HTML for GitLab: it hides, and « <title> » swallows
+    the rest of the description. Every tag of the description goes in a code span."""
+
+    def test_a_tag_of_a_row_title_goes_in_a_code_span(self):
+        text = full_body(fixed=[fixed_row(
+            ref=141, title="Renseigner un <title> unique et descriptif sur chaque page")])
+        self.assertIn(
+            "### CQ-141 : Renseigner un `<title>` unique et descriptif sur chaque page\n", text)
+        self.assertNotIn("un <title>", text)
+
+    def test_every_text_of_the_description_is_covered(self):
+        text = full_body(
+            fixed=[fixed_row(
+                semi_auto=True, human_check="Relire les <title> en double.",
+                remaining="Traduire le <label for=\"q\"> du localisateur.",
+                summary="Le champ n'a ni <label> ni aria-label, la page finit par </main>.",
+                change="Ajoute un <label class=\"visually-hidden\"> et un <br/>.",
+                uat="Inspecter le <input type=\"search\">.")],
+            attention=["Le <h1> est dans le gabarit."],
+            waiting=[{"ref": 12, "title": "Balise <meta>", "text": "Quel <link> ?", "url": None}],
+            left=[{"ref": 40, "title": "Un <iframe> par page", "reason": "<script> tiers",
+                   "url": None}],
+            earlier=[{"ref": 9, "title": "Un <h1> par page"}])
+        for tag in ("<title>", "<label for=\"q\">", "<label>", "</main>",
+                    "<label class=\"visually-hidden\">", "<br/>", "<input type=\"search\">",
+                    "<h1>", "<meta>", "<link>", "<iframe>", "<script>"):
+            with self.subTest(tag=tag):
+                self.assertIn(f"`{tag}`", text)
+        self.assertIsNone(re.search(r"(?<!`)<[A-Za-z/]", text))
+
+    def test_a_comment_and_a_doctype_go_in_a_code_span_too(self):
+        text = full_body(attention=["Un <!-- commentaire --> et un <!DOCTYPE html> restent."])
+        self.assertIn("- Un `<!-- commentaire -->` et un `<!DOCTYPE html>` restent.", text)
+
+    def test_a_tag_already_in_a_code_span_is_left_alone(self):
+        text = full_body(
+            fixed=[fixed_row(title="Un `<title>` par page", change="Corrige ``<a href>`` ici.")],
+            checks=[{"name": PHP, "status": "passed", "files": [], "command": "grep '<title>' a",
+                     "detail": ""}])
+        self.assertIn("### CQ-107 : Un `<title>` par page\n", text)
+        self.assertIn("- Changement : Corrige ``<a href>`` ici.", text)
+        self.assertIn("`grep '<title>' a`", text)
+        self.assertNotIn("``<title>", text)
+
+    def test_what_is_no_tag_is_left_alone(self):
+        notes = ["Largeur < 320 px et a<b.", "Voir <https://example.org/a> et 3 > 2.",
+                 "Un tag cassé < title> reste."]
+        text = full_body(attention=notes)
+        self.assertEqual(section(text, "Points d'attention"), [f"- {note}" for note in notes])
+
+    def test_the_addition_is_covered_and_the_change_is_stable(self):
+        added = fix_mr.addition(
+            fixed=[fixed_row(title="Un <title> par page")], checks=None, not_run=[],
+            attention=[], waiting=[],
+            left=[{"ref": 40, "title": "Un <iframe> par page", "reason": "Manuel", "url": None}])
+        self.assertIn("#### CQ-107 : Un `<title>` par page\n", added)
+        self.assertIn("- CQ-40 : Un `<iframe>` par page : Manuel", added)
+        self.assertEqual(fix_mr._clean(added), added)
+
+
 class CommandChecksTest(unittest.TestCase):
     """The commands of the project (entries of checks.json with a command): one bullet each."""
     BROKEN = "Déjà en échec avant les correctifs"
