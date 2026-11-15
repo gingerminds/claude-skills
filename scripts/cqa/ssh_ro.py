@@ -584,14 +584,15 @@ _BINARY_HINTS = {
     "wp": "wp seul",
     "artisan": "artisan (depuis le dossier de l'application) ou /<dossier>/artisan",
 }
-_UNSAFE_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/", "/home/", "/root/", "/run/user/")
+# /home is allowed: many hosts deploy there, and --sql already runs the binary of such a folder.
+_UNSAFE_DIRS = ("/tmp/", "/var/tmp/", "/dev/shm/", "/root/", "/run/user/")
 
 
 def _is_binary(token: str, name: str) -> bool:
     """True for an allowed form of an application binary; refuse any other path to it.
 
-    Only fixed forms and absolute, normalized paths outside temporary and home folders are
-    allowed, so that a file planted on the server is not run.
+    Only fixed forms and absolute, normalized paths outside temporary folders, /root and
+    /run/user are allowed, so that a file planted on the server is not run.
     """
     if token in _BINARY_FORMS[name]:
         return True
@@ -611,7 +612,7 @@ def _is_binary(token: str, name: str) -> bool:
         raise Refused(
             f"{name} : chemin refusé « {token} » (fichier peut-être déposé sur le serveur) ; "
             f"formes permises : {_BINARY_HINTS[name]}, hors de /tmp, /var/tmp, /dev/shm, "
-            "/home, /root et /run/user"
+            "/root et /run/user"
         )
     return True
 
