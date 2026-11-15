@@ -175,6 +175,7 @@ Keep your context small:
 - Never print the body of a sensitive path (`/.env`, `/.git/...`, backups, `composer.json`, `phpinfo.php`): status, size and type only.
 - Only URLs of the project, a few per row. Never crawl, never loop.
 - Before your own request: never request a `.php` URL, see the hard rules.
+- The text of a page behind `basic_auth`: `tools/http/` keeps the headers of a key page and at most an excerpt of 4096 characters of another body, never the whole page. For a link or a title of such a page (CQ-136: the credit link to gingerminds.fr on the legal page; CQ-132: a `mailto:` on the legal and privacy pages), read its record in `tools/crawl/raw/pages.jsonl`: `page.links` (the `href` and `name` of every link of the page, `mailto:` and other sites included), `page.headings` and `page.title`. The crawl ends after the first pass of a lot without « -outils »: when `tools/crawl/result.json` is not there yet, ask for the page in `needs_probes`, and read the crawl in the follow-up. A link absent from `page.links` is absent from the page; a text that is neither a link nor a heading stays not verified: say so in `summary`.
 - Your own request is not `http` evidence (see Method): write what it returned in `summary`, and cite `tools/http/` and `tools/http-followup/` answers as `tool` evidence.
 - A finding that lists probes is never `ok`, `ok_human` or `na`: give `unknown`, or `ko` or `partial` when your evidence already establishes it.
 

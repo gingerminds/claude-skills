@@ -5211,6 +5211,20 @@ class ContextDocumentsInstructionsTest(unittest.TestCase):
                 self.assertNotIn(EM_DASH, _text(path))
 
 
+class ProtectedPageTextTest(unittest.TestCase):
+    """Pilot: behind Basic Auth the auditor left CQ-132 and CQ-136 not evaluated although the
+    crawl keeps the links of the legal pages."""
+
+    def test_auditor_reads_the_links_of_a_protected_page_in_the_crawl(self):
+        text = _text(ROOT / "agents" / "cqa-auditor.md")
+        for needle in ("The text of a page behind `basic_auth`",
+                       "`tools/crawl/raw/pages.jsonl`: `page.links`", "CQ-136", "CQ-132",
+                       "ask for the page in `needs_probes`, and read the crawl in the follow-up",
+                       "stays not verified"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+
 class MrDescriptionTagsTest(unittest.TestCase):
     def test_skill_says_a_bare_tag_goes_in_a_code_span(self):
         text = _text(SKILL)
