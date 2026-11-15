@@ -22,7 +22,11 @@ The Chrome tools may be deferred. Load them in one ToolSearch call:
 
 1. Load the tools; call `tabs_context_mcp` with `createIfEmpty: true`.
 2. Create a tab with `tabs_create_mcp`, then `navigate` it (with its `tabId`) to `target.preprod_url`.
-3. Close that tab with `tabs_close_mcp`.
+3. Read `document.body.className` with `javascript_tool` (a read-only expression). `user-logged-in` (Drupal), `logged-in` or `admin-bar` (WordPress) mean an account of the site is open in this Chrome: the lots without session would see the site as that account, not as a visitor. Another stack, or none of these classes: nothing to do.
+   - Interactive mode: ask « Un compte est ouvert sur la préprod dans Chrome. Les premiers contrôles doivent voir le site en visiteur. » with « Je me suis déconnecté » (reload the tab and read the class again, once) and « Continuer connecté ».
+   - Autonomous mode, or « Continuer connecté », or the class still there: go on, and keep this line for `remarques.md` (SKILL.md, section 8, step 3): « Lots navigateur sans session passés avec un compte ouvert dans Chrome : la vue visiteur n'a pas été observée par le navigateur. »
+   - Never log out yourself: no click and no URL that changes state.
+4. Close that tab with `tabs_close_mcp`.
 
 "Navigateur" is available when the tab was created and navigated. A Basic Auth dialog or a login page is expected. Tools missing, or the extension not connected: « Claude in Chrome n'est pas connecté : ouvrir Chrome avec l'extension Claude, puis relancer le diagnostic. » and "Navigateur" is unavailable.
 

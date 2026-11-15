@@ -459,7 +459,7 @@ RUN="<run_dir>"
 GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_plan.py" scan "$RUN"
 ```
 
-Anti-secret check of the run directory (the cached template fiches in `fiches/` and `context-docs/` are excluded: the secrets of a context document are looked for at its import, by `context-docs --check`). Exit 7: give the lead the files and labels found, never a value.
+Anti-secret check of the run directory (the cached template fiches in `fiches/` and `context-docs/` are excluded: the secrets of a context document are looked for at its import, by `context-docs --check`). Exit 7: under « Fichiers à vérifier après l'analyse finale », give the lead each entry of `advice`: its `paths` with their labels (from `found`), then its `text`, word for word. Never a value, and never open these files to quote them. `advice` separates a value of this session written by mistake, a file the skill wrote, and the raw output of a tool, where a public browser key served by the audited site is expected.
 
 **7. Completion.** Write `done.json` in the run directory with Write: `{"run_id": "<run_id>", "scan_ok": <true or false>}`. The run is now complete (section 3).
 
@@ -1155,6 +1155,7 @@ It needs every section of the key settled or failed (exit 2 names the one that i
 - An `already_ok` or a `not_found` becomes one line under « Points d'attention » (« CQ-112 : le rapport <label> signale 7.3, mais le code est déjà conforme. » or « ..., mais l'élément n'a pas été retrouvé dans le code. »), never a question.
 - The `ko` points of a report that no row holds, for a report whose categories meet a section of the merge request, go under « Hors-scope » as « - Rapport <label> : <références> : <résumé> (<propriétaire>) », 30 lines at most, then « - et <n> autres points du rapport sans ligne ».
 - Only the name of the report, the references, the counts and the paraphrased summary are written, never an excerpt, an exploitation detail or a note of the fixer; the Markdown of a text of the report (an image, a link, a mention) is flattened to its plain text. A secret in one of these texts makes `mr-body` exit 7.
+- The audit finding of a fixed row (« Constat de l'audit ») is cut at a word after 240 characters, then « … (suite dans la ligne Notion) », when the row has its Notion link: the row holds the whole text. The change and the UAT stay whole.
 - An HTML tag written as it is in a text of the description (« `<title>` » in the title of a row, in a finding, in a change) is put in a code span: GitLab reads a bare tag as HTML, hides it, and « `<title>` » swallows the text that follows. A tag already in a code span stays as it is.
 
 ```bash
