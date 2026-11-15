@@ -1603,8 +1603,41 @@ def _cmd_scan(args, services) -> int:
             skip_dirs=fix_state.WORKTREE_DIRS,
         )
     ]
-    _emit({"ok": not found, "found": found})
+    document = {"ok": not found, "found": found}
+    if found:
+        document["advice"] = _scan_advice(found)
+    _emit(document)
     return EXIT_SECRET if found else EXIT_OK
+
+
+# What the lead does with a file the final scan names, by kind: a value of this session, a file
+# the skill wrote, the raw output of a tool (what the audited site itself answered).
+SCAN_ADVICE = {
+    "session": ("Un identifiant de cette session (Basic Auth, jeton) est écrit dans ce fichier : "
+                "c'est un défaut du skill. Retirez la valeur du fichier avant de partager le "
+                "dossier du run, et signalez-le."),
+    "run": ("Secret possible dans un fichier écrit par le skill : ouvrez-le, vérifiez la valeur, "
+            "retirez-la du fichier, et faites-la changer si elle est réelle."),
+    "tool": ("Valeur relevée dans une page ou une réponse du site audité (sortie brute d'un "
+             "outil). Une clé publique de navigateur (carte, captcha) y est normale : vérifiez "
+             "dans le projet qu'elle est limitée au domaine du site. Tout autre secret servi "
+             "par le site est à faire changer, et à corriger dans le projet."),
+}
+
+
+def _scan_advice(found: list) -> list:
+    """Return [{"paths", "text"}], one entry per kind of file found, in the order of
+    SCAN_ADVICE; a file with a value of the session counts for that kind only."""
+    kinds: dict = {}
+    for item in found:
+        if item["label"] == "known_value":
+            kinds[item["path"]] = "session"
+        else:
+            kinds.setdefault(
+                item["path"], "tool" if item["path"].startswith("tools/") else "run")
+    return [{"paths": sorted(path for path, kind in kinds.items() if kind == name),
+             "text": SCAN_ADVICE[name]}
+            for name in SCAN_ADVICE if name in kinds.values()]
 
 
 def _cmd_context_docs(args, services) -> int:

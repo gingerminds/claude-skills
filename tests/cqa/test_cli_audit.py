@@ -2763,6 +2763,35 @@ class ScanTest(AuditCase):
         )
         self.assertNotIn("hunter22", out + err)
 
+    def test_scan_says_what_to_do_with_each_kind_of_file(self):
+        """Pilot: the scan named a public map key kept in the raw output of a tool, and the lead
+        was left without a word on what to check."""
+        run_dir = self.make_run()
+        raw = run_dir / "tools" / "lighthouse" / "raw"
+        raw.mkdir(parents=True)
+        (raw / "07.json").write_text('{"url": "https://maps.example/js?key=AIza' + "B" * 35 + '"}',
+                                     encoding="utf-8")
+        (run_dir / "notes.txt").write_text("DB_PASSWORD=hunter22", encoding="utf-8")
+        code, out, err = self.run_main(["scan", run_dir], env={"GM_AUDIT_AUTH_PASS": "s3cret-pilot"})
+        self.assertEqual(code, 7)
+        document = json.loads(out)
+        self.assertEqual(document["advice"], [
+            {"paths": ["notes.txt"], "text": cqa_plan_module.SCAN_ADVICE["run"]},
+            {"paths": ["tools/lighthouse/raw/07.json"], "text": cqa_plan_module.SCAN_ADVICE["tool"]},
+        ])
+        (run_dir / "leak.txt").write_text("mot de passe s3cret-pilot", encoding="utf-8")
+        code, out, err = self.run_main(["scan", run_dir], env={"GM_AUDIT_AUTH_PASS": "s3cret-pilot"})
+        document = json.loads(out)
+        self.assertEqual(document["advice"][0],
+                         {"paths": ["leak.txt"], "text": cqa_plan_module.SCAN_ADVICE["session"]})
+        self.assertNotIn("s3cret-pilot", out + err)
+        self.assertNotIn("\u2014", "".join(cqa_plan_module.SCAN_ADVICE.values()))
+
+    def test_a_clean_scan_gives_no_advice(self):
+        code, out, _ = self.run_main(["scan", self.make_run()])
+        self.assertEqual(code, 0)
+        self.assertNotIn("advice", json.loads(out))
+
     def test_final_scan_skips_the_fiches(self):
         run_dir = self.make_run()
         text = '{"Authorization":"Basic BASE64_USER_PASS"}'

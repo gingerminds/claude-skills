@@ -459,7 +459,7 @@ RUN="<run_dir>"
 GM_AUDIT_AUTH_USER='<identifiant>' GM_AUDIT_AUTH_PASS='<mot de passe>' python3 "$S/cqa_plan.py" scan "$RUN"
 ```
 
-Anti-secret check of the run directory (the cached template fiches in `fiches/` and `context-docs/` are excluded: the secrets of a context document are looked for at its import, by `context-docs --check`). Exit 7: give the lead the files and labels found, never a value.
+Anti-secret check of the run directory (the cached template fiches in `fiches/` and `context-docs/` are excluded: the secrets of a context document are looked for at its import, by `context-docs --check`). Exit 7: under « Analyse anti-secret : fichiers à vérifier », give the lead each entry of `advice`: its `paths` with their labels (from `found`), then its `text`, word for word. Never a value, and never open these files to quote them. `advice` separates a value of this session written by mistake, a file the skill wrote, and the raw output of a tool, where a public browser key served by the audited site is expected.
 
 **7. Completion.** Write `done.json` in the run directory with Write: `{"run_id": "<run_id>", "scan_ok": <true or false>}`. The run is now complete (section 3).
 
