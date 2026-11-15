@@ -5225,6 +5225,30 @@ class ProtectedPageTextTest(unittest.TestCase):
                 self.assertIn(needle, text)
 
 
+class OpenAccountInChromeTest(unittest.TestCase):
+    """Pilot: the lots without session ran in a Chrome where a front account was open."""
+
+    POINT = ("- dans Chrome, fermez la session du site audité si un compte y est ouvert (compte de "
+             "test, back-office) : le skill visite d'abord le site en visiteur ;")
+
+    def test_departure_notice_asks_to_close_the_account_but_not_in_a_fix_pass(self):
+        notice = _section(_text(CONTEXT_MD), "8. Departure notice")
+        self.assertEqual(notice.count(self.POINT), 1)
+        self.assertIn("(never `fix`, which opens no page)", notice)
+        self.assertIn("between the second and the third", notice)
+        self.assertNotIn(EM_DASH, notice)
+
+    def test_browser_diagnostic_detects_an_open_account_and_never_logs_out(self):
+        text = _section(_text(REFERENCES / "browser.md"), 'Diagnostic (tool "Navigateur")')
+        for needle in ("`document.body.className`", "`user-logged-in` (Drupal)",
+                       "`logged-in` or `admin-bar` (WordPress)",
+                       "« Je me suis déconnecté »", "« Continuer connecté »",
+                       "la vue visiteur n'a pas été observée par le navigateur",
+                       "Never log out yourself", "4. Close that tab with `tabs_close_mcp`."):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+
+
 class MrDescriptionTagsTest(unittest.TestCase):
     def test_skill_says_a_bare_tag_goes_in_a_code_span(self):
         text = _text(SKILL)

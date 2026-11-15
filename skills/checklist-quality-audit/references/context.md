@@ -309,3 +309,9 @@ End with exactly one closing sentence, as its own paragraph, word for word:
 - `fix`: « Rien n'est poussé en votre absence. À votre retour, le skill vous pose les questions qu'il a mises de côté, puis ne publie les branches qu'avec votre accord. »
 
 Print the sentence without its quotation marks.
+
+For the audit, a `rerun` and a `recette` (never `fix`, which opens no page), when "Navigateur" is among the tools of the run or not yet checked, add this point between the second and the third, word for word:
+
+```markdown
+- dans Chrome, fermez la session du site audité si un compte y est ouvert (compte de test, back-office) : le skill visite d'abord le site en visiteur ;
+```
