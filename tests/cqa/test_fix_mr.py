@@ -264,6 +264,28 @@ class HtmlTagsTest(unittest.TestCase):
         self.assertEqual(fix_mr._clean(added), added)
 
 
+class ShortFindingTest(unittest.TestCase):
+    """Pilot: 62 rows gave a description of 129 KB, a quarter of it the audit findings that the
+    Notion row linked just above already holds."""
+
+    LONG = "Les champs du formulaire ont un label. " * 12
+
+    def test_a_long_finding_is_cut_at_a_word_when_the_row_has_its_notion_link(self):
+        text = full_body(fixed=[fixed_row(summary=self.LONG)])
+        line = next(line for line in text.splitlines() if line.startswith("- Constat de l'audit"))
+        finding = line[len("- Constat de l'audit : "):]
+        self.assertLessEqual(len(finding), fix_mr.MAX_FINDING + len(fix_mr.FINDING_REST))
+        self.assertTrue(finding.endswith("… (suite dans la ligne Notion)"))
+        kept = finding[:-len(fix_mr.FINDING_REST)]
+        self.assertTrue(self.LONG.startswith(kept))
+        self.assertTrue(self.LONG[len(kept)] == " " and not kept.endswith(" "))
+
+    def test_a_short_finding_and_a_row_without_link_are_left_whole(self):
+        text = full_body(fixed=[fixed_row(), fixed_row(ref=108, url=None, summary=self.LONG)])
+        self.assertIn("- Constat de l'audit : Aucun en-tête CSP sur les pages publiques.\n", text)
+        self.assertIn(f"- Constat de l'audit : {self.LONG.strip()}\n", text)
+
+
 class CommandChecksTest(unittest.TestCase):
     """The commands of the project (entries of checks.json with a command): one bullet each."""
     BROKEN = "Déjà en échec avant les correctifs"

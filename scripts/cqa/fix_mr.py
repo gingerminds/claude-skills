@@ -24,6 +24,9 @@ PREPARED = ("MR préparée par le skill gm:checklist-quality-audit, en brouillon
             "ajuster avant fusion.")
 HORS_SCOPE = "Hors-scope"
 PARTIAL = "**Partiel.**"
+# The audit finding of a fixed row is cut in the description: the Notion row linked above holds it.
+MAX_FINDING = 240
+FINDING_REST = "… (suite dans la ligne Notion)"
 FAILED_SECTION = "Section non aboutie : {reason}"
 REORDER_CONFLICT = "Commits non rangés par section : conflit de rejeu"
 _NO_REASON = "raison non précisée"
@@ -634,7 +637,8 @@ def _fix(heading: str, row: dict) -> str:
         lines.append(f"{SEMI_AUTO} À valider : {check}" if check else SEMI_AUTO)
     if row.get("remaining"):
         lines.append(f"{PARTIAL} Reste à faire : {row['remaining']}")
-    before = [("Ligne Notion", row.get("url")), ("Constat de l'audit", row.get("summary"))]
+    before = [("Ligne Notion", row.get("url")),
+              ("Constat de l'audit", _finding(row.get("summary"), row.get("url")))]
     after = [
         ("Changement", row.get("change")),
         ("Commits", ", ".join(row.get("commits") or [])),
@@ -645,6 +649,17 @@ def _fix(heading: str, row: dict) -> str:
     bullets += [f"- {label} : {value}" for label, value in after if value]
     lines.append("\n".join(bullets))
     return "\n\n".join(lines)
+
+
+def _finding(summary, url):
+    """Return the audit finding of a fixed row, cut at a word after MAX_FINDING characters when
+    the row has its Notion link (the row holds the whole text); whole without a link."""
+    if not isinstance(summary, str):
+        return summary
+    text = summary.strip()
+    if not url or len(text) <= MAX_FINDING:
+        return text
+    return text[:MAX_FINDING + 1].rsplit(" ", 1)[0].rstrip(" ,;:") + FINDING_REST
 
 
 def _verification(checks, not_run: list) -> list:
