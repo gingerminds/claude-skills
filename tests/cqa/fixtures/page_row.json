@@ -1,0 +1,90 @@
+{
+  "object": "page",
+  "id": "0123456789abcdef0123456789abcdef",
+  "created_time": "2026-01-05T09:00:00.000Z",
+  "last_edited_time": "2026-10-19T14:30:00.000Z",
+  "created_by": {"object": "user", "id": "user-1"},
+  "last_edited_by": {"object": "user", "id": "user-2"},
+  "archived": false,
+  "in_trash": false,
+  "properties": {
+    "Tâche": {
+      "id": "title",
+      "type": "title",
+      "title": [
+        {
+          "type": "text",
+          "text": {"content": "Activer la compression des réponses HTTP", "link": null},
+          "plain_text": "Activer la compression des réponses HTTP",
+          "href": null
+        }
+      ]
+    },
+    "Réf": {"id": "p01", "type": "unique_id", "unique_id": {"prefix": "CQ", "number": 12}},
+    "Réf modèle": {
+      "id": "p02",
+      "type": "rich_text",
+      "rich_text": [
+        {"type": "text", "text": {"content": "CQ-79", "link": null}, "plain_text": "CQ-79", "href": null}
+      ]
+    },
+    "Statut": {"id": "p03", "type": "status", "status": {"id": "s1", "name": "À traiter", "color": "red"}},
+    "Assignée à": {
+      "id": "p04",
+      "type": "multi_select",
+      "multi_select": [
+        {"id": "a1", "name": "Alice", "color": "blue"},
+        {"id": "a2", "name": "Bruno", "color": "green"}
+      ]
+    },
+    "Catégorie": {"id": "p05", "type": "select", "select": {"id": "c1", "name": "QUALITÉ", "color": "blue"}},
+    "Sous-catégorie": {
+      "id": "p06",
+      "type": "select",
+      "select": {"id": "d1", "name": "Performance", "color": "orange"}
+    },
+    "Mise en ligne": {"id": "p07", "type": "select", "select": {"id": "m1", "name": "Bloquant", "color": "red"}},
+    "Section": {"id": "p08", "type": "multi_select", "multi_select": [{"id": "e2", "name": "Back", "color": "green"}]},
+    "Technos concernées": {
+      "id": "p09",
+      "type": "multi_select",
+      "multi_select": [
+        {"id": "t1", "name": "Laravel", "color": "red"},
+        {"id": "t2", "name": "Drupal", "color": "blue"}
+      ]
+    },
+    "Phase": {
+      "id": "p10",
+      "type": "multi_select",
+      "multi_select": [
+        {"id": "h2", "name": "Build", "color": "blue"},
+        {"id": "h3", "name": "Recette J-30", "color": "yellow"}
+      ]
+    },
+    "Outils requis": {
+      "id": "p11",
+      "type": "multi_select",
+      "multi_select": [
+        {"id": "o01", "name": "Code", "color": "blue"},
+        {"id": "o04", "name": "Navigateur", "color": "purple"}
+      ]
+    },
+    "Automatisation skill": {
+      "id": "p12",
+      "type": "select",
+      "select": {"id": "u2", "name": "Partielle", "color": "yellow"}
+    },
+    "Outillage skill": {
+      "id": "p13",
+      "type": "rich_text",
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {"content": "Lire les en-têtes avec la sonde HTTP.", "link": null},
+          "plain_text": "Lire les en-têtes avec la sonde HTTP.",
+          "href": null
+        }
+      ]
+    }
+  }
+}

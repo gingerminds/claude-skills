@@ -1,0 +1,18 @@
+{
+  "tool": "http",
+  "toolbox_version": "1.2.0",
+  "tool_version": "1.2.0",
+  "status": "ok",
+  "reason": null,
+  "started_at": "2026-10-20T14:35:00Z",
+  "duration_s": 12.5,
+  "targets": [
+    "https://preprod.example.org"
+  ],
+  "files": [
+    "raw/probes.json"
+  ],
+  "counts": {
+    "probes": 14
+  }
+}

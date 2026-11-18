@@ -1,0 +1,384 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Findings of one lot of the PRE-MEL audit",
+  "description": "Content of findings/<lot>.json: exactly one finding per checklist row of the lot. Every text a lead dev reads (summary, todo, human_check, divergence, detail) is written in French.",
+  "type": "object",
+  "required": ["lot", "findings"],
+  "properties": {
+    "lot": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Id of the lot, as given in the dispatch. A file whose lot is another one is refused."
+    },
+    "findings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/finding"},
+      "description": "One finding per row of the lot. A ref that is not in the lot, or that appears twice, is rejected."
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "verdict",
+        "confidence",
+        "summary",
+        "evidence",
+        "todo",
+        "human_check",
+        "divergence",
+        "needs_probes"
+      ],
+      "properties": {
+        "ref": {
+          "type": "integer",
+          "description": "Ref of the checklist row, as an integer (79 for CQ-79)."
+        },
+        "verdict": {
+          "enum": ["ko", "partial", "unknown", "ok_human", "ok", "na"],
+          "description": "ko: not compliant. partial: partly compliant. unknown: cannot be evaluated (say why in summary). ok_human: compliant as far as the audit can tell, a human must validate (say what in human_check). ok: compliant, verified without human judgement; needs at least one piece of evidence and high confidence, and todo and human_check must be null, otherwise it is lowered to ok_human. na: not applicable; na needs high confidence and at least one piece of evidence, otherwise it becomes unknown. When several repos give different results, keep the worst in this order: ko, partial, unknown, ok_human, ok, na."
+        },
+        "confidence": {
+          "enum": ["high", "medium", "low"],
+          "description": "Confidence in the verdict."
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600,
+          "pattern": "\\S",
+          "description": "What was found, in French, 1 to 600 characters."
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {"$ref": "#/$defs/evidence_file"},
+              {"$ref": "#/$defs/evidence_page"},
+              {"$ref": "#/$defs/evidence_tool"},
+              {"$ref": "#/$defs/evidence_http"},
+              {"$ref": "#/$defs/evidence_document"},
+              {"$ref": "#/$defs/evidence_fact"}
+            ]
+          },
+          "description": "What the verdict rests on. May be empty, but an ok without evidence is lowered to ok_human and an na without evidence becomes unknown. A file must exist in its repo and a tool must have its summary.json: a finding with other evidence is refused. A tool must also have a result.json that is ok or not_applicable, a page URL must be on a host of the target (target.preprod_url, target.prod_url on a prod run, sites, key_pages), an http URL must be on such a host (key_pages aside) and be a probe of the toolbox that ran: any other piece of evidence is dropped from the finding, which stays without it. The sub-agents never write a document evidence: cqa_plan.py does, for the rows it judges from a context document, and validate refuses it in a lot file. A fact evidence supports an na only: it is dropped when facts/server.json does not hold it for the row, and an ok that has only facts is lowered to ok_human."
+        },
+        "todo": {
+          "type": ["string", "null"],
+          "maxLength": 400,
+          "description": "What to do to fix the row, in French, at most 400 characters. null when there is nothing to do: an ok with a filled todo is lowered to ok_human."
+        },
+        "human_check": {
+          "type": ["string", "null"],
+          "maxLength": 400,
+          "description": "What a human must validate, in French, at most 400 characters. null when nothing: an ok with a filled human_check is lowered to ok_human."
+        },
+        "divergence": {
+          "type": ["string", "null"],
+          "maxLength": 400,
+          "description": "Difference between the code (develop) and the preprod, in French, at most 400 characters, for example a fix not deployed yet. null when both agree. A filled divergence turns ok and ok_human into partial."
+        },
+        "needs_probes": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/probe"},
+          "description": "HTTP responses missing from the tool collection. Ask for them here instead of concluding; they are run once, then the lot is re-run. [] when none is needed. A finding that still waits for probes after the follow-up is capped at unknown: ko and partial are kept, ok_human, ok and na become unknown."
+        },
+        "needs_scenarios": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/scenario"},
+          "description": "Optional (absent or [] when none is needed). Interaction scenarios that the tool collection cannot answer, for example a menu to open, a focus to follow, a Tab to walk, on a 320 px touch screen. They are played once, in an emulated Chromium and without any change to the site, then the lot is re-run. At most 3 per finding, with ids that are unique in the lot. A request is data, never code: it is checked against a whitelist (see scenario and scenario_step), and a finding that breaks a rule is invalid. A finding that still waits for scenarios after the follow-up is capped at unknown, like one that waits for probes: ko and partial are kept, ok_human, ok and na become unknown."
+        },
+        "tool_dates": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[a-z0-9-]+$"},
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+          },
+          "description": "Optional. For each tool whose tools/<tool>/result.json or summary.json was read, the started_at of that result.json (ISO 8601 UTC, for example 2026-10-27T21:15:05Z or 2026-10-27T21:15:05.068Z). It lets a later run tell which rows rest on a tool that was rerun since."
+        },
+        "source": {
+          "const": "context_doc",
+          "description": "Optional. Set by cqa_plan.py only, on a finding it built from the verdict of a context document (findings/context-docs.json). The sub-agents never write it: validate refuses it in a lot file."
+        },
+        "in_repo": {
+          "type": "boolean",
+          "description": "Optional. false when all the work to fix the row lies outside the repos (back office, database, host, a new plugin, dependencies): the fix mode then leaves the row to the devs, with the reason « hors du dépôt : <todo> ». true when the fix is made in a repo. Absent: the fix mode decides as before."
+        }
+      },
+      "examples": [
+        {
+          "ref": 79,
+          "verdict": "ko",
+          "confidence": "high",
+          "summary": "3 éléments ont un tabindex positif : l'ordre de tabulation saute le menu.",
+          "evidence": [
+            {"type": "file", "repo": "nuxt", "path": "components/AppHeader.vue", "line": 42},
+            {
+              "type": "page",
+              "url": "https://preprod.example.org/actualites/x",
+              "detail": "parcours au clavier"
+            },
+            {"type": "tool", "tool": "a11y", "ref": "summary.json#home/3"}
+          ],
+          "todo": "Supprimer les tabindex positifs et suivre l'ordre du DOM.",
+          "human_check": null,
+          "divergence": null,
+          "needs_probes": []
+        },
+        {
+          "ref": 17,
+          "verdict": "unknown",
+          "confidence": "medium",
+          "summary": "Le menu mobile s'ouvre au toucher, mais le focus et la fermeture à Échap ne sont pas établis sans jouer le parcours.",
+          "evidence": [
+            {
+              "type": "page",
+              "url": "https://preprod.example.org/",
+              "detail": "bouton #menu-toggle lu dans le DOM"
+            }
+          ],
+          "todo": null,
+          "human_check": null,
+          "divergence": null,
+          "needs_probes": [],
+          "needs_scenarios": [
+            {
+              "id": "menu-burger",
+              "url": "https://preprod.example.org/",
+              "profile": "portrait",
+              "steps": [
+                {"type": "tap", "selector": "#menu-toggle"},
+                {"type": "state", "selector": "#menu"},
+                {"type": "tab", "count": 3},
+                {"type": "press", "key": "Escape"},
+                {"type": "capture"}
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "evidence_file": {
+      "type": "object",
+      "required": ["type", "repo", "path"],
+      "properties": {
+        "type": {"const": "file"},
+        "repo": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Name of the repo, as in context.json."
+        },
+        "path": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Path of a file inside the repo, relative to its root; a folder or the root itself is rejected."
+        },
+        "line": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Line number, optional."
+        }
+      }
+    },
+    "evidence_page": {
+      "type": "object",
+      "required": ["type", "url"],
+      "properties": {
+        "type": {"const": "page"},
+        "url": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "URL of the page that was looked at."
+        },
+        "detail": {
+          "type": ["string", "null"],
+          "description": "What was observed on the page, in French, optional."
+        }
+      }
+    },
+    "evidence_tool": {
+      "type": "object",
+      "required": ["type", "tool", "ref"],
+      "properties": {
+        "type": {"const": "tool"},
+        "tool": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Name of the toolbox tool, for example a11y."
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Where to find it, relative to tools/<tool>/, for example summary.json#home/3."
+        }
+      }
+    },
+    "evidence_http": {
+      "type": "object",
+      "required": ["type", "url", "detail"],
+      "properties": {
+        "type": {"const": "http"},
+        "url": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "URL that was requested."
+        },
+        "detail": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "What the response showed, in French (status, header, body excerpt without secrets)."
+        }
+      }
+    },
+    "evidence_document": {
+      "type": "object",
+      "required": ["type", "doc", "ref"],
+      "description": "Written by cqa_plan.py only, for a row judged from a context document (a third-party audit report, a pentest). Never write it: validate refuses it in a lot file.",
+      "properties": {
+        "type": {"const": "document"},
+        "doc": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "Id of the context document in the run, for example d1."
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "What the verdict rests on in the document, paraphrased: the criteria (critères 7.3, 12.9) or the place of the finding. Never an excerpt of the document."
+        }
+      }
+    },
+    "evidence_fact": {
+      "type": "object",
+      "required": ["type", "topic"],
+      "description": "A fact noted from the server in facts/server.json (server lot): supports an na, never an ok.",
+      "properties": {
+        "type": {"const": "fact"},
+        "topic": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "The exact topic of a fact of facts/server.json whose refs hold the row, whose exit is 0 and whose command and result are filled."
+        }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "required": ["url", "method"],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "URL to request on the target."
+        },
+        "method": {
+          "enum": ["GET", "HEAD"],
+          "description": "HTTP method, uppercase."
+        }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "required": ["id", "url", "profile", "steps"],
+      "additionalProperties": false,
+      "description": "One scenario: the steps to play, in order, on a page loaded afresh in one profile. Only these four keys are accepted.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]{1,40}$",
+          "description": "Name chosen by the sub-agent, unique among the scenarios of the lot (a second finding of the lot that takes it invalidates both). The follow-up cites it as <lot>:<id>, in summary.json#<lot>:<id>."
+        },
+        "url": {
+          "type": "string",
+          "pattern": "\\S",
+          "maxLength": 2000,
+          "description": "URL of the page to load, on the origin of the target (it need not be a key page), at most 2000 characters. It is loaded by a GET before any guard acts: never a URL that changes a state (logout, delete, publish, cron, a token, action=trash), never a PHP file other than the public entries of the application. Such a scenario is refused with its reason."
+        },
+        "profile": {
+          "enum": ["portrait", "paysage"],
+          "description": "portrait is 320 x 640, paysage 640 x 320, both touch screens at scale 2."
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 15,
+          "items": {"$ref": "#/$defs/scenario_step"},
+          "description": "1 to 15 steps, played in order; a step that fails stops the scenario."
+        }
+      }
+    },
+    "scenario_step": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "description": "One step of a scenario, from a closed list. No typing, no JavaScript, no free navigation. A step aimed at a submit control or a consent banner is refused by the tool with its reason, and a step that would navigate is noted navigation-blocked. After each step the tool reads the focus and the aria-expanded, inert and aria-hidden states.",
+      "properties": {
+        "type": {
+          "enum": ["tab", "press", "tap", "select", "state", "capture"],
+          "description": "tab: press Tab count times (Shift+Tab with shift) and read each stop. press: press one key of the list. tap: touch the element of selector. select: choose value in the select of selector. state: read the attributes, role, size and focus of the element of selector. capture: take a screenshot."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30,
+          "description": "tab only: number of presses, 1 when absent."
+        },
+        "shift": {
+          "type": "boolean",
+          "description": "tab only: true to walk backwards with Shift+Tab, false when absent."
+        },
+        "key": {
+          "enum": ["Escape", "Tab", "Shift+Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"],
+          "description": "press only: the key. Enter and Space are not in the list."
+        },
+        "selector": {
+          "type": "string",
+          "maxLength": 200,
+          "allOf": [
+            {"pattern": "\\S"},
+            {"pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]*$"}
+          ],
+          "description": "tap, select and state: a CSS selector read in the DOM, at most 200 characters, no control character or line break. It is resolved with querySelector, so a selector that is not valid CSS is reported as invalid, never run as anything else."
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]*$",
+          "description": "select only: the value or the label of the option to choose, at most 200 characters, no control character."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "tab"}}, "required": ["type"]},
+          "then": {"propertyNames": {"enum": ["type", "count", "shift"]}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "press"}}, "required": ["type"]},
+          "then": {"required": ["key"], "propertyNames": {"enum": ["type", "key"]}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "tap"}}, "required": ["type"]},
+          "then": {"required": ["selector"], "propertyNames": {"enum": ["type", "selector"]}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "select"}}, "required": ["type"]},
+          "then": {
+            "required": ["selector", "value"],
+            "propertyNames": {"enum": ["type", "selector", "value"]}
+          }
+        },
+        {
+          "if": {"properties": {"type": {"const": "state"}}, "required": ["type"]},
+          "then": {"required": ["selector"], "propertyNames": {"enum": ["type", "selector"]}}
+        },
+        {
+          "if": {"properties": {"type": {"const": "capture"}}, "required": ["type"]},
+          "then": {"propertyNames": {"enum": ["type"]}}
+        }
+      ]
+    }
+  }
+}

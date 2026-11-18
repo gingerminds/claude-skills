@@ -21,7 +21,7 @@ Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_S
 - Extend through **hooks** (`add_action`/`add_filter`) — never edit core or a third-party plugin/theme directly.
 - Custom code lives in a **custom plugin** and/or the **(child) theme**; prefix functions/classes/handles to avoid collisions.
 - User-facing strings through the i18n API (`__()`, `_e()`, `esc_html__()`) with a text domain.
-- Detection: `roots/wordpress` in `composer.json`, or a `wp-content/` tree (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
+- Detection: `roots/wordpress`, `johnpbloch/wordpress` or `wpackagist-plugin/*` / `wpackagist-theme/*` in `composer.json`, or a `wp-content/` tree (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
 
 ---
 
