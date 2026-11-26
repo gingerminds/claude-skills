@@ -58,7 +58,7 @@ STATUS_RE = re.compile(
     r"^(constaté \(\d{2}/\d{2}/\d{4}\)|décidé|à confirmer|indiqué par .+ \(\d{2}/\d{2}/\d{4}\))$"
 )
 SECRET_RE = re.compile(
-    r"(?i)(mot de passe|password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S+"
+    r"(?i)(mot de passe|password|passwd|secret|token|api[_-]?key)[\"']?\s*[:=]\s*\S+"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY"
 )
 EM_DASH = "\u2014"
@@ -67,12 +67,15 @@ MATRIX_HEADING = "## Matrice des flux"
 EXTERNAL_IMAGE_RE = re.compile(r'<image\b[^>]*?\bhref="(?!data:)([^"]*)"')
 MASK = "[masqué]"
 # Values after a credential-like key, URL userinfo passwords, mysql -p<password>.
+QUOTED_OR_WORD = r"(?:\"[^\"]*\"|'[^']*'|\S+)"
 SECRET_VALUE_RE = re.compile(
-    r"(?i)(\b[\w.-]*(?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|authorization|credentials?|dsn|users)"
-    r"[\w.-]*\s*[=:]\s*)((?:Bearer|Basic)\s+)?\S+"
+    r"(?i)(\b[\w.-]*(?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|authorization|credentials?|dsn"
+    r"|(?:basic|digest)auth\.users)[\w.-]*[\"']?\s*[=:]\s*)((?:Bearer|Basic)\s+)?" + QUOTED_OR_WORD
 )
-URL_PASSWORD_RE = re.compile(r"(://[^/\s:@]*:)[^@\s]+@")
-MYSQL_PASSWORD_RE = re.compile(r"(?<!\S)-p(?=\S)\S+")
+# The password of a URL stops at the path, the query or the fragment.
+URL_PASSWORD_RE = re.compile(r"(://[^/\s:@]*:)[^@\s/?#]+@")
+MYSQL_CLIENT_RE = re.compile(r"\b(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)\b")
+MYSQL_PASSWORD_RE = re.compile(r"(?<!\S)-p(?=\S)" + QUOTED_OR_WORD)
 HTML_STYLE_RE = re.compile(r"(?:^|;)html=1(?:;|$)")
 UNREADABLE_VIEW = (
     "aucun diagramme embarqué ou diagramme illisible (enregistrer en .drawio.svg avec une copie du diagramme)"
@@ -362,7 +365,11 @@ def mask_secrets(text: str) -> str:
     """Hide the usual forms of credentials in a command output (a safety net, not a guarantee)."""
     text = SECRET_VALUE_RE.sub(lambda m: m.group(1) + (m.group(2) or "") + MASK, text)
     text = URL_PASSWORD_RE.sub(lambda m: m.group(1) + MASK + "@", text)
-    return MYSQL_PASSWORD_RE.sub("-p" + MASK, text)
+    # -p<password> only on a MySQL or MariaDB client line: elsewhere -p is a port (docker run -p8080:80).
+    return "".join(
+        MYSQL_PASSWORD_RE.sub("-p" + MASK, line) if MYSQL_CLIENT_RE.search(line) else line
+        for line in text.splitlines(keepends=True)
+    )
 
 
 def _docker(image: str, workdir: Path, args: Tuple[str, ...], error: str, options: Tuple[str, ...] = ()) -> None:

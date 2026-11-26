@@ -123,6 +123,18 @@ class CheckTest(unittest.TestCase):
             ],
         )
 
+    def test_json_secret_is_reported(self):
+        labels = VALID_LABELS + ('{"password": "hunter2"}',)
+        root = write_project(self.tmp, None, readme([flow_row("P01")]) + "\n`\"token\": \"abc\"`\n")
+        write_view(root / "views" / "01-vue.drawio.svg", mxfile(*labels))
+        self.assertEqual(
+            check(load_config(root)),
+            [
+                "01-vue.drawio.svg : secret possible (mot de passe, jeton ou clé), à retirer",
+                "README.md : secret possible (mot de passe, jeton ou clé), à retirer",
+            ],
+        )
+
     def test_flow_on_view_missing_from_matrix(self):
         config = self.project(labels=VALID_LABELS + ("Q02 · 22/tcp",))
         self.assertEqual(check(config), ["Q02 : sur la vue 01-vue.drawio.svg mais absent de la matrice des flux"])

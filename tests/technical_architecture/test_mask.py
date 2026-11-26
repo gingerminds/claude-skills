@@ -23,6 +23,11 @@ class MaskTest(unittest.TestCase):
             "SENTRY_DSN=https://k3y@o1.ingest.example.org/2": "SENTRY_DSN=[masqué]",
             "AWS_SECRET_ACCESS_KEY=abc/def": "AWS_SECRET_ACCESS_KEY=[masqué]",
             "client_credentials: s3cr3t": "client_credentials: [masqué]",
+            '{"password": "hunter2", "user": "app"}': '{"password": [masqué], "user": "app"}',
+            "'api_key': 'k 1'": "'api_key': [masqué]",
+            'mysql -p"my secret" db': "mysql -p[masqué] db",
+            "mariadb -uapp -p'a b' app": "mariadb -uapp -p[masqué] app",
+            "basicauth.users: admin:$$apr1$$x": "basicauth.users: [masqué]",
         }
         for line, expected in cases.items():
             with self.subTest(line):
@@ -35,6 +40,9 @@ class MaskTest(unittest.TestCase):
             "image: nginx:1.27",
             "server_name www.example.org;",
             "ssh -p 22022 deploy@example.org",
+            "docker run -p8080:80 nginx",
+            "http://host:8080/n?e=ops@example.org",
+            'LISTEN 0 128 *:22 *:* users:(("sshd",pid=1,fd=3))',
         ):
             with self.subTest(line):
                 self.assertEqual(mask_secrets(line), line)
