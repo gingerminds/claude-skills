@@ -44,7 +44,8 @@ class ConfigTest(unittest.TestCase):
         flow_id_re = load_config(write_project(self.tmp, data)).flow_id_re
         self.assertTrue(flow_id_re.fullmatch("P01"))
         self.assertTrue(flow_id_re.search("flux X12 · 443/tcp"))
-        for rejected in ("Q01", "P1", "P001"):
+        self.assertEqual(flow_id_re.findall("consultation (P01, X02) ; voir P01."), ["P01", "X02", "P01"])
+        for rejected in ("Q01", "P1", "P001", "srv-P01", "P01-backup", "web.P01"):
             with self.subTest(rejected=rejected):
                 self.assertIsNone(flow_id_re.search(rejected))
 

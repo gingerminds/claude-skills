@@ -119,7 +119,8 @@ class Config:
     @property
     def flow_id_re(self) -> Pattern[str]:
         letters = "".join(letter for letter, _ in self.flow_prefixes)
-        return re.compile(r"\b[" + letters + r"]\d{2}\b")
+        # Never glued to a host name: srv-P01, web.P01 and P01-backup are not flow IDs.
+        return re.compile(r"(?<![\w.-])[" + letters + r"]\d{2}(?![\w-])")
 
     def pdf_path(self, with_known_issues: bool) -> Path:
         """Where the dossier is written: always under build/."""
