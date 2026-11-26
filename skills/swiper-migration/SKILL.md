@@ -9,7 +9,7 @@ Entry point for migrating a project's sliders off a legacy Swiper integration. T
 
 ## Load the migration knowledge
 
-Load `${CLAUDE_SKILL_DIR}/../../stack/vue/MAIN.md` for the **swiper-migration** nature — read its `## core` + `## swiper-migration` sections (detection, what "legacy" looks like, per-slider migration steps, verification, output format, non-goals). Apply `## dev` conventions (extract a composable if the same slider config repeats across pages, type props/emits, etc.) to how each migrated component is structured.
+Load `${CLAUDE_PLUGIN_ROOT}/stack/vue/MAIN.md` for the **swiper-migration** nature — read its `## core` + `## swiper-migration` sections (detection, what "legacy" looks like, per-slider migration steps, verification, output format, non-goals). Apply `## dev` conventions (extract a composable if the same slider config repeats across pages, type props/emits, etc.) to how each migrated component is structured.
 
 ## Review before wrapping up
 

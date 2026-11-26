@@ -9,7 +9,7 @@ Entry point for Angular frontend development. This skill carries the **workflow*
 
 ## Load the Angular knowledge
 
-Load `${CLAUDE_SKILL_DIR}/../../stack/angular/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (conventions, DI, RxJS, signals, component design, forms, testing). Apply that discipline throughout the work below.
+Load `${CLAUDE_PLUGIN_ROOT}/stack/angular/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (conventions, DI, RxJS, signals, component design, forms, testing). Apply that discipline throughout the work below.
 
 ## Start from the ticket
 

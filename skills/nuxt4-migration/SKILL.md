@@ -9,7 +9,7 @@ Entry point for driving a Nuxt 3 → 4 migration. This skill carries the **workf
 
 ## Load the migration knowledge
 
-Load `${CLAUDE_SKILL_DIR}/../../stack/vue/MAIN.md` for the **nuxt4-migration** nature — read its `## core` + `## nuxt4-migration` sections (scope check, official tooling, module ecosystem audit, breaking-change catalog, `future.compatibilityVersion`, build/test/iterate loop, output format, non-goals). Apply that procedure end to end; every manual code change should also follow the `## dev` section (Composition API conventions, composables, SSR/SSG specifics) — this skill drives the migration *sequence*, the stack resource governs both *what breaks* and *how the code itself should look* once touched.
+Load `${CLAUDE_PLUGIN_ROOT}/stack/vue/MAIN.md` for the **nuxt4-migration** nature — read its `## core` + `## nuxt4-migration` sections (scope check, official tooling, module ecosystem audit, breaking-change catalog, `future.compatibilityVersion`, build/test/iterate loop, output format, non-goals). Apply that procedure end to end; every manual code change should also follow the `## dev` section (Composition API conventions, composables, SSR/SSG specifics) — this skill drives the migration *sequence*, the stack resource governs both *what breaks* and *how the code itself should look* once touched.
 
 ## Review before wrapping up
 

@@ -9,7 +9,7 @@ Entry point for generic Python development — libraries, CLIs, scripts, and ser
 
 ## Load the Python knowledge
 
-Load `${CLAUDE_SKILL_DIR}/../../stack/python/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (packaging, typing, structure, errors, testing). When the ticket reaches beyond plain feature work (security implications, or a change where standards/regressions are the crux), also read the `## security` or `## review` section so you build with the right lens from the start.
+Load `${CLAUDE_PLUGIN_ROOT}/stack/python/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (packaging, typing, structure, errors, testing). When the ticket reaches beyond plain feature work (security implications, or a change where standards/regressions are the crux), also read the `## security` or `## review` section so you build with the right lens from the start.
 
 ## Start from the ticket
 
@@ -34,5 +34,5 @@ State briefly what you found (or confirm there's nothing relevant) before propos
 4. **Then** provide implementation.
 5. **Mention** potential edge cases.
 6. **Mention** performance considerations (algorithmic complexity, memory, generators vs lists).
-7. **Mention** tests to add or update, and how to run them (via the runner — see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`).
+7. **Mention** tests to add or update, and how to run them (via the runner — see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`).
 8. **Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.

@@ -13,7 +13,7 @@ Nature → section:
 | `/gm:nuxt4-migration` | core + nuxt4-migration |
 | `/gm:swiper-migration` | core + swiper-migration |
 
-Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md` (anchored on the calling skill's base dir).
+Cross-stack resources: `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`, `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md` (anchored on the calling skill's base dir).
 
 ---
 
@@ -25,8 +25,8 @@ Shared baseline (all natures):
 - Follow the [Vue Style Guide](https://vuejs.org/style-guide/) priority A and B rules.
 - Component names are **two words minimum** (`UserCard`, not `Card`).
 - SFC block order (team convention): `<script setup>`, `<template>`, `<style scoped>`.
-- Lint via the project runner (see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`): eslint + prettier, `vue-tsc` for type checks.
-- Detection: `vue` / `nuxt` in `package.json` (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
+- Lint via the project runner (see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`): eslint + prettier, `vue-tsc` for type checks.
+- Detection: `vue` / `nuxt` in `package.json` (see `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`).
 
 ---
 
@@ -158,7 +158,7 @@ grep -E 'compatibilityVersion|future' nuxt.config.ts 2>/dev/null
 ```
 
 - Confirm the project is on Nuxt 3 (or already mid-migration with `app/` partially in place — say so, don't restart from scratch).
-- Find the project runner via `${CLAUDE_SKILL_DIR}/../../shared/runner.md` (`make` → `docker compose` → `lando`) — builds/tests should run inside it if one exists.
+- Find the project runner via `${CLAUDE_PLUGIN_ROOT}/shared/runner.md` (`make` → `docker compose` → `lando`) — builds/tests should run inside it if one exists.
 - Check for a clean git tree (`git status`) before starting — the migration touches many files across the project; the user needs a clean baseline to diff against and revert if something goes wrong.
 
 ### Run the official tooling first

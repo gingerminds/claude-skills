@@ -11,7 +11,7 @@ Nature → section:
 | `/gm:security` | core + security |
 | `/gm:archi-c4` | core + archi |
 
-Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`.
+Cross-stack resources: `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`, `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`.
 
 ---
 
@@ -20,7 +20,7 @@ Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_S
 - Python 3.11+, **PEP 8**; format/lint with black + ruff; type hints + mypy on new code.
 - Packaging via `pyproject.toml`; dependencies pinned in a lockfile; run inside a virtualenv.
 - Modules/packages have one clear responsibility; public API surfaced via `__init__.py` deliberately.
-- Detection: `pyproject.toml` / `requirements*.txt` with no django (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
+- Detection: `pyproject.toml` / `requirements*.txt` with no django (see `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`).
 
 ---
 
@@ -32,7 +32,7 @@ Consumed by `/gm:python`.
 - **Typing**: type hints on public functions; dataclasses/`TypedDict`/`pydantic` for structured data; avoid `Any` unless bridging untyped libs.
 - **Errors**: raise specific exceptions; never bare `except:`; use context managers for resources.
 - **Config**: read from env/config files, not hardcoded; keep I/O out of pure logic.
-- **Testing**: `pytest` via the runner (`${CLAUDE_SKILL_DIR}/../../shared/runner.md`); fixtures over setup boilerplate; test behaviour, not implementation.
+- **Testing**: `pytest` via the runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`); fixtures over setup boilerplate; test behaviour, not implementation.
 
 ---
 

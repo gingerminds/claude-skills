@@ -11,7 +11,7 @@ Nature → section:
 | `/gm:security` | core + security |
 | `/gm:archi-c4` | core + archi |
 
-Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`.
+Cross-stack resources: `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`, `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`.
 
 ---
 
@@ -20,7 +20,7 @@ Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_S
 - PHP 8.2+, **PSR-12** coding style; enforce with Laravel Pint (`./vendor/bin/pint`).
 - Follow the framework's directory conventions (`app/`, `routes/`, `database/`, `config/`); use artisan generators rather than hand-rolling boilerplate.
 - User-facing strings go through the localization helpers (`__()`, `trans()`), never hardcoded.
-- Detection: `laravel/framework` in `composer.json` (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
+- Detection: `laravel/framework` in `composer.json` (see `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`).
 
 ---
 
@@ -32,7 +32,7 @@ Consumed by `/gm:laravel`.
 - **HTTP layer**: validate input through Form Request classes, not inline in controllers; keep controllers thin — push domain logic into services/actions.
 - **Service providers** for wiring/bootstrapping; bind interfaces in the container rather than `new`-ing dependencies.
 - **Queues & events** for slow or side-effect work (mail, external calls); jobs are idempotent.
-- **Testing**: Pest or PHPUnit via the runner (`${CLAUDE_SKILL_DIR}/../../shared/runner.md`); prefer feature tests hitting routes + `RefreshDatabase`, unit tests for services.
+- **Testing**: Pest or PHPUnit via the runner (`${CLAUDE_PLUGIN_ROOT}/shared/runner.md`); prefer feature tests hitting routes + `RefreshDatabase`, unit tests for services.
 
 ---
 

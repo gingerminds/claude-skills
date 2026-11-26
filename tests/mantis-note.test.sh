@@ -7,28 +7,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/scripts/mantis-note.sh"
 STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR"' EXIT
-mkdir -p "$STUB_DIR/bin"
-
-# Stub curl: record args, copy --data-binary @file, write body to -o, print code.
-cat > "$STUB_DIR/bin/curl" <<'STUB'
-#!/usr/bin/env bash
-printf '%s\n' "$@" > "$STUB_DIR/args"
-out=""
-while (( $# )); do
-  case "$1" in
-    -o) out="$2"; shift ;;
-    --data-binary) f="${2#@}"; cat "$f" > "$STUB_DIR/payload"; shift ;;
-  esac
-  shift
-done
-[[ -n "$out" ]] && printf '%s' "${STUB_BODY:-}" > "$out"
-printf '%s' "${STUB_CODE:-200}"
-STUB
-chmod +x "$STUB_DIR/bin/curl"
+source "$ROOT/tests/lib/curl-stub.sh"
 
 fails=0
-export STUB_DIR
-export PATH="$STUB_DIR/bin:$PATH"
 
 pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1: $2"; fails=$((fails + 1)); }
@@ -127,6 +108,13 @@ test_leading_zeros_stripped() {
   grep -q '/issues/51234/notes' "$STUB_DIR/args" 2>/dev/null && pass "${FUNCNAME[0]}" || fail "${FUNCNAME[0]}" "id not stripped"
 }
 
+test_curl_has_timeouts() {
+  local f="$STUB_DIR/n.txt"; printf 'hello' > "$f"
+  STUB_CODE=201 STUB_BODY='{"note":{"id":1,"view_state":{"name":"private"}}}' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 1 "$f"
+  local args; args="$(tr '\n' ' ' < "$STUB_DIR/args")"
+  [[ "$args" == *"--connect-timeout 10 "* && "$args" == *"--max-time 60 "* ]] && pass "${FUNCNAME[0]}" || fail "${FUNCNAME[0]}" "args: $args"
+}
+
 test_missing_args_exits_2
 test_too_many_args_exits_2
 test_non_private_response_exits_3
@@ -137,5 +125,6 @@ test_posts_private_note
 test_api_error_exits_3
 test_special_chars_preserved
 test_leading_zeros_stripped
+test_curl_has_timeouts
 
 exit $(( fails > 0 ? 1 : 0 ))

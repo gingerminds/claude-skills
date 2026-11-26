@@ -72,7 +72,7 @@ git switch "$branch"
 
 Between "before" and "after", **rebuild and flush**, or both shots show the same thing:
 
-- front assets: the project's build (`make build`, `npm run build`, `gulp build`…, through the runner — see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`);
+- front assets: the project's build (`make build`, `npm run build`, `gulp build`…, through the runner — see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`);
 - CMS caches: e.g. Drupal `drush -l <site> cr`, WordPress object/page cache;
 - browser cache: headless Chrome starts with a fresh profile, so it's fine; with a real browser, hard-reload.
 
