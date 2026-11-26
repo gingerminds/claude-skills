@@ -99,11 +99,11 @@ def _icon_style(icon: Optional[str], vertical: str) -> Tuple[str, int]:
 
 
 def _wrap(text: str, width: float, font: int) -> str:
-    """Break a plain-text label to the block width, never before « : ; ? ! » » nor after « « »."""
+    """Break a plain-text label to the block width at spaces only, never before « : ; ? ! » » nor after « « »."""
     columns = max(10, int((width - 4) / (font * GLYPH_RATIO)))
     glued = NO_BREAK_BEFORE.sub("\u00a0", text.replace("« ", "«\u00a0"))
     lines = [wrapped for line in glued.split("\n")
-             for wrapped in (textwrap.wrap(line, columns, break_long_words=False) or [""])]
+             for wrapped in (textwrap.wrap(line, columns, break_long_words=False, break_on_hyphens=False) or [""])]
     return "\n".join(lines).replace("\u00a0", " ")
 
 
@@ -267,7 +267,7 @@ class Diagram:
                   sources: str) -> str:
         """Standard title block: title, environment and « État au » date, sources."""
         zone = self.zone("cartouche", title, x, y, w, h, role="internet", font=16)
-        self.text("cartouche-env", f"{environment}\nÉtat au {state}", 15, 32, w - 30, 40, parent=zone, font=12,
+        self.text("cartouche-env", f"{environment}\nÉtat\u00a0au\u00a0{state}", 15, 32, w - 30, 40, parent=zone, font=12,
                   bold=True)
         self.text("cartouche-sources", sources, 15, 80, w - 30, h - 90, parent=zone, font=11)
         return zone

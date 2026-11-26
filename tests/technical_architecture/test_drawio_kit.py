@@ -150,6 +150,16 @@ class DrawioKitTest(unittest.TestCase):
             self.assertFalse(line[:1] in ":;?!»", line)
             self.assertFalse(line.endswith("«"), line)
 
+    def test_wrap_keeps_host_names_and_dates_whole(self):
+        diagram = Diagram("vue", "Vue")
+        diagram.text("t", "Hôte srv-web-01.example.org via proxy-interne-02", 0, 0, 140, 60)
+        diagram.cartouche(200, 0, 120, 150, "Vue", "Production", "26/11/2026", "Sources : dépôt.")
+        lines = view_text(diagram.to_xml()).split("\n")
+        for name in ("srv-web-01.example.org", "proxy-interne-02"):
+            self.assertTrue(any(name in line for line in lines), lines)
+        self.assertFalse(any(line.endswith("-") for line in lines), lines)
+        self.assertIn("État au 26/11/2026", lines)
+
     def test_special_characters_round_trip(self):
         diagram = Diagram("vue", "Vue")
         diagram.box("a", "Front & API <v2>\nété", 0, 0, 200, 60, "client")
