@@ -194,6 +194,11 @@ class Diagram:
         for end in (source, target):
             if end not in self.rects or end == "1":
                 raise ValueError(f"cellule inconnue : {end}")
+        path = [self._anchor(source, exit), *points, self._anchor(target, entry)]
+        lengths = [math.dist(a, b) for a, b in zip(path, path[1:])]
+        seg = lengths.index(max(lengths)) if label_seg is None else label_seg
+        if not 0 <= seg < len(lengths):
+            raise ValueError(f"segment inconnu : {label_seg}")
         self._claim(cell_id)
         style = (f"edgeStyle=orthogonalEdgeStyle;rounded=1;html=0;endArrow=block;endFill=1;"
                  f"jumpStyle=arc;jumpSize=8;"
@@ -206,10 +211,7 @@ class Diagram:
         cell = ET.SubElement(self.root, "mxCell", id=cell_id, value=self.label(text), style=style, edge="1",
                              parent="1", source=source, target=target)
         geometry = ET.SubElement(cell, "mxGeometry", relative="1", **{"as": "geometry"})
-        path = [self._anchor(source, exit), *points, self._anchor(target, entry)]
-        lengths = [math.dist(a, b) for a, b in zip(path, path[1:])]
         total = sum(lengths) or 1
-        seg = lengths.index(max(lengths)) if label_seg is None else label_seg
         position = (sum(lengths[:seg]) + lengths[seg] * label_frac) / total
         geometry.set("x", f"{2 * position - 1:.3f}")
         if points:
@@ -288,6 +290,9 @@ class Diagram:
         return ET.tostring(self.mxfile, encoding="unicode")
 
     def write(self, path: Path) -> None:
-        """Write the uncompressed .drawio file."""
+        """Write the uncompressed .drawio file; refuse while sibling boxes overlap."""
+        pairs = self.overlaps()
+        if pairs:
+            raise ValueError("blocs qui se chevauchent : " + ", ".join(f"{a} / {b}" for a, b in pairs))
         ET.indent(self.mxfile)
         ET.ElementTree(self.mxfile).write(path, encoding="unicode")

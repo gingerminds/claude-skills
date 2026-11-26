@@ -24,7 +24,7 @@ Coordinates are relative to the parent zone. Work on a grid: columns for actors,
 
 For each view, from the repository root (`D=docs/architecture`, or the documentation folder of the project):
 
-1. `PYTHONPATH="$T" python3 "$D/build/gen/NN-<slug>.py" "$D/build/gen/NN-<slug>.drawio"` and check that `build().overlaps()` is empty (sibling boxes that intersect).
+1. `PYTHONPATH="$T" python3 "$D/build/gen/NN-<slug>.py" "$D/build/gen/NN-<slug>.drawio"`. The kit refuses to write while sibling boxes intersect (`overlaps()`) and names the pairs to move.
 2. `python3 "$T/architecture.py" render "$D/build/gen/NN-<slug>.drawio" "$D/views/NN-<slug>.drawio.svg" --png "$D/build/NN-<slug>.png"`.
 3. Read the PNG. Look for labels over boxes or over other labels, arrows through boxes, text that overflows its box, empty or cramped areas. Fix the generator and render again until it reads cleanly.
 4. Give the user the PNG path, take their comments, iterate.

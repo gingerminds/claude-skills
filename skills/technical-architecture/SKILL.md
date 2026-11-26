@@ -49,7 +49,7 @@ First find the documentation folder: `git ls-files '*tools/architecture.json'`, 
    - `known_issues`: the answer to question 6; `repositories`: the local paths of the other repositories (question 2).
 4. **Draw the views**, one at a time, following `references/drawio-style.md`:
    - write a generator `docs/architecture/build/gen/NN-<slug>.py` on the model of `assets/example/generators/view02.py` (a `build() -> Diagram` function, owners and date at the top);
-   - run it: `PYTHONPATH="$T" python3 docs/architecture/build/gen/NN-<slug>.py docs/architecture/build/gen/NN-<slug>.drawio`, and require `build().overlaps() == []`;
+   - run it: `PYTHONPATH="$T" python3 docs/architecture/build/gen/NN-<slug>.py docs/architecture/build/gen/NN-<slug>.drawio`. The kit refuses to write a diagram whose sibling boxes overlap and names the pairs: move them and run it again;
    - render it: `python3 "$T/architecture.py" render docs/architecture/build/gen/NN-<slug>.drawio docs/architecture/views/NN-<slug>.drawio.svg --png docs/architecture/build/NN-<slug>.png`;
    - read the PNG, fix any label or arrow that collides, render again; then give the user the PNG path and iterate on their comments;
    - once the user validates the view, the `.drawio.svg` is the source: later edits go through `extract` and `render`, or through draw.io.

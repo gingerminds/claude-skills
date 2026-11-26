@@ -88,6 +88,24 @@ class DrawioKitTest(unittest.TestCase):
             diagram.box("d", "D", 100, 0, 10, 10, "agence", icon="kubernetes")
         self.assertEqual(str(raised.exception), "pictogramme inconnu : kubernetes")
 
+    def test_label_segment_is_checked(self):
+        diagram = sample()
+        for segment in (1, 5, -1):
+            with self.subTest(segment=segment), self.assertRaises(ValueError) as raised:
+                diagram.edge(f"seg{segment}", "P09", "web", "db", "donnees", (1, 0.5), (0, 0.5), label_seg=segment)
+            self.assertEqual(str(raised.exception), f"segment inconnu : {segment}")
+        diagram.edge("seg0", "P09", "web", "db", "donnees", (1, 0.5), (0, 0.5), label_seg=0)
+
+    def test_write_refuses_overlaps(self):
+        diagram = sample()
+        diagram.box("cache", "Cache", 150, 60, 100, 40, "agence", parent="prod")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vue.drawio"
+            with self.assertRaises(ValueError) as raised:
+                diagram.write(path)
+            self.assertEqual(str(raised.exception), "blocs qui se chevauchent : web / cache")
+            self.assertFalse(path.exists())
+
     def test_overlaps(self):
         diagram = sample()
         self.assertEqual(diagram.overlaps(), [])
