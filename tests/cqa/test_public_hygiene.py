@@ -28,6 +28,9 @@ SCOPE = [
     "scripts/cqa-toolbox.sh",
     "scripts/cqa-keepawake.sh",
     "tests/cqa",
+    "skills/technical-architecture",
+    "scripts/technical_architecture",
+    "tests/technical_architecture",
     "README.md",
 ]
 
@@ -41,6 +44,7 @@ CONTENT_SCOPE = [
     "agents/cqa-fixer.md",
     "agents/cqa-fix-reviewer.md",
     "agents/cqa-importer.md",
+    "skills/technical-architecture",
     "README.md",
 ]
 
@@ -52,6 +56,8 @@ ALLOWED_IPS = {
     "127.0.0.1",  # loopback, local test servers
     "127.0.0.2",  # loopback range check in test_cli_prepare
 }
+# RFC 5737 documentation ranges, used by the technical architecture example.
+DOCUMENTATION_PREFIXES = ("192.0.2.", "198.51.100.", "203.0.113.")
 
 # R15: obviously fake ids used by the tests and fixtures, compared lowercase without dashes.
 ALLOWED_NOTION_IDS = {
@@ -80,7 +86,8 @@ def read(path):
 
 
 def find_ips(text):
-    return sorted(set(IPV4.findall(text)) - ALLOWED_IPS)
+    found = set(IPV4.findall(text)) - ALLOWED_IPS
+    return sorted(ip for ip in found if not ip.startswith(DOCUMENTATION_PREFIXES))
 
 
 def find_notion_ids(text):
@@ -96,6 +103,11 @@ class DetectorsTest(unittest.TestCase):
     def test_ipv4_is_found_and_loopback_is_allowed(self):
         address = ".".join(["10", "0", "0", "1"])
         self.assertEqual(find_ips(f"ssh {address} and 127.0.0.1"), [address])
+
+    def test_documentation_ranges_are_allowed(self):
+        self.assertEqual(find_ips("203.0.113.10 192.0.2.1 198.51.100.7"), [])
+        address = ".".join(["10", "0", "0", "1"])
+        self.assertEqual(find_ips(f"203.0.113.10 {address}"), [address])
 
     def test_notion_ids_are_found_in_both_forms(self):
         flat = "a1" * 16
@@ -126,6 +138,7 @@ class PublicHygieneTest(unittest.TestCase):
             "scripts/cqa_notion.py",
             "scripts/cqa-toolbox.sh",
             "tests/cqa/test_public_hygiene.py",
+            "scripts/technical_architecture/architecture.py",
             "README.md",
         ):
             self.assertIn(expected, names)

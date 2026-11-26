@@ -1,0 +1,14 @@
+{
+  "tool_version": "1.0.0",
+  "title": "Architecture de la plateforme Exemple",
+  "pdf": "architecture-exemple.pdf",
+  "flow_prefixes": {"P": "Production", "Q": "Préproduction", "X": "Hors environnement"},
+  "owners": {
+    "hebergeur": "Hébergeur Exemple",
+    "agence": "Gingerminds",
+    "client": "Client Exemple",
+    "tiers": "Service tiers"
+  },
+  "known_issues": true,
+  "repositories": []
+}
