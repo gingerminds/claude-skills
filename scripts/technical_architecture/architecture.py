@@ -405,12 +405,14 @@ def render(src: Path, view: Path, png: Optional[Path] = None) -> None:
             workdir, "--export", "--format", "svg", "--embed-diagram", "--embed-svg-images",
             "--theme", "light", "--output", "out.svg", "source.drawio",
         )
+        view.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(workdir / "out.svg", view)
         if png:
             _drawio(
                 workdir, "--export", "--format", "png", "--scale", "2", "--theme", "light",
                 "--output", "out.png", "source.drawio",
             )
+            png.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(workdir / "out.png", png)
 
 
@@ -553,6 +555,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except VIEW_ERRORS:
             _errors([f"{args.view.name} : {UNREADABLE_VIEW}"])
             return 1
+        args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(diagram, encoding="utf-8")
         return 0
     if args.command == "render":

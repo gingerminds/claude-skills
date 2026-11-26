@@ -88,6 +88,27 @@ class RenderPdfTest(unittest.TestCase):
         self.assertTrue((self.tmp / "vue.drawio.svg").is_file())
         self.assertTrue((self.tmp / "vue.png").is_file())
 
+    def test_render_creates_missing_folders(self):
+        source = self.tmp / "source.drawio"
+        source.write_text(mxfile(*LABELS), encoding="utf-8")
+        architecture.render(source, self.tmp / "vues" / "vue.drawio.svg", self.tmp / "build" / "apercu" / "vue.png")
+        self.assertTrue((self.tmp / "vues" / "vue.drawio.svg").is_file())
+        self.assertTrue((self.tmp / "build" / "apercu" / "vue.png").is_file())
+
+    def test_extract_creates_missing_folders(self):
+        root = self.project()
+        out = root / "build" / "sources" / "vue.drawio"
+        self.assertEqual(main(["extract", str(root / "views" / "01-vue.drawio.svg"), str(out)]), 0)
+        self.assertEqual(view_text(out.read_text(encoding="utf-8")), view_text(mxfile(*LABELS)))
+
+    def test_crlf_readme_keeps_its_annexes(self):
+        root = self.project()
+        readme_path = root / "README.md"
+        readme_path.write_bytes(readme_path.read_bytes().replace(b"\n", b"\r\n"))
+        markdown = build_dossier_markdown(load_config(root), True)
+        self.assertEqual(markdown.count("::: {.annexe}"), 3)
+        self.assertIn("| P01 | Internet |", markdown)
+
     def test_docker_mount_keeps_spaces(self):
         architecture._docker("image", Path("/tmp/a b/c"), ("arg",), "échec")
         self.assertIn("/tmp/a b/c:/data", self.commands()[0])
