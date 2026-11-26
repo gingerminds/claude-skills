@@ -194,7 +194,8 @@ claude-skills/
 │   ├── stack-detect.md      # cheatsheet de détection de stack + règle de chargement
 │   ├── root-cause.md        # investigation de cause racine (tickets bug) — consommé par ticket
 │   ├── scope-classification.md  # classification bounded/architectural (tickets feature) — consommé par ticket
-│   └── ticket-format.md     # gabarit de la note de qualification — consommé par ticket-refine
+│   ├── ticket-format.md     # gabarit de la note de qualification — consommé par ticket-refine
+│   └── visual-evidence.md   # captures avant/après des modifs front, upload dans la MR — consommé par drupal, merge-request, review
 ├── tests/
 │   ├── cqa/                  # tests unittest de l'audit et hygiène du dépôt public (voir « Contribuer »)
 │   └── mantis-note.test.sh  # tests de scripts/mantis-note.sh

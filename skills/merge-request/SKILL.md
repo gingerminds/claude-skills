@@ -13,6 +13,7 @@ Turn a finished change into a clean, reviewable GitLab MR. Outward-facing: creat
 2. **Base branch** — Default target is `develop` (fall back to the repo's default branch). Confirm from existing branches/MRs if unsure.
 3. **Clean staging** — Stage **only** the files belonging to this change. Inspect `git status` and explicitly exclude unrelated working-tree edits (leave them unstaged — never `git add -A` blindly).
 4. **Reuse the review** — If `/gm:review` just ran, lift its verdict, **Vérification ✅** checks, and **Hors-scope** notes straight into the MR description instead of re-deriving them.
+5. **Visual change?** — If the diff touches the rendering (templates, styles, front JS, images, email templates), the MR needs before/after screenshots: upload them and fill **Rendu avant / après** per `${CLAUDE_SKILL_DIR}/../../shared/visual-evidence.md`. No "before" was taken? Recover it with the stash procedure there — don't open the MR without it.
 
 ## Commit
 
@@ -72,6 +73,9 @@ This fills `$DESC` above. Reference the tracker (Mantis/Jira/issue) with a real 
 
 ### UAT manuelle
 <exact steps a human follows to confirm>
+
+## Rendu avant / après
+<only for a visual change — table of uploaded screenshots, see shared/visual-evidence.md; omit the section otherwise>
 
 ## Hors-scope
 <dead code / latent issues for a separate ticket>

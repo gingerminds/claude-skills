@@ -37,8 +37,9 @@ State briefly what you found (or confirm there's nothing relevant) before propos
 
 1. **Understand the ticket** — if it came from one and the intent isn't already in context, run `/gm:ticket` to get the brief, then **survey** the existing custom modules (see above) so you build on what's there, not beside it.
 2. **Classify** whether the problem is domain logic, infrastructure, or presentation.
+   - **Touches the rendering** (Twig, Sass/CSS, front JS, images/SVG, email templates, display config)? → follow `${CLAUDE_SKILL_DIR}/../../shared/visual-evidence.md`: list the affected pages/emails and **capture the "before" screenshots now, before editing any file**.
 3. **Propose** the cleanest architectural approach (apply the `dev.md` architecture/decoration/plugin/event guidance).
-4. **Then** provide implementation.
+4. **Then** provide implementation. For a rendering change, rebuild assets + `drush cr`, then capture the matching "after" screenshots and check the pair actually shows the change.
 5. **Mention** potential edge cases.
 6. **Mention** performance considerations (cacheability metadata, N+1, batch/queue).
 7. **Mention** tests to add or update, and how to run them (via the runner — see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`).
