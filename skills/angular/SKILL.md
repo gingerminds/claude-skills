@@ -27,13 +27,8 @@ Before writing any code, **read the project's existing Angular code** to build a
 
 State briefly what you found (or confirm there's nothing relevant) before proposing an approach.
 
-## Problem-Solving Procedure
+## Approach
 
-1. **Understand the ticket** — if it came from one and the intent isn't already in context, run `/gm:ticket` to get the brief, then **survey** the existing Angular code (see above) so you build on what's there, not beside it.
-2. **Classify** whether the problem is presentation, a service/business-logic concern, routing/navigation, or a cross-cutting concern (auth, i18n, forms).
-3. **Propose** the cleanest approach, citing the relevant pattern (service + DI, guard/resolver, signal store...).
-4. **Then** provide implementation.
-5. **Mention** potential edge cases — especially RxJS subscription leaks and change-detection surprises.
-6. **Mention** performance considerations (change detection strategy, bundle/lazy loading).
-7. **Mention** tests to add or update, and how to run them (`ng test` / Jest, via the runner — see `shared/runner.md`).
-8. **Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.
+Classify the problem (presentation, a service/business-logic concern, routing/navigation, or a cross-cutting concern: auth, i18n, forms) and propose the cleanest approach, citing the pattern you rely on (service + DI, guard/resolver, signal store...), then implement it. Add or update the tests the change needs and run them (`ng test` / Jest, via the runner — see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`). Raise edge cases and performance risks (RxJS subscription leaks, change-detection surprises, change detection strategy, bundle/lazy loading) only where they bear on this change.
+
+**Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.

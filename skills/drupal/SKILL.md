@@ -11,7 +11,7 @@ Entry point for Drupal backend development. This skill carries the **workflow**;
 
 Load `${CLAUDE_PLUGIN_ROOT}/stack/drupal/MAIN.md` for the **dev** nature — it pulls `core.md` (coding standard, `t()`, Cache API vocabulary) + `dev.md` (architecture, entities, cacheability, config, security, testing, service decoration, plugins, event subscribers). Apply that discipline throughout the work below.
 
-**`dev` is the baseline, not always enough.** `MAIN.md` is the dispatcher — it lists every nature the stack exposes (`core` / `dev` / `review` / `security`). When the ticket reaches beyond plain feature work, also load the nature(s) it implicates so you build with the right lens from the start, not after the fact:
+**`dev` is the baseline, not always enough.** `MAIN.md` is the dispatcher — it lists every nature the stack exposes (`dev` / `review` / `security` / `archi`, on top of the always-loaded `core`). When the ticket reaches beyond plain feature work, also load the nature(s) it implicates so you build with the right lens from the start, not after the fact:
 
 - Ticket with **security / access / data-exposure** implications (auth, permissions, private data, file handling, an SA to patch) → also load `${CLAUDE_PLUGIN_ROOT}/stack/drupal/security.md`.
 - Working against **existing code you must not regress**, or a change where cacheability/standards are the crux → also load `${CLAUDE_PLUGIN_ROOT}/stack/drupal/review.md` to keep its checklist in mind while coding (the formal pass still runs later via `/gm:review`).
@@ -33,14 +33,10 @@ Before writing any code, **read the project's custom modules** to build a pictur
 
 State briefly what you found (or confirm there's nothing relevant) before proposing an approach.
 
-## Problem-Solving Procedure
+## Approach
 
-1. **Understand the ticket** — if it came from one and the intent isn't already in context, run `/gm:ticket` to get the brief, then **survey** the existing custom modules (see above) so you build on what's there, not beside it.
-2. **Classify** whether the problem is domain logic, infrastructure, or presentation.
-   - **Touches the rendering** (Twig, Sass/CSS, front JS, images/SVG, email templates, display config)? → follow `${CLAUDE_PLUGIN_ROOT}/shared/visual-evidence.md`: list the affected pages/emails and **capture the "before" screenshots now, before editing any file**.
-3. **Propose** the cleanest architectural approach (apply the `dev.md` architecture/decoration/plugin/event guidance).
-4. **Then** provide implementation. For a rendering change, rebuild assets + `drush cr`, then capture the matching "after" screenshots and check the pair actually shows the change.
-5. **Mention** potential edge cases.
-6. **Mention** performance considerations (cacheability metadata, N+1, batch/queue).
-7. **Mention** tests to add or update, and how to run them (via the runner — see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`).
-8. **Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.
+Classify the problem (domain logic, infrastructure, or presentation) and propose the cleanest architectural approach, applying the `dev.md` architecture/decoration/plugin/event guidance, then implement it. Add or update the tests the change needs and run them (via the runner — see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`). Raise edge cases and performance risks (cacheability metadata, N+1, batch/queue) only where they bear on this change.
+
+**Touches the rendering** (Twig, Sass/CSS, front JS, images/SVG, email templates, display config)? Follow `${CLAUDE_PLUGIN_ROOT}/shared/visual-evidence.md`: list the affected pages/emails and **capture the "before" screenshots before editing any file**. After implementing, rebuild assets + `drush cr`, then capture the matching "after" screenshots and check the pair actually shows the change.
+
+**Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.
