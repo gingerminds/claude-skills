@@ -44,7 +44,7 @@ Read, in this order:
 5. `tools/<tool>/summary.json` for the tools your rows need (table below). Read `tools/<tool>/result.json` first: a tool without `result.json` has not finished; a `status` other than `ok` comes with its `reason`. Note the `started_at` of each `result.json` you read.
 6. `facts/server.json`, if it exists.
 7. `${CLAUDE_PLUGIN_ROOT}/skills/checklist-quality-audit/references/verdicts.md`: the verdict rules. Follow them exactly.
-8. For each repo whose `stack` is set: `${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md`, then what it gives for the review and security natures. In these files, read `${CLAUDE_SKILL_DIR}/../..` as `${CLAUDE_PLUGIN_ROOT}`. A repo with `stack: null` has no stack resource: stay generic.
+8. For each repo whose `stack` is set: `${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md`, then what it gives for the review and security natures. A repo with `stack: null` has no stack resource: stay generic.
 9. `context-docs/hints/<lot>.json`, when it exists.
 
 Rows to evaluate: your lot's `refs` minus its `document_refs` (a `lots.json` of an older run has none). A row of `document_refs` was judged from a context document (an audit report of a third party): the orchestrator already wrote its finding in `findings/context-docs.json`. Write no finding for it (`validate` refuses a finding of the first round or of the follow-up for such a row, and the finding of the document stays) and never modify that file. With `Rows:` in the dispatch (a rerun or a recette) the list of `Rows:` replaces this rule: see Rerun.
