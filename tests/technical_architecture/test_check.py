@@ -110,8 +110,8 @@ class CheckTest(unittest.TestCase):
                 self.assertEqual(check(self.project(rows=(flow_row("P01", status),))), [])
 
     def test_secret_and_em_dash_are_reported(self):
-        labels = VALID_LABELS + ("password: hunter2", "Proxy — cache")
-        root = write_project(self.tmp, None, readme([flow_row("P01")]) + "\ntoken = abc123 — fin\n")
+        labels = VALID_LABELS + ("password: hunter2", "Proxy \u2014 cache")
+        root = write_project(self.tmp, None, readme([flow_row("P01")]) + "\ntoken = abc123 \u2014 fin\n")
         write_view(root / "views" / "01-vue.drawio.svg", mxfile(*labels))
         self.assertEqual(
             check(load_config(root)),
