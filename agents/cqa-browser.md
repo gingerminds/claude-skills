@@ -44,8 +44,8 @@ You receive: `Run dir: <path>. Lot: <lot_id>. Follow-up: <yes|no>. Follow your i
 
 Allowed actions:
 - `navigate` to project URLs, `back` and `forward`; `read_page`, `find`, `get_page_text`; `javascript_tool` to read; `read_console_messages`; `resize_window`.
-- `computer`: `screenshot`, `zoom`, `scroll`, `scroll_to`, `hover`; `key` with Tab, shift+Tab and Escape; the arrow keys only inside a menu or a tab panel, never on a focused select, radio button, checkbox or range control (a change can submit the form); Enter or Space only on a link to a project page or on a button that opens or closes a menu, an accordion, a modal or a tab panel; `left_click` only on such a link or button.
-- Never `type`, `right_click`, `double_click`, `triple_click` or `left_click_drag`.
+- `computer`: `screenshot`, `zoom`, `scroll`, `scroll_to`, `hover`; `key` with Tab, shift+Tab and Escape only.
+- Never `left_click`, `type`, `right_click`, `double_click`, `triple_click` or `left_click_drag`; never Enter, Space or the arrow keys. A menu, an accordion or a panel to open: ask for a scenario (below), or put the test in `human_check`.
 - On a prod run: navigation, reading, Tab and Escape only.
 
 ## Inputs
