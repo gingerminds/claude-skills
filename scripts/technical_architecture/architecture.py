@@ -66,6 +66,7 @@ MATRIX_HEADING = "## Matrice des flux"
 EXTERNAL_IMAGE_RE = re.compile(r'<image\b[^>]*?\bhref="(?!data:)([^"]*)"')
 # Looks like a flow ID, whatever the configured prefixes.
 ID_LIKE_RE = re.compile(r"^[A-Z]\d+$")
+HTML_STYLE_RE = re.compile(r"(?:^|;)html=1(?:;|$)")
 UNREADABLE_VIEW = (
     "aucun diagramme embarqué ou diagramme illisible (enregistrer en .drawio.svg avec une copie du diagramme)"
 )
@@ -207,15 +208,28 @@ def extract_diagram(view: Path) -> str:
     return ET.tostring(mxfile, encoding="unicode")
 
 
+def _is_html(element: ET.Element) -> bool:
+    """Whether a cell label is HTML (html=1 in its style, or in the style of a wrapped mxCell)."""
+    style = element.get("style")
+    if style is None:
+        child = element.find("mxCell")
+        style = child.get("style") if child is not None else None
+    return bool(HTML_STYLE_RE.search(style or ""))
+
+
 def view_text(mxfile_xml: str) -> str:
-    """Return the visible text of every cell, HTML stripped, one label per line."""
+    """Return the visible text of every cell: plain labels as written, HTML labels stripped to one line."""
     labels = []
     for element in ET.fromstring(mxfile_xml).iter():
         for attribute in ("value", "label"):
             value = element.get(attribute)
-            if value:
+            if not value:
+                continue
+            if _is_html(element):
                 text = html.unescape(re.sub(r"<[^>]+>", " ", value)).replace("\xa0", " ")
                 labels.append(re.sub(r"\s+", " ", text).strip())
+            else:
+                labels.append(value.replace("\xa0", " ").strip())
     return "\n".join(label for label in labels if label)
 
 

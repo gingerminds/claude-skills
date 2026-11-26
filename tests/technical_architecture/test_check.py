@@ -136,6 +136,18 @@ class CheckTest(unittest.TestCase):
         write_view(root / "views" / "01-vue.drawio.svg", mxfile(*VALID_LABELS))
         self.assertEqual(check(load_config(root)), ["README.md : introuvable"])
 
+    def test_html_labels_are_stripped(self):
+        xml = (
+            '<mxfile><diagram id="d" name="Vue"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>'
+            '<mxCell id="a" value="&lt;b&gt;P01&lt;/b&gt;&amp;nbsp;&amp;middot; 443/tcp&lt;br&gt;proxy" '
+            'style="rounded=1;html=1;" vertex="1" parent="1"/>'
+            '<UserObject id="b" label="&lt;i&gt;Légende&lt;/i&gt;"><mxCell style="text;html=1;" vertex="1" parent="1"/>'
+            '</UserObject>'
+            '<mxCell id="c" value="Front &amp; API &lt;v2&gt;" style="html=0;" vertex="1" parent="1"/>'
+            '</root></mxGraphModel></diagram></mxfile>'
+        )
+        self.assertEqual(view_text(xml), "P01 · 443/tcp proxy\nLégende\nFront & API <v2>")
+
     def test_matrix_rows_follow_prefixes(self):
         config = self.project(rows=(flow_row("P01"), flow_row("Q03"), flow_row("R01")))
         rows = matrix_rows(config.readme.read_text(encoding="utf-8"), config.flow_id_re)
