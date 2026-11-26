@@ -31,13 +31,14 @@ Accept any of:
 - a branch name `feature/<id>-slug` or `fix/<id>-slug` (legacy `feat/<id>-slug` tolerated) → extract the id;
 - a ticket pasted inline.
 
-Normalize the id without leading zeros (`0012345` → `12345`). Then call the script directly (not through `bash …`, so it matches `allowed-tools`):
+Read `${CLAUDE_PLUGIN_ROOT}/shared/mantis-ticket.md` first (id form, exit codes, reading every note, attachments), then run these exact command lines:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id>    # summary, description, steps to reproduce, additional info, notes, attachment list
+${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id>                                  # the ticket digest
+${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "<scratchpad>"  # one attachment
 ```
 
-It needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If it exits non-zero (2 = missing credentials or bad usage, 3 = HTTP/API error):
+Ticket unreachable (non-zero exit):
 
 - **manual use** — ask the user to paste the ticket rather than guessing the intent;
 - **agent mode** — stop. Reply with exactly `Erreur : ticket <id> inaccessible (<code>)`, where `<code>` is the exit code.
@@ -46,22 +47,7 @@ A pasted ticket is a first-class input — digest it the same way.
 
 ## 2. Attachments
 
-If the digest ends with an `## Attachments` section, **download and read the attachments by default** — a mockup or a screenshot of the bug often *is* the spec. No attachments → say nothing, move on. Download into the session scratchpad directory:
-
-```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "<scratchpad>"
-```
-
-Pass the scratchpad **directory**, never a filename: the script names the file itself (`<file-id>-<sanitised original name>`), refuses a `<file-id>` that is not digits only, a directory outside the temp roots and an existing file (exit 2). Take the written path from its stdout line `Downloaded issue <id> file <file-id> -> <path>` and use exactly that path.
-
-Then `Read` each file and fold what it shows into the brief (the expected UI, the error in the screenshot, a URL). A download that fails does not stop the skill: mention the file as not loaded and carry on.
-
-Ask only about attachments you judge probably useless (large archives, binaries unrelated to the change, duplicates):
-
-- **manual use** — ask via `AskUserQuestion` whether to load those files, listing them (options `Charger`, `Ignorer`);
-- **agent mode** — do not ask and do not load them; list them in the brief as `Pièces jointes non chargées : <noms>`.
-
-For a **pasted** ticket, the user can paste or drop the images directly.
+Download and read them as the **Attachments** section of `shared/mantis-ticket.md` says, and fold what they show into the brief (the expected UI, the error in the screenshot, a URL). No attachments → say nothing, move on. In agent mode, the attachments not loaded are listed in the brief. For a **pasted** ticket, the user can paste or drop the images directly.
 
 ## 3. Look for a qualification note
 

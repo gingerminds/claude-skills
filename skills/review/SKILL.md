@@ -45,15 +45,16 @@ Several stacks detected and the scope of the change is ambiguous: in manual use,
 
 ## Load the ticket
 
-Correctness is judged against intent, so get the ticket. Extract the Mantis id from the MR description or the branch name (`feature|fix/<id>-slug`, also legacy `feat/`), without leading zeros. The id must be **digits only**; anything else counts as « no ticket id ». Then call the script directly (not through `bash …`, so it matches `allowed-tools`):
+Correctness is judged against intent, so get the ticket. Extract the Mantis id from the MR description or the branch name (`feature|fix/<id>-slug`, also legacy `feat/`). Read `${CLAUDE_PLUGIN_ROOT}/shared/mantis-ticket.md` first (id form, exit codes, reading every note, attachments), then run these exact command lines:
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id>    # summary, description, steps-to-reproduce, notes, attachment list
+${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id>                                  # the ticket digest
+${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "<scratchpad>"  # one attachment
 ```
 
-**Read the whole ticket, not just the opening request** — the initial description *and* every note/exchange. The real intent often drifts in the discussion: a note narrows the scope, corrects the expected behaviour, drops a requirement, or settles a question raised mid-thread. Judge the change against the *latest agreed* intent across all notes, not the first description. If notes contradict each other, flag the ambiguity rather than guessing.
+Judge the change against the *latest agreed* intent across all notes, not the first description.
 
-The script needs `MANTIS_URL` + `MANTIS_TOKEN` in the env. If they're unset or it exits non-zero (exit 2 = no creds, 3 = API error):
+Ticket unreachable (credentials unset or non-zero exit):
 
 - **manual use** — **ask the user to paste the ticket** rather than reviewing intent blind — and ask for the notes too, not only the description;
 - **agent mode** — continue without the ticket. Judge Correctness against the MR/branch description and the commit messages, and mark **Correctness** ⚠️ « non vérifié contre le ticket » in the dimension table and in the unverified points. This reviewer-side gap is **not** a finding: it raises no Blocker/Major and counts in neither reservation total.
@@ -62,18 +63,7 @@ No ticket id anywhere (MR description, branch, commits), in either mode: judge C
 
 ### Attachments
 
-If the digest lists an `## Attachments` section, **download and read the attachments by default** — a mockup or a before/after screenshot is often the real acceptance criterion. Download into the session scratchpad directory:
-
-```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh <id> --file <file-id> "<scratchpad>"
-```
-
-Pass the scratchpad **directory**, never a filename: the script names the file itself (`<file-id>-<sanitised original name>`), refuses a `<file-id>` that is not digits only, a directory outside the temp roots and an existing file (exit 2). Take the written path from its stdout line `Downloaded issue <id> file <file-id> -> <path>` and use exactly that path. Then `Read` each file. A download that fails does not stop the review: mention the file as not loaded and carry on.
-
-Ask only about attachments you judge probably useless (large archives, binaries unrelated to the change, duplicates):
-
-- **manual use** — ask whether to load those files, listing them;
-- **agent mode** — do not load them; list them in the review as `Pièces jointes non chargées : <noms>`.
+Download and read them as the **Attachments** section of `shared/mantis-ticket.md` says — a mockup or a before/after screenshot is often the real acceptance criterion. In agent mode, the attachments not loaded are listed in the review.
 
 ## Review dimensions
 

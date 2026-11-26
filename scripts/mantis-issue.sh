@@ -9,8 +9,10 @@
 #   --file names the file itself: <dest-dir>/<fid>-<sanitised original filename>
 #   (every char outside [A-Za-z0-9._-] -> "_", ".." removed; empty name -> <fid>.bin).
 #   <dest-dir> must be an existing directory under a temp root ($TMPDIR, /tmp,
-#   /private/tmp — the Claude scratchpad lives there); an existing file is never
-#   overwritten. On success stdout is: Downloaded issue <id> file <fid> -> <path>
+#   /private/tmp — the Claude scratchpad lives there). A file is never overwritten:
+#   if <path> is already a regular file (same attachment fetched earlier in the
+#   session), it is reused as is. On success stdout is:
+#   Downloaded issue <id> file <fid> -> <path>
 #
 # Env:     MANTIS_URL    base URL of the Mantis instance (e.g. https://mantis.example.com)
 #          MANTIS_TOKEN  Mantis API token (My Account -> API Tokens)
@@ -20,8 +22,8 @@
 # Exit codes:
 #   0  ticket printed / file downloaded
 #   2  missing env / bad usage (non-numeric id, dest-dir outside a temp root,
-#      target file already exists) -> skill should fall back to "paste the ticket"
-#   3  HTTP / API error          -> skill should fall back to "paste the ticket"
+#      target is a symlink or not a regular file) -> skill should fall back to "paste the ticket"
+#   3  HTTP / API error, or a 200 that is not a JSON object -> skill should fall back to "paste the ticket"
 set -euo pipefail
 
 usage() {
@@ -76,6 +78,14 @@ fi
 
 base="${MANTIS_URL%/}"
 
+# A 200 that is not a JSON object (empty body, SSO login page, wrong MANTIS_URL) is an
+# API error, not an empty ticket nor a jq crash.
+require_json() {
+  jq -e 'type == "object"' "$1" >/dev/null 2>&1 && return
+  echo "Mantis returned HTTP 200 without a JSON object from ${base}: check MANTIS_URL." >&2
+  exit 3
+}
+
 # --- Download mode: fetch a single attachment into <dest-dir> ----------------
 if [[ "$mode" == "file" ]]; then
   fbody="$(mktemp)"
@@ -91,6 +101,7 @@ if [[ "$mode" == "file" ]]; then
     jq -r '.message // empty' "$fbody" >&2 2>/dev/null || true
     exit 3
   fi
+  require_json "$fbody"
 
   # The single-file endpoint wraps the attachment in .files[0]; content is base64.
   # A missing file id still returns HTTP 200 with {"files":[]}, so check for content.
@@ -109,17 +120,27 @@ if [[ "$mode" == "file" ]]; then
     dest="${dest_dir}/${file_id}-${safe_name}"
   fi
 
-  # Claim the name with noclobber first: never overwrite, even if the file appears
-  # between a check and the write, and only ever clean up a file this run created.
-  if [[ -e "$dest" || -L "$dest" ]] || ! ( set -C; : > "$dest" ) 2>/dev/null; then
+  # Never overwrite. A regular file there is the same attachment, fetched earlier in
+  # the session (or by a parallel run): reuse it. Anything else (symlink, dir) is refused.
+  reuse_or_refuse() {
+    if [[ -f "$dest" && ! -L "$dest" ]]; then
+      echo "Downloaded issue ${id} file ${file_id} -> ${dest}"
+      exit 0
+    fi
     echo "Refusing to overwrite existing file: ${dest}" >&2
     exit 2
-  fi
-  if ! printf '%s' "$content" | base64 -d > "$dest" 2>/dev/null; then
+  }
+  if [[ -e "$dest" || -L "$dest" ]]; then reuse_or_refuse; fi
+
+  # Decode next to the target, then publish it with a hard link: atomic and never
+  # clobbering, so the target only ever appears complete.
+  part="$(mktemp "${dest_dir}/.part.XXXXXX")"
+  trap 'rm -f "$fbody" "$part"' EXIT
+  if ! printf '%s' "$content" | base64 -d > "$part" 2>/dev/null; then
     echo "Could not write attachment ${file_id} to ${dest} (decode error)." >&2
-    rm -f "$dest"
     exit 3
   fi
+  ln "$part" "$dest" 2>/dev/null || reuse_or_refuse
   echo "Downloaded issue ${id} file ${file_id} -> ${dest}"
   exit 0
 fi
@@ -138,6 +159,7 @@ if [[ "$code" != "200" ]]; then
   jq -r '.message // empty' "$body" >&2 2>/dev/null || true
   exit 3
 fi
+require_json "$body"
 
 jq -r '
   .issues[0] as $i

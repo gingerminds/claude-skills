@@ -119,12 +119,64 @@ test_file_empty_name_falls_back() {
   [[ $rc -eq 0 && "$out" == "Downloaded issue 7 file 5 -> $want" && -f "$want" ]] && pass "${FUNCNAME[0]}" || fail "${FUNCNAME[0]}" "rc=$rc out: $out"
 }
 
-test_file_refuses_overwrite() {
+# Same attachment downloaded by an earlier skill of the session: reuse it, never overwrite.
+test_file_reuses_existing() {
   local d; d="$(new_dest_dir)"
   printf 'old' > "$d/3-a.png"
   STUB_CODE=200 STUB_BODY='{"files":[{"id":3,"filename":"a.png","content":"aGVsbG8="}]}' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 7 --file 3 "$d"
-  if [[ $rc -ne 2 ]]; then fail "${FUNCNAME[0]}" "rc=$rc"
+  if [[ $rc -ne 0 ]]; then fail "${FUNCNAME[0]}" "rc=$rc err: $err"
+  elif [[ "$out" != "Downloaded issue 7 file 3 -> $d/3-a.png" ]]; then fail "${FUNCNAME[0]}" "out: $out"
   elif [[ "$(cat "$d/3-a.png")" != "old" ]]; then fail "${FUNCNAME[0]}" "existing file overwritten"
+  else pass "${FUNCNAME[0]}"; fi
+}
+
+test_file_refuses_symlink_target() {
+  local d; d="$(new_dest_dir)"
+  printf 'keep' > "$STUB_DIR/victim"
+  ln -s "$STUB_DIR/victim" "$d/3-a.png"
+  STUB_CODE=200 STUB_BODY='{"files":[{"id":3,"filename":"a.png","content":"aGVsbG8="}]}' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 7 --file 3 "$d"
+  if [[ $rc -ne 2 ]]; then fail "${FUNCNAME[0]}" "rc=$rc"
+  elif [[ "$(cat "$STUB_DIR/victim")" != "keep" ]]; then fail "${FUNCNAME[0]}" "symlink target overwritten"
+  else pass "${FUNCNAME[0]}"; fi
+}
+
+# A 200 that is not JSON (SSO login page, wrong MANTIS_URL) is an API error (3), not a jq crash.
+test_non_json_200_exits_3() {
+  local d; d="$(new_dest_dir)"
+  STUB_CODE=200 STUB_BODY='<html>login</html>' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 7
+  if [[ $rc -ne 3 || "$err" != *"MANTIS_URL"* ]]; then fail "${FUNCNAME[0]}" "digest rc=$rc err: $err"; return; fi
+  STUB_CODE=200 STUB_BODY='<html>login</html>' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 7 --file 3 "$d"
+  if [[ $rc -ne 3 || "$err" != *"MANTIS_URL"* ]]; then fail "${FUNCNAME[0]}" "file rc=$rc err: $err"; return; fi
+  local body
+  for body in '' '"text"' '[]' 'null'; do
+    STUB_CODE=200 STUB_BODY="$body" MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 7
+    if [[ $rc -ne 3 ]]; then fail "${FUNCNAME[0]}" "body '$body' rc=$rc out: $out"; return; fi
+  done
+  pass "${FUNCNAME[0]}"
+}
+
+# The target only appears once fully written: no partial file left for a later run to reuse.
+test_file_leaves_no_partial_on_decode_error() {
+  local d; d="$(new_dest_dir)"
+  STUB_CODE=200 STUB_BODY='{"files":[{"filename":"a.png","content":"@@@not b64"}]}' MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 7 --file 3 "$d"
+  if [[ $rc -ne 3 ]]; then fail "${FUNCNAME[0]}" "rc=$rc"
+  elif [[ -n "$(ls -A "$d")" ]]; then fail "${FUNCNAME[0]}" "files left: $(ls -A "$d")"
+  else pass "${FUNCNAME[0]}"; fi
+}
+
+# The skills parse this output: `- [<reporter>] <text>` per note (ticket-refine finds its
+# previous note there) and one `- [<file-id>] <name>` per attachment, issue AND note level.
+test_digest_lists_notes_and_all_attachments() {
+  STUB_CODE=200 STUB_BODY='{"issues":[{"id":7,"summary":"T",
+    "attachments":[{"id":11,"filename":"spec.pdf","content_type":"application/pdf","size":10}],
+    "notes":[{"reporter":{"name":"alice"},"text":"voir capture",
+              "attachments":[{"id":12,"filename":"bug.png","content_type":"image/png; charset=binary","size":20}]}]}]}' \
+    MANTIS_URL=https://mantis.test MANTIS_TOKEN=tok run_script 7
+  if [[ $rc -ne 0 ]]; then fail "${FUNCNAME[0]}" "rc=$rc err: $err"
+  elif [[ "$out" != *"- [alice] voir capture"* ]]; then fail "${FUNCNAME[0]}" "note line missing: $out"
+  elif [[ "$out" != *"## Attachments"* ]]; then fail "${FUNCNAME[0]}" "no Attachments section: $out"
+  elif [[ "$out" != *"- [11] spec.pdf (application/pdf, 10 bytes)"* ]]; then fail "${FUNCNAME[0]}" "issue attachment missing: $out"
+  elif [[ "$out" != *"- [12] bug.png (image/png, 20 bytes)"* ]]; then fail "${FUNCNAME[0]}" "note attachment missing: $out"
   else pass "${FUNCNAME[0]}"; fi
 }
 
@@ -136,6 +188,10 @@ test_file_dest_symlink_escape_exits_2
 test_file_sanitises_name
 test_file_strips_traversal
 test_file_empty_name_falls_back
-test_file_refuses_overwrite
+test_file_reuses_existing
+test_file_refuses_symlink_target
+test_non_json_200_exits_3
+test_file_leaves_no_partial_on_decode_error
+test_digest_lists_notes_and_all_attachments
 
 exit $(( fails > 0 ? 1 : 0 ))

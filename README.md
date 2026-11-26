@@ -107,6 +107,8 @@ claude-skills/
 │   ├── runner.md            # ordre de priorité du runner : make → docker → lando
 │   ├── stack-detect.md      # cheatsheet de détection de stack + règle de chargement
 │   ├── agent-mode.md        # règle commune du mode agent — lue par chaque skill
+│   ├── mantis-ticket.md     # chargement d'un ticket Mantis + pièces jointes — lu par ticket, ticket-refine, review, merge-review
+│   ├── gitlab-quick-actions.md  # pas de ligne en « / » dans ce qu'on publie sur GitLab — lu par merge-request, merge-review
 │   ├── root-cause.md        # investigation de cause racine (tickets bug) — consommé par ticket
 │   ├── scope-classification.md  # classification bounded/architectural (tickets feature) — consommé par ticket
 │   └── ticket-format.md     # gabarit de la note de qualification — produit par ticket-refine, lu par ticket et merge-request
@@ -150,7 +152,7 @@ claude-skills/
     └── swiper-migration/SKILL.md  # point d'entrée : charge stack/vue/MAIN.md (swiper-migration)
 ```
 
-Les skills qui lisent Mantis (`ticket`, `ticket-refine`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh` — une seule copie, pas de duplication. Les pièces jointes se téléchargent avec `mantis-issue.sh <id> --file <file-id> <dossier>` : le script nomme lui-même le fichier (`<file-id>-<nom assaini>`), n'écrit que dans un dossier temporaire (`$TMPDIR`, `/tmp`, scratchpad Claude), n'écrase jamais un fichier existant et affiche le chemin écrit. `ticket-refine` y ajoute l'écriture : il publie sa note privée via `${CLAUDE_PLUGIN_ROOT}/scripts/mantis-note.sh`.
+Les skills qui lisent Mantis (`ticket`, `ticket-refine`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh` — une seule copie, pas de duplication. Les pièces jointes se téléchargent avec `mantis-issue.sh <id> --file <file-id> <dossier>` : le script nomme lui-même le fichier (`<file-id>-<nom assaini>`), n'écrit que dans un dossier temporaire (`$TMPDIR`, `/tmp`, scratchpad Claude), n'écrase jamais un fichier (une pièce jointe déjà téléchargée dans la session est réutilisée) et affiche le chemin. La procédure commune (codes de sortie, lecture de toutes les notes, pièces jointes) est dans `shared/mantis-ticket.md`. `ticket-refine` y ajoute l'écriture : il publie sa note privée via `${CLAUDE_PLUGIN_ROOT}/scripts/mantis-note.sh`.
 
 ### Architecture stack-agnostique
 
