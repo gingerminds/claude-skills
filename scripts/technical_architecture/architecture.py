@@ -18,23 +18,39 @@ Usage: python3 architecture.py [--racine <folder>] extract <view.drawio.svg> <ou
 --racine defaults to the folder above tools/, where this script is installed.
 """
 
+import argparse
 import base64
 import binascii
 import html
 import json
+import os
 import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 import zlib
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
-from typing import Dict, List, Pattern, Tuple
+from typing import Dict, List, Optional, Pattern, Sequence, Tuple
 
 TOOL_VERSION = "1.0.0"
 CONFIG_NAME = "architecture.json"
 ROLES = ("hebergeur", "agence", "client", "tiers")
 PDF_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.pdf$")
 PREFIX_RE = re.compile(r"^[A-Z]$")
+
+DRAWIO_IMAGE = "rlespinasse/drawio-desktop-headless:v1.78.0"
+PANDOC_IMAGE = "pandoc/core:3.14.0-alpine"
+CHROME_IMAGE = "zenika/alpine-chrome:124"
+# README sections appended to the PDF after the views; the last one can be left out.
+ANNEX_SECTIONS = ("Légende", "Matrice des flux", "Points d'attention connus")
+LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+VIEW_INDEX_RE = re.compile(r"^\| \[([^\]]+)\]\(views/([^)]+)\) \| ([^|]+) \|", re.M)
 
 CARTOUCHE_RE = re.compile(r"État au \d{2}/\d{2}/\d{4}")
 STATUS_RE = re.compile(
@@ -318,3 +334,202 @@ def check(config: Config) -> List[str]:
     for flow_id in sorted(matrix_ids - set(view_ids)):
         errors.append(f"{flow_id} : dans la matrice des flux mais sur aucune vue")
     return errors
+
+
+def _docker(image: str, workdir: Path, args: Tuple[str, ...], error: str, options: Tuple[str, ...] = ()) -> None:
+    """Run a tool image in Docker on files of workdir, as the current user; exit with a French error on failure."""
+    command = [
+        "docker", "run", "--rm", *options,
+        "--user", f"{os.getuid()}:{os.getgid()}",
+        "-e", "HOME=/tmp",
+        "-v", f"{workdir}:/data", "-w", "/data",
+        image, *args,
+    ]
+    print("+ " + shlex.join(command), flush=True)
+    if subprocess.run(command, stdout=subprocess.DEVNULL).returncode != 0:
+        sys.exit(f"ERREUR : {error}")
+
+
+def _drawio(workdir: Path, *args: str) -> None:
+    """Run draw.io headless in Docker on files of workdir."""
+    _docker(DRAWIO_IMAGE, workdir, args, "l'export draw.io a échoué", ("--shm-size=1g",))
+
+
+def render(src: Path, view: Path, png: Optional[Path] = None) -> None:
+    """Export a .drawio source to a .drawio.svg view (and an optional PNG preview)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = Path(tmp)
+        shutil.copyfile(src, workdir / "source.drawio")
+        _drawio(
+            workdir, "--export", "--format", "svg", "--embed-diagram", "--embed-svg-images",
+            "--theme", "light", "--output", "out.svg", "source.drawio",
+        )
+        shutil.copyfile(workdir / "out.svg", view)
+        if png:
+            _drawio(
+                workdir, "--export", "--format", "png", "--scale", "2", "--theme", "light",
+                "--output", "out.png", "source.drawio",
+            )
+            shutil.copyfile(workdir / "out.png", png)
+
+
+def refresh(views_dir: Path) -> None:
+    """Re-render every view in place from its own embedded diagram, once all of them are known to embed one."""
+    sources: List[Tuple[Path, str]] = []
+    for view in sorted(views_dir.glob("*.drawio.svg")):
+        try:
+            sources.append((view, extract_diagram(view)))
+        except VIEW_ERRORS:
+            sys.exit(f"ERREUR : {view.name} : {UNREADABLE_VIEW}")
+    for view, diagram in sources:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.drawio"
+            source.write_text(diagram, encoding="utf-8")
+            render(source, view)
+
+
+def _section(readme_text: str, title: str) -> str:
+    """Return a level-2 section of the README, heading included (empty when absent)."""
+    match = re.search(rf"^## {re.escape(title)}\n.*?(?=^## |\Z)", readme_text, re.M | re.S)
+    return match.group(0).strip() if match else ""
+
+
+def _for_print(markdown: str) -> str:
+    """Adapt a README section to the PDF: no status column or legend, no link to repository files."""
+    out: List[str] = []
+    table: List[str] = []
+
+    def flush() -> None:
+        if table:
+            header = _cells(table[0])
+            drop = header.index("Statut") if "Statut" in header else None
+            for row in table:
+                cells = _cells(row)
+                if drop is not None and drop < len(cells):
+                    del cells[drop]
+                out.append("| " + " | ".join(cells) + " |")
+            table.clear()
+
+    for line in markdown.split("\n"):
+        if line.startswith("|"):
+            table.append(line)
+            continue
+        flush()
+        if not line.startswith("Statuts :"):
+            out.append(line)
+    flush()
+    text = LINK_RE.sub(lambda m: "" if ".md" in m.group(2) else m.group(1), "\n".join(out))
+    # Drop the separators left around a removed link.
+    text = re.sub(r"\s*;\s*(?=\|)", " ", text)
+    return re.sub(r"(?<=\|)\s*;\s*", " ", text)
+
+
+def build_dossier_markdown(config: Config, with_known_issues: bool) -> str:
+    """Pandoc Markdown of the PDF dossier: title page, one view per page, then the README annexes."""
+    readme_text = config.readme.read_text(encoding="utf-8")
+    index = {m.group(2): (m.group(1), m.group(3).strip()) for m in VIEW_INDEX_RE.finditer(readme_text)}
+    parts = [f"::: {{.titre}}\n# {config.title}\n\nDossier généré le {date.today():%d/%m/%Y}\n:::"]
+    for view in list_views(config):
+        title, question = index.get(view.name, (view.name, ""))
+        lead = f"*{question}*\n\n" if question else ""
+        parts.append(f"::: {{.vue}}\n## {title}\n\n{lead}![{title}](views/{view.name})\n:::")
+    keep_known_issues = with_known_issues and config.known_issues
+    for title in ANNEX_SECTIONS if keep_known_issues else ANNEX_SECTIONS[:-1]:
+        body = _for_print(_section(readme_text, title))
+        if body:
+            parts.append(f"::: {{.annexe}}\n{body}\n:::")
+    return "\n\n".join(parts) + "\n"
+
+
+def pdf(config: Config, with_known_issues: bool, out: Optional[Path] = None) -> Path:
+    """Build the PDF dossier: Markdown to HTML with pandoc, then HTML to PDF with headless Chromium."""
+    if not config.css.is_file():
+        raise ConfigError(f"dossier.css introuvable dans {config.css.parent}")
+    target = out or config.pdf_path(with_known_issues)
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = Path(tmp)
+        shutil.copytree(config.views_dir, workdir / "views")
+        shutil.copyfile(config.css, workdir / "dossier.css")
+        markdown = build_dossier_markdown(config, with_known_issues)
+        (workdir / "dossier.md").write_text(markdown, encoding="utf-8")
+        _docker(PANDOC_IMAGE, workdir, (
+            "dossier.md", "--from", "markdown-implicit_figures", "--to", "html5", "--columns", "1000",
+            "--standalone", "--css", "dossier.css",
+            "--metadata", f"pagetitle={config.title}", "--metadata", "lang=fr", "--output", "dossier.html",
+        ), "la conversion pandoc a échoué")
+        _docker(CHROME_IMAGE, workdir, (
+            "--headless", "--no-sandbox", "--disable-gpu", "--no-pdf-header-footer",
+            "--print-to-pdf=/data/dossier.pdf", "file:///data/dossier.html",
+        ), "l'impression PDF par Chromium a échoué", ("--shm-size=1g",))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(workdir / "dossier.pdf", target)
+    print(f"Dossier PDF : {target}")
+    return target
+
+
+def _errors(messages: Sequence[str]) -> None:
+    for message in messages:
+        print(f"ERREUR : {message}", file=sys.stderr)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Architecture technique : vues draw.io, matrice des flux, dossier PDF")
+    parser.add_argument("--racine", type=Path, help="dossier de la documentation (par défaut, celui qui contient tools/)")
+    commands = parser.add_subparsers(dest="command", required=True)
+    extract = commands.add_parser("extract", help="extrait le diagramme embarqué d'une vue")
+    extract.add_argument("view", type=Path)
+    extract.add_argument("out", type=Path)
+    render_parser = commands.add_parser("render", help="génère une vue depuis une source .drawio")
+    render_parser.add_argument("source", type=Path)
+    render_parser.add_argument("view", type=Path)
+    render_parser.add_argument("--png", type=Path, help="aperçu PNG à relire")
+    commands.add_parser("refresh", help="régénère toutes les vues depuis leur diagramme embarqué")
+    commands.add_parser("check", help="vérifie vues et matrice des flux")
+    pdf_parser = commands.add_parser("pdf", help="génère le dossier PDF dans build/ (jamais versionné)")
+    pdf_parser.add_argument("--sans-points-attention", action="store_true", help="retire l'annexe des points d'attention")
+    pdf_parser.add_argument("--sortie", type=Path, help="fichier PDF produit (par défaut, dans build/)")
+    commands.add_parser("version", help="affiche la version de l'outil")
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Command line entry point; returns the exit code."""
+    args = _parser().parse_args(argv)
+    if args.command == "version":
+        print(TOOL_VERSION)
+        return 0
+    if args.command == "extract":
+        try:
+            diagram = extract_diagram(args.view)
+        except (OSError, *VIEW_ERRORS):
+            _errors([f"{args.view.name} : {UNREADABLE_VIEW}"])
+            return 1
+        args.out.write_text(diagram, encoding="utf-8")
+        return 0
+    if args.command == "render":
+        render(args.source, args.view, args.png)
+        return 0
+
+    root = args.racine or default_root()
+    try:
+        config = load_config(root)
+        if args.command == "refresh":
+            refresh(config.views_dir)
+            return 0
+        errors = check(config)
+        if errors:
+            _errors(errors)
+            return 1
+        if args.command == "check":
+            flows = len(matrix_rows(config.readme.read_text(encoding="utf-8"), config.flow_id_re))
+            print(f"Schémas vérifiés : {len(list_views(config))} vue(s), {flows} flux.")
+            return 0
+        pdf(config, not args.sans_points_attention, args.sortie)
+        return 0
+    except ConfigError as error:
+        _errors([str(error)])
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
