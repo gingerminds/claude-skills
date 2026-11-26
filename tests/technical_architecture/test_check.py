@@ -136,6 +136,23 @@ class CheckTest(unittest.TestCase):
         write_view(root / "views" / "01-vue.drawio.svg", mxfile(*VALID_LABELS))
         self.assertEqual(check(load_config(root)), ["README.md : introuvable"])
 
+    def test_multi_page_view_is_reported(self):
+        config = self.project()
+        two_pages = mxfile(*VALID_LABELS).replace(
+            "</mxfile>", mxfile("P02 · 22/tcp").split(">", 1)[1].replace("</mxfile>", "") + "</mxfile>"
+        )
+        write_view(config.views_dir / "01-vue.drawio.svg", two_pages)
+        self.assertEqual(two_pages.count("<diagram "), 2)
+        self.assertEqual(check(config), ["01-vue.drawio.svg : plusieurs pages (une vue = une page)"])
+
+    def test_formatted_flow_ids_are_reported(self):
+        cells = ("`P02`", "**P03**", "p04", "P 05")
+        config = self.project(rows=(flow_row("P01"),) + tuple(flow_row(cell) for cell in cells))
+        self.assertEqual(
+            check(config),
+            [f"{cell} : identifiant invalide (une lettre parmi P, Q, X puis deux chiffres)" for cell in cells],
+        )
+
     def test_html_labels_are_stripped(self):
         xml = (
             '<mxfile><diagram id="d" name="Vue"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>'

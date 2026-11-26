@@ -14,6 +14,7 @@ Usage: python3 architecture.py [--racine <folder>] extract <view.drawio.svg> <ou
        python3 architecture.py [--racine <folder>] check
        python3 architecture.py [--racine <folder>] pdf [--sans-points-attention] [--sortie <file.pdf>]
        python3 architecture.py version
+       <command> | python3 architecture.py mask
 
 --racine defaults to the folder above tools/, where this script is installed.
 """
@@ -64,8 +65,14 @@ EM_DASH = "\u2014"
 MATRIX_HEADING = "## Matrice des flux"
 # An <image> whose href is not a data: URI breaks once the SVG leaves draw.io.
 EXTERNAL_IMAGE_RE = re.compile(r'<image\b[^>]*?\bhref="(?!data:)([^"]*)"')
-# Looks like a flow ID, whatever the configured prefixes.
-ID_LIKE_RE = re.compile(r"^[A-Z]\d+$")
+MASK = "[masqué]"
+# Values after a credential-like key, URL userinfo passwords, mysql -p<password>.
+SECRET_VALUE_RE = re.compile(
+    r"(?i)(\b[\w.-]*(?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|authorization|credentials?|dsn|users)"
+    r"[\w.-]*\s*[=:]\s*)((?:Bearer|Basic)\s+)?\S+"
+)
+URL_PASSWORD_RE = re.compile(r"(://[^/\s:@]*:)[^@\s]+@")
+MYSQL_PASSWORD_RE = re.compile(r"(?<!\S)-p(?=\S)\S+")
 HTML_STYLE_RE = re.compile(r"(?:^|;)html=1(?:;|$)")
 UNREADABLE_VIEW = (
     "aucun diagramme embarqué ou diagramme illisible (enregistrer en .drawio.svg avec une copie du diagramme)"
@@ -262,12 +269,8 @@ def _matrix_table_rows(readme_text: str) -> List[Tuple[List[str], List[str]]]:
 
 
 def _id_rows(readme_text: str) -> List[Tuple[str, Dict[str, str]]]:
-    """(first cell, row) for every matrix row whose first cell looks like a flow ID."""
-    return [
-        (cells[0], dict(zip(header, cells)))
-        for header, cells in _matrix_table_rows(readme_text)
-        if ID_LIKE_RE.match(cells[0])
-    ]
+    """(first cell, row) for every matrix row with a non-empty first cell."""
+    return [(cells[0], dict(zip(header, cells))) for header, cells in _matrix_table_rows(readme_text) if cells[0]]
 
 
 def matrix_rows(readme_text: str, flow_id_re: Pattern[str]) -> List[Dict[str, str]]:
@@ -304,11 +307,16 @@ def check(config: Config) -> List[str]:
         errors.append("views : aucune vue (*.drawio.svg)")
     for view in views:
         try:
-            text = view_text(extract_diagram(view))
+            diagram_xml = extract_diagram(view)
+            pages = ET.fromstring(diagram_xml).findall("diagram")
+            # draw.io exports the first page only: the other ones would be checked but never shown.
+            text = view_text(ET.tostring(pages[0], encoding="unicode") if pages else diagram_xml)
             raw = view.read_text(encoding="utf-8")
         except VIEW_ERRORS:
             errors.append(f"{view.name} : {UNREADABLE_VIEW}")
             continue
+        if len(pages) > 1:
+            errors.append(f"{view.name} : plusieurs pages (une vue = une page)")
         if not CARTOUCHE_RE.search(text):
             errors.append(f"{view.name} : cartouche sans « État au JJ/MM/AAAA »")
         if "Légende" not in text:
@@ -350,6 +358,13 @@ def check(config: Config) -> List[str]:
     return errors
 
 
+def mask_secrets(text: str) -> str:
+    """Hide the usual forms of credentials in a command output (a safety net, not a guarantee)."""
+    text = SECRET_VALUE_RE.sub(lambda m: m.group(1) + (m.group(2) or "") + MASK, text)
+    text = URL_PASSWORD_RE.sub(lambda m: m.group(1) + MASK + "@", text)
+    return MYSQL_PASSWORD_RE.sub("-p" + MASK, text)
+
+
 def _docker(image: str, workdir: Path, args: Tuple[str, ...], error: str, options: Tuple[str, ...] = ()) -> None:
     """Run a tool image in Docker on files of workdir, as the current user; exit with a French error on failure."""
     command = [
@@ -360,7 +375,11 @@ def _docker(image: str, workdir: Path, args: Tuple[str, ...], error: str, option
         image, *args,
     ]
     print("+ " + shlex.join(command), flush=True)
-    if subprocess.run(command, stdout=subprocess.DEVNULL).returncode != 0:
+    try:
+        returncode = subprocess.run(command, stdout=subprocess.DEVNULL).returncode
+    except FileNotFoundError:
+        sys.exit("ERREUR : docker introuvable : installer Docker et le lancer")
+    if returncode != 0:
         sys.exit(f"ERREUR : {error}")
 
 
@@ -503,6 +522,7 @@ def _parser() -> argparse.ArgumentParser:
     pdf_parser.add_argument("--sans-points-attention", action="store_true", help="retire l'annexe des points d'attention")
     pdf_parser.add_argument("--sortie", type=Path, help="fichier PDF produit (par défaut, dans build/)")
     commands.add_parser("version", help="affiche la version de l'outil")
+    commands.add_parser("mask", help="recopie l'entrée standard en masquant les secrets usuels")
     return parser
 
 
@@ -512,10 +532,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "version":
         print(TOOL_VERSION)
         return 0
+    if args.command == "mask":
+        for line in sys.stdin:
+            sys.stdout.write(mask_secrets(line))
+        return 0
     if args.command == "extract":
+        if not args.view.is_file():
+            _errors([f"{args.view.name} : introuvable"])
+            return 1
         try:
             diagram = extract_diagram(args.view)
-        except (OSError, *VIEW_ERRORS):
+        except VIEW_ERRORS:
             _errors([f"{args.view.name} : {UNREADABLE_VIEW}"])
             return 1
         args.out.write_text(diagram, encoding="utf-8")

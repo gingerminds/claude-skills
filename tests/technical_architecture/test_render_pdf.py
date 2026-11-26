@@ -98,6 +98,18 @@ class RenderPdfTest(unittest.TestCase):
             architecture._docker("image", self.tmp, ("arg",), "l'export draw.io a échoué")
         self.assertEqual(str(raised.exception.code), "ERREUR : l'export draw.io a échoué")
 
+    def test_docker_missing_exits_in_french(self):
+        self.run.side_effect = FileNotFoundError(2, "No such file or directory", "docker")
+        with self.assertRaises(SystemExit) as raised:
+            architecture._docker("image", self.tmp, ("arg",), "l'export draw.io a échoué")
+        self.assertEqual(str(raised.exception.code), "ERREUR : docker introuvable : installer Docker et le lancer")
+
+    def test_extract_missing_file(self):
+        out = self.tmp / "vue.drawio"
+        self.assertEqual(main(["extract", str(self.tmp / "absente.drawio.svg"), str(out)]), 1)
+        self.assertIn("ERREUR : absente.drawio.svg : introuvable", self.stderr.getvalue())
+        self.assertFalse(out.exists())
+
     def test_refresh_refuses_before_rendering(self):
         root = self.project()
         (root / "views" / "02-prod.drawio.svg").write_text("<svg/>", encoding="utf-8")
