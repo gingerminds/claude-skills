@@ -139,6 +139,7 @@ class PublicHygieneTest(unittest.TestCase):
             "scripts/cqa-toolbox.sh",
             "tests/cqa/test_public_hygiene.py",
             "scripts/technical_architecture/architecture.py",
+            "skills/technical-architecture/SKILL.md",
             "README.md",
         ):
             self.assertIn(expected, names)
