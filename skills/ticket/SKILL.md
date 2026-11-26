@@ -1,6 +1,6 @@
 ---
 name: ticket
-description: "Loads and digests a Mantis ticket (or a pasted ticket) into a focused development brief — the goal, what to look at in the codebase, constraints, and acceptance criteria — so the context is in memory before a stack-specific dev session (Drupal, Vue, Laravel, Python/Django, WordPress…). Builds on the /gm:ticket-refine qualification note when one exists instead of re-analysing the raw ticket, and loads attachments by default. Detects the project stack to route to the right dev skill, and classifies the ticket as bug or feature/refactor to apply the matching pre-code discipline (root-cause hypothesis, or scope/approach sketch). Tuned for a Mantis + GitLab workflow; also runs unattended in agent mode."
+description: "Loads and digests a Mantis ticket (or a pasted ticket) into a focused development brief — the goal, what to look at in the codebase, constraints, and acceptance criteria — so the context is in memory before a stack-specific dev session (Drupal, Vue, Laravel, Python/Django, WordPress…). Tuned for a Mantis + GitLab workflow; also runs unattended in agent mode."
 when_to_use: "Use before starting work on a ticketed change — « prépare le ticket 12345 », « charge le ticket », « on attaque le #12345 », a Mantis URL, or a branch name like fix/12345-slug — or when the user invokes /gm:ticket. Not for rewriting or qualifying a ticket into a private Mantis note (use /gm:ticket-refine), nor for questions about Mantis in general."
 argument-hint: "<mantis-id | url | branche>"
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh *)
@@ -81,7 +81,7 @@ The note never points to code: the stack detection, the classification and the *
 
 Before framing the brief, identify the project's stack so the hand-off points at the right dev skill and the brief uses the right vocabulary. Apply `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`: **actually read** the root manifests (`composer.json`, `package.json`, `pyproject.toml`/`requirements*.txt`, `manage.py`) — don't guess from the repo name. This stays lightweight — no code survey (that's the dev skill's job).
 
-Resolve the dev skill from that file's **Dev skill routing** table (drupal→`/gm:drupal`, vue→`/gm:vue`, laravel→`/gm:laravel`, django→`/gm:django`, python→`/gm:python`, wordpress→`/gm:wordpress`). Note the detected stack and the resolved skill — the brief and the hand-off use them. If detection is ambiguous (monorepo, multiple stacks), note the candidates and let the "À regarder" reflect each; if the stack is generic `php`/`js` or has no dedicated skill yet, say so and plan a generic dev hand-off.
+Resolve the dev skill from that file's **Dev skill routing** table. Note the detected stack and the resolved skill — the brief and the hand-off use them. If detection is ambiguous (monorepo, multiple stacks), note the candidates and let the "À regarder" reflect each; if the stack is generic `php`/`js` or has no dedicated skill yet, say so and plan a generic dev hand-off.
 
 ## 5. Classify the ticket
 

@@ -1,6 +1,6 @@
 ---
 name: merge-request
-description: "Prepares a GitLab merge request — a scoped commit, a branch push, and `glab mr create` with a structured French description that references the ticket — or updates the existing MR of the branch instead of duplicating it. Draft by default, Ready only with --ready; --dry-run shows the commit message, the glab command and the description without committing, pushing or opening anything. Enriches the description with the qualification note's acceptance criteria, the automated review verdict and the QA report when .gm/handoff/<id>/ holds them. Never approves or merges. Also runs unattended in agent mode."
+description: "Prepares a GitLab merge request — a scoped commit, a branch push, and `glab mr create` with a structured French description that references the ticket — or updates the existing MR of the branch instead of duplicating it. Draft by default, Ready only with --ready. Never approves or merges. Also runs unattended in agent mode."
 when_to_use: "Use when the user asks to prepare, open, create or update a MR (or PR) after a fix or a feature — « ouvre la merge request », « prépare la MR », « c'est corrigé, pousse et crée la MR », « mets à jour la description de la MR » — or invokes /gm:merge-request. Not for a plain commit without a MR, nor for reviewing someone else's MR (use /gm:merge-review)."
 argument-hint: "[--ready] [--dry-run] [<ticket>] [<branche-cible>] [<fichiers>…]"
 allowed-tools: Bash(glab mr list *), Bash(glab mr view *), Bash(glab mr create *), Bash(glab mr update *), Bash(glab auth status*), Bash(GITLAB_HOST=* glab mr list *), Bash(GITLAB_HOST=* glab mr view *), Bash(GITLAB_HOST=* glab mr create *), Bash(GITLAB_HOST=* glab mr update *), Bash(GITLAB_HOST=* glab auth status*), Bash(git add *), Bash(git commit *), Bash(git push -u origin feature/*), Bash(git push -u origin fix/*), Bash(git push -u origin feat/*)
@@ -65,7 +65,7 @@ This run's arguments: `$ARGUMENTS`
    - **manual use** — decide from the conversation which files belong to the change; ask when unsure.
    - **agent mode** — stage only the files the caller's prompt names. If it names none, commit nothing: open the MR from the commits already on the branch, and list the uncommitted files in the reply (`Modifications non commitées laissées de côté : <fichiers>`). No commit ahead of the base and nothing to commit → stop on `Erreur : aucun commit à proposer sur <branche>`.
 6. **Visual change?** — If the diff touches the rendering (templates, styles, front JS, images, email templates), the MR needs before/after screenshots per `${CLAUDE_PLUGIN_ROOT}/shared/visual-evidence.md`. Here, only list the affected views; capturing and uploading happen in step 4.
-   - **manual use** — no "before" was taken? Recover it with the stash procedure there; don't open the MR without the screenshots.
+   - **manual use** — no "before" was taken? Recover it with the procedure in *Recovering a "before" after the fact* there (it differs for uncommitted and committed changes); don't open the MR without the screenshots.
    - **`--dry-run`** — capture and upload nothing; list the views in the output (step 5).
    - **agent mode** — capture and upload nothing (a local site and a browser are not assumed). Open the MR anyway, put `Captures avant/après manquantes : <vues>` in **Rendu avant / après**, and report it in the reply.
 
@@ -89,7 +89,7 @@ In `--dry-run`, do not commit: show the message that would be used and the files
 
 ## 3. Build the description
 
-The description is the template below, in French. Reference the tracker with a real link (`$MANTIS_URL/view.php?id=<id>` when `MANTIS_URL` is set). **Reuse the review**: if `/gm:review` just ran in this session, lift its verdict, **Vérification ✅** checks and **Hors-scope** notes instead of re-deriving them.
+The description is the template below, in French. Reference the tracker with a real link (`$MANTIS_URL/view.php?id=<id>` when `MANTIS_URL` is set). **Reuse the review**: if `/gm:review` just ran in this session, lift its verdict line, the checks it reports as actually run, and its out-of-scope notes instead of re-deriving them.
 
 ```markdown
 ## Contexte
