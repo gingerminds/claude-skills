@@ -64,6 +64,10 @@ This run's arguments: `$ARGUMENTS`
 5. **Clean staging** — Stage **only** the files belonging to this change. Inspect `git status` and leave unrelated working-tree edits unstaged. In `--dry-run`, stage nothing: list the files that would be staged.
    - **manual use** — decide from the conversation which files belong to the change; ask when unsure.
    - **agent mode** — stage only the files the caller's prompt names. If it names none, commit nothing: open the MR from the commits already on the branch, and list the uncommitted files in the reply (`Modifications non commitées laissées de côté : <fichiers>`). No commit ahead of the base and nothing to commit → stop on `Erreur : aucun commit à proposer sur <branche>`.
+6. **Visual change?** — If the diff touches the rendering (templates, styles, front JS, images, email templates), the MR needs before/after screenshots per `${CLAUDE_PLUGIN_ROOT}/shared/visual-evidence.md`. Here, only list the affected views; capturing and uploading happen in step 4.
+   - **manual use** — no "before" was taken? Recover it with the stash procedure there; don't open the MR without the screenshots.
+   - **`--dry-run`** — capture and upload nothing; list the views in the output (step 5).
+   - **agent mode** — capture and upload nothing (a local site and a browser are not assumed). Open the MR anyway, put `Captures avant/après manquantes : <vues>` in **Rendu avant / après**, and report it in the reply.
 
 ## 2. Commit
 
@@ -103,6 +107,9 @@ The description is the template below, in French. Reference the tracker with a r
 
 ### UAT manuelle
 <exact steps a human follows to confirm>
+
+## Rendu avant / après
+<only for a visual change — table of uploaded screenshots, see shared/visual-evidence.md; omit the section otherwise>
 
 ## Hors-scope
 <dead code / latent issues for a separate ticket>
@@ -153,6 +160,8 @@ Look in `<root>/.gm/handoff/<id>/`, where `<root>` is `git rev-parse --show-topl
 
 Not in `--dry-run` (see step 5). Before the push, state the `Cible : …` line (rule 11) in the reply.
 
+Visual change, manual use (step 1.6): after the `Cible : …` line, upload the screenshots as `shared/visual-evidence.md` says and fill **Rendu avant / après** before writing the description file; purge the screenshots folder only once the MR shows them.
+
 ```bash
 git rev-parse --abbrev-ref HEAD   # must be the ticket branch from step 1.3, never a shared branch
 git push -u origin <branch>       # the ticket branch only — never a shared branch, never --force
@@ -194,6 +203,7 @@ Write the description to `<scratchpad>/mr-desc.md` and run the quick-action chec
 1. the `Cible : …` line (rule 11), with `<MR !<iid> | nouvelle MR>` as `glab mr list` found it;
 2. the branch (existing, or the one that would be created) and the base branch;
 3. the files that would be committed and the commit message (or `aucun commit : <raison>`);
+   - visual change (step 1.6): the views that would need before/after screenshots;
 4. the exact `git push` and `glab` command that would run: `glab mr create` with `--draft` (without it under `--ready`), or `glab mr update` with neither `--draft` nor `--ready` (only `--ready` under `--ready`);
 5. the full description, enriched sections included;
 6. which `.gm/handoff/<id>/` files were found, used or skipped.

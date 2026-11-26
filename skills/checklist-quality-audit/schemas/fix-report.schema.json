@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Report of the fixer for one key and one pass of the fix mode",
+  "description": "Content of fix/<repo>/report-<N>.json, checked by cqa_fix.py validate <run_dir> <key> report --pass <N> (exit 6 with the list of errors). One row per row of the dispatch, all of the section of pass N; every row of that section still pending in the state must be there. Texts a reviewer or a lead dev reads (change, uat, remaining, reason, question, attention) are written in French. A valid report updates the rows of fix/state.json.",
+  "type": "object",
+  "required": ["key", "pass", "rows"],
+  "properties": {
+    "key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Key of the pass: the name of the repo, as in the Fix: field of the dispatch."
+    },
+    "pass": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of the pass, as in the Pass: field of the dispatch."
+    },
+    "rows": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/row"},
+      "description": "One entry per row. A ref that is not a row of the section of the pass (« Réf d'une autre section (<alias>) », « Réf hors de cette clé »), or that appears twice, is rejected."
+    }
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "required": ["ref", "outcome"],
+      "properties": {
+        "ref": {
+          "type": "integer",
+          "description": "Ref of the checklist row, as an integer (107 for CQ-107)."
+        },
+        "outcome": {
+          "enum": ["fixed", "skipped", "question", "needs_command"],
+          "description": "fixed: corrected by commits of the branch (a row given up after its commits stays fixed, with an attention starting with « Abandon : »). skipped: not attempted, with the reason; no commit of the row on the branch. question: a decision is missing, the row waits for the answer; no commit of the row on the branch. needs_command: the fix needs a development dependency; the orchestrator installs it if the command has an allowed form (cqa_fix.py install) and commits its manifest and lock file, then the row is reported again in a correction pass; no commit of the row on the branch."
+        },
+        "change": {
+          "type": ["string", "null"],
+          "maxLength": 600,
+          "description": "Required for fixed: what changed, in French, 1 to 600 characters."
+        },
+        "uat": {
+          "type": ["string", "null"],
+          "maxLength": 600,
+          "description": "Required for fixed: the manual acceptance test a reviewer runs, in French, 1 to 600 characters."
+        },
+        "remaining": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "fixed only, optional: what is left to do when the commits fix the row in part, in French, 1 to 300 characters. The merge request, the summary and Notion mark the row « partiel » with it."
+        },
+        "commits": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
+          "description": "Required for fixed, at least one: SHAs (full or abbreviated) of commits of <start_sha>..HEAD whose subject carries the ref of the row, or the covered_by ref. A commit not yet recorded for the row in fix/state.json must lie in bases[N]..HEAD (made during pass N, after pass-start), else « commit hors de la passe N »."
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "maxLength": 300,
+          "description": "Required for skipped: why, in French, 1 to 300 characters (for example: déjà corrigé sur develop)."
+        },
+        "question": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/question"}],
+          "description": "Required for question."
+        },
+        "needs_command": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/$defs/needs_command"}],
+          "description": "Required for needs_command."
+        },
+        "covered_by": {
+          "type": ["integer", "null"],
+          "description": "fixed only: the ref of another row of the key whose commit also fixes this row (a commit carries one row only)."
+        },
+        "attention": {
+          "type": ["string", "null"],
+          "maxLength": 400,
+          "description": "Optional: what the reviewer should look at closely, in French (for a Semi-auto row, the À valider of the finding). A row given up after its commits starts with « Abandon : » and then holds 300 characters at most."
+        },
+        "context_items": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "array", "items": {"$ref": "#/$defs/context_item"}}
+          ],
+          "description": "fixed only: what became of each point of a context document (a third-party audit report) that the dispatch gave for the row, in the field context_items of the row. Required when the row has such points: one entry for each of them, none twice, none other. A row without such points leaves it out. Absent or null for any other outcome."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"outcome": {"const": "fixed"}}},
+          "then": {
+            "required": ["change", "uat", "commits"],
+            "properties": {
+              "change": {"type": "string", "minLength": 1},
+              "uat": {"type": "string", "minLength": 1},
+              "commits": {"minItems": 1}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"outcome": {"enum": ["skipped", "question", "needs_command"]}}},
+          "then": {"properties": {"context_items": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "skipped"}}},
+          "then": {
+            "required": ["reason"],
+            "properties": {"reason": {"type": "string", "minLength": 1}}
+          }
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "question"}}},
+          "then": {
+            "required": ["question"],
+            "properties": {"question": {"$ref": "#/$defs/question"}}
+          }
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "needs_command"}}},
+          "then": {
+            "required": ["needs_command"],
+            "properties": {"needs_command": {"$ref": "#/$defs/needs_command"}}
+          }
+        }
+      ]
+    },
+    "context_item": {
+      "type": "object",
+      "required": ["id", "outcome"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Id of the point, as given in the context_items of the row (d1-004)."
+        },
+        "outcome": {
+          "enum": ["fixed", "already_ok", "not_found", "left"],
+          "description": "fixed: corrected by the commits of the row. already_ok: the code already meets the point, a disagreement with the report that the merge request mentions. not_found: the code the point names cannot be found, also a disagreement. left: not corrected in this repo, with the reason in the note."
+        },
+        "note": {
+          "type": ["string", "null"],
+          "maxLength": 300,
+          "description": "In French, 300 characters at most. Required for already_ok, not_found and left (what you saw in the code, or why the point is left); optional, or null, for fixed. A paraphrase: never a text of the report copied as it is."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"outcome": {"enum": ["already_ok", "not_found", "left"]}}},
+          "then": {
+            "required": ["note"],
+            "properties": {"note": {"type": "string", "minLength": 1}}
+          }
+        }
+      ]
+    },
+    "needs_command": {
+      "type": "object",
+      "required": ["command", "dir", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "The install command, exactly one of: npm install --save-dev|-D <package>[@<version>]..., npm install --save-exact <package>@<version>, npm install --package-lock-only, composer require --dev <vendor/package>[:<version>]..., composer update --lock, yarn add --dev <package>, pnpm add -D <package>. Single spaces, public registry names only (no URL, path or git+), no other option, no shell character. The fixer never runs it: the orchestrator rebuilds it from these parts, and refuses any other text (exit 5)."
+        },
+        "dir": {
+          "type": "string",
+          "description": "The folder of the repo that holds the manifest (package.json or composer.json), relative, without .. or a trailing /, an empty text for the root."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "Why the fix needs this dependency, in French, 1 to 300 characters. Kept as the reason of the row in the state."
+        }
+      }
+    },
+    "question": {
+      "type": "object",
+      "required": ["text", "options", "default"],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 600,
+          "description": "The question for the lead, in French. Its text is kept as the reason of the row in the state."
+        },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 200},
+          "description": "The possible answers, in French, 2 to 4, each checked in the code like a fix. Never an option that leaves the row as it is (« ne rien faire », « laisser à un dev », « pas de changement »...): the orchestrator already offers to leave the row to the devs, and validate refuses such an option."
+        },
+        "default": {
+          "type": "string",
+          "description": "What the fixer would do without an answer: one of the options."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "key": "front",
+      "pass": 1,
+      "rows": [
+        {
+          "ref": 107,
+          "outcome": "fixed",
+          "change": "Ajoute les en-têtes de sécurité dans la configuration du serveur web du thème.",
+          "uat": "Ouvrir la page d'accueil et vérifier l'en-tête X-Content-Type-Options dans les outils du navigateur.",
+          "remaining": null,
+          "commits": ["1a2b3c4d5e6f"],
+          "reason": null,
+          "question": null,
+          "covered_by": null,
+          "attention": null
+        },
+        {
+          "ref": 112,
+          "outcome": "question",
+          "change": null,
+          "uat": null,
+          "commits": [],
+          "reason": null,
+          "question": {
+            "text": "Quel contact mettre dans security.txt ?",
+            "options": ["L'adresse de l'équipe technique", "L'adresse du client"],
+            "default": "L'adresse de l'équipe technique"
+          },
+          "covered_by": null,
+          "attention": null
+        }
+      ]
+    }
+  ]
+}
