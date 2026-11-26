@@ -95,7 +95,7 @@ class SkillContractTest(unittest.TestCase):
         self.assertIn("ARCHITECTURE_TOOL := python3 docs/architecture/tools/architecture.py", text)
         self.assertRegex(text, r"(?m)^diagrams:.*##")
         self.assertRegex(text, r"(?m)^architecture-pdf:.*##")
-        self.assertIn("$(if $(SANS_POINTS_ATTENTION),--sans-points-attention)", text)
+        self.assertIn("$(if $(filter 1 oui yes true,$(SANS_POINTS_ATTENTION)),--sans-points-attention)", text)
         lines = text.splitlines()
         for index, line in enumerate(lines):
             if re.match(r"^(diagrams|architecture-pdf):", line):

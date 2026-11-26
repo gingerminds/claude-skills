@@ -8,4 +8,4 @@ diagrams: ## Régénère les vues d'architecture (draw.io dans Docker) et vérif
 	$(ARCHITECTURE_TOOL) check
 
 architecture-pdf: ## Génère le dossier PDF dans docs/architecture/build/ (SANS_POINTS_ATTENTION=1 : sans les points d'attention)
-	$(ARCHITECTURE_TOOL) pdf $(if $(SANS_POINTS_ATTENTION),--sans-points-attention)
+	$(ARCHITECTURE_TOOL) pdf $(if $(filter 1 oui yes true,$(SANS_POINTS_ATTENTION)),--sans-points-attention)
