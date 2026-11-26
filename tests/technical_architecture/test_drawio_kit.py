@@ -128,6 +128,28 @@ class DrawioKitTest(unittest.TestCase):
         self.assertIn("Production\nÉtat au 26/11/2026", text)
         self.assertIn("Sources : dépôt, relevé SSH.", text)
 
+    def test_text_blocks_wrap_to_their_width(self):
+        diagram = Diagram("vue", "Vue")
+        sources = ("Sources : dépôt (compose, CI), relevé SSH en lecture seule du 26/11/2026, "
+                   "indications de l'hébergeur (NAT, pare-feu).")
+        diagram.text("t", sources + "\nSeconde ligne.", 0, 0, 300, 100, font=11)
+        lines = view_text(diagram.to_xml()).split("\n")
+        self.assertGreater(len(lines), 3)
+        self.assertTrue(all(len(line) <= 300 / (11 * 0.55) for line in lines))
+        self.assertEqual(" ".join(lines), sources + " Seconde ligne.")
+        self.assertEqual(lines[-1], "Seconde ligne.")
+
+    def test_wrap_never_starts_a_line_with_french_punctuation(self):
+        diagram = Diagram("vue", "Vue")
+        note = ("Une seule VM porte toute la pile : les échanges avec les bases restent internes "
+                "(réseau Docker), d'où des flèches sans identifiant ; « exemple » ?")
+        diagram.text("t", note, 0, 0, 180, 120)
+        lines = view_text(diagram.to_xml()).split("\n")
+        self.assertEqual(" ".join(lines), note)
+        for line in lines:
+            self.assertFalse(line[:1] in ":;?!»", line)
+            self.assertFalse(line.endswith("«"), line)
+
     def test_special_characters_round_trip(self):
         diagram = Diagram("vue", "Vue")
         diagram.box("a", "Front & API <v2>\nété", 0, 0, 200, 60, "client")

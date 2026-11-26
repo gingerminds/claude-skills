@@ -6,6 +6,8 @@ fallback image per label in the SVG. Standalone: never imports the tool.
 """
 
 import math
+import re
+import textwrap
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -64,6 +66,9 @@ ICONS: Dict[str, Tuple[str, int, int]] = {
     "health": ("img/lib/azure2/general/Service_Health.svg", 24, 22),
     "builds": ("img/lib/azure2/general/Builds.svg", 20, 20),
 }
+# Average glyph width as a share of the font size, to wrap plain-text blocks.
+GLYPH_RATIO = 0.55
+NO_BREAK_BEFORE = re.compile(r" (?=[:;?!»])")
 LEGEND_ROLES = (("hebergeur", " (hébergeur)"), ("agence", " (agence)"), ("client", " (client)"), ("tiers", ""))
 
 Point = Tuple[float, float]
@@ -91,6 +96,15 @@ def _icon_style(icon: Optional[str], vertical: str) -> Tuple[str, int]:
     style = (f"shape=label;image={path};imageWidth={width};imageHeight={height};"
              f"imageAlign=left;imageVerticalAlign={vertical};")
     return style, width
+
+
+def _wrap(text: str, width: float, font: int) -> str:
+    """Break a plain-text label to the block width, never before « : ; ? ! » » nor after « « »."""
+    columns = max(10, int((width - 4) / (font * GLYPH_RATIO)))
+    glued = NO_BREAK_BEFORE.sub("\u00a0", text.replace("« ", "«\u00a0"))
+    lines = [wrapped for line in glued.split("\n")
+             for wrapped in (textwrap.wrap(line, columns, break_long_words=False) or [""])]
+    return "\n".join(lines).replace("\u00a0", " ")
 
 
 class Diagram:
@@ -159,10 +173,10 @@ class Diagram:
 
     def text(self, cell_id: str, text: str, x: float, y: float, w: float, h: float, parent: str = "1",
              font: int = 10, align: str = "left", color: str = "#333333", bold: bool = False) -> str:
-        """A free text block."""
+        """A free text block, wrapped to its width: draw.io never wraps a plain-text label."""
         style = (f"text;html=0;align={align};verticalAlign=top;fontSize={font};fontColor={color};spacing=2;"
                  + ("fontStyle=1;" if bold else ""))
-        return self._vertex(cell_id, self.label(text), style, x, y, w, h, parent)
+        return self._vertex(cell_id, _wrap(self.label(text), w, font), style, x, y, w, h, parent)
 
     def _anchor(self, cell_id: str, rel: Point) -> Point:
         x, y, w, h = self.rects[cell_id]
