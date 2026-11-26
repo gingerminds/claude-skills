@@ -1,5 +1,8 @@
 import hashlib
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -104,6 +107,40 @@ class SkillContractTest(unittest.TestCase):
         for needle in ("docker compose config", "docker inspect", ".env", "sudo", "ss -tlnp", "sshd -T"):
             self.assertIn(needle, text)
 
+    def test_collection_masks_with_the_tool(self):
+        text = (SKILL_DIR / "references" / "collection.md").read_text(encoding="utf-8")
+        self.assertIn('| python3 "$T/architecture.py" mask', text)
+        self.assertNotIn("perl", text)
+        self.assertNotIn("never reaches", text)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("grep") and shutil.which("sed"), "bash, grep, sed")
+    def test_env_key_names_command(self):
+        text = (SKILL_DIR / "references" / "collection.md").read_text(encoding="utf-8")
+        match = re.search(r"\"grep -oE '([^']+)' <chemin>/\.env\" \| sed -E '([^']+)'", text)
+        self.assertIsNotNone(match, "env key command not found")
+        sample = "# admin password is changeme\nDB_PASSWORD=s3cret\nexport API_KEY=\"abc\ncontinued line\"\nEMPTY=\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            env = Path(tmp) / ".env"
+            env.write_text(sample, encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c", 'grep -oE "$1" "$2" | sed -E "$3"', "_", match.group(1), str(env), match.group(2)],
+                capture_output=True, text=True, check=True,
+            )
+        self.assertEqual(result.stdout.split(), ["DB_PASSWORD", "API_KEY", "EMPTY"])
+
+    def test_commands_run_from_the_repository_root(self):
+        for path in [SKILL] + sorted((SKILL_DIR / "references").glob("*.md")):
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "python3" in line or "PYTHONPATH" in line:
+                    with self.subTest(file=path.name, line=number):
+                        self.assertIsNone(re.search(r"(?<![\w/.-])(?:views|build)/", line), line)
+
+    def test_documentation_folder_is_found_anywhere(self):
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertIn("git ls-files '*tools/architecture.json'", text)
+        self.assertIn("another folder", text)
+        self.assertIn("repository root", text)
+
     def test_question_catalogue(self):
         text = (SKILL_DIR / "references" / "questions.md").read_text(encoding="utf-8")
         for question in (
@@ -136,7 +173,7 @@ class SkillContractTest(unittest.TestCase):
         for path in owned_files():
             text = path.read_bytes().decode("utf-8", errors="replace")
             with self.subTest(path=path.relative_to(ROOT).as_posix()):
-                self.assertNotIn("—", text)
+                self.assertNotIn("\u2014", text)
                 self.assertEqual(forbidden_names(text), [])
 
     def test_no_other_skill_mentioned(self):

@@ -16,7 +16,7 @@ Where to look before asking: the project `CLAUDE.md` and `README.md`, the `docs/
 - **Ask**: does the project live in other repositories (separate front and back, an infrastructure repository, deploy scripts)? Which local paths?
 - **Pre-fill from**: submodules, CI jobs that clone or trigger other projects, docs that name them.
 - **Skip when**: everything (code, Docker, CI, deploy) is visibly in the current repository.
-- **Changes**: those repositories are read like the current one, read-only. The dossier lives in the current repository; their local paths go in the config `repositories` so the update mode reads their history too.
+- **Changes**: those repositories are read like the current one, read-only. The dossier lives in the current repository; their local paths, relative to its root (`../exemple-front`), go in the config `repositories` so the update mode reads their history too.
 
 ## 3. The environments and their SSH aliases
 

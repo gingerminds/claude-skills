@@ -10,7 +10,7 @@ You document how a project is hosted and how its flows circulate, for preprod an
 
 ## Mental model
 
-**Deliverables, in the project** (default folder `docs/architecture/`, asked only if the project keeps its docs elsewhere):
+**Deliverables, in the project** (default folder `docs/architecture/`; ask only if the project keeps its docs elsewhere, or if `docs/architecture/` already holds something else). If the user picks another folder, substitute it for `docs/architecture` in every command of this skill and its references, and in every asset you copy (Makefile snippet, `CLAUDE.md` block, README):
 
 - `views/NN-<slug>.drawio.svg`: one view per question. Each file is an SVG image that embeds its draw.io diagram: forges display it, draw.io edits it.
 - `README.md`: index of the views with their question, legend, flow matrix (one table per environment plus « Hors environnement »), known issues (optional annex), how to edit a view.
@@ -18,7 +18,7 @@ You document how a project is hosted and how its flows circulate, for preprod an
 - `build/`: git-ignored. Facts log, throwaway generators, PNG previews, and the PDF dossier, generated on demand only and never versioned.
 - `make diagrams` (re-render and check) and `make architecture-pdf`, plus a rule in the project's `CLAUDE.md` that keeps views and matrix in step with every infrastructure change.
 
-**In the plugin.** In every Bash call, start with `T="${CLAUDE_SKILL_DIR}/../../scripts/technical_architecture"` (variables do not survive between calls; quote every path, folders may hold spaces):
+**In the plugin.** Run every command from the repository root, with paths relative to it. In every Bash call, start with `T="${CLAUDE_SKILL_DIR}/../../scripts/technical_architecture"` (variables do not survive between calls; quote every path, folders may hold spaces):
 
 - `"$T/architecture.py"`: the tool copied as is into projects (`extract`, `render`, `refresh`, `check`, `pdf`, `version`; `--racine <folder>` points it at a documentation folder).
 - `"$T/dossier.css"`: the PDF stylesheet copied with it.
@@ -29,12 +29,12 @@ Rendering and the PDF run in Docker (draw.io headless, pandoc, Chromium); images
 
 ## Choose the mode
 
-Look at the argument and at the project, in this order:
+First find the documentation folder: `git ls-files '*tools/architecture.json'`, then, for a config not committed yet, `find . -path '*/tools/architecture.json' -not -path '*/node_modules/*' -not -path '*/vendor/*'`. The folder that holds `tools/` is the documentation folder; below, `docs/architecture` stands for it. Then look at the argument and at the project, in this order:
 
 1. **`pdf`** (optionally `--sans-points-attention`): from the repository root, run `python3 docs/architecture/tools/architecture.py pdf` with the flag if given. The tool checks first and generates nothing when the check fails: relay its `ERREUR` lines. On success give the path it prints (in `docs/architecture/build/`) and stop. If the project has no `docs/architecture/tools/architecture.py`, say so and offer the create mode.
 2. **`mise-a-jour`**: follow `references/update.md`.
-3. **No argument, `docs/architecture/tools/architecture.json` present**: offer the update mode (`references/update.md`), or a targeted change if the user named one.
-4. **No argument, `docs/architecture/` present without that config** (documentation made by hand or by an older tool): never overwrite it. Offer to adopt it (section Adopt) or stop.
+3. **No argument, a `tools/architecture.json` found**: offer the update mode (`references/update.md`), or a targeted change if the user named one.
+4. **No argument, no config, but `docs/architecture/` present** (documentation made by hand or by an older tool, or a folder used for something else such as decision records): never overwrite it. Offer to adopt it (section Adopt), to create the dossier in another folder, or to stop.
 5. **Otherwise**: create (section Create).
 
 ## Create
@@ -49,8 +49,8 @@ Look at the argument and at the project, in this order:
    - `known_issues`: the answer to question 6; `repositories`: the local paths of the other repositories (question 2).
 4. **Draw the views**, one at a time, following `references/drawio-style.md`:
    - write a generator `docs/architecture/build/gen/NN-<slug>.py` on the model of `assets/example/generators/view02.py` (a `build() -> Diagram` function, owners and date at the top);
-   - run it with `PYTHONPATH="$T"` to write `build/gen/NN-<slug>.drawio`, and require `build().overlaps() == []`;
-   - render it: `python3 "$T/architecture.py" render build/gen/NN-<slug>.drawio views/NN-<slug>.drawio.svg --png build/NN-<slug>.png`;
+   - run it: `PYTHONPATH="$T" python3 docs/architecture/build/gen/NN-<slug>.py docs/architecture/build/gen/NN-<slug>.drawio`, and require `build().overlaps() == []`;
+   - render it: `python3 "$T/architecture.py" render docs/architecture/build/gen/NN-<slug>.drawio docs/architecture/views/NN-<slug>.drawio.svg --png docs/architecture/build/NN-<slug>.png`;
    - read the PNG, fix any label or arrow that collides, render again; then give the user the PNG path and iterate on their comments;
    - once the user validates the view, the `.drawio.svg` is the source: later edits go through `extract` and `render`, or through draw.io.
 5. **Write the README** from `assets/README.template.md`, on the model of `assets/example/README.md`: replace every `<...>`, one section per view, one matrix table per environment prefix. Drop the « Points d'attention connus » section when `known_issues` is false. Every flow ID drawn on a view has its matrix row, and the reverse; statuses come from the facts log.

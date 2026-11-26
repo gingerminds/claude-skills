@@ -1,18 +1,18 @@
 # Update mode
 
-The project already has `docs/architecture/tools/architecture.json`. Bring the views and the matrix back in line with what the repositories and the servers show today. Work in the order below; nothing is changed before step 5, and step 5 only applies what the user chose.
+The project already has `docs/architecture/tools/architecture.json` (or the documentation folder found by `SKILL.md`; substitute it below). Run every command from the repository root. Bring the views and the matrix back in line with what the repositories and the servers show today. Work in the order below; nothing is changed before step 5, and step 5 only applies what the user chose.
 
 ## 1. Read the current state
 
 - the config (`title`, `flow_prefixes`, `owners`, `repositories`, `tool_version`);
-- the « État au » date of every view: `python3 docs/architecture/tools/architecture.py extract views/<vue>.drawio.svg build/<vue>.drawio`, then read the cartouche;
+- the « État au » date of every view: `python3 docs/architecture/tools/architecture.py extract docs/architecture/views/<vue>.drawio.svg docs/architecture/build/<vue>.drawio`, then read the cartouche;
 - the README matrix and known issues, and the facts log `build/faits.md` if it is still there.
 
 Run `python3 docs/architecture/tools/architecture.py check` first: errors that predate this update are reported to the user as such.
 
 ## 2. List what changed in the repositories
 
-Take the oldest « État au » date and run `git log --since=<AAAA-MM-JJ> --name-only` in the current repository and in each path of `repositories`:
+Take the oldest « État au » date and run `git log --since=<AAAA-MM-JJ> --name-only` in the current repository and in each path of `repositories` (relative to the repository root):
 
 ```bash
 git -C "<repository>" log --since=<AAAA-MM-JJ> --name-only --format='%h %ad %s' --date=short -- <infrastructure paths>

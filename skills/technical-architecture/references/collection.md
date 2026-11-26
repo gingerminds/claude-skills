@@ -29,17 +29,19 @@ Connect only through the aliases the user chose at question 3, one command per c
 - scheduled jobs and services: `crontab -l`, `cat /etc/crontab`, `ls /etc/cron.d`, `systemctl list-units --type=service --state=running --no-pager`;
 - `cat` of a deployed compose file, a proxy config, or the config of a log or monitoring agent (it names the destinations), as long as it is not a secret file.
 
-Pipe through the local mask every output that may carry a credential (crontabs, configs, compose files, unit files), so a secret never reaches the conversation. It hides the value after a key such as `password=`, `token:` or `Authorization:`; it is a safety net, not a licence to read secret files:
+Pipe through the tool's mask every output that may carry a credential (crontabs, configs, compose files, unit files):
 
 ```bash
-ssh <alias> 'crontab -l' | perl -CSD -Mutf8 -pe 's/((?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|authorization)[^=:\s]*[=:\s]+)(?:(?:Bearer|Basic)\s+)?\S+/${1}[masqué]/gi'
+ssh <alias> 'crontab -l' | python3 "$T/architecture.py" mask
 ```
+
+It hides the usual forms: the value after a key such as `password=`, `token:`, `Authorization:`, `DSN=` or `users=`, the password of a URL (between `user:` and `@`) and the password glued to the `-p` option of `mysql` or `mysqldump`. It is a safety net, not a guarantee: read every output as possibly sensitive, and never copy a value that looks like a credential even when the mask missed it.
 
 **Forbidden:**
 
 - `docker inspect` without such a `--format` (it prints the environment variables, so the secrets);
 - `docker compose config` (it resolves and prints the `.env` values);
-- reading a `.env` file, a key, a certificate's private part or any secret file; of a `.env`, only the key names, through `cut -d= -f1`;
+- reading a `.env` file, a key, a certificate's private part or any secret file. Of a `.env`, only the key names, filtered on the server so no value leaves it: `ssh <alias> "grep -oE '^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' <chemin>/.env" | sed -E 's/^[[:space:]]*(export[[:space:]]+)?//; s/=$//'`;
 - `sudo`, except a closed list of read commands shown to the user first and run after their yes: `sudo iptables -S`, `sudo nft list ruleset`, `sudo sshd -T` (with the grep above), `sudo ss -tlnp`;
 - any connection outside the configured aliases.
 

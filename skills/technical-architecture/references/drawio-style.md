@@ -22,11 +22,11 @@ Coordinates are relative to the parent zone. Work on a grid: columns for actors,
 
 ## Render, read, fix
 
-For each view:
+For each view, from the repository root (`D=docs/architecture`, or the documentation folder of the project):
 
-1. `PYTHONPATH="$T" python3 build/gen/NN-<slug>.py build/gen/NN-<slug>.drawio` and check that `build().overlaps()` is empty (sibling boxes that intersect).
-2. `python3 "$T/architecture.py" render build/gen/NN-<slug>.drawio views/NN-<slug>.drawio.svg --png build/NN-<slug>.png`.
+1. `PYTHONPATH="$T" python3 "$D/build/gen/NN-<slug>.py" "$D/build/gen/NN-<slug>.drawio"` and check that `build().overlaps()` is empty (sibling boxes that intersect).
+2. `python3 "$T/architecture.py" render "$D/build/gen/NN-<slug>.drawio" "$D/views/NN-<slug>.drawio.svg" --png "$D/build/NN-<slug>.png"`.
 3. Read the PNG. Look for labels over boxes or over other labels, arrows through boxes, text that overflows its box, empty or cramped areas. Fix the generator and render again until it reads cleanly.
 4. Give the user the PNG path, take their comments, iterate.
 
-Once the user validates a view, the `.drawio.svg` is the source. To change it later: `python3 docs/architecture/tools/architecture.py extract views/NN-<slug>.drawio.svg build/NN-<slug>.drawio`, edit the XML, then `render` it back to the same view and read the PNG again. The user can also edit it in draw.io; then run `make diagrams`.
+Once the user validates a view, the `.drawio.svg` is the source. To change it later: `python3 "$D/tools/architecture.py" extract "$D/views/NN-<slug>.drawio.svg" "$D/build/NN-<slug>.drawio"`, edit the XML, then `render` it back to the same view with `--png` and read the PNG again. The user can also edit it in draw.io; then run `make diagrams`.
