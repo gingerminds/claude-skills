@@ -89,7 +89,7 @@ Statuts : `constaté (JJ/MM/AAAA)`, `décidé`, `indiqué par <qui> (JJ/MM/AAAA)
 | # | Constat | Effet | Détail |
 |---|---------|-------|--------|
 | A01 | MariaDB et Redis sans TLS entre la VM web et la VM données | identifiants et données circulent en clair sur le réseau privé de l'hébergeur ; la protection repose sur son cloisonnement | `P02`, `P04` |
-| A02 | Envoi des commandes à l'API partenaire non vérifié en production (flux indiqué par le code, pas encore observé) | une panne de l'envoi passerait inaperçue tant que le flux n'est pas supervisé | `P05`, `Q03` |
+| A02 | Envoi des commandes à l'API partenaire non vérifié en production : ni observé sur le serveur, ni décrit par la configuration de production du dépôt | une panne de l'envoi passerait inaperçue tant que le flux n'est pas confirmé et supervisé | `P05` |
 
 ## Modifier un schéma
 
