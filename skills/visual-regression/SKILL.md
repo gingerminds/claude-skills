@@ -1,12 +1,12 @@
 ---
 name: visual-regression
 disable-model-invocation: true
-description: Sets up and runs visual (screenshot) regression testing with Playwright — detects/configures the tooling if absent, captures baselines, runs comparisons, and reports pixel diffs with a clear accept/reject call per snapshot. Also supports comparing two live URLs directly (no committed baseline needed) — the case of a rewritten/migrated repo with no relevant local history, checked against the still-live old site; invoke as `/gm:visual-regression <old-url> <new-url>` to go straight to that mode. Stack-agnostic (targets any rendered URL: Drupal, WordPress, Laravel, Vue/Nuxt, Django...). Manual invocation only. Use when the user asks to check for visual regressions, compare UI screenshots before/after a change or a migration, diff two environments/URLs visually, set up screenshot testing, or invokes /gm:visual-regression.
+description: Sets up and runs Playwright screenshot regression testing against baselines, or compares two live URLs page by page to audit a migration or a rewrite (`/gm:visual-regression <old-url> <new-url>`). Stack-agnostic. Use when the user wants to check for visual regressions, compare a site before and after a change or a migration, or set up screenshot testing.
 ---
 
 # Visual regression testing (Playwright)
 
-Catch unintended UI/CSS changes by comparing screenshots of rendered pages against committed baselines. Tool: Playwright's built-in `toHaveScreenshot()` — no external SaaS, no extra account. Stack-agnostic: it drives a browser against a URL, so it works the same whether the app behind it is Drupal, WordPress, Laravel, Vue/Nuxt or Django.
+Catch unintended UI/CSS changes by comparing screenshots of rendered pages against committed baselines. Tool: Playwright's built-in `toHaveScreenshot()` — no external SaaS, no extra account. Stack-agnostic: it drives a browser against a URL, so it works the same whether the app behind it is Drupal, WordPress, Laravel, Vue/Nuxt or Django. Everything the user reads (questions, reports, the project `CLAUDE.md` block) is in French.
 
 ## Mental model
 
@@ -31,7 +31,7 @@ Catch unintended UI/CSS changes by comparing screenshots of rendered pages again
 
 ## How to reach the running app
 
-Apply `${CLAUDE_SKILL_DIR}/../../shared/runner.md` (make → docker compose → lando) to find how the project boots. Then:
+Apply `${CLAUDE_PLUGIN_ROOT}/shared/runner.md` (make → docker compose → lando) to find how the project boots. Then:
 
 - If one command reliably boots the full stack and blocks until ready, wire it as Playwright's `webServer` (`command`, `url`, `reuseExistingServer: !process.env.CI`) so `playwright test` starts it automatically.
 - Otherwise, assume the app is already running locally and just ask the user for the base URL (`http://localhost:8080`, a Lando/DDEV URL, etc.) — set it as `use.baseURL`.
