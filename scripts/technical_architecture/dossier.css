@@ -1,0 +1,95 @@
+/* Print layout of the architecture PDF dossier (pandoc HTML printed by headless Chromium). */
+@page {
+  size: A4 landscape;
+  margin: 12mm;
+}
+
+body {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  font-family: "DejaVu Sans", "Liberation Sans", Arial, sans-serif;
+  font-size: 10pt;
+  line-height: 1.35;
+  color: #1a1a1a;
+}
+
+.titre {
+  padding-top: 60mm;
+  text-align: center;
+  page-break-after: always;
+}
+
+.titre h1 {
+  font-size: 26pt;
+}
+
+.vue {
+  page-break-after: always;
+  page-break-inside: avoid;
+  text-align: center;
+}
+
+.vue h2 {
+  margin: 0 0 1mm;
+  font-size: 15pt;
+  text-align: left;
+}
+
+.vue p {
+  margin: 0 0 3mm;
+  text-align: left;
+}
+
+.vue img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 158mm;
+}
+
+.annexe > h2 {
+  page-break-before: always;
+  font-size: 15pt;
+}
+
+.annexe h3 {
+  font-size: 12pt;
+}
+
+table {
+  display: table;
+  width: 100%;
+  margin: 2mm 0 4mm;
+  border-collapse: collapse;
+  table-layout: auto;
+  font-size: 7pt;
+  line-height: 1.25;
+}
+
+th,
+td {
+  padding: 2px 3px;
+  border: 1px solid #bbbbbb;
+  vertical-align: top;
+  text-align: left;
+  overflow-wrap: break-word;
+}
+
+th:first-child,
+td:first-child {
+  white-space: nowrap;
+}
+
+th {
+  background: #eeeeee;
+}
+
+tr {
+  page-break-inside: avoid;
+}
+
+code {
+  font-size: 95%;
+  overflow-wrap: break-word;
+}
