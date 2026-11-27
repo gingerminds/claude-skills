@@ -13,7 +13,7 @@ Nature → section:
 | `/gm:nuxt4-migration` | core + nuxt4-migration |
 | `/gm:swiper-migration` | core + swiper-migration |
 
-Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md` (anchored on the calling skill's base dir).
+Cross-stack resources: `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`, `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`.
 
 ---
 
@@ -25,28 +25,14 @@ Shared baseline (all natures):
 - Follow the [Vue Style Guide](https://vuejs.org/style-guide/) priority A and B rules.
 - Component names are **two words minimum** (`UserCard`, not `Card`).
 - SFC block order (team convention): `<script setup>`, `<template>`, `<style scoped>`.
-- Lint via the project runner (see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`): eslint + prettier, `vue-tsc` for type checks.
-- Detection: `vue` / `nuxt` in `package.json` (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
+- Lint via the project runner (see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`): eslint + prettier, `vue-tsc` for type checks.
+- Detection: `vue` / `nuxt` in `package.json` (see `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`).
 
 ---
 
 ## dev
 
 Consumed by `/gm:vue`.
-
-### Core knowledge areas
-
-- Vue 3 Composition API (`setup()`, `<script setup>`)
-- Reactivity (`ref`, `reactive`, `computed`, `watch`, `watchEffect`)
-- Lifecycle hooks and their SSR behaviour
-- Component communication (props, emits, `v-model`, `provide`/`inject`, `expose`); slots (default, named, scoped)
-- Nuxt 3 auto-imports, layers, modules, plugins, middleware, server routes
-- Nuxt rendering modes (SSR, SSG, SPA, hybrid per-route)
-- Pinia (stores, actions, getters, `storeToRefs`)
-- Vue Router / Nuxt routing (dynamic routes, navigation guards, route middleware)
-- TypeScript in SFCs; `<Suspense>`, async components, lazy loading
-- `useAsyncData`, `useFetch`, `$fetch` and their caching in Nuxt; `useNuxtApp`, runtime config, app config
-- Nitro server engine (server routes, API handlers, middleware)
 
 ### Architecture mindset
 
@@ -120,7 +106,7 @@ Consumed by `/gm:archi-c4`. Layered on `core`. Instructions in English; generate
 
 ### Where custom code lives (what we detail)
 
-- The whole app repo is custom. Nuxt: `components/`, `composables/`, `stores/` (Pinia), `pages/`, `layouts/`, `middleware/`, `plugins/`, `server/` (Nitro API/routes), `utils/`. Plain Vue: `src/**`.
+- The whole app repo is custom. Nuxt: `components/`, `composables/`, `stores/` (Pinia), `pages/`, `layouts/`, `middleware/`, `plugins/`, `utils/` (under `app/` on Nuxt 4), plus `server/` (Nitro API/routes). Plain Vue: `src/**`.
 - Build/orchestration (`nuxt.config.ts`, `vite.config.*`, `Makefile`, CI) → **containers** (C2).
 
 **Never detailed (black box, `type: external`)**: `node_modules/**` — Vue/Nuxt runtime, UI libraries, any dependency. Show only what custom code imports/calls (an external API, the Nitro runtime, a headless CMS, a DB) as `external` nodes.
@@ -158,7 +144,7 @@ grep -E 'compatibilityVersion|future' nuxt.config.ts 2>/dev/null
 ```
 
 - Confirm the project is on Nuxt 3 (or already mid-migration with `app/` partially in place — say so, don't restart from scratch).
-- Find the project runner via `${CLAUDE_SKILL_DIR}/../../shared/runner.md` (`make` → `docker compose` → `lando`) — builds/tests should run inside it if one exists.
+- Find the project runner via `${CLAUDE_PLUGIN_ROOT}/shared/runner.md` (`make` → `docker compose` → `lando`) — builds/tests should run inside it if one exists.
 - Check for a clean git tree (`git status`) before starting — the migration touches many files across the project; the user needs a clean baseline to diff against and revert if something goes wrong.
 
 ### Run the official tooling first
@@ -269,7 +255,7 @@ The global is removed after hydration. Grep for `window.__NUXT__` / direct paylo
 After each meaningful chunk, not just at the end:
 
 ```bash
-<runner> nuxt build   # or dev, per project convention — resolve <runner> via shared/runner.md
+<runner> nuxt build   # or dev, per project convention — resolve <runner> via ${CLAUDE_PLUGIN_ROOT}/shared/runner.md
 <runner> <test command>
 ```
 
@@ -279,7 +265,7 @@ Fix as you go rather than batching every area then debugging one giant failure. 
 
 Lead with a one-line status: how many breaking-change areas apply to this project and the single riskiest one. Then:
 
-**Findings table** — one row per area from the audit above:
+**Findings table** — one row per area from the audit above (rows below are illustrative):
 
 | Area | Applies? | Files affected | Risk |
 |---|---|---|---|

@@ -2,21 +2,6 @@
 
 Backend development knowledge for Drupal 10/11. Assumes `core.md` is already loaded (standard, `t()`, Cache API vocabulary). Consumed by `/gm:drupal`.
 
-## Core knowledge areas
-
-Assume familiarity with:
-
-- Drupal 10/11 internals and the Symfony components it builds on
-- Plugin system, Dependency Injection Container
-- Entity API, Typed Data API
-- Config API, Cache API, Render API
-- Event subscribers
-- Services & service decoration
-- Batch API, Queue API, Migrate API
-- Access API, Multilingual API
-- Routing & controllers
-- Forms API (backend logic, not theming)
-
 ## Architecture mindset
 
 - Business logic lives in **services**, never in controllers.

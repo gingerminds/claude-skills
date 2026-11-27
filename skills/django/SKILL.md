@@ -9,7 +9,7 @@ Entry point for Django backend development. This skill carries the **workflow**;
 
 ## Load the Django knowledge
 
-Load `${CLAUDE_SKILL_DIR}/../../stack/django/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (apps, models, ORM, migrations, DRF, testing). When the ticket reaches beyond plain feature work (security/access implications, or a change where standards/regressions are the crux), also read the `## security` or `## review` section so you build with the right lens from the start.
+Load `${CLAUDE_PLUGIN_ROOT}/stack/django/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (apps, models, ORM, migrations, DRF, testing). When the ticket reaches beyond plain feature work (security/access implications, or a change where standards/regressions are the crux), also read the `## security` or `## review` section so you build with the right lens from the start.
 
 ## Start from the ticket
 
@@ -26,13 +26,8 @@ Before writing any code, **read the project's existing apps** to build a picture
 
 State briefly what you found (or confirm there's nothing relevant) before proposing an approach.
 
-## Problem-Solving Procedure
+## Approach
 
-1. **Understand the ticket** — if it came from one and the intent isn't already in context, run `/gm:ticket`, then **survey** the existing apps (see above) so you build on what's there, not beside it.
-2. **Classify** whether the problem is domain/model logic, view/API layer, persistence/migration, or a cross-cutting concern (auth, tasks, i18n).
-3. **Propose** the cleanest approach, citing the relevant pattern (model method, service, serializer/viewset, queryset).
-4. **Then** provide implementation.
-5. **Mention** potential edge cases.
-6. **Mention** performance considerations (ORM N+1, indexes, caching).
-7. **Mention** tests to add or update, and how to run them (via the runner — see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`).
-8. **Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.
+Classify the problem (domain/model logic, view/API layer, persistence/migration, or a cross-cutting concern: auth, tasks, i18n) and propose the cleanest approach, citing the pattern you rely on (model method, service, serializer/viewset, queryset), then implement it. Add or update the tests the change needs and run them (via the runner — see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`). Raise edge cases and performance risks (ORM N+1, indexes, caching) only where they bear on this change.
+
+**Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.

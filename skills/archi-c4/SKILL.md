@@ -1,6 +1,7 @@
 ---
 name: archi-c4
-description: Prepare, generate and maintain interactive C4 architecture documentation (self-contained HTML) under .archi/. Traces only custom code (contrib/core/vendor shown as black boxes); project-level C1/C2 in index.html plus one page per custom unit for C3 (C4 UML on request). Stack-agnostic via shared/stack-detect.md; loads a stack archi resource when the detected stack provides one. All generated output is written in French. Use when the user asks to set up / generate / update an architecture diagram or C4 model, "documenter l'archi", "à quoi ressemble le projet", or invokes /gm:archi-c4.
+description: Prepare, generate and maintain interactive C4 architecture documentation (self-contained HTML) under .archi/. Traces only custom code (contrib/core/vendor shown as black boxes); project-level C1/C2 in index.html plus one page per custom unit for C3 (C4 UML on request). Stack-agnostic via shared/stack-detect.md; loads a stack archi resource when the detected stack provides one. All generated output is written in French.
+when_to_use: "Use when the user asks to set up, generate or update an architecture diagram or C4 model of the project — « génère le diagramme C4 de l'architecture », « documenter l'archi », « à quoi ressemble le projet », « mets à jour .archi/ » — or invokes /gm:archi-c4. Not for a one-off question about a folder, a file or a class (« quel est le rôle du dossier web/modules/custom ? »): answer it directly."
 ---
 
 # Interactive C4 architecture (`.archi/`)
@@ -18,8 +19,8 @@ Produce living, interactive architecture docs under the target project's `.archi
 
 ## Detect the stack
 
-1. Apply `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`.
-2. Any stack whose `MAIN.md` exposes an **archi** section → load `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md` for the **archi** nature (where custom lives, source of truth, black box) — `MAIN.md` routes to the right content whatever its form. E.g.:
+1. Apply `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`.
+2. Any stack whose `MAIN.md` exposes an **archi** section → load `${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md` for the **archi** nature (where custom lives, source of truth, black box) — `MAIN.md` routes to the right content whatever its form. E.g.:
    - Drupal → `stack/drupal/archi.md`.
    - Vue / Nuxt → the `core` + `archi` sections of `stack/vue/MAIN.md`.
 3. Stack with no archi resource/section → **generic method**: ask the user where custom code lives and what the wiring source of truth is (entry points + custom→custom imports/instantiations, stop at the third-party boundary). Never `Read` a non-existent stack resource.
@@ -55,8 +56,8 @@ Produce living, interactive architecture docs under the target project's `.archi
 1. **List the custom units to trace first** (from the stack resource or the generic method). **Present the list and get it validated** before writing anything.
 2. **Project view — `.archi/index.html`**: generate `META` + `CONTEXT` (C1: the system, its `person` actors, its external systems) + `CONTAINER` (C2: each custom unit as `container`/`component` + shared infra as `store`/`external` — DB, search engine, cron, storage). On each custom container, set `doc: "units/<slug>.html"`.
 3. **Per unit — `.archi/units/<slug>.html`**: generate `META` + `COMPONENT` (C3, from the source of truth). `<slug>` = kebab-case unit name.
-4. **C4 (UML code)**: do NOT produce by default. Offer it via `AskUser`, warning the user (message in French): « Le niveau C4 (UML par classe) est le plus détaillé mais devient obsolète à chaque refactor et coûte cher à (re)générer. L'ajouter pour cette unité ? ». If yes, add `CODE.views` to the unit (see per-view splitting in the stack resource).
-5. **Accurate model, not decorative**: every edge maps to a real dependency (DI argument, `extends`, `use`, call). On a large project, per-unit exploration may be delegated to **subagents** (one unit = one agent) then synthesised.
+4. **C4 (UML code)**: do NOT produce by default. Offer it via `AskUserQuestion`, warning the user (message in French): « Le niveau C4 (UML par classe) est le plus détaillé mais devient obsolète à chaque refactor et coûte cher à (re)générer. L'ajouter pour cette unité ? ». If yes, add `CODE.views` to the unit (see per-view splitting in the stack resource).
+5. **Accurate model, not decorative**: every edge maps to a real dependency (DI argument, `extends`, `use`, call).
 6. **Stamp**: in `META.footer`, record the source of truth used AND the generation stamp: `généré le <YYYY-MM-DD> · commit <short-hash>` (`git rev-parse --short HEAD`).
 
 ## Flow 3 — Maintain
@@ -64,7 +65,7 @@ Produce living, interactive architecture docs under the target project's `.archi
 1. Read each doc's stamp under `.archi/**` (`généré le … · commit …`).
 2. Compare with custom files changed since that commit:
    `git diff --name-only <commit>..HEAD -- <custom paths>`.
-3. If custom units changed **or** the generation is old → **`AskUser` « Faut-il vérifier / mettre à jour le C4 ? »** listing the impacted units.
+3. If custom units changed **or** the generation is old → **`AskUserQuestion` « Faut-il vérifier / mettre à jour le C4 ? »** listing the impacted units.
 4. Update = regenerate the data blocks of the affected docs (the template never changes). Re-stamp.
 
 ## Non-goals

@@ -11,7 +11,7 @@ Nature → section:
 | `/gm:security` | core + security |
 | `/gm:archi-c4` | core + archi |
 
-Cross-stack resources: `${CLAUDE_SKILL_DIR}/../../shared/runner.md`, `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md` (anchored on the calling skill's base dir).
+Cross-stack resources: `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`, `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`.
 
 ---
 
@@ -22,26 +22,14 @@ Shared baseline (all natures):
 - **Standalone components** as the default for new code (Angular 15+ standalone APIs, `bootstrapApplication`) — only follow an `NgModule` structure when the codebase is already organized that way; match the surrounding style rather than migrating mid-ticket.
 - TypeScript strict mode; typed inputs/outputs via `@Input()`/`@Output()` or the newer signal-based `input()`/`output()` APIs (Angular 17+) — pick whichever the codebase already uses.
 - `OnPush` change detection by default on new components unless there's a concrete reason not to.
-- Lint via the project runner (see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`): `angular-eslint`, `tsc` (via `ng build`/`ng lint`).
-- Detection: `@angular/core` in `package.json` (see `${CLAUDE_SKILL_DIR}/../../shared/stack-detect.md`).
+- Lint via the project runner (see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`): `angular-eslint`, `tsc` (via `ng build`/`ng lint`).
+- Detection: `@angular/core` in `package.json` (see `${CLAUDE_PLUGIN_ROOT}/shared/stack-detect.md`).
 
 ---
 
 ## dev
 
 Consumed by `/gm:angular`.
-
-### Core knowledge areas
-
-- Components & templates: property/event binding, structural directives (`*ngIf`/`@if`, `*ngFor`/`@for`, the newer built-in control-flow syntax), attribute directives, pipes (pure by default).
-- Dependency injection: `providedIn: 'root'` services, component/route-level providers, injection tokens (`InjectionToken`) for config, `inject()` function vs constructor injection.
-- RxJS: Observables, common operators (`map`, `switchMap`, `mergeMap`, `combineLatest`, `debounceTime`), the `async` pipe, subscription lifecycle.
-- Signals (Angular 17+): `signal()`, `computed()`, `effect()`, interop with RxJS (`toSignal`/`toObservable`) — the direction the framework is moving for reactivity and change detection.
-- Angular Router: route config, guards (`CanActivate`/functional guards), resolvers, lazy-loaded routes (`loadComponent`/`loadChildren`), route params/query params via `ActivatedRoute` or the `input()` route binding.
-- Forms: Reactive Forms (`FormGroup`/`FormControl`, strictly typed since Angular 14) preferred for anything non-trivial; template-driven forms for simple cases; custom validators.
-- Change detection: `OnPush` strategy, signals reducing the need for manual `markForCheck`, zoneless change detection (experimental) as the direction to be aware of.
-- HTTP: `HttpClient`, interceptors (functional interceptors in modern Angular) for auth/error handling, typed responses.
-- Testing: `TestBed`, Jasmine/Jest, Angular Testing Library, marble testing for RxJS-heavy logic.
 
 ### Architecture mindset
 

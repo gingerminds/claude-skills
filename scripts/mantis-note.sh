@@ -12,6 +12,8 @@
 #          MANTIS_TOKEN  Mantis API token (My Account -> API Tokens)
 #          (both required for a real send only, not for --dry-run)
 #
+# Timeouts: every curl call uses --connect-timeout 10 and --max-time 60.
+#
 # Exit codes:
 #   0  note posted (HTTP 200/201), or dry-run done
 #   2  bad usage / missing or empty note file / missing env (outside --dry-run)
@@ -64,7 +66,7 @@ fi
 
 base="${MANTIS_URL%/}"
 
-code="$(curl -sS -X POST -o "$body" -w '%{http_code}' \
+code="$(curl -sS --connect-timeout 10 --max-time 60 -X POST -o "$body" -w '%{http_code}' \
   -H "Authorization: ${MANTIS_TOKEN}" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \

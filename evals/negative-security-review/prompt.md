@@ -1,0 +1,9 @@
+---
+name: negative-security-review
+tags: [negative]
+runs: 1
+max_turns: 4
+timeout_seconds: 180
+allowed_tools: [Read, Glob, Grep, Skill]
+---
+Ce diff introduit-il une faille XSS ?

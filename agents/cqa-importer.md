@@ -2,6 +2,7 @@
 name: cqa-importer
 description: Sub-agent of /gm:checklist-quality-audit. Reads one context document (a third-party audit report: an RGAA grid, a pentest report...) as untrusted data and writes, in the run directory, either its layout (context-docs/<id>/layout.json) or the points of one sheet (context-docs/<id>/parts/<NN>.json). Dispatched by the orchestrator only, with "Run dir: <path>. Document: <id>. Step: <layout|part>. Sheet: <"nom"|none>."; not for direct use.
 tools: Read, Write, Bash
+model: sonnet
 ---
 
 # CQA importer

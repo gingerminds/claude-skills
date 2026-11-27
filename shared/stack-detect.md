@@ -23,12 +23,12 @@ For `package.json`, parse it as JSON and check `react`, `react-dom`, `@angular/c
 
 ## Loading rule
 
-- **One stack detected** → load its entry point `${CLAUDE_SKILL_DIR}/../../stack/<stack>/MAIN.md`, stating the **nature** the caller needs (`core` + `dev` | `review` | `security`). `MAIN.md` routes to the right content, whatever its form (single sectioned file or split folder).
+- **One stack detected** → load its entry point `${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md`, stating the **nature** the caller needs (`core` + `dev` | `review` | `security`). `MAIN.md` routes to the right content, whatever its form (single sectioned file or split folder).
 - **Multiple stacks** (Drupal + Vue monorepo, a theme with a JS pipeline…) → load each, or ask the user which one governs when the change's scope is ambiguous.
 - **Generic `php` / `js`** (a `composer.json`/`package.json` with no CMS or known framework) → there is **no `stack/php` or `stack/js` resource**; treat exactly like *no known stack* below — never attempt to `Read` a non-existent `MAIN.md`.
 - **No known stack** → stay generic, load no `stack/` resource, and say so.
 
-The **runner** is cross-cutting (stack-independent): see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`.
+The **runner** is cross-cutting (stack-independent): see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`.
 
 ## Dev skill routing
 

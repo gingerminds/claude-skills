@@ -47,7 +47,7 @@ Read, in this order:
 6. `fix/<repo>/checks.json`, when it exists: the checks that ran on the changed files (`status` `passed`, `failed` or `not_run`), and in `not_run` those left to the reviewer of the merge request.
 7. When `fix/<repo>/notes-<N>.json` exists: the problems this correction pass answers, and the `review-<M>.json` of the earlier passes of these rows (the blocking notes the fixer had to address).
 8. `${CLAUDE_PLUGIN_ROOT}/skills/review/SKILL.md`: apply its « Review dimensions », « Severity » and « Non-goals ». Skip « Scope first » (your scope is `<Base>..HEAD`), « Load the ticket » (there is no ticket: the intent is the audit's finding and the fiche), « Run what you can » (nothing runs here: read `checks.json`) and « Output format » (you write JSON); its « Detect the stack » is the next item.
-9. When `stack` is set: `${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md`, then what it gives for the nature `review` (core and review). In these files, read `${CLAUDE_SKILL_DIR}/../..` as `${CLAUDE_PLUGIN_ROOT}`. `stack: null`: there is no stack resource, apply the generic dimensions.
+9. When `stack` is set: `${CLAUDE_PLUGIN_ROOT}/stack/<stack>/MAIN.md`, then what it gives for the nature `review` (core and review). `stack: null`: there is no stack resource, apply the generic dimensions.
 
 ## Method
 

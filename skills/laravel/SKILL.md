@@ -9,7 +9,7 @@ Entry point for Laravel backend development. This skill carries the **workflow**
 
 ## Load the Laravel knowledge
 
-Load `${CLAUDE_SKILL_DIR}/../../stack/laravel/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (PSR-12, Eloquent, form requests, services, queues, testing). When the ticket reaches beyond plain feature work (security/access implications, or a change where standards/regressions are the crux), also read the `## security` or `## review` section so you build with the right lens from the start.
+Load `${CLAUDE_PLUGIN_ROOT}/stack/laravel/MAIN.md` for the **dev** nature — read its `## core` + `## dev` sections (PSR-12, Eloquent, form requests, services, queues, testing). When the ticket reaches beyond plain feature work (security/access implications, or a change where standards/regressions are the crux), also read the `## security` or `## review` section so you build with the right lens from the start.
 
 ## Start from the ticket
 
@@ -26,13 +26,8 @@ Before writing any code, **read the project's existing app code** to build a pic
 
 State briefly what you found (or confirm there's nothing relevant) before proposing an approach.
 
-## Problem-Solving Procedure
+## Approach
 
-1. **Understand the ticket** — if it came from one and the intent isn't already in context, run `/gm:ticket`, then **survey** the existing app code (see above) so you build on what's there, not beside it.
-2. **Classify** whether the problem is domain logic, HTTP/presentation, persistence, or a cross-cutting concern (auth, queue, events).
-3. **Propose** the cleanest approach, citing the relevant pattern (form request, service/action, service provider binding, job/event).
-4. **Then** provide implementation.
-5. **Mention** potential edge cases.
-6. **Mention** performance considerations (N+1, caching, queued work).
-7. **Mention** tests to add or update, and how to run them (via the runner — see `${CLAUDE_SKILL_DIR}/../../shared/runner.md`).
-8. **Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.
+Classify the problem (domain logic, HTTP/presentation, persistence, or a cross-cutting concern: auth, queue, events) and propose the cleanest approach, citing the pattern you rely on (form request, service/action, service provider binding, job/event), then implement it. Add or update the tests the change needs and run them (via the runner — see `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`). Raise edge cases and performance risks (N+1, caching, queued work) only where they bear on this change.
+
+**Review before wrapping up** — once the change is complete, run **`/gm:review`** on it to get a severity-ranked verdict before it goes anywhere near a merge request. Don't consider the work done until that review has run.

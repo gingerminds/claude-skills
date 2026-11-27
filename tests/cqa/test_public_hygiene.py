@@ -13,7 +13,7 @@ from cqa.secrets import scan_tree
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
-EXPECTED_VERSION = "0.19.0"
+EXPECTED_VERSION = "0.21.0"
 NEW_SKILL = "/gm:checklist-quality-audit"
 
 SCOPE = [
@@ -28,6 +28,9 @@ SCOPE = [
     "scripts/cqa-toolbox.sh",
     "scripts/cqa-keepawake.sh",
     "tests/cqa",
+    "skills/technical-architecture",
+    "scripts/technical_architecture",
+    "tests/technical_architecture",
     "README.md",
 ]
 
@@ -41,6 +44,7 @@ CONTENT_SCOPE = [
     "agents/cqa-fixer.md",
     "agents/cqa-fix-reviewer.md",
     "agents/cqa-importer.md",
+    "skills/technical-architecture",
     "README.md",
 ]
 
@@ -52,6 +56,8 @@ ALLOWED_IPS = {
     "127.0.0.1",  # loopback, local test servers
     "127.0.0.2",  # loopback range check in test_cli_prepare
 }
+# RFC 5737 documentation ranges, used by the technical architecture example.
+DOCUMENTATION_PREFIXES = ("192.0.2.", "198.51.100.", "203.0.113.")
 
 # R15: obviously fake ids used by the tests and fixtures, compared lowercase without dashes.
 ALLOWED_NOTION_IDS = {
@@ -80,7 +86,8 @@ def read(path):
 
 
 def find_ips(text):
-    return sorted(set(IPV4.findall(text)) - ALLOWED_IPS)
+    found = set(IPV4.findall(text)) - ALLOWED_IPS
+    return sorted(ip for ip in found if not ip.startswith(DOCUMENTATION_PREFIXES))
 
 
 def find_notion_ids(text):
@@ -92,10 +99,41 @@ def _raise(error):
     raise error
 
 
+def technical_architecture_sources():
+    return sorted(ROOT.glob("scripts/technical_architecture/*.py")) + sorted(
+        ROOT.glob("skills/technical-architecture/assets/example/generators/*.py")
+    )
+
+
+def pep604_annotations(source):
+    """Line numbers of annotations written as X | Y (Python 3.10 at runtime)."""
+    annotations = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+            arguments += [arg for arg in (node.args.vararg, node.args.kwarg) if arg]
+            annotations += [arg.annotation for arg in arguments if arg.annotation]
+            if node.returns:
+                annotations.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            annotations.append(node.annotation)
+    return sorted(
+        child.lineno
+        for annotation in annotations
+        for child in ast.walk(annotation)
+        if isinstance(child, ast.BinOp) and isinstance(child.op, ast.BitOr)
+    )
+
+
 class DetectorsTest(unittest.TestCase):
     def test_ipv4_is_found_and_loopback_is_allowed(self):
         address = ".".join(["10", "0", "0", "1"])
         self.assertEqual(find_ips(f"ssh {address} and 127.0.0.1"), [address])
+
+    def test_documentation_ranges_are_allowed(self):
+        self.assertEqual(find_ips("203.0.113.10 192.0.2.1 198.51.100.7"), [])
+        address = ".".join(["10", "0", "0", "1"])
+        self.assertEqual(find_ips(f"203.0.113.10 {address}"), [address])
 
     def test_notion_ids_are_found_in_both_forms(self):
         flat = "a1" * 16
@@ -126,6 +164,8 @@ class PublicHygieneTest(unittest.TestCase):
             "scripts/cqa_notion.py",
             "scripts/cqa-toolbox.sh",
             "tests/cqa/test_public_hygiene.py",
+            "scripts/technical_architecture/architecture.py",
+            "skills/technical-architecture/SKILL.md",
             "README.md",
         ):
             self.assertIn(expected, names)
@@ -191,13 +231,25 @@ class PublicHygieneTest(unittest.TestCase):
     def test_marketplace_lists_the_skill(self):
         marketplace = json.loads(MARKETPLACE_JSON.read_text(encoding="utf-8"))
         self.assertIn(NEW_SKILL, marketplace["plugins"][0]["description"])
+        self.assertIn("/gm:technical-architecture", marketplace["plugins"][0]["description"])
 
     def test_python39_syntax(self):
         sources = sorted(ROOT.glob("scripts/cqa_*.py")) + sorted(ROOT.glob("scripts/cqa/*.py"))
         self.assertGreaterEqual(len(sources), 10)
-        for path in sources:
+        for path in sources + technical_architecture_sources():
             with self.subTest(path=path.relative_to(ROOT).as_posix()):
                 ast.parse(read(path), filename=str(path), feature_version=(3, 9))
+
+    def test_no_pep604_annotations(self):
+        sources = technical_architecture_sources()
+        self.assertGreaterEqual(len(sources), 5)
+        for path in sources:
+            with self.subTest(path=path.relative_to(ROOT).as_posix()):
+                self.assertEqual(pep604_annotations(read(path)), [])
+
+    def test_pep604_detector(self):
+        self.assertEqual(pep604_annotations("def f(a: int | None) -> str | None:\n    b: int | str = 1\n"), [1, 1, 2])
+        self.assertEqual(pep604_annotations("def f(a: Optional[int]) -> int:\n    return a | 1\n"), [])
 
 
 if __name__ == "__main__":

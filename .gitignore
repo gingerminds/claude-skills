@@ -7,3 +7,6 @@ __pycache__/
 # Artefacts de conception / scratch — locaux, hors dépôt
 docs/superpowers/
 .superpowers/
+
+# Résultats d'evals — locaux
+evals/results/
