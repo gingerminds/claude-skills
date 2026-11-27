@@ -56,8 +56,8 @@ Produce living, interactive architecture docs under the target project's `.archi
 1. **List the custom units to trace first** (from the stack resource or the generic method). **Present the list and get it validated** before writing anything.
 2. **Project view — `.archi/index.html`**: generate `META` + `CONTEXT` (C1: the system, its `person` actors, its external systems) + `CONTAINER` (C2: each custom unit as `container`/`component` + shared infra as `store`/`external` — DB, search engine, cron, storage). On each custom container, set `doc: "units/<slug>.html"`.
 3. **Per unit — `.archi/units/<slug>.html`**: generate `META` + `COMPONENT` (C3, from the source of truth). `<slug>` = kebab-case unit name.
-4. **C4 (UML code)**: do NOT produce by default. Offer it via `AskUser`, warning the user (message in French): « Le niveau C4 (UML par classe) est le plus détaillé mais devient obsolète à chaque refactor et coûte cher à (re)générer. L'ajouter pour cette unité ? ». If yes, add `CODE.views` to the unit (see per-view splitting in the stack resource).
-5. **Accurate model, not decorative**: every edge maps to a real dependency (DI argument, `extends`, `use`, call). On a large project, per-unit exploration may be delegated to **subagents** (one unit = one agent) then synthesised.
+4. **C4 (UML code)**: do NOT produce by default. Offer it via `AskUserQuestion`, warning the user (message in French): « Le niveau C4 (UML par classe) est le plus détaillé mais devient obsolète à chaque refactor et coûte cher à (re)générer. L'ajouter pour cette unité ? ». If yes, add `CODE.views` to the unit (see per-view splitting in the stack resource).
+5. **Accurate model, not decorative**: every edge maps to a real dependency (DI argument, `extends`, `use`, call).
 6. **Stamp**: in `META.footer`, record the source of truth used AND the generation stamp: `généré le <YYYY-MM-DD> · commit <short-hash>` (`git rev-parse --short HEAD`).
 
 ## Flow 3 — Maintain
@@ -65,7 +65,7 @@ Produce living, interactive architecture docs under the target project's `.archi
 1. Read each doc's stamp under `.archi/**` (`généré le … · commit …`).
 2. Compare with custom files changed since that commit:
    `git diff --name-only <commit>..HEAD -- <custom paths>`.
-3. If custom units changed **or** the generation is old → **`AskUser` « Faut-il vérifier / mettre à jour le C4 ? »** listing the impacted units.
+3. If custom units changed **or** the generation is old → **`AskUserQuestion` « Faut-il vérifier / mettre à jour le C4 ? »** listing the impacted units.
 4. Update = regenerate the data blocks of the affected docs (the template never changes). Re-stamp.
 
 ## Non-goals

@@ -67,8 +67,7 @@ State every assumption at the **top** of the reply, before any file, in French:
 each with the file it comes from. No speculative service: what nothing in the
 project points to is left out and named in the assumptions line. If no runtime
 can be deduced at all (empty project, no known stack), write
-`QUESTION BLOQUANTE : <question>` and emit no file. The manual flow above is
-unchanged.
+`QUESTION BLOQUANTE : <question>` and emit no file.
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: merge-review
-description: "Reviews an existing GitLab merge request end-to-end — content/correctness against the linked Mantis ticket (attachments loaded by default), form, language and coding standards — then publishes on its own a French global review note and one anchored discussion per finding, in manual use as in agent mode. --dry-run shows the note and each discussion with its anchor and publishes nothing. Never approves, merges or marks the MR Ready: it ends on an approve / request-changes recommendation that the user acts on in GitLab. Runs in a forked subagent. Stack-agnostic (stack specifics through gm:review); GitLab-oriented."
+description: "Reviews an existing GitLab merge request end-to-end — content/correctness against the linked Mantis ticket (attachments loaded by default), form, language and coding standards — then publishes on its own a French global review note and one anchored discussion per finding, in manual use as in agent mode. Never approves, merges or marks the MR Ready: it ends on an approve / request-changes recommendation that the user acts on in GitLab. Runs in a forked subagent. Stack-agnostic (stack specifics through gm:review); GitLab-oriented."
 when_to_use: "Use when the user gives a GitLab MR (URL or number) to review as a reviewer — « relis la MR !87 », « fais la revue de https://gitlab…/-/merge_requests/87 », « review cette merge request » — or invokes /gm:merge-review. Not for reviewing one's own change or branch before opening a MR (use /gm:review), nor for opening or updating a MR (use /gm:merge-request)."
 argument-hint: "<url-ou-numéro-MR> [--dry-run]"
 context: fork
@@ -81,7 +81,7 @@ Download and read them as the **Attachments** section of `shared/mantis-ticket.m
 
 ## Review axes
 
-Apply the **`gm:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Tests — the **Blocker/Major/Minor/Nit** severity scale, and that skill's **Noise control** rule (Nits folded, Minor one-liners, full Why/Action for Blocker/Major only). `gm:review` handles **stack detection** and loads the stack's review specifics (e.g. Drupal cacheability/`t()`/`Drupal,DrupalPractice`, Vue reactivity/hydration) — reuse them here. If `gm:review` reports no stack resource for the detected stack, carry that note into the review and rely on the generic dimensions. Run the project's linters when present, via the runner in `${CLAUDE_PLUGIN_ROOT}/shared/runner.md` (`make` → `docker compose` → `lando`). Below are the axes specific to reviewing someone else's MR:
+Apply the **`gm:review` dimensions** — Correctness, Security, Performance & cacheability, Standards, Visual evidence, Tests — the **Blocker/Major/Minor/Nit** severity scale, and that skill's **Noise control** rule (Nits folded, Minor one-liners, full Why/Action for Blocker/Major only). `gm:review` handles **stack detection** and loads the stack's review specifics (e.g. Drupal cacheability/`t()`/`Drupal,DrupalPractice`, Vue reactivity/hydration) — reuse them here. If `gm:review` reports no stack resource for the detected stack, carry that note into the review and rely on the generic dimensions. Run the project's linters when present, via the runner in `${CLAUDE_PLUGIN_ROOT}/shared/runner.md` (`make` → `docker compose` → `lando`). For **Visual evidence**, the MR exists: look for the before/after screenshots in its description (`${CLAUDE_PLUGIN_ROOT}/shared/visual-evidence.md`); when the diff touches the rendering and they are missing, it is a **Minor** posted as a general thread, asking the author to add them. Below are the axes specific to reviewing someone else's MR:
 
 - **Contenu** — Does the diff deliver what the ticket asks, end to end? Root cause vs symptom. This is `gm:review` Correctness, judged against the loaded ticket.
 - **Forme** — Commit & MR hygiene:
@@ -233,7 +233,7 @@ The third value applies when the findings alone would give approve but a reviewe
 ## Non-goals
 
 - No approval, ever: the skill never approves, revokes an approval, merges or marks the MR Ready, in any mode. The user approves in GitLab, or asks for it explicitly afterwards in their own session.
-- No confirmation before publishing: the note and the discussions are posted directly (decision 21); `--dry-run` is the way to preview them.
+- No confirmation before publishing: the note and the discussions are posted directly; `--dry-run` is the way to preview them.
 - No GitLab quick action: no line of the note or a discussion starts with `/`.
 - No duplicate threads on a re-review: an open thread with the same symptom is not posted again.
 - Never recommend approve on what you couldn't verify, nor on Blocker/Major findings; a reviewer-side limitation is never posted as a defect of the author.

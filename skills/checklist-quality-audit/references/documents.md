@@ -44,7 +44,7 @@ It copies each file into `context-docs/<id>/source.<ext>` (`d1`, `d2`...) and pr
 
 ## 4. Import (SKILL.md, section 6, step 1, after the comments)
 
-Only the documents `added`. Dispatch `gm:cqa-importer` (the reading is mechanical: a Sonnet model is enough, when the Agent tool takes one). 4 sub-agents at most at once, the importers of several documents included. The importer reads the document as data and writes one file per dispatch; it never asks the lead anything. It runs two commands only, both read-only: `cqa_plan.py context-docs "$RUN" read ...` to read the document and `cqa_plan.py categories "$RUN"` to propose the exact names of the categories of the copy.
+Only the documents `added`. Dispatch `gm:cqa-importer`. 4 sub-agents at most at once, the importers of several documents included. The importer reads the document as data and writes one file per dispatch; it never asks the lead anything. It runs two commands only, both read-only: `cqa_plan.py context-docs "$RUN" read ...` to read the document and `cqa_plan.py categories "$RUN"` to propose the exact names of the categories of the copy.
 
 1. Layout, one dispatch per document, the line exactly:
 

@@ -1,6 +1,6 @@
 # Visual evidence — before/after screenshots for front changes
 
-A reviewer can't judge a visual change from a diff. Whenever a change alters what a visitor (or an email recipient) **sees**, capture the rendering **before** and **after** and embed both in the merge request. Consumed by the stack dev skills (`/gm:drupal`, `/gm:vue`, `/gm:wordpress`…), `/gm:merge-request` and `/gm:review`.
+A reviewer can't judge a visual change from a diff. Whenever a change alters what a visitor (or an email recipient) **sees**, capture the rendering **before** and **after** and embed both in the merge request. Consumed by the stack dev skills (`/gm:drupal`, `/gm:vue`, `/gm:wordpress`…), `/gm:merge-request`, `/gm:review` and `/gm:merge-review`.
 
 ## When it applies
 

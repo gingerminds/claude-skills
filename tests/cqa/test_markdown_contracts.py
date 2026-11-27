@@ -2501,9 +2501,9 @@ class FixSectionTest(unittest.TestCase):
 
     def test_read_only_rule_keeps_its_text_and_scopes_the_fix_exception(self):
         rules = _section(self.skill, "1. Imperative rules")
-        rule = next(line for line in rules.splitlines() if line.startswith("- **Read-only (v1).**"))
+        rule = next(line for line in rules.splitlines() if line.startswith("- **Read-only.**"))
         self.assertIn(
-            "- **Read-only (v1).** Never modify a project repo: no checkout, switch, stash, pull, "
+            "- **Read-only.** Never modify a project repo: no checkout, switch, stash, pull, "
             "commit, install, file edit, runner start. Never write on a server or in a database, "
             "never submit a form, never deploy. When something needs one of these, give the lead "
             "the exact command and let them run it.",
@@ -3500,7 +3500,7 @@ class FixProjectCommandsTest(unittest.TestCase):
                 self.assertIn(needle, intro)
         self.assertNotIn("It never runs a command of the project (`docker compose`", intro)
         rule = next(line for line in _section(self.skill, "1. Imperative rules").splitlines()
-                    if line.startswith("- **Read-only (v1).**"))
+                    if line.startswith("- **Read-only.**"))
         self.assertIn("disposable containers", rule)
 
     def test_the_end_of_the_pass_reports_the_commands_that_were_already_broken(self):

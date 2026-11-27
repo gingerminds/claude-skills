@@ -46,12 +46,12 @@ State up front which ecosystems you found and will audit; skip the rest explicit
 
 Prefer real signals over guesswork. Run what applies, capture the output, never invent advisory IDs.
 
-**Two things are mandatory and complementary — do BOTH, never just one:**
+**Do both — each finds what the other cannot:**
 
-1. **Read the package/lock files** (`composer.lock`, `package-lock.json`/`pnpm-lock.yaml`/`yarn.lock`) to extract the *exact installed versions* of every package. The lockfile is the ground truth for "what is actually installed". But note: **a lockfile contains NO CVE/advisory data** — only versions and an optional `abandoned` flag. Reading it is necessary but never sufficient.
+1. **Read the package/lock files** (`composer.lock`, `package-lock.json`/`pnpm-lock.yaml`/`yarn.lock`) to extract the *exact installed versions* of every package. The lockfile is the ground truth for "what is actually installed". It contains no CVE/advisory data — only versions and an optional `abandoned` flag.
 2. **Run the real audit** (`composer audit`, `npm audit`, plus any stack tool such as `drush pm:security` on Drupal) which fetches the **advisory database over the network** and maps installed versions → CVE/GHSA/SA ids. This is where the actual vulnerability signal comes from.
 
-Reading the lockfile alone gets you hygiene findings (abandoned, pre-release versions) but will MISS every real CVE. Always pair the two: extract versions from the lock, then cross-reference them against advisories.
+Reading the lockfile alone gets you hygiene findings (abandoned, pre-release versions) and misses every real CVE: extract versions from the lock, then cross-reference them against advisories.
 
 ### Where to run — runner first, then host, then offline fallback
 
@@ -59,7 +59,7 @@ Try in this order; don't stop at the first failure, escalate to the next:
 
 1. **Inside the runner** (`<runner> composer audit`, `<runner> npm audit`, and any stack tool such as `<runner> drush pm:security`) — the bootstrapped, network-capable environment. Best signal. Start it if it isn't up. Resolve `<runner>` via `${CLAUDE_PLUGIN_ROOT}/shared/runner.md`.
 2. **On the host** — if the runner is down (Docker not running, runner fails to start), run `composer audit --locked` / `npm audit` directly on the host. The host PHP version may differ, but `--locked` audits the committed lockfile so the result is still valid.
-3. **Offline fallback via `WebFetch`** — if the environment has **no network from the shell** (sandboxed `composer audit`/`npm audit` fail with curl errors), DON'T give up and DON'T claim "0 vulnerabilities". Extract installed versions from the lockfile (see below), then pull the advisory feeds with `WebFetch` (a separate network path that often works when the shell is sandboxed) and cross-reference by hand — the loaded stack resource gives the stack-specific feeds (e.g. Drupal.org SA RSS).
+3. **Offline fallback via `WebFetch`** — if the environment has **no network from the shell** (sandboxed `composer audit`/`npm audit` fail with curl errors), don't report "0 vulnerabilities" from a run that never reached an advisory source. Extract installed versions from the lockfile (see below), then pull the advisory feeds with `WebFetch` (a separate network path that often works when the shell is sandboxed) and cross-reference by hand — the loaded stack resource gives the stack-specific feeds (e.g. Drupal.org SA RSS).
 
 The goal is to get **real material** one way or another. A "couldn't run anything" report is a last resort, not a first answer — exhaust runner → host → WebFetch before concluding.
 
