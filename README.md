@@ -30,6 +30,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `checklist-quality-audit` | `/gm:checklist-quality-audit` (alias `/gm:cqa`) | Audit PRE-MEL de la checklist qualité d'un projet : vérifie le poste et que la préprod sert le code audité, évalue chaque ligne de la copie Notion du projet (code, préprod, boîte à outils Docker, navigateur), écrit statuts et commentaires de preuve après confirmation du lead, puis répartit le reste entre les devs. Lecture seule sur les repos, les serveurs et les bases, sauf le mode `fix`, qui corrige dans ses propres worktrees et livre une MR en brouillon par passe et par repo, ses lignes rangées par catégorie. Peut être limité à des catégories (`--category`) et reprendre des rapports d'audit tiers comme documents de contexte (`--context`). Prérequis : voir « Préparer son poste ». |
 | `nuxt4-migration` | `/gm:nuxt4-migration` | Audite un projet Nuxt 3 et pilote sa migration vers Nuxt 4 — lance `nuxt upgrade` + les codemods officiels, met à jour l'écosystème de modules (Node, modules Nuxt, TypeScript/Vite), passe en revue chaque zone de breaking change (structure de dossiers, comportement `useAsyncData`/`useFetch`, noms de composants normalisés, styles inline, Unhead v2, config TypeScript, `window.__NUXT__`, options supprimées), déclenche `/gm:swiper-migration` si Swiper est détecté, et produit un plan de migration priorisé. |
 | `swiper-migration` | `/gm:swiper-migration` | Audite les sliders Swiper d'un projet Vue/Nuxt utilisant un ancien wrapper/API (`vue-awesome-swiper`, prop `options` unique, directive `v-swiper`) et les migre vers les composants Vue modernes de Swiper.js (`swiper/vue`). Invocable seul, ou déclenché automatiquement par `/gm:nuxt4-migration` si Swiper est présent. |
+| `visual-regression` | `/gm:visual-regression` | Non-régression visuelle avec Playwright — capture des baselines, compare et rapporte les diffs pixel par pixel avec un verdict accept/reject par snapshot. Supporte aussi la comparaison directe de deux URLs live (sans baseline committée), pour auditer une migration/refonte : `/gm:visual-regression <url-ancien-site> <url-nouveau-site>`. Stack-agnostique (cible n'importe quelle URL rendue). |
 
 ## Mode agent
 
@@ -96,6 +97,8 @@ Côté reviewer, `/gm:merge-review` prend une MR existante (URL ou numéro), cha
 Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépare, génère et maintient un modèle **C4 interactif** (HTML autonome) dans `.archi/` — vue projet (C1/C2) dans `.archi/index.html` et une page par unité custom (C3, C4 à la demande), à ouvrir dans le navigateur.
 
 Pour documenter l'infrastructure d'un projet (qui héberge quoi, quelles machines, quels conteneurs, quels ports, quels flux), `/gm:technical-architecture` relève les faits dans les dépôts puis sur les serveurs en lecture seule, pose une à une les questions qui restent, et produit dans `docs/architecture/` des vues draw.io (`.drawio.svg`), un README avec la matrice des flux et les points d'attention, et les cibles `make diagrams` et `make architecture-pdf`. `/gm:technical-architecture mise-a-jour` relève de nouveau les faits et propose les écarts ; `/gm:technical-architecture pdf` génère le dossier PDF dans `docs/architecture/build/`, jamais versionné.
+
+Pour la non-régression visuelle, `/gm:visual-regression` met en place et fait tourner des tests Playwright (baselines committées comparées au code courant), ou compare directement deux URLs live sans baseline — utile pour auditer une migration/refonte contre l'ancien site encore accessible.
 
 ### Préparer son poste pour `/gm:checklist-quality-audit`
 
@@ -269,7 +272,8 @@ claude-skills/
     │   ├── references/      # questions, relevé des faits (SSH en lecture seule), charte des vues, mise à jour
     │   └── assets/          # modèles (README, bloc CLAUDE.md, cibles make) + exemple fictif complet (example/)
     ├── nuxt4-migration/SKILL.md   # point d'entrée : charge stack/vue/MAIN.md (nuxt4-migration, déclenche swiper-migration si Swiper détecté)
-    └── swiper-migration/SKILL.md  # point d'entrée : charge stack/vue/MAIN.md (swiper-migration)
+    ├── swiper-migration/SKILL.md  # point d'entrée : charge stack/vue/MAIN.md (swiper-migration)
+    └── visual-regression/SKILL.md
 ```
 
 Les skills qui lisent Mantis (`ticket`, `ticket-refine`, `review`, `merge-review`) appellent le helper partagé via `${CLAUDE_PLUGIN_ROOT}/scripts/mantis-issue.sh` — une seule copie, pas de duplication. Les pièces jointes se téléchargent avec `mantis-issue.sh <id> --file <file-id> <dossier>` : le script nomme lui-même le fichier (`<file-id>-<nom assaini>`), n'écrit que dans un dossier temporaire (`$TMPDIR`, `/tmp`, scratchpad Claude), n'écrase jamais un fichier (une pièce jointe déjà téléchargée dans la session est réutilisée) et affiche le chemin. La procédure commune (codes de sortie, lecture de toutes les notes, pièces jointes) est dans `shared/mantis-ticket.md`. `ticket-refine` y ajoute l'écriture : il publie sa note privée via `${CLAUDE_PLUGIN_ROOT}/scripts/mantis-note.sh`.
