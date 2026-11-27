@@ -26,6 +26,7 @@ Collection de skills maison pour [Claude Code](https://claude.com/claude-code), 
 | `merge-review` | `/gm:merge-review` | Review côté reviewer d'une MR GitLab existante — fond, forme, langue, standards — charge le ticket Mantis lié et publie une note de synthèse + une discussion par constat, puis donne une recommandation approve / request-changes. Publie lui-même la note et les discussions (sauf avec `--dry-run`, qui n'envoie rien) et n'approuve jamais la MR. S'exécute en sous-agent. Stack-agnostique (via `gm:review`). |
 | `security` | `/gm:security` | Audit sécurité des dépendances et de l'infra — `composer audit` / `npm audit`, advisories CMS/framework, config Docker — priorisé par criticité réelle. S'exécute en sous-agent : renvoie un rapport et les commandes exactes à lancer, sans appliquer aucun correctif lui-même. Stack-agnostique : les checks spécifiques (ex. SA Drupal) viennent de `stack/`. |
 | `archi-c4` | `/gm:archi-c4` | Prépare, génère et maintient une doc d'architecture **C4 interactive** (HTML autonome) dans `.archi/` — vue projet C1/C2 + une page par unité custom pour C3 (C4 UML à la demande). Trace uniquement le code custom (contrib/core/vendor en boîte noire). Stack-agnostique ; ressources dédiées par techno quand elles existent. |
+| `technical-architecture` | `/gm:technical-architecture` | Documente l'architecture technique d'un projet en préprod et en prod : vues draw.io (machines, réseaux, conteneurs, ports, accès, flux), matrice des flux, points d'attention, dossier PDF généré à la demande. Relève les faits dans les dépôts puis en SSH en lecture seule, installe l'outillage dans le projet (`make diagrams`, règle `CLAUDE.md`) et le tient à jour (`mise-a-jour`). |
 | `checklist-quality-audit` | `/gm:checklist-quality-audit` (alias `/gm:cqa`) | Audit PRE-MEL de la checklist qualité d'un projet : vérifie le poste et que la préprod sert le code audité, évalue chaque ligne de la copie Notion du projet (code, préprod, boîte à outils Docker, navigateur), écrit statuts et commentaires de preuve après confirmation du lead, puis répartit le reste entre les devs. Lecture seule sur les repos, les serveurs et les bases, sauf le mode `fix`, qui corrige dans ses propres worktrees et livre une MR en brouillon par passe et par repo, ses lignes rangées par catégorie. Peut être limité à des catégories (`--category`) et reprendre des rapports d'audit tiers comme documents de contexte (`--context`). Prérequis : voir « Préparer son poste ». |
 | `nuxt4-migration` | `/gm:nuxt4-migration` | Audite un projet Nuxt 3 et pilote sa migration vers Nuxt 4 — lance `nuxt upgrade` + les codemods officiels, met à jour l'écosystème de modules (Node, modules Nuxt, TypeScript/Vite), passe en revue chaque zone de breaking change (structure de dossiers, comportement `useAsyncData`/`useFetch`, noms de composants normalisés, styles inline, Unhead v2, config TypeScript, `window.__NUXT__`, options supprimées), déclenche `/gm:swiper-migration` si Swiper est détecté, et produit un plan de migration priorisé. |
 | `swiper-migration` | `/gm:swiper-migration` | Audite les sliders Swiper d'un projet Vue/Nuxt utilisant un ancien wrapper/API (`vue-awesome-swiper`, prop `options` unique, directive `v-swiper`) et les migre vers les composants Vue modernes de Swiper.js (`swiper/vue`). Invocable seul, ou déclenché automatiquement par `/gm:nuxt4-migration` si Swiper est présent. |
@@ -93,6 +94,8 @@ Tape `/gm:<skill>` dans Claude Code. Les skills se chaînent — un flux Drupal 
 Côté reviewer, `/gm:merge-review` prend une MR existante (URL ou numéro), charge le ticket lié et publie la note de review et ses discussions (`--dry-run` pour seulement les afficher). `/gm:security` fait un audit dépendances + infra à part entière, `/gm:docker-devops` couvre tout le volet conteneurs / CI.
 
 Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépare, génère et maintient un modèle **C4 interactif** (HTML autonome) dans `.archi/` — vue projet (C1/C2) dans `.archi/index.html` et une page par unité custom (C3, C4 à la demande), à ouvrir dans le navigateur.
+
+Pour documenter l'infrastructure d'un projet (qui héberge quoi, quelles machines, quels conteneurs, quels ports, quels flux), `/gm:technical-architecture` relève les faits dans les dépôts puis sur les serveurs en lecture seule, pose une à une les questions qui restent, et produit dans `docs/architecture/` des vues draw.io (`.drawio.svg`), un README avec la matrice des flux et les points d'attention, et les cibles `make diagrams` et `make architecture-pdf`. `/gm:technical-architecture mise-a-jour` relève de nouveau les faits et propose les écarts ; `/gm:technical-architecture pdf` génère le dossier PDF dans `docs/architecture/build/`, jamais versionné.
 
 ### Préparer son poste pour `/gm:checklist-quality-audit`
 
@@ -181,6 +184,12 @@ Pour découvrir ou documenter l'architecture d'un projet, `/gm:archi-c4` prépar
 - **Passe v2 terminée** (plugin 0.14 ou avant, une branche par catégorie) : son résultat s'écrit dans Notion après coup, à la main, depuis le dossier du run : `cqa_notion.py fix-plan <run_dir>` puis `cqa_notion.py apply <run_dir> --plan fix/notion-plan.json`. Les lignes de ses MR reçoivent le commentaire « Correctif automatique » (lu dans ses rapports) et passent en « En review » seulement si leur statut n'a pas changé depuis le lancement de cette passe : ce statut est lu dans le `fix/candidates.json` puis le `rows.json` du run, chacun uniquement s'il est plus ancien que le lancement de la passe (sinon il a été réécrit depuis, par une relance, une recette, une assignation ou un nouveau `candidates` : aucun statut n'est posé, le plan le dit, et « En review » est à poser à la main sur les lignes qui n'ont pas bougé) ; le commentaire de page dit qu'il s'agit d'une reprise de la passe du <date>. Cette écriture ne vérifie pas que ses MR sont encore ouvertes : une MR fermée sans fusion depuis est rattrapée par la prochaine recette (`merged`, puis `fix-plan --closed-only`). Une passe v2 inachevée est refusée : abandonnez-la d'abord.
 - **Fin** : synthèse dans `fix/synthese.md` et message prêt à coller pour l'équipe. Ensuite : relire et ajuster les MR, les fusionner, déployer en préprod, puis `/gm:cqa recette`, qui reprend d'elle-même les lignes « En review » des MR fusionnées et déployées (une ligne restée à un autre statut est à passer d'abord en « Mis en place »).
 
+### Préparer son poste pour `/gm:technical-architecture`
+
+- **Docker** installé et lancé (Docker Desktop sous macOS, Docker Engine sous Linux) : les vues sont rendues par draw.io headless, le PDF par pandoc et Chromium, dans des images publiques tirées au premier rendu (`rlespinasse/drawio-desktop-headless`, `pandoc/core`, `zenika/alpine-chrome`).
+- **Python 3.9 ou plus** (bibliothèque standard seule), pour l'outil copié dans le projet et le kit de dessin.
+- **Alias SSH** des serveurs du projet dans `~/.ssh/config`, avec un accès en lecture : le skill propose les alias qui correspondent au projet et demande lesquels utiliser, puis n'y lance que des commandes de lecture.
+
 ## Structure
 
 ```
@@ -200,6 +209,7 @@ claude-skills/
 │   ├── cqa/                 # bibliothèque de l'audit (Python >= 3.9, bibliothèque standard seule)
 │   ├── cqa-keepawake.sh     # empêche la mise en veille du poste pendant l'audit (systemd-inhibit, caffeinate)
 │   ├── cqa-toolbox.sh       # lanceur de la boîte à outils Docker de l'audit
+│   ├── technical_architecture/  # outil copié dans les projets (architecture.py, dossier.css) + kit de dessin draw.io (drawio_kit.py)
 │   └── mantis-note.sh       # publie une note Mantis privée (ticket-refine)
 ├── shared/                  # ressources transverses (indépendantes de la techno)
 │   ├── runner.md            # ordre de priorité du runner : make → docker → lando
@@ -215,6 +225,7 @@ claude-skills/
 │   ├── cqa/                  # tests unittest de l'audit et hygiène du dépôt public (voir « Contribuer »)
 │   ├── lib/
 │   │   └── curl-stub.sh     # faux curl partagé par les tests Mantis
+│   ├── technical_architecture/  # tests de l'outil, du kit de dessin, de l'exemple et du contrat du skill
 │   ├── mantis-issue.test.sh # tests de scripts/mantis-issue.sh
 │   └── mantis-note.test.sh  # tests de scripts/mantis-note.sh
 ├── evals/                   # suite d'evals de déclenchement (trigger-* / negative-*), cf. evals/README.md
@@ -253,6 +264,10 @@ claude-skills/
     ├── archi-c4/
     │   ├── SKILL.md
     │   └── assets/          # template.html figé + model.example.js (contrat)
+    ├── technical-architecture/
+    │   ├── SKILL.md         # création, adoption, mise à jour, PDF à la demande
+    │   ├── references/      # questions, relevé des faits (SSH en lecture seule), charte des vues, mise à jour
+    │   └── assets/          # modèles (README, bloc CLAUDE.md, cibles make) + exemple fictif complet (example/)
     ├── nuxt4-migration/SKILL.md   # point d'entrée : charge stack/vue/MAIN.md (nuxt4-migration, déclenche swiper-migration si Swiper détecté)
     └── swiper-migration/SKILL.md  # point d'entrée : charge stack/vue/MAIN.md (swiper-migration)
 ```
@@ -304,4 +319,6 @@ Les résultats (`evals/results/`) ne sont pas versionnés.
 PYTHONPATH=scripts python3 -m unittest discover -s tests -t . -v
 ```
 
-Le dépôt est public : `tests/cqa/test_public_hygiene.py` fait échouer la suite sur toute adresse IP, tout identifiant Notion hors de la liste d'identifiants factices du test, tout secret dans les fichiers de contenu, et toute version désalignée entre `marketplace.json` et `plugin.json`. Dans les tests et les fixtures, utilise des identifiants factices (`0123456789abcdef0123456789abcdef`), des prénoms inventés et des domaines `example.org`.
+Le rendu réel de `/gm:technical-architecture` (draw.io dans Docker) a son propre test, ignoré par défaut : `GM_TA_DOCKER=1 PYTHONPATH=scripts python3 -m unittest tests.technical_architecture.test_render_pdf -v`.
+
+Le dépôt est public : `tests/cqa/test_public_hygiene.py` fait échouer la suite sur toute adresse IP (hors plages de documentation RFC 5737, utilisées par l'exemple de `/gm:technical-architecture`), tout identifiant Notion hors de la liste d'identifiants factices du test, tout secret dans les fichiers de contenu, et toute version désalignée entre `marketplace.json` et `plugin.json`. Dans les tests et les fixtures, utilise des identifiants factices (`0123456789abcdef0123456789abcdef`), des prénoms inventés et des domaines `example.org`.
